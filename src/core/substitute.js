@@ -216,19 +216,25 @@ export function locate(req) {
       // which is the bug, restated — reconcile: whatever the raw bytes carry
       // and the structured view does not account for is reported against the
       // body, where nothing is ever a site, so the request is refused.
-      const unaccounted = new Map()
-      for (const hit of detect.detectAll(text)) {
-        unaccounted.set(hit.nonce, (unaccounted.get(hit.nonce) || 0) + 1)
-      }
+      // By nonce, not by count. The raw text is read through several decoders,
+      // so one occurrence can legitimately surface more than once — a body
+      // containing `\/` anywhere makes the JSON-unescaped view differ from the
+      // raw one, and the placeholder is then found in both. Counting made that
+      // ordinary body look like it carried a hidden placeholder, and the
+      // answer to that is AV_BAD_LOCATION: a fail-closed false positive on
+      // real traffic, which is a broken product rather than a safe one.
+      //
+      // A nonce the raw bytes carry and the structured view never mentions is
+      // the thing being looked for, and every way of hiding one — an object
+      // key, a duplicate key the parser drops — produces exactly that.
+      const structured = new Set()
       for (let i = firstBodyOccurrence; i < occurrences.length; i++) {
-        const n = occurrences[i].parsed.nonce
-        const left = unaccounted.get(n)
-        if (left) unaccounted.set(n, left - 1)
+        structured.add(occurrences[i].parsed.nonce)
       }
+      const reported = new Set()
       for (const hit of detect.detectAll(text)) {
-        const left = unaccounted.get(hit.nonce)
-        if (!left) continue
-        unaccounted.set(hit.nonce, left - 1)
+        if (structured.has(hit.nonce) || reported.has(hit.nonce)) continue
+        reported.add(hit.nonce)
         add(hit, { region: 'body', encoding: hit.encoding, hidden_by: 'the body parser' })
       }
     }

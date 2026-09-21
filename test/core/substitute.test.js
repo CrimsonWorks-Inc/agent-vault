@@ -224,3 +224,55 @@ test('describeLocation is specific enough for an agent to fix its own request', 
   const { occurrences } = sub.locate(r)
   assert.equal(sub.describeLocation(occurrences[0].location), 'JSON body at /comment')
 })
+
+test('the raw-bytes reconciliation does not refuse ordinary requests', () => {
+  // locate() reconciles its structured scan against the raw bytes, so that a
+  // placeholder in a position the parser hides — an object key, the first of
+  // two duplicate keys — is still found. The risk that buys is the opposite
+  // one: an over-count refuses a request that was fine, and a fail-closed
+  // false positive on real traffic is a broken product rather than a safe one.
+  //
+  // So: a realistic body with everything that might confuse a byte count, and
+  // exactly one occurrence expected, at its declared site.
+  const p = mk()
+  const body = Buffer.from(JSON.stringify({
+    auth: { key: p },
+    note: 'a line\nand another\twith escapes: \\ " / and a slash\\/',
+    blob: Buffer.from('some unrelated payload that is long enough to look like base64 to a scanner').toString('base64'),
+    items: [{ id: 1, tag: 'x' }, { id: 2, tag: 'y' }],
+    unicode: 'café über 中文',
+    empty: '', zero: 0, nothing: null, yes: true,
+  }, null, 2))
+  const r = req({ method: 'POST', headers: [['Content-Type', 'application/json']], body })
+  const { occurrences } = sub.locate(r)
+  assert.equal(occurrences.length, 1, `expected exactly one occurrence, got ${occurrences.map((o) => o.location.region).join(', ')}`)
+  assert.ok(sub.matchesSite(occurrences[0].location, sites.parseSite('json:/auth/key')))
+
+  // The same placeholder twice at the same site counts twice and no more.
+  const twice = Buffer.from(JSON.stringify({ auth: { key: p }, backup: { key: p } }))
+  const r2 = req({ method: 'POST', headers: [['Content-Type', 'application/json']], body: twice })
+  assert.equal(sub.locate(r2).occurrences.length, 2)
+
+  // And a form body, whose values are percent-encoded on the wire, is not
+  // double-counted against its own decoded form.
+  const form = Buffer.from(`token=${encodeURIComponent(p)}&other=1`)
+  const r3 = req({ method: 'POST', headers: [['Content-Type', 'application/x-www-form-urlencoded']], body: form })
+  const found = sub.locate(r3).occurrences
+  assert.equal(found.length, 1, `form body produced ${found.length} occurrences`)
+  assert.ok(sub.matchesSite(found[0].location, sites.parseSite('form:token')))
+})
+
+test('a second header of the same name is substituted in place', () => {
+  // apply() looked the header up by name and always found the first, so with
+  // two of them the secret went into the one without the placeholder and the
+  // placeholder went upstream.
+  const p = mk()
+  const r = req({ headers: [['authorization', 'Bearer something-else'], ['authorization', `Bearer ${p}`]] })
+  const { occurrences } = sub.locate(r)
+  const at = occurrences.find((o) => sub.matchesSite(o.location, sites.parseSite('header:authorization:Bearer')))
+  assert.ok(at, 'the placeholder should sit at the declared site')
+
+  const out = sub.apply(r, at.location, p, 'sk-REALSECRET1234567890')
+  const values = out.headers.filter(([n]) => n.toLowerCase() === 'authorization').map(([, v]) => v)
+  assert.deepEqual(values, ['Bearer something-else', 'Bearer sk-REALSECRET1234567890'])
+})
