@@ -704,8 +704,24 @@ const COMMANDS = {
 
   async approvals() {
     const pending = await control('GET', '/v1/approvals')
-    if (JSON_OUT) return out(null, pending)
-    if (!pending.length) return console.log(C.dim('nothing waiting'))
+    // Sessions an agent has asked for are shown here too. They are a different
+    // kind of question — a session is hours and a budget, where a held request
+    // is one call — so they are labelled rather than blended in.
+    const sessions = await control('GET', '/v1/session-requests').catch(() => [])
+    if (JSON_OUT) return out(null, { requests: pending, session_requests: sessions })
+    if (!pending.length && !sessions.length) return console.log(C.dim('nothing waiting'))
+
+    for (const r of sessions) {
+      console.log(`${C.yellow('session requested')} ${r.id}`)
+      console.log(`  ${C.bold(r.summary)}`)
+      if (r.agent_reason_untrusted) {
+        console.log(`  ${C.dim(`claimed by the agent (unverified): ${r.agent_reason_untrusted}`)}`)
+      }
+      console.log(`  ${C.dim('this grants hours of access, not one call. Narrow it if it asks for more than it needs:')}`)
+      console.log(`  ${C.dim(`agent-vault approve ${r.id} [--methods GET] [--paths "/user"] [--budget N]`)}`)
+      console.log(`  ${C.dim(`agent-vault deny ${r.id}`)}`)
+    }
+
     for (const a of pending) {
       console.log(`${C.yellow('pending')} ${a.id}`)
       console.log(`  ${C.bold(a.summary)}`)
@@ -715,12 +731,32 @@ const COMMANDS = {
   },
 
   async approve(args) {
-    const r = await control('POST', '/v1/approvals', { id: args._[0], granted: true })
+    const id = args._[0]
+    if (String(id).startsWith('sr_')) {
+      // Whatever is overridden here is what gets created: the daemon binds the
+      // gate to the FINAL proposal, not to what the agent asked for.
+      const overrides = {}
+      if (args.methods) overrides.methods = String(args.methods).split(',')
+      if (args.paths) overrides.paths = [String(args.paths)]
+      if (args.budget) overrides.budget = Number(args.budget)
+      if (args.uses) overrides.uses = Number(args.uses)
+      const r = await controlWithPresence('POST', '/v1/session-requests/decide', { id, granted: true, overrides })
+      const narrowed = Object.keys(overrides).length
+        ? ` ${C.dim(`(narrowed: ${Object.entries(overrides).map(([k, v]) => `${k}=${v}`).join(' ')})`)}`
+        : ''
+      return out(`${C.green('approved')} ${summarizeGranted(r.granted)}${narrowed}`, r)
+    }
+    const r = await controlWithPresence('POST', '/v1/approvals', { id, granted: true })
     out(`${C.green('approved')} ${r.summary}`, r)
   },
 
   async deny(args) {
-    const r = await control('POST', '/v1/approvals', { id: args._[0], granted: false })
+    const id = args._[0]
+    if (String(id).startsWith('sr_')) {
+      const r = await controlWithPresence('POST', '/v1/session-requests/decide', { id, granted: false })
+      return out(`${C.red('denied')} ${r.summary}`, r)
+    }
+    const r = await control('POST', '/v1/approvals', { id, granted: false })
     out(`${C.red('denied')} ${r.summary}`, r)
   },
 
@@ -1268,6 +1304,15 @@ function parseArgs(argv) {
     args._.push(a)
   }
   return args
+}
+
+/** What a human actually granted, in the words they would use. */
+function summarizeGranted(g = {}) {
+  const bits = [`session for ${g.cred}`]
+  if (g.methods) bits.push(g.methods.join(','))
+  if (g.paths) bits.push(g.paths.join(' '))
+  if (g.budget) bits.push(`${g.budget} requests`)
+  return bits.join(' · ')
 }
 
 function printHelp() {

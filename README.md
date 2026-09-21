@@ -26,7 +26,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 422 tests
+npm test          # 436 tests
 ```
 
 ```bash
@@ -37,7 +37,7 @@ The changelog records what the four independent reviews found, with the
 reproductions: [CHANGELOG.md](CHANGELOG.md).
 
 The second one checks the tests against themselves: it removes each of
-twenty-nine critical protections in turn and asserts the suite notices.
+thirty-one critical protections in turn and asserts the suite notices.
 It has already earned its keep twice by catching its own anchors drifting
 after a refactor — it cannot tell a moved line from a deleted one, so it
 reports the drift and fails rather than quietly passing. Deleting the
@@ -79,7 +79,7 @@ Three ways in, in the order to try them.
 agent-vault mcp install --agent claude-code
 ```
 
-`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains five tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http` and `vault_explain_denial` — and no token is written to the config, because the bridge finds the session from the CLI's own state.
+`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains six tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial` and `vault_request_session` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
 
 **MCP over HTTP**, for an agent somewhere else:
 
@@ -141,6 +141,8 @@ That opens the docs inside the web UI, where they are written against your actua
 **A use is consumed before the first upstream byte**, inside the same step that re-checks session, grant and budget. Twenty concurrent uses of a one-time placeholder produce exactly one upstream request.
 
 **Responses are scrubbed** against every injected secret and every other stored credential, in every encoding a response is likely to carry it in — raw, the UTF-8 bytes as the wire actually delivers them, percent-encoded, escaped-slash, JSON-escaped, `\u`-escaped, hex, HTML entities, and base64 at all three byte alignments in both alphabets — including across streaming chunk boundaries. Tokens the vault never stored (a minted installation token, an AWS key) are redacted by shape.
+
+**An agent can ask for a session; only a human can grant one.** `vault_request_session` opens a request and creates nothing — no session, no token, no grant — until a human answers it. They see what was asked for and the agent's stated reason as an unverified claim, and they can narrow it before approving: `agent-vault approve sr_… --methods GET --paths "/user"`. What they approve is what gets created, through the same code path as `session create`, so an approved proposal cannot reach a laxer one. Approval supplies the human, never the permission — the credential's host ceiling and the profile's deny paths still bind afterwards.
 
 **Approvals are bound to the request hash.** A write held for a human executes exactly once however many times the client retries; later resends replay the stored response instead of producing a second side effect.
 

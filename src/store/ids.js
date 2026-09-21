@@ -46,5 +46,6 @@ export const id = {
   placeholder: () => `ph_${ulid()}`,
   approval: () => `ap_${ulid()}`,
   request: () => `req_${ulid()}`,
+  sessionRequest: () => `sr_${ulid()}`,
   client: () => `cl_${ulid()}`,
 }

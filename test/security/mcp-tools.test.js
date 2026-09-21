@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { Vault } from '../../src/store/vault.js'
 import { McpServer } from '../../src/daemon/mcp.js'
+import { SessionRequests } from '../../src/daemon/session-requests.js'
 import { Pipeline } from '../../src/daemon/pipeline.js'
 
 let dir, vault, mcp, upstream, upPort, received, session
@@ -58,7 +59,11 @@ before(async () => {
       budget: { unit: 'requests', limit: 100 }, approval: 'auto',
     },
   })
-  mcp = new McpServer(vault, new Pipeline(vault), () => session)
+  // The session-request store lives on the daemon, because a request outlives
+  // any one MCP connection — the human answers in their own time.
+  mcp = new McpServer(vault, new Pipeline(vault), () => session, {
+    sessionRequests: new SessionRequests(vault.audit),
+  })
 })
 
 after(() => {
@@ -152,13 +157,41 @@ test('no tool returns a credential value, whatever it is asked', async () => {
   assert.ok(!all.includes('UNGRANTED-SECRET-0044556'), 'an ungranted credential value came back')
 })
 
-test('the tool list is exactly the five documented tools', async () => {
+test('the tool list is exactly the documented tools', async () => {
   // A new tool is a new surface. This fails when one is added, which is the
-  // point: it should be a decision, not a drive-by.
+  // point: it should be a decision, not a drive-by. It did its job when
+  // vault_request_session arrived — a tool two error paths had been telling
+  // agents to call for months while it did not exist.
   const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
   assert.deepEqual(listed.result.tools.map((t) => t.name).sort(), [
-    'vault_explain_denial', 'vault_get_placeholder', 'vault_http', 'vault_list_creds', 'vault_status',
+    'vault_explain_denial', 'vault_get_placeholder', 'vault_http', 'vault_list_creds',
+    'vault_request_session', 'vault_status',
   ])
+})
+
+test('the one capability-shaped tool cannot create capability', async () => {
+  // vault_request_session is the only tool that touches session creation, so
+  // it is the one to be sure about: asking must create nothing. A human
+  // answers it through the control socket, gated, or it never resolves.
+  const before = Object.keys(vault.db.sessions).length
+  const res = await mcp.handle({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'vault_request_session', arguments: { cred: 'gh-frozencrow', reason: 'testing' } },
+  })
+  const payload = JSON.parse(res.result.content[0].text)
+  assert.equal(payload.state, 'pending')
+  assert.ok(payload.request_id.startsWith('sr_'))
+  assert.equal(Object.keys(vault.db.sessions).length, before, 'asking created a session')
+  assert.equal(JSON.stringify(payload).includes('avs1.'), false, 'a token came back from asking')
+
+  // Polling before a human answers hands out nothing either.
+  const polled = await mcp.handle({
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'vault_request_session', arguments: { poll_id: payload.request_id, reason: 'checking' } },
+  })
+  const poll = JSON.parse(polled.result.content[0].text)
+  assert.equal(poll.state, 'pending')
+  assert.equal(poll.token, undefined)
 })
 
 test('a concurrent request cannot hijack a batch mid-flight', async () => {

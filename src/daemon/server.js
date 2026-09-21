@@ -20,6 +20,7 @@ import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN } from '../core/scrub.js'
+import { SessionRequests, proposalOf } from './session-requests.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
 // of a version string are two chances to report one the code is not, and the
@@ -65,7 +66,7 @@ export class Daemon {
     this.socketGroup = socketGroup
     this.enrolledUid = enrolledUid
     this.pipeline = new Pipeline(vault)
-    this.mcp = new McpServer(vault, this.pipeline, () => this.currentMcpSession)
+    this.mcp = new McpServer(vault, this.pipeline, () => this.currentMcpSession, this)
     this.currentMcpSession = null
     this.servers = []
     // A short window after a passphrase proof during which widening operations
@@ -79,6 +80,8 @@ export class Daemon {
     // rather than trusting the UI process, which runs as the human's account
     // and is therefore reachable by an agent.
     this.opChallenges = new Map()
+    // Sessions an agent has asked for and a human has not yet answered.
+    this.sessionRequests = new SessionRequests(vault.audit)
     // Consecutive failed passphrase attempts, and when to start accepting them
     // again. Every attempt costs an scrypt — deliberately, so guessing is
     // expensive — but scryptSync runs ON the event loop, so 188ms of "slow" is
@@ -117,6 +120,58 @@ export class Daemon {
       consecutive_failures: this.passphraseFailures,
       until: new Date(this.passphraseLockedUntil).toISOString(),
     })
+  }
+
+
+  /**
+   * Make a session from a request body.
+   *
+   * Shared by the route a human calls and the approval of a proposal an agent
+   * made, so an approved proposal cannot be created by some second, laxer
+   * path. Every ceiling in here applies either way: approval supplies the
+   * human, never permission.
+   */
+  #createSession(input) {
+          const cred = this.vault.findCredential(input.cred)
+          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
+          const profile = getProfile(cred.connector_kind)
+          const { session, token } = this.vault.createSession({
+            label: input.label, ttlMs: (input.ttl_hours ?? 8) * 3600_000, policy: {}, remote: !!input.remote,
+          })
+          // A grant can only reach the hosts the credential itself declares.
+          // Without this an agent minting its own session could aim the
+          // credential at a host it controls (the exfiltration path found in
+          // the pen test).
+          const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
+          const hosts = policyMod.confineHosts(input.hosts, ceiling)
+          const policy = {
+            hosts,
+            methods: input.methods || ['GET', 'HEAD'],
+            paths: input.paths || ['/**'],
+            budget: { unit: profile.defaultBudget.unit, limit: input.budget ?? profile.defaultBudget.limit },
+            approval: input.approval || 'on-write',
+          }
+          const problems = policyMod.lint(policy, { kind: cred.connector_kind })
+          const grant = this.vault.createGrant({
+            sessionId: session.id, credentialId: cred.id, fields: [cred.fields[0].name], policy,
+          })
+          // The grant's placeholder_policy is a ceiling, not a default. It sat
+          // on the right of a `??`, so an agent asking for a million uses got
+          // a million even where the human had configured one-time use.
+          const maxUses = grant.policy?.placeholder_policy?.max_uses
+          const asked = input.uses ?? null
+          const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
+          const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses })
+          return {
+            session_id: session.id, token, expires_at: session.expires_at,
+            grant_id: grant.id, placeholder,
+            usage: cred.fields[0].sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)),
+            base_url: `http://127.0.0.1:${this.gatewayPort}/p/${cred.slug}`,
+            // The profile's own read-only probe, so a caller can print an
+            // example request that works instead of a made-up path.
+            probe_path: profile.probe?.path || null,
+            lint: problems,
+          }
   }
 
   /**
@@ -671,47 +726,102 @@ export class Daemon {
 
         case 'POST /v1/sessions': {
           this.#requireHumanForWidening('session create', this.#wideningOperation(route, url, input), input.presence)
-          const cred = this.vault.findCredential(input.cred)
-          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
-          const profile = getProfile(cred.connector_kind)
-          const { session, token } = this.vault.createSession({
-            label: input.label, ttlMs: (input.ttl_hours ?? 8) * 3600_000, policy: {}, remote: !!input.remote,
-          })
-          // A grant can only reach the hosts the credential itself declares.
-          // Without this an agent minting its own session could aim the
-          // credential at a host it controls (the exfiltration path found in
-          // the pen test).
-          const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
-          const hosts = policyMod.confineHosts(input.hosts, ceiling)
-          const policy = {
-            hosts,
-            methods: input.methods || ['GET', 'HEAD'],
-            paths: input.paths || ['/**'],
-            budget: { unit: profile.defaultBudget.unit, limit: input.budget ?? profile.defaultBudget.limit },
-            approval: input.approval || 'on-write',
-          }
-          const problems = policyMod.lint(policy, { kind: cred.connector_kind })
-          const grant = this.vault.createGrant({
-            sessionId: session.id, credentialId: cred.id, fields: [cred.fields[0].name], policy,
-          })
-          // The grant's placeholder_policy is a ceiling, not a default. It sat
-          // on the right of a `??`, so an agent asking for a million uses got
-          // a million even where the human had configured one-time use.
-          const maxUses = grant.policy?.placeholder_policy?.max_uses
-          const asked = input.uses ?? null
-          const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
-          const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses })
-          return json(200, {
-            session_id: session.id, token, expires_at: session.expires_at,
-            grant_id: grant.id, placeholder,
-            usage: cred.fields[0].sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)),
-            base_url: `http://127.0.0.1:${this.gatewayPort}/p/${cred.slug}`,
-            // The profile's own read-only probe, so a caller can print an
-            // example request that works instead of a made-up path.
-            probe_path: profile.probe?.path || null,
-            lint: problems,
-          })
+          return json(200, this.#createSession(input))
         }
+        // ------------------------------------------------- session requests
+        //
+        // An agent may ASK for a session. Asking creates nothing: no session,
+        // no token, no grant. The only thing that exists afterwards is a
+        // question for a human, which is why this route is not gated — there
+        // is no capability here to guard.
+        case 'POST /v1/session-requests': {
+          const proposal = proposalOf(input)
+          if (!proposal.cred) throw deny('AV_NOT_FOUND', 'a session request must name a credential')
+          if (!this.vault.findCredential(proposal.cred)) {
+            throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
+          }
+          try {
+            const record = this.sessionRequests.propose({ proposal, reason: input.reason })
+            return json(200, {
+              ...SessionRequests.redact(record),
+              next: {
+                agent: 'poll GET /v1/session-requests/collect?id=<id> until a human answers',
+                human: [`agent-vault requests`, `agent-vault approve ${record.id}`],
+              },
+            })
+          } catch (e) {
+            if (e.code === 'AV_TOO_MANY_REQUESTS') {
+              throw deny('AV_POLICY_DENIED', e.message, { rule: 'session_requests' })
+            }
+            throw e
+          }
+        }
+
+        case 'GET /v1/session-requests':
+          return json(200, this.sessionRequests.pending().map(SessionRequests.redact))
+
+        // The agent collects its own token, exactly once. Reading is not
+        // widening: the token was authorised by the human who approved it, and
+        // handing it over twice would leave a second live copy in memory.
+        case 'GET /v1/session-requests/collect': {
+          const record = this.sessionRequests.get(url.searchParams.get('id'))
+          if (!record) throw deny('AV_NOT_FOUND', 'no such session request')
+          if (record.state === 'pending') return json(200, { state: 'pending' })
+          if (record.state === 'denied') return json(200, { state: 'denied' })
+          if (!record.result) return json(200, { state: record.state, detail: 'the answer is no longer available; ask again' })
+          const result = record.result
+          record.result = null
+          record.state = 'collected'
+          this.vault.audit?.write('session_request.collected', { request_id: record.id })
+          return json(200, { state: 'approved', ...result })
+        }
+
+        case 'POST /v1/session-requests/decide': {
+          const record = this.sessionRequests.get(input.id)
+          if (!record) throw deny('AV_NOT_FOUND', `no session request ${input.id}`)
+          if (record.state !== 'pending') {
+            throw deny('AV_POLICY_DENIED', `that request was already ${record.state}`, { rule: 'session_requests' })
+          }
+          // What the human is about to create, after any edit they made. The
+          // gate binds to THIS, not to what the agent originally asked for —
+          // the HTTP approvals bound everything about a request except its
+          // headers, and an approved POST arrived as a DELETE. Whatever is
+          // outside the binding is what an agent can change afterwards.
+          const final = proposalOf({ ...record.proposal, ...proposalOf(input.overrides || {}) })
+          this.#requireHumanForWidening(
+            'session request approval',
+            webauthn.operationFor('session_request.decide', {
+              id: record.id, granted: !!input.granted, ...final,
+            }),
+            input.presence,
+          )
+          if (!input.granted) {
+            record.state = 'denied'
+            record.decided_at = new Date().toISOString()
+            this.vault.audit?.write('session_request.denied', { request_id: record.id })
+            return json(200, SessionRequests.redact(record))
+          }
+          // Created through the same helper the human's own route uses, so an
+          // approved proposal cannot reach a second, laxer path.
+          const created = this.#createSession({
+            ...final,
+            budget: final.budget,
+            ttl_hours: final.ttl_minutes ? final.ttl_minutes / 60 : undefined,
+            label: `requested by an agent (${record.id})`,
+          })
+          record.state = 'approved'
+          record.decided_at = new Date().toISOString()
+          record.granted_proposal = final
+          record.result = created
+          this.vault.audit?.write('session_request.approved', {
+            request_id: record.id,
+            session_id: created.session_id,
+            granted: final,
+            edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
+          })
+          return json(200, { ...SessionRequests.redact(record), granted: final })
+        }
+
         case 'GET /v1/sessions':
           return json(200, Object.values(this.vault.db.sessions).map((s) => ({
             id: s.id, label: s.label, state: s.state, expires_at: s.expires_at, remote: s.remote,

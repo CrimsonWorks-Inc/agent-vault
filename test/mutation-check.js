@@ -230,6 +230,20 @@ const MUTATIONS = [
     tests: ['test/security/bridge.test.js'],
   },
   {
+    what: 'an agent can approve its own session request',
+    file: 'src/daemon/server.js',
+    from: "          this.#requireHumanForWidening(\n            'session request approval',",
+    to: "          if (0) this.#requireHumanForWidening(\n            'session request approval',",
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
+    what: 'a session request is created from what was asked, not what was approved',
+    file: 'src/daemon/server.js',
+    from: '          const created = this.#createSession({\n            ...final,',
+    to: '          const created = this.#createSession({\n            ...record.proposal,',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",
