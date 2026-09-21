@@ -187,6 +187,16 @@ test('no mutating control route widens capability without a human', async () => 
     ['POST', '/v1/approvals', { id: 'whatever', granted: true }],
     ['POST', '/v1/listeners', { id: 'n', address: '127.0.0.1:7998', surfaces: ['mcp'] }],
     ['POST', '/v1/presence', { credentialId: 'c', publicKeySpki: 'k' }],
+    // Enrolling Touch ID as an UNLOCK factor wraps the master key to a secret
+    // the caller supplies. An agent that could do this would hold a key to the
+    // vault forever, openable without the passphrase and without a human in
+    // the room — transient socket access turned into permanent possession.
+    // The route's own comment claimed it required a presence window. It did
+    // not; nothing called the gate.
+    ['POST', '/v1/factors/webauthn', { credential_id: 'c', prf_secret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' }],
+    // And the mirror: stripping the human's unlock factor is a capability
+    // change in the other direction.
+    ['POST', '/v1/factors/webauthn', { action: 'remove' }],
   ]
   for (const [method, path, body] of widening) {
     const res = await ctl(method, path, body)

@@ -141,7 +141,12 @@ export class Daemon {
       case 'POST /v1/placeholders': return of('placeholder.issue', input)
       case 'POST /v1/approvals': return of('approval.approve', input)
       case 'POST /v1/listeners': return of('listener.add', input)
-      case 'POST /v1/factors/webauthn': return of('touchid.enroll', input)
+      // One route, two opposite actions. `action` is part of the bound
+      // operation either way, but the op NAME is what the UI shows the human,
+      // and asking someone to confirm "touchid.enroll" for a removal is
+      // asking them to approve something they were not shown.
+      case 'POST /v1/factors/webauthn':
+        return of(input?.action === 'remove' ? 'touchid.remove' : 'touchid.enroll', input)
       default: return null
     }
   }
@@ -720,9 +725,23 @@ export class Daemon {
           })
         }
         case 'POST /v1/factors/webauthn': {
-          // Enroll or remove Touch ID as an unlock factor. Requires the vault
-          // unlocked and a live presence window, like any settings change.
+          // Enroll or remove Touch ID as an *unlock* factor — a wrap of the
+          // vault master key, not a presence tap. Enrolling is the sharpest
+          // widening this socket offers: the caller supplies the PRF secret,
+          // so an agent that reached here could wrap the VMK to a secret it
+          // chose and from then on open the vault whenever it liked, without
+          // the passphrase and without touching anything. That converts
+          // transient access to the socket into permanent possession of the
+          // key. Removing is a capability change too, and the mirror of the
+          // same trick: strip the human's factor and leave your own.
+          //
+          // This comment used to say the route required a presence window. It
+          // did not; nothing here called the gate. Now it does.
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
+          this.#requireHumanForWidening(
+            input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',
+            this.#wideningOperation(route, url, input), input.presence,
+          )
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
           }

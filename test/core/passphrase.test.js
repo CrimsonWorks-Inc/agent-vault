@@ -93,6 +93,38 @@ test('the passphrase cannot be removed while Touch ID is the other factor', () =
   assert.equal(v.removePassphrase('recovery-passphrase'), true)
 })
 
+test('removing the last unlock factor leaves the vault openable, not destroyed', () => {
+  // Every wrap is a way back to the master key. Remove the last one and the
+  // vault is not locked, it is gone: no factor opens it, and no factor can be
+  // added, because adding one needs the key that just became unreachable. Not
+  // a lockout — a deletion of every credential in it, with no recovery.
+  //
+  // The two supported paths cannot reach this state (enrolling Touch ID needs
+  // a passphrase, and the passphrase cannot be removed while Touch ID is
+  // enrolled), so this reaches it directly, the way a half-written state or an
+  // older build's vault would. removePassphrase has always had this guard.
+  // removeWebauthnUnlock did not.
+  const v = Vault.create(dir, { factor: 'none' })
+  v.setPassphrase('recovery-passphrase')
+  const prf = randomBytes(32).toString('base64')
+  v.addWebauthnUnlock('cred-1', prf)
+
+  // The state under test: the PRF wrap is the only one left.
+  v.db.kv.vmk_wraps = v.db.kv.vmk_wraps.filter((w) => w.class === 'webauthn-prf')
+  assert.equal(v.db.kv.vmk_wraps.length, 1)
+
+  v.removeWebauthnUnlock()
+  assert.ok(v.db.kv.vmk_wraps.length > 0, 'the vault was left with no way to open it')
+
+  // And prove it by actually opening it again from disk. `lock()` wipes the
+  // key in memory, so a successful unlock here came from a wrap, not from
+  // state the process happened to be holding.
+  v.lock()
+  const r = Vault.open(dir)
+  assert.equal(r.unlockWith({ passphrase: null }), 'none',
+    'the vault should still open on the uid boundary alone')
+})
+
 test('setting a passphrase keeps an existing Touch ID factor', () => {
   const v = Vault.create(dir, { factor: 'none' })
   v.setPassphrase('first-passphrase')

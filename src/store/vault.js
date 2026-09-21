@@ -211,6 +211,22 @@ export class Vault {
     this.#requireUnlocked()
     const had = this.hasWebauthnUnlock
     this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf')
+    // Every wrap is a way back to the master key. Remove the last one and the
+    // vault is not locked, it is destroyed: no factor opens it, and no factor
+    // can be added, because adding one needs the key that is now unreachable.
+    // Enrolling requires a passphrase, so this should be impossible — but
+    // "should be" is how a one-way door gets left unguarded, and the cost of
+    // being wrong here is every credential in the vault, permanently.
+    // removePassphrase has had this guard since the beginning; this is the
+    // same guard, for the same reason.
+    if (!this.db.kv.vmk_wraps.length) {
+      const deviceKey = readFileSync(this.deviceKeyPath)
+      this.db.kv.vmk_wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
+      crypt.wipe(deviceKey)
+      this.audit.write('presence.factor_downgraded', {
+        class: 'none', reason: 'removing the last wrap would have made the vault unopenable',
+      })
+    }
     this.#syncFactors()
     this.#persist()
     if (had) this.audit.write('presence.factor_removed', { class: 'webauthn-prf' })

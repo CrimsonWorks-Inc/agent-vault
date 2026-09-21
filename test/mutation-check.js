@@ -111,6 +111,20 @@ const MUTATIONS = [
     tests: ['test/core/detect-fuzz.test.js'],
   },
   {
+    what: 'an agent can enroll its own unlock factor',
+    file: 'src/daemon/server.js',
+    from: "          this.#requireHumanForWidening(\n            input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',",
+    to: "          if (0) this.#requireHumanForWidening(\n            input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',",
+    tests: ['test/security/control-gate.test.js'],
+  },
+  {
+    what: 'removing the last wrap leaves the vault unopenable',
+    file: 'src/store/vault.js',
+    from: '    if (!this.db.kv.vmk_wraps.length) {\n      const deviceKey = readFileSync(this.deviceKeyPath)',
+    to: '    if (false) {\n      const deviceKey = readFileSync(this.deviceKeyPath)',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",
