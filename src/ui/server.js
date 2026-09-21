@@ -399,19 +399,23 @@ export class UiServer {
    * the check are derived from this, so they cannot drift apart.
    */
   #operationFor(key, url, body) {
+    // The same builder the daemon uses, over the same request, so the two
+    // cannot describe the operation differently — and neither can describe it
+    // incompletely, which is what let a signature authorise more than it said.
+    const of = (op, params) => webauthn.operationFor(op, params)
     switch (key) {
-      case 'POST credentials': return { op: 'cred.add', slug: body?.slug, kind: body?.kind }
-      case 'DELETE credentials': return { op: 'cred.remove', slug: url.searchParams.get('slug') }
-      case 'POST sessions': return { op: 'session.create', cred: body?.cred, methods: body?.methods, paths: body?.paths }
-      case 'DELETE sessions': return { op: 'session.revoke', sid: url.searchParams.get('sid') }
-      case 'POST approvals': return { op: body?.granted === false ? 'approval.deny' : 'approval.approve', id: body?.id }
-      case 'POST lock': return { op: 'vault.lock' }
-      case 'POST unlock': return { op: 'vault.unlock' }
-      case 'POST touchid/enroll': return { op: 'touchid.enroll' }
-      case 'POST touchid/remove': return { op: 'touchid.remove' }
+      case 'POST credentials': return of('cred.add', body)
+      case 'DELETE credentials': return of('cred.remove', { slug: url.searchParams.get('slug') })
+      case 'POST sessions': return of('session.create', body)
+      case 'DELETE sessions': return of('session.revoke', { sid: url.searchParams.get('sid') })
+      case 'POST approvals': return of(body?.granted === false ? 'approval.deny' : 'approval.approve', body)
+      case 'POST lock': return of('vault.lock', {})
+      case 'POST touchid/enroll': return of('touchid.enroll', body)
+      case 'POST touchid/remove': return of('touchid.remove', {})
       default: return { op: key }
     }
   }
+
 
   // ------------------------------------------------------------------ helpers
 

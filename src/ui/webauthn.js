@@ -215,6 +215,37 @@ export function verifyAssertion({
 }
 
 /**
+ * The operation a signature authorises, built from the whole request.
+ *
+ * This used to be a hand-listed subset of each request's fields, and the
+ * fields nobody thought to list were the interesting ones: a signature for
+ * "session.create on demo, GET, /**" did not bind `approval`, `budget`,
+ * `ttl_hours` or `remote`, so a fingerprint given for a read-only eight-hour
+ * local session created a remote, auto-approving, billion-request, decade-long
+ * one. Both sides derived the same incomplete operation, so the daemon's
+ * independent re-verification could not catch it either.
+ *
+ * Everything in the request is bound now. A credential value is replaced by
+ * its digest: the signature must cover which secret is being stored, but the
+ * secret itself has no business in a structure that gets canonicalised,
+ * compared and logged.
+ */
+export function operationFor(op, params = {}) {
+  const out = { op }
+  for (const key of Object.keys(params).sort()) {
+    if (key === 'presence') continue          // the proof is not part of what it proves
+    const v = params[key]
+    if (v === undefined) continue
+    if (key === 'value' || key === 'prf_secret') {
+      out[`${key}_sha256`] = createHash('sha256').update(String(v)).digest('hex')
+      continue
+    }
+    out[key] = v
+  }
+  return out
+}
+
+/**
  * Stable key order, so the signed operation and the executed one compare
  * exactly. Everything that hashes or compares an operation goes through this;
  * two implementations that disagree about key order or about an absent field

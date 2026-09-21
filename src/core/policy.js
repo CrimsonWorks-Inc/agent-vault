@@ -160,17 +160,59 @@ export function normalizeHost(host) {
  */
 export function normalizePath(path) {
   let p = String(path || '/')
-  const q = p.indexOf('?')
-  if (q !== -1) p = p.slice(0, q)
+
+  // Decode to a fixed point, not a fixed number of rounds. Two rounds left a
+  // live escape in the output at three levels of encoding, and the forwarded
+  // path was the un-normalized original, so the upstream resolved something
+  // the policy never saw.
   let decoded = p
-  for (let i = 0; i < 2; i++) {
-    try {
-      const next = decodeURIComponent(decoded)
-      if (next === decoded) break
-      decoded = next
-    } catch { throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape') }
+  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
+    let next
+    try { next = decodeURIComponent(decoded) } catch {
+      throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
+    }
+    if (next === decoded) break
+    decoded = next
+    if (i === MAX_DECODE_ROUNDS - 1) {
+      throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times to resolve')
+    }
   }
-  if (decoded.includes('\0')) throw deny('AV_POLICY_DENIED', 'path contains a null byte')
+
+  // Everything below decides what resource this names. A URL parser answers
+  // the same question differently, and where the two disagree the request
+  // goes somewhere the policy did not authorise.
+  //
+  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
+  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
+  //   "/user/keys".
+  const cut = decoded.search(/[?#]/)
+  if (cut !== -1) decoded = decoded.slice(0, cut)
+
+  //   An encoded slash is genuinely ambiguous: to this function it is a
+  //   separator, to some upstreams a literal character in one segment. Two
+  //   readings means two different resources, so it is refused rather than
+  //   guessed. The same goes for a backslash, which several servers fold to
+  //   a separator.
+  if (/%2f|%5c|\\/i.test(String(path || ''))) {
+    throw deny('AV_POLICY_DENIED', 'path contains an encoded slash or a backslash', {
+      rule: 'path_ambiguous_separator',
+      hint: 'Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.',
+    })
+  }
+
+  //   TAB, LF and CR are deleted outright by the WHATWG URL parser, so
+  //   "/repos/o/r/hooks\t" matched no deny glob and arrived as
+  //   "/repos/o/r/hooks". Every C0 control and DEL is refused: none of them
+  //   belongs in a path, and each is a chance for two parsers to disagree.
+  const control = /[\u0000-\u001f\u007f]/.exec(decoded)
+  if (control) {
+    const code = control[0].charCodeAt(0).toString(16).padStart(2, '0')
+    throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {
+      rule: 'path_control_char',
+      hint: 'A URL parser strips or reinterprets these, so the path checked here would not be the path requested.',
+    })
+  }
+
   const segments = []
   for (const seg of decoded.split('/')) {
     if (seg === '' || seg === '.') continue
@@ -183,6 +225,9 @@ export function normalizePath(path) {
   }
   return `/${segments.join('/')}`
 }
+
+// Enough for any legitimate double-encoding, far short of a decode bomb.
+const MAX_DECODE_ROUNDS = 5
 
 /** Glob match: `*` spans one segment, `**` spans many. */
 export function matchPath(pattern, path) {

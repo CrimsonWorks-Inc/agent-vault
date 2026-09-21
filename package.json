@@ -26,7 +26,8 @@
     "test:security": "node --test test/security/*.test.js",
     "demo": "node demo/demo.js",
     "daemon": "node bin/agent-vault.js daemon",
-    "ui": "node bin/agent-vault.js ui"
+    "ui": "node bin/agent-vault.js ui",
+    "test:mutation": "node test/mutation-check.js"
   },
   "dependencies": {},
   "devDependencies": {}

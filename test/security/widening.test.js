@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest } from 'node:http'
 import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from 'node:crypto'
+import { operationFor } from '../../src/ui/webauthn.js'
 import { Vault } from '../../src/store/vault.js'
 import { Daemon } from '../../src/daemon/server.js'
 import { UiServer } from '../../src/ui/server.js'
@@ -132,9 +133,10 @@ test('the passphrase gate is on, so an unsigned call is refused', async () => {
 test('creating a session from the UI works with one fingerprint', async () => {
   // The bug: this answered "session create needs a human: confirm your
   // passphrase" even though the human had just confirmed with Touch ID.
+  const body = { cred: 'demo', methods: ['GET'], paths: ['/**'] }
   const res = await withPresence(
-    { op: 'session.create', cred: 'demo', methods: ['GET'], paths: ['/**'] },
-    (presence) => api('POST', 'sessions', { cred: 'demo', methods: ['GET'], paths: ['/**'], presence }),
+    operationFor('session.create', body),
+    (presence) => api('POST', 'sessions', { ...body, presence }),
   )
   const created = await res.json()
   assert.equal(res.status, 200, JSON.stringify(created))
@@ -160,11 +162,10 @@ test('the credential list says where a placeholder may go', async () => {
 })
 
 test('adding a credential from the UI works the same way', async () => {
+  const body = { slug: 'second', kind: 'http', host: 'api.other.com', value: 'sk-test-000111222333444' }
   const res = await withPresence(
-    { op: 'cred.add', slug: 'second', kind: 'http' },
-    (presence) => api('POST', 'credentials', {
-      slug: 'second', kind: 'http', host: 'api.other.com', value: 'sk-test-000111222333444', presence,
-    }),
+    operationFor('cred.add', body),
+    (presence) => api('POST', 'credentials', { ...body, presence }),
   )
   assert.equal(res.status, 200, JSON.stringify(await res.json()))
   assert.ok(vault.findCredential('second'))
@@ -174,7 +175,7 @@ test('removing a credential from the UI works, signature and all', async () => {
   // This one is structurally different: the proof rides in the body of a
   // DELETE, which is easy to drop by accident.
   const res = await withPresence(
-    { op: 'cred.remove', slug: 'second' },
+    operationFor('cred.remove', { slug: 'second' }),
     (presence) => api('DELETE', 'credentials?slug=second', { presence }),
   )
   assert.equal(res.status, 200, JSON.stringify(await res.json()))
@@ -187,7 +188,7 @@ test('a signature for one operation cannot authorise another', async () => {
   // operation against the call it actually received, so the swap is caught
   // even if the UI process is the one doing the lying.
   const ch = await (await api('POST', 'presence/challenge', {
-    operation: { op: 'session.create', cred: 'demo', methods: ['GET'], paths: ['/**'] },
+    operation: operationFor('session.create', { cred: 'demo', methods: ['GET'], paths: ['/**'] }),
   })).json()
   const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
 
@@ -199,7 +200,7 @@ test('a signature for one operation cannot authorise another', async () => {
 })
 
 test('a signature is good for exactly one call', async () => {
-  const operation = { op: 'session.create', cred: 'demo', methods: ['GET'], paths: ['/**'] }
+  const operation = operationFor('session.create', { cred: 'demo', methods: ['GET'], paths: ['/**'] })
   const ch = await (await api('POST', 'presence/challenge', { operation })).json()
   const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
   const body = { cred: 'demo', methods: ['GET'], paths: ['/**'], presence }
@@ -222,7 +223,7 @@ test('a challenge the daemon never minted proves nothing', async () => {
 
 test('a key the daemon never enrolled proves nothing', async () => {
   const stranger = makeAuthenticator()
-  const operation = { op: 'session.create', cred: 'demo', methods: ['GET'], paths: ['/**'] }
+  const operation = operationFor('session.create', { cred: 'demo', methods: ['GET'], paths: ['/**'] })
   const ch = await (await api('POST', 'presence/challenge', { operation })).json()
   const presence = { challengeId: ch.challengeId, ...stranger.assert(ch.challenge) }
 
@@ -263,4 +264,46 @@ test('a wrong passphrase opens nothing', async () => {
   const res = await control('POST', '/v1/presence/window', { passphrase: 'not it' })
   assert.equal(res.status, 403)
   assert.equal(res.body.code, 'AV_PRESENCE_DENIED')
+})
+
+test('a signature does not authorise fields it never covered', async () => {
+  // Found by an independent audit. The signed operation was a hand-listed
+  // subset of the request, so a fingerprint given for "demo, GET, /**" also
+  // authorised whatever the agent put in the fields nobody listed: the same
+  // signature created a remote, auto-approving, billion-request, decade-long
+  // session. Both the UI and the daemon derived the same incomplete operation,
+  // so the daemon's independent check could not catch it either.
+  const benign = { cred: 'demo', methods: ['GET'], paths: ['/**'] }
+  const hostile = {
+    ...benign,
+    remote: true,              // reachable from the network
+    approval: 'auto',          // no human on writes
+    budget: 1_000_000_000,
+    ttl_hours: 87_600,         // ten years
+    uses: 1_000_000,
+  }
+
+  const ch = await (await api('POST', 'presence/challenge', {
+    operation: operationFor('session.create', benign),
+  })).json()
+  const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  const res = await control('POST', '/v1/sessions', { ...hostile, presence })
+  assert.equal(res.status, 401, `a benign signature created: ${JSON.stringify(res.body).slice(0, 200)}`)
+  assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED')
+})
+
+test('the value stored under a cred.add signature is bound to it', async () => {
+  // Only slug and kind were signed, so the same signature could store any
+  // secret, at any host, with any injection sites.
+  const intended = { slug: 'bound', kind: 'http', host: 'api.example.com', value: 'INTENDED-SECRET-0001' }
+  const ch = await (await api('POST', 'presence/challenge', {
+    operation: operationFor('cred.add', intended),
+  })).json()
+  const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  const swapped = { ...intended, value: 'ATTACKER-SUBSTITUTED-VALUE-0002' }
+  const res = await control('POST', '/v1/credentials', { ...swapped, presence })
+  assert.equal(res.status, 401, 'a different value must not ride on that signature')
+  assert.ok(!vault.findCredential('bound'), 'and nothing should have been stored')
 })

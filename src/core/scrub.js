@@ -33,6 +33,13 @@ export function encodings(secret, minLen = MIN_SECRET_LEN) {
   const add = (s) => { if (s && s.length >= minLen) out.add(s) }
 
   add(secret)
+  // The same secret as the response actually carries it. Bodies are read
+  // byte-for-byte as latin1 so a binary body survives intact, which means a
+  // secret with any character outside ASCII arrives as its UTF-8 bytes —
+  // "café" on the wire is five bytes that read back as "cafÃ©" and never
+  // matched the needle. Any credential with an accent in it was published to
+  // the agent whenever an upstream echoed it.
+  add(Buffer.from(secret, 'utf8').toString('latin1'))
   add(encodeURIComponent(secret))
   add(secret.replace(/\//g, '\\/'))
   add(JSON.stringify(secret).slice(1, -1))

@@ -300,6 +300,31 @@
       api('POST', 'touchid/enroll', { credential_id: bufToB64u(cred.rawId), prf_secret: bufToB64(prf), presence: proof }))
   }
 
+  /**
+   * The operation a signature will authorise, built from the whole request.
+   *
+   * It used to be a hand-picked few fields, and the ones nobody picked were
+   * the dangerous ones: a signature for "session.create on demo, GET, /**"
+   * did not cover approval, budget, ttl or remote. The server rebuilds this
+   * from the request it receives and compares, so anything missing here is a
+   * field that could be changed after you touched the sensor.
+   */
+  async function operationFor(op, params) {
+    const out = { op }
+    for (const key of Object.keys(params).sort()) {
+      const v = params[key]
+      if (v === undefined || key === 'presence') continue
+      if (key === 'value' || key === 'prf_secret') {
+        const bytes = new TextEncoder().encode(String(v))
+        const digest = await crypto.subtle.digest('SHA-256', bytes)
+        out[`${key}_sha256`] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+        continue
+      }
+      out[key] = v
+    }
+    return out
+  }
+
   let presenceState = { enrolled: false }
   let vaultLocked = false
 
@@ -1019,8 +1044,9 @@ ${c.cli} ui                         open this page`)}`,
       const kind = document.getElementById('kind').value
       const host = document.getElementById('host').value.trim()
       if (!slug || !value) return toast('A name and a value are both required')
-      await gated({ op: 'cred.add', slug, kind }, (proof) =>
-        api('POST', 'credentials', { slug, kind, value, host: host || undefined, presence: proof }))
+      const body = { slug, kind, value, host: host || undefined }
+      await gated(await operationFor('cred.add', body), (proof) =>
+        api('POST', 'credentials', { ...body, presence: proof }))
       document.getElementById('value').value = ''
       toast(`Stored ${slug}`)
       render()
@@ -1028,7 +1054,7 @@ ${c.cli} ui                         open this page`)}`,
     async 'rm-cred'(btn) {
       const slug = btn.dataset.slug
       if (!confirm(`Remove ${slug}? Every grant using it is revoked.`)) return
-      await gated({ op: 'cred.remove', slug }, (proof) =>
+      await gated(await operationFor('cred.remove', { slug }), (proof) =>
         api('DELETE', `credentials?slug=${encodeURIComponent(slug)}`, { presence: proof }))
       toast('Removed')
       render()
@@ -1043,7 +1069,7 @@ ${c.cli} ui                         open this page`)}`,
         approval: document.getElementById('sApproval').value,
       }
       const s = await gated(
-        { op: 'session.create', cred: body.cred, methods: body.methods, paths: body.paths },
+        await operationFor('session.create', body),
         (proof) => api('POST', 'sessions', { ...body, presence: proof }),
       )
       // Carry the credential's own injection site through, so the example call
@@ -1060,21 +1086,21 @@ ${c.cli} ui                         open this page`)}`,
     },
     async revoke(btn) {
       const sid = btn.dataset.sid
-      await gated({ op: 'session.revoke', sid }, (proof) =>
+      await gated(await operationFor('session.revoke', { sid }), (proof) =>
         api('DELETE', `sessions?sid=${encodeURIComponent(sid)}`, { presence: proof }))
       toast('Revoked')
       render()
     },
     async approve(btn) {
       const id = btn.dataset.id
-      await gated({ op: 'approval.approve', id }, (proof) =>
+      await gated(await operationFor('approval.approve', { id, granted: true }), (proof) =>
         api('POST', 'approvals', { id, granted: true, presence: proof }))
       toast('Approved')
       render()
     },
     async deny(btn) {
       const id = btn.dataset.id
-      await gated({ op: 'approval.deny', id }, (proof) =>
+      await gated(await operationFor('approval.deny', { id, granted: false }), (proof) =>
         api('POST', 'approvals', { id, granted: false, presence: proof }))
       toast('Denied')
       render()

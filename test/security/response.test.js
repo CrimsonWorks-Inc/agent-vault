@@ -122,7 +122,7 @@ test('a gzipped binary body round-trips through decompression unchanged', async 
   assert.ok(res.body.equals(binary))
 })
 
-test('server-sent events are streamed and scrubbed per event, not buffered', async () => {
+test('a secret inside an event is scrubbed, and the rest survives', async () => {
   const events = [
     `data: {"delta":"hello"}\n\n`,
     `data: {"leak":"${SECRET}"}\n\n`,
@@ -138,11 +138,39 @@ test('server-sent events are streamed and scrubbed per event, not buffered', asy
 
   const chunks = []
   for await (const c of res.stream) chunks.push(c)
-  assert.equal(chunks.length, 3, 'each event is emitted on its own, as it arrives')
+  // Chunk count is deliberately not asserted. The scrubber holds back the
+  // length of its longest needle so a secret spanning a boundary is seen
+  // whole, and this stream is shorter than that hold-back — so it arrives in
+  // one piece, correctly. That the hold-back stays bounded on a realistic
+  // stream is the next test's job.
   const all = Buffer.concat(chunks).toString('utf8')
   assert.ok(!all.includes(SECRET), 'a secret inside an event must be scrubbed')
   assert.ok(all.includes(placeholder))
   assert.ok(all.includes('hello') && all.includes('done'))
+  assert.ok(all.indexOf('hello') < all.indexOf('done'), 'order must be preserved')
+})
+
+test('the stream hold-back is bounded, not the whole response', async () => {
+  // The hold-back exists so a secret spanning a boundary is caught. It must
+  // not become "buffer everything and scrub at the end", which would turn a
+  // token stream into a long silence and then a wall of text.
+  const many = Array.from({ length: 200 }, (_, i) => `data: {"delta":"tok${i}"}\n\n`)
+  const p = pipelineReturning({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    res: Readable.from(many.map((e) => Buffer.from(e))),
+  })
+  const res = await p.handle(req())
+  let first = null
+  let seen = 0
+  for await (const c of res.stream) {
+    seen += c.length
+    if (first === null) first = seen
+  }
+  const total = many.join('').length
+  assert.ok(first < total / 4,
+    `output should start early, not after most of the response (${first} of ${total})`)
+  assert.ok(seen >= total * 0.9, 'and everything should still arrive')
 })
 
 test('a secret split across two stream chunks is still caught', async () => {
@@ -241,4 +269,60 @@ test('a secret cannot escape through an internal error message', async () => {
       `a credential escaped through an error message: ${text.slice(0, 200)}`)
     assert.match(text, /\[\[av:|REDACT|boom/i, 'the error should still say something useful')
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a secret split across two SSE events is caught', async () => {
+  // Every SSE client concatenates the data: fields, so scrubbing each event on
+  // its own is not scrubbing at all — `data: ghp_REAL` then `data: SECRET`
+  // matched nothing in either and reassembled perfectly on the far side. That
+  // is exactly the LLM token stream the streaming path exists for.
+  const dir = mkdtempSync(join(tmpdir(), 'av-sse-'))
+  const SECRET = 'ghp_SSESPLIT0123456789abcdefghij'
+  let upstream
+  try {
+    upstream = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      // Split mid-secret, the way a token stream naturally would.
+      res.write(`data: {"delta":"${SECRET.slice(0, 14)}"}\n\n`)
+      setTimeout(() => {
+        res.write(`data: {"delta":"${SECRET.slice(14)}"}\n\n`)
+        res.end()
+      }, 10)
+    })
+    await new Promise((r) => upstream.listen(0, '127.0.0.1', r))
+    const port = upstream.address().port
+
+    const v = Vault.create(dir, { factor: 'none' })
+    const cred = v.addCredential({
+      slug: 'llm', kind: 'http', connector: { host: `127.0.0.1:${port}`, scheme: 'http' },
+      fields: { token: SECRET }, sites: { token: ['header:authorization:Bearer'] },
+    })
+    const made = v.createSession({ label: 'agent' })
+    const grant = v.createGrant({
+      sessionId: made.session.id, credentialId: cred.id, fields: ['token'],
+      policy: {
+        hosts: ['127.0.0.1'], methods: ['GET'], paths: ['/**'],
+        budget: { unit: 'requests', limit: 9 }, approval: 'auto',
+      },
+    })
+    const placeholder = v.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder
+
+    const res = await new Pipeline(v).handle({
+      method: 'GET', path: '/p/llm/stream', query: '',
+      headers: [['authorization', `Bearer ${placeholder}`]], body: null,
+    })
+    assert.ok(res.stream, 'the response should stream')
+
+    let delivered = ''
+    for await (const chunk of res.stream) delivered += chunk.toString('latin1')
+
+    // What a client actually reconstructs.
+    const reassembled = [...delivered.matchAll(/"delta":"([^"]*)"/g)].map((m) => m[1]).join('')
+    assert.ok(!reassembled.includes(SECRET),
+      `the secret survived reassembly: ${reassembled.slice(0, 80)}`)
+    assert.ok(!delivered.includes(SECRET), 'and must not appear in the raw stream either')
+  } finally {
+    if (upstream) upstream.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

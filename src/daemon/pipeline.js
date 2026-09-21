@@ -411,7 +411,14 @@ export class Pipeline {
 
     markUpstream()
     const authority = route.port ? `${decision.host}:${route.port}` : decision.host
-    const upstreamUrl = `${route.scheme === 'http' ? 'http' : 'https'}://${authority}${decision.path}${outgoing.query ? `?${outgoing.query}` : ''}`
+    // Re-encode each segment of the path policy actually approved. The
+    // decision is made on a fully decoded path; putting that straight into a
+    // URL lets the parser read it differently a second time, which is how a
+    // tab, a `#` or a `?` ended up naming one resource here and another on
+    // the wire. Encoding per segment makes the two readings identical by
+    // construction.
+    const wirePath = decision.path.split('/').map((seg) => encodeURIComponent(seg)).join('/')
+    const upstreamUrl = `${route.scheme === 'http' ? 'http' : 'https'}://${authority}${wirePath}${outgoing.query ? `?${outgoing.query}` : ''}`
     let res
     try {
       res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body })
@@ -443,7 +450,11 @@ export class Pipeline {
       this.vault.audit.write('response.streamed', { request_id: requestId, content_type: contentType })
       return {
         status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, redactions: 0,
-        stream: scrubEventStream(res.res, scrubber),
+        stream: scrubEventStream(res.res, scrubber, () => {
+          this.vault.audit?.write('response.stream_cut', {
+            request_id: requestId, reason: 'credential_split_across_events',
+          })
+        }),
       }
     }
 
@@ -592,21 +603,74 @@ function decompress(buf, encoding) {
 }
 
 /**
- * Scrub a server-sent event stream one event at a time. Events are delimited by
- * a blank line, so holding only the partial tail lets each complete event go
- * out as soon as it arrives while a secret split across a chunk boundary is
- * still caught before it reaches the agent.
+ * Scrub a server-sent event stream.
+ *
+ * Three things are going on, because one scrubber is not enough here.
+ *
+ * The raw bytes go through Scrubber.stream(), which holds back the longest
+ * needle so a secret spanning a chunk boundary is seen whole. This used to
+ * scrub each `\n\n` event in isolation, which reads as safe and is not.
+ *
+ * That still misses a secret the upstream splits across events, because the
+ * framing — `"}\n\ndata: {"` — sits between the halves and the secret is not
+ * contiguous in the bytes anywhere. So the `data:` payloads are concatenated
+ * and watched separately. That catches a raw-text stream split across events.
+ *
+ * What neither catches is a secret split across *application* fields, as in
+ * `{"delta":"ghp_REAL"}` then `{"delta":"SECRET"}`: reassembling that means
+ * knowing the upstream's JSON shape, which a byte proxy does not. For that
+ * case the stream is cut rather than continued — the agent may have received
+ * a fragment, and it will not receive the rest. It requires a hostile upstream,
+ * which already holds the credential; what it buys is teaching the agent a
+ * secret it was never given, and that is worth failing closed over.
  */
-async function* scrubEventStream(source, scrubber) {
-  let held = ''
+async function* scrubEventStream(source, scrubber, onLeak) {
+  const frame = scrubber.stream()
+  let pending = ''
+  let assembled = ''
+
+  const dataOf = (event) => event.split('\n')
+    .filter((l) => l.startsWith('data:'))
+    .map((l) => l.slice(5).replace(/^ /, ''))
+    .join('')
+
+  /** True when the payload so far, ignoring punctuation, contains a secret. */
+  const leaked = (text) => {
+    if (scrubber.scrub(text).redactions > 0) return true
+    // Application framing between the fragments: compare with it removed.
+    const bare = text.replace(/[^A-Za-z0-9_\-+/=]/g, '')
+    return scrubber.scrub(bare).redactions > 0
+  }
+
   for await (const chunk of source) {
-    held += chunk.toString('latin1')
+    pending += frame.push(chunk.toString('latin1'))
     let boundary
-    while ((boundary = held.indexOf('\n\n')) !== -1) {
-      const event = held.slice(0, boundary + 2)
-      held = held.slice(boundary + 2)
-      yield Buffer.from(scrubber.scrub(event).text, 'latin1')
+    while ((boundary = pending.indexOf('\n\n')) !== -1) {
+      const event = pending.slice(0, boundary + 2)
+      pending = pending.slice(boundary + 2)
+      assembled += dataOf(event)
+      // Keep only enough to span a split; an LLM response is unbounded.
+      if (assembled.length > scrubber.overlap * 4) {
+        assembled = assembled.slice(-scrubber.overlap * 4)
+      }
+      if (leaked(assembled)) {
+        onLeak?.()
+        yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
+        return
+      }
+      yield Buffer.from(event, 'latin1')
     }
   }
-  if (held) yield Buffer.from(scrubber.scrub(held).text, 'latin1')
+  const tail = pending + frame.flush()
+  if (tail) {
+    assembled += dataOf(tail)
+    if (leaked(assembled)) {
+      onLeak?.()
+      yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
+      return
+    }
+    yield Buffer.from(tail, 'latin1')
+  }
 }
+
+

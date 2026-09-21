@@ -131,20 +131,21 @@ export class Daemon {
    * the human and signs. Derived from the request the daemon received.
    */
   #wideningOperation(route, url, input) {
+    // Built from the whole request, not a field list. Whatever is not bound
+    // here is a field an agent can change under someone else's signature.
+    const of = (op, params) => webauthn.operationFor(op, params)
     switch (route) {
-      case 'POST /v1/credentials': return { op: 'cred.add', slug: input?.slug, kind: input?.kind }
-      case 'DELETE /v1/credentials': return { op: 'cred.remove', slug: url.searchParams.get('slug') }
-      case 'POST /v1/sessions':
-        return { op: 'session.create', cred: input?.cred, methods: input?.methods, paths: input?.paths }
-      case 'POST /v1/placeholders':
-        return { op: 'placeholder.issue', cred: input?.cred, sid: input?.sid }
-      case 'POST /v1/approvals':
-        return { op: 'approval.approve', id: input?.id }
-      case 'POST /v1/listeners':
-        return { op: 'listener.add', id: input?.id, address: input?.address }
+      case 'POST /v1/credentials': return of('cred.add', input)
+      case 'DELETE /v1/credentials': return of('cred.remove', { slug: url.searchParams.get('slug') })
+      case 'POST /v1/sessions': return of('session.create', input)
+      case 'POST /v1/placeholders': return of('placeholder.issue', input)
+      case 'POST /v1/approvals': return of('approval.approve', input)
+      case 'POST /v1/listeners': return of('listener.add', input)
+      case 'POST /v1/factors/webauthn': return of('touchid.enroll', input)
       default: return null
     }
   }
+
 
   async start() {
     const gateway = createServer((req, res) => this.#onGateway(req, res))
