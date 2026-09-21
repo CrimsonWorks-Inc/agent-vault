@@ -64,7 +64,7 @@ const MUTATIONS = [
   {
     what: 'the session token is forwarded upstream',
     file: 'src/daemon/pipeline.js',
-    from: "if (typeof v === 'string' && SESSION_TOKEN.test(v)) continue",
+    from: 'if (carriesToken) continue',
     to: 'if (false) continue',
     tests: ['test/security/carrier.test.js'],
   },
@@ -81,6 +81,34 @@ const MUTATIONS = [
     from: 'err.detail = this.#safeMessage({ message: err.detail })',
     to: '',
     tests: ['test/security/response.test.js'],
+  },
+  {
+    what: 'a control character in a path is allowed through',
+    file: 'src/core/policy.js',
+    from: "throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {",
+    to: "if (0) throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {",
+    tests: ['test/security/path-parsing.test.js'],
+  },
+  {
+    what: 'a non-ASCII secret is not scrubbed',
+    file: 'src/core/scrub.js',
+    from: "add(Buffer.from(secret, 'utf8').toString('latin1'))",
+    to: '',
+    tests: ['test/core/scrub-fuzz.test.js'],
+  },
+  {
+    what: 'the MCP session is read from shared state again',
+    file: 'src/daemon/server.js',
+    from: 'const r = await this.mcp.handle(m, session)',
+    to: 'const r = await this.mcp.handle(m)',
+    tests: ['test/security/mcp-tools.test.js'],
+  },
+  {
+    what: 'a child may widen past a ceiling',
+    file: 'src/core/policy.js',
+    from: '  if (outer === inner) return true\n  const o = String(outer)',
+    to: '  if (outer === inner) return true\n  if (String(outer).includes("**")) return String(inner).startsWith(String(outer).slice(0, String(outer).indexOf("**")))\n  const o = String(outer)',
+    tests: ['test/core/detect-fuzz.test.js'],
   },
   {
     what: 'the installer accepts a symlinked checkout',

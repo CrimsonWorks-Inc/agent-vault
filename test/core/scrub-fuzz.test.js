@@ -103,3 +103,43 @@ test('every declared encoding of a secret is actually caught', () => {
     }
   }
 })
+
+test('a secret is scrubbed as the response actually carries it, not as a JS string', () => {
+  // Bodies are read byte-for-byte as latin1 so a binary response survives
+  // intact. The needles were JS strings, so a secret with any character
+  // outside ASCII never matched: "café" on the wire is five bytes that read
+  // back as "cafÃ©". Any credential with an accent in it was published to the
+  // agent the moment an upstream echoed it — and non-ASCII passwords are
+  // ordinary, not exotic.
+  const secrets = [
+    'ghp_plainASCIIsecret12345',
+    'pa55w0rd-café-über-secret',
+    'Sécrèt-Key-0123456789',
+    'пароль-секретный-123',
+    '密码-0123456789abcdef',
+    '🔑-emoji-key-0123456',
+  ]
+  for (const secret of secrets) {
+    const s = new Scrubber([{ secret, label: 'k', replacement: '[R]', always: true }])
+    // Exactly how the pipeline sees a UTF-8 body.
+    const wire = Buffer.from(JSON.stringify({ echo: secret }), 'utf8').toString('latin1')
+    const { text, redactions } = s.scrub(wire)
+    assert.ok(redactions > 0, `${secret} was not redacted at all`)
+    const asClientReads = Buffer.from(text, 'latin1').toString('utf8')
+    assert.ok(!asClientReads.includes(secret), `${secret} survived to the agent`)
+  }
+})
+
+test('the same holds through the streaming path, at any chunk size', () => {
+  const secret = 'contraseña-secreta-0123456789'
+  const wire = Buffer.from(`{"echo":"${secret}"}`, 'utf8').toString('latin1')
+  for (const size of [1, 3, 7, 32, 4096]) {
+    const s = new Scrubber([{ secret, label: 'k', replacement: '[R]', always: true }])
+    const st = s.stream()
+    let out = ''
+    for (let p = 0; p < wire.length; p += size) out += st.push(wire.slice(p, p + size))
+    out += st.flush()
+    const asClientReads = Buffer.from(out, 'latin1').toString('utf8')
+    assert.ok(!asClientReads.includes(secret), `chunk size ${size} leaked the secret`)
+  }
+})
