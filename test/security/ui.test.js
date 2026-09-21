@@ -8,7 +8,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from 'node:crypto'
@@ -248,6 +248,38 @@ test('a valid signature for the right operation is accepted exactly once', async
   const replay = await api('POST', 'lock', { presence: proof })
   assert.equal(replay.status, 401)
   assert.match((await replay.json()).error, /already-used/)
+})
+
+test('a session created here reaches the store every local client reads', async () => {
+  // The vault keeps only token_hash, so a token's plaintext exists exactly
+  // once — at creation — and nothing can ever hand it back. That makes
+  // whoever created the session the only thing able to record it.
+  //
+  // The CLI recorded its sessions and this page recorded nothing, so a session
+  // made here lived in the vault and on the screen and nowhere else, while the
+  // MCP stdio bridge went on reading the CLI's copy. On a machine where the
+  // CLI had made one days earlier that was not "no session" but confidently
+  // the wrong one: an expired token, used with conviction, and a client that
+  // hung for thirty seconds rather than saying so.
+  // An earlier test locked the vault; creating a session needs it open.
+  if (vault.locked) vault.unlockWith({ passphrase: PASSPHRASE })
+
+  const auth = globalThis.__auth
+  const operation = { op: 'session.create', cred: 'demo', methods: ['GET'], paths: ['/**'] }
+  const ch = await (await api('POST', 'presence/challenge', { operation })).json()
+  const proof = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  const res = await api('POST', 'sessions', { ...operation, presence: proof })
+  const created = await res.json()
+  assert.equal(res.status, 200, `the UI could not create a session: ${JSON.stringify(created)}`)
+  assert.ok(created.token, 'the page must return a token to show the human')
+
+  const state = JSON.parse(readFileSync(join(dir, 'cli-state.json'), 'utf8'))
+  assert.equal(state.token, created.token,
+    'a session created in the UI did not reach the store the CLI and the bridge read')
+  assert.equal(state.session_id, created.session_id)
+  assert.equal(statSync(join(dir, 'cli-state.json')).mode & 0o077, 0,
+    'the state file must not be readable by other accounts')
 })
 
 test('the enrollment is recorded in the audit log', () => {

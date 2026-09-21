@@ -31,6 +31,7 @@ import { createServer } from 'node:http'
 import { request as socketRequest } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import * as webauthn from './webauthn.js'
+import { rememberSession } from '../client-state.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -43,7 +44,13 @@ export class UiServer {
    * @param {string} socketPath the daemon's control socket
    * @param {{port?: number, idleMs?: number}} opts
    */
-  constructor(socketPath, { port = 0, idleMs = IDLE_EXIT_MS, cli = 'agent-vault' } = {}) {
+  constructor(socketPath, { port = 0, idleMs = IDLE_EXIT_MS, cli = 'agent-vault', statePath = null } = {}) {
+    // Told, not derived. Deriving it from the environment means writing state
+    // for whichever vault the environment names rather than the one this
+    // server is actually serving, which is how a UI pointed at a scratch vault
+    // overwrote the state of the real one. Default to the vault beside the
+    // socket, which is the vault this server talks to.
+    this.statePath = statePath || join(dirname(socketPath), 'cli-state.json')
     this.socketPath = socketPath
     this.port = port
     this.idleMs = idleMs
@@ -327,8 +334,25 @@ export class UiServer {
             'DELETE', `/v1/credentials?slug=${encodeURIComponent(url.searchParams.get('slug'))}`,
             { presence: body?.presence },
           ))
-        case 'POST sessions':
-          return this.#send(res, 200, await this.#control('POST', '/v1/sessions', body))
+        case 'POST sessions': {
+          const created = await this.#control('POST', '/v1/sessions', body)
+          // Record it where every local client looks. The vault keeps only
+          // token_hash, so this plaintext exists exactly once — here — and
+          // nothing can ever hand it back. A session created in this page used
+          // to live in the vault and on the screen and nowhere else, while the
+          // MCP bridge went on reading a token the CLI had written days
+          // earlier and which had since expired. The docs page two panes over
+          // promises "the bridge finds your current session"; this is what
+          // makes that true however the session was made.
+          try {
+            rememberSession(created, this.statePath)
+          } catch (e) {
+            // Never fail the session over the bookkeeping: the human has the
+            // token on screen either way, and can paste it.
+            this.lastStateError = String(e?.message ?? e)
+          }
+          return this.#send(res, 200, created)
+        }
         case 'DELETE sessions':
           return this.#send(res, 200, await this.#control('DELETE', `/v1/sessions?sid=${encodeURIComponent(url.searchParams.get('sid'))}`))
         case 'POST approvals':

@@ -189,3 +189,4 @@ test('a successful call is still forwarded byte for byte', async () => {
     assert.ok(res.result.tools.length > 0)
   } finally { b.proc.kill() }
 })
+

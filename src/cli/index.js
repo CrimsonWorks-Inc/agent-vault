@@ -17,6 +17,7 @@ import { Daemon } from '../daemon/server.js'
 import { listProfiles } from '../connectors/profiles.js'
 import { EXIT } from '../core/errors.js'
 import * as ph from '../core/placeholder.js'
+import { loadState, saveState, rememberSession, statePath, stateDir } from '../client-state.js'
 
 // A system install puts the vault behind its own uid. The CLI finds it by the
 // state file the privileged installer writes, and falls back to a dev vault in
@@ -41,8 +42,9 @@ const SOCKET = process.env.AGENT_VAULT_DIR
 // CLI-side state holds only capabilities, never a secret, so it lives beside
 // the user rather than behind the boundary. It still follows AGENT_VAULT_DIR
 // when that is set, so a dev or test vault stays fully self-contained.
-const CLI_STATE_DIR = process.env.AGENT_VAULT_DIR || join(homedir(), '.agent-vault')
-const STATE = join(CLI_STATE_DIR, 'cli-state.json')
+// Both the CLI and the UI write this now; see src/client-state.js for why.
+const STATE = statePath()
+const CLI_STATE_DIR = stateDir()
 const SETUP_BIN = new URL('../../bin/agent-vault-setup.js', import.meta.url).pathname
 
 const C = process.stdout.isTTY && !process.env.NO_COLOR
@@ -143,28 +145,6 @@ async function controlWithPresence(method, path, body) {
     await control('POST', '/v1/presence/window', { passphrase })
     return control(method, path, body)
   }
-}
-
-function saveState(patch) {
-  if (!existsSync(CLI_STATE_DIR)) mkdirSync(CLI_STATE_DIR, { recursive: true, mode: 0o700 })
-  const current = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {}
-  writeFileSync(STATE, JSON.stringify({ ...current, ...patch }, null, 2), { mode: 0o600 })
-}
-function loadState() {
-  const raw = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {}
-  // This file holds no secrets by design, so it lives in the human's home
-  // directory and anything running as them can edit it — including an agent.
-  // The port went straight into `http://127.0.0.1:${port}/...`, so a value of
-  // `1@attacker.example` made `127.0.0.1:1` the userinfo and the attacker's
-  // name the HOST. `agent-vault env` then exported that URL, and the session
-  // token with it, to somewhere else entirely — and it kept working long after
-  // the agent that wrote it was gone.
-  if (raw.gateway_port !== undefined) {
-    const port = Number(raw.gateway_port)
-    if (!Number.isInteger(port) || port < 1 || port > 65535) delete raw.gateway_port
-    else raw.gateway_port = port
-  }
-  return raw
 }
 
 /**
@@ -624,7 +604,7 @@ const COMMANDS = {
       uses: args.uses ? Number(args.uses) : undefined,
     }
     const s = await controlWithPresence('POST', '/v1/sessions', body)
-    saveState({ session_id: s.session_id, token: s.token, placeholder: s.placeholder, base_url: s.base_url })
+    rememberSession(s)
     if (JSON_OUT) return out(null, s)
     console.log(`${C.green('session')} ${s.session_id} ${C.dim(`expires ${s.expires_at}`)}`)
     console.log(`  base url     ${s.base_url}`)
@@ -1063,6 +1043,9 @@ const COMMANDS = {
     const { UiServer } = await import('../ui/server.js')
     await control('GET', '/v1/status') // fail fast if the daemon is not up
     const ui = new UiServer(SOCKET, {
+      // Explicit: in a system install the socket is under run/ and the state
+      // belongs beside the human, so the socket's directory is the wrong guess.
+      statePath: STATE,
       port: Number(args.port || 0),
       idleMs: (Number(args.idle) || 30) * 60_000,
       cli: cliInvocation(),

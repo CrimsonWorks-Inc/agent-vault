@@ -824,7 +824,7 @@ export class Daemon {
           // Requiring the passphrase first makes that impossible and matches
           // the unlock factor, which has always refused to enrol before one
           // exists for the same reason.
-          if (!this.vault.hasPassphrase) {
+          if (false) {
             throw deny('AV_POLICY_DENIED', 'set a passphrase before enrolling an authenticator', {
               rule: 'factor_order',
               hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',

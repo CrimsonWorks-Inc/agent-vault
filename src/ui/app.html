@@ -534,7 +534,9 @@
           <li><code>vault_explain_denial</code> — why that was refused, and what is allowed instead</li>
         </ul>
         <p>No token is written to the config file: the bridge finds your current session
-        from the CLI's own state.</p>
+        from the state file, which is written whether you create the session here or with
+        <span class="mono">agent-vault session create</span>. Only the session that was made
+        most recently is there, so making a new one anywhere points the bridge at it.</p>
         <h3>2. MCP over HTTP — for an agent on another machine</h3>
         <p>The daemon speaks Streamable HTTP on the same port as the proxy.</p></div>
         ${code(`${c.cli} mcp url`, 'Prints the endpoint and the Authorization header to use.')}
@@ -756,7 +758,9 @@ ${c.cli} ui                         open this page`)}`,
     return `
       <div class="card"><h2>Hand this to the agent</h2><div class="body">
         <p class="caption">Session <span class="mono">${esc(s.session_id)}</span>, ${esc(until(s.expires_at))}.
-          Shown once — reload this page and it is gone.</p>
+          Shown once here — reload and it is gone from this page. It is saved to
+          <span class="mono">~/.agent-vault/cli-state.json</span>, which is where the CLI and the
+          MCP bridge look for it.</p>
         ${codeRow('Base URL', s.base_url)}
         ${codeRow('Session token', s.token)}
         ${codeRow('Placeholder', s.placeholder)}

@@ -113,3 +113,31 @@ test('the daemon reports the version the package actually is', () => {
   assert.equal(firstHeading[1], pkg.version,
     `the changelog's newest entry is ${firstHeading[1]} but the package is ${pkg.version}`)
 })
+
+test('no test can write state into the real vault directory', () => {
+  // A UI server derives nothing about where state lives any more — it is told.
+  // That mattered because it used to read AGENT_VAULT_DIR from the
+  // environment, so an in-process test that never set it wrote a session token
+  // into the author's own ~/.agent-vault/cli-state.json, replacing the live
+  // one with a session in a temp vault that was about to be deleted.
+  //
+  // The rule this encodes: every writer of client state takes the path as an
+  // argument. A default that reaches for the environment is a default that
+  // will one day point at somebody's real vault.
+  const state = readFileSync(join(ROOT, 'src/client-state.js'), 'utf8')
+  for (const fn of ['loadState', 'saveState', 'rememberSession']) {
+    const sig = new RegExp(`export function ${fn}\\(([^)]*)\\)`).exec(state)
+    assert.ok(sig, `${fn} is gone`)
+    assert.match(sig[1], /path = statePath\(\)|path\b/,
+      `${fn} must take the state path as an argument, not reach for the environment`)
+  }
+
+  // And the UI takes it from its caller rather than the environment.
+  const ui = readFileSync(join(ROOT, 'src/ui/server.js'), 'utf8')
+  assert.match(ui, /this\.statePath = statePath \|\|/,
+    'the UI server must be told where state lives')
+  assert.ok(!/process\.env\.AGENT_VAULT_DIR/.test(ui),
+    'the UI server must not derive the vault directory from the environment')
+  assert.match(ui, /rememberSession\(created, this\.statePath\)/,
+    'the UI must write to the path it was given')
+})
