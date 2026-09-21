@@ -234,6 +234,9 @@ export class Pipeline {
       // host, so a port could be smuggled past the allowlist. A port is honored
       // only when it belongs to the credential's own connector, never one the
       // caller appends here.
+      // The scheme comes from the URL the agent wrote. A credential that
+      // declares https must not be downgraded to cleartext by asking for
+      // /t/http/... — that puts the human's token on the wire in the clear.
       const host = policyMod.hostOnly(rawHost)
       const grants = this.vault.grantsForSession(session.id)
       for (const g of grants) {
@@ -247,7 +250,14 @@ export class Pipeline {
           const colon = credRaw.lastIndexOf(':')
           const credPort = credHost === host && colon > 0 && /^\d+$/.test(credRaw.slice(colon + 1))
             ? credRaw.slice(colon + 1) : null
-          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme, profile }
+          const credScheme = cred.connector?.scheme || 'https'
+          if (scheme !== credScheme && credScheme === 'https') {
+            throw deny('AV_POLICY_DENIED', `${cred.slug} is an https credential; ${scheme} would send it in the clear`, {
+              rule: 'scheme_downgrade',
+              hint: `Use /t/https/${host}/... or the credential's own route, /p/${cred.slug}/...`,
+            })
+          }
+          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme: credScheme, profile }
         }
       }
       throw deny('AV_NO_GRANT', `no grant in this session allows host ${policyMod.hostOnly(rawHost)}`)
@@ -403,7 +413,12 @@ export class Pipeline {
       // A session token that survived substitution is a carrier, not content.
       // It authenticates to this daemon and means nothing upstream, so sending
       // it would hand a third party a capability for no reason at all.
-      if (typeof v === 'string' && SESSION_TOKEN.test(v)) continue
+      // Array-valued headers are sent as repeated headers by Node, and the
+      // string-only test let a live session token through in one.
+      const carriesToken = Array.isArray(v)
+        ? v.some((x) => SESSION_TOKEN.test(String(x)))
+        : SESSION_TOKEN.test(String(v))
+      if (carriesToken) continue
       headers[n] = v
     }
     headers.host = route.port ? `${decision.host}:${route.port}` : decision.host

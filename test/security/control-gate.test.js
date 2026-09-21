@@ -293,3 +293,53 @@ test('the CLI names the factor that exists, not the one it expects', () => {
     'and point at the UI when only an authenticator can satisfy it')
   void ttyAt
 })
+
+// ------------------------------------------ findings from the independent audits
+
+test('one malformed byte on the control socket does not kill the daemon', async () => {
+  // Parsing sat outside the handler's try. The handler is async, so a bad
+  // byte became an unhandled rejection and took the process down — on a
+  // socket the agent can reach by design. Unconditional DoS on the vault.
+  const res = await new Promise((resolve) => {
+    const req = unixRequest({ socketPath: sock, path: '/v1/status', method: 'POST', headers: { 'content-type': 'application/json' } }, (r) => {
+      const c = []
+      r.on('data', (x) => c.push(x))
+      r.on('end', () => resolve({ status: r.statusCode, text: Buffer.concat(c).toString() }))
+    })
+    req.on('error', () => resolve({ status: 0, text: '' }))
+    req.end('{')
+  })
+  assert.equal(res.status, 400, 'it should answer, not die')
+  assert.match(res.text, /not valid JSON/)
+  // Still alive.
+  assert.equal((await ctl('GET', '/v1/status')).status, 200)
+})
+
+test('the grant’s placeholder ceiling beats what the agent asks for', async () => {
+  // placeholder_policy.max_uses sat on the right of a `??`, so it was only a
+  // default. A human configuring one-time placeholders got session-lifetime
+  // ones the moment an agent asked for them.
+  const cred = vault.findCredential('prod')
+  const made = vault.createSession({ label: 'ceiling' })
+  const grant = vault.createGrant({
+    sessionId: made.session.id, credentialId: cred.id, fields: ['token'],
+    policy: {
+      hosts: ['127.0.0.1'], methods: ['GET'], paths: ['/**'],
+      budget: { unit: 'requests', limit: 50 }, approval: 'auto',
+      placeholder_policy: { max_uses: 1 },
+    },
+  })
+  await ctl('POST', '/v1/presence/window', { passphrase: PASS })
+  const greedy = await ctl('POST', '/v1/placeholders', { cred: 'prod', sid: made.session.id, uses: 1_000_000 })
+  assert.equal(greedy.status, 200)
+  const row = Object.values(vault.db.placeholders)
+    .filter((p) => p.grant_id === grant.id)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
+  assert.ok(row, 'the issued placeholder should be in the ledger')
+  assert.equal(row.max_uses, 1, 'the grant ceiling must win over what was asked')
+
+  // And the vault enforces it directly, so no call site can forget.
+  const direct = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 9_999 })
+  assert.equal(direct.row.max_uses, 1)
+  daemon.presenceGraceUntil = 0
+})

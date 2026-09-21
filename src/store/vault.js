@@ -630,7 +630,12 @@ export class Vault {
       if (oldest) { oldest.state = 'dead'; oldest.dead_reason = 'rotated' }
     }
 
-    const maxUses = uses ?? phPolicy.max_uses ?? budgetLimit
+    // The grant's placeholder_policy is a ceiling, not a default. It used to
+    // sit on the right of a `??`, so a caller asking for a million uses got a
+    // million even where the human had configured one-time placeholders.
+    // Enforced here so no call site can forget it.
+    const ceiling = phPolicy.max_uses ?? budgetLimit
+    const maxUses = uses == null ? ceiling : Math.min(uses, ceiling)
     const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
     const expires = Math.min(
       ttl ? Date.now() + ttl : Infinity,

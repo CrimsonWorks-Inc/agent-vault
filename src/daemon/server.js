@@ -462,7 +462,11 @@ export class Daemon {
     const messages = Array.isArray(message) ? message : [message]
     const responses = []
     for (const m of messages) {
-      const r = await this.mcp.handle(m)
+      // The session travels with the message. It used to be read from a field
+      // on this Daemon, across the await below, so a concurrent request could
+      // replace it between two messages of the same batch — and the rest of
+      // the batch ran as somebody else's session, against their credentials.
+      const r = await this.mcp.handle(m, session)
       if (r) responses.push(r)
     }
     if (!responses.length) return send(202, null, extra)
@@ -476,7 +480,17 @@ export class Daemon {
     if (body === null) return
     const url = new URL(req.url, 'http://control')
     const json = (status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)) }
-    const input = body.length ? JSON.parse(body.toString('utf8')) : {}
+
+    // Parsing sat outside the try below. This handler is async, so a single
+    // malformed byte on the control socket became an unhandled rejection and
+    // took the whole daemon down — and the control socket is reachable by the
+    // agent by design.
+    let input
+    try {
+      input = body.length ? JSON.parse(body.toString('utf8')) : {}
+    } catch (e) {
+      return json(400, { code: 'AV_MCP_PROTOCOL', detail: `request body is not valid JSON: ${e.message}` })
+    }
 
     try {
       const route = `${req.method} ${url.pathname}`
@@ -538,7 +552,13 @@ export class Daemon {
           const grant = this.vault.createGrant({
             sessionId: session.id, credentialId: cred.id, fields: [cred.fields[0].name], policy,
           })
-          const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses: input.uses ?? null })
+          // The grant's placeholder_policy is a ceiling, not a default. It sat
+          // on the right of a `??`, so an agent asking for a million uses got
+          // a million even where the human had configured one-time use.
+          const maxUses = grant.policy?.placeholder_policy?.max_uses
+          const asked = input.uses ?? null
+          const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
+          const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses })
           return json(200, {
             session_id: session.id, token, expires_at: session.expires_at,
             grant_id: grant.id, placeholder,

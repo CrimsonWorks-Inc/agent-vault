@@ -103,8 +103,19 @@ export class McpServer {
   }
 
   /** Handle one JSON-RPC message. Returns a response object, or null for notifications. */
-  async handle(message) {
+  /**
+   * @param {object} message a JSON-RPC message
+   * @param {object|null} [forSession] the session this message belongs to.
+   *   Passed explicitly because the HTTP transport handles a batch in a loop
+   *   with an `await` in it, and reading the session from shared state across
+   *   that await let a concurrent request swap it mid-batch: one agent's
+   *   second call ran as another agent's session.
+   */
+  async handle(message, forSession) {
     const { id, method, params } = message
+    // Resolved once, here, and then carried explicitly. Reading it again
+    // deeper in would reintroduce the race this parameter exists to close.
+    const session = forSession !== undefined ? forSession : this.resolveSession()
     const ok = (result) => (id === undefined ? null : { jsonrpc: '2.0', id, result })
     const fail = (code, msg, data) => (id === undefined ? null : { jsonrpc: '2.0', id, error: { code, message: msg, data } })
 
@@ -126,9 +137,9 @@ export class McpServer {
         case 'resources/list':
           return ok({ resources: [{ uri: 'agent-vault://session', name: 'Current session', mimeType: 'application/json' }] })
         case 'resources/read':
-          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(), null, 2) }] })
+          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(session), null, 2) }] })
         case 'tools/call':
-          return ok(await this.#callTool(params?.name, params?.arguments || {}))
+          return ok(await this.#callTool(params?.name, params?.arguments || {}, session))
         default:
           return fail(-32601, `unknown method: ${method}`)
       }
@@ -143,8 +154,7 @@ export class McpServer {
     }
   }
 
-  #status() {
-    const session = this.resolveSession()
+  #status(session) {
     return {
       daemon: 'agent-vault', version: SERVER_INFO.version,
       locked: this.vault.locked,
@@ -153,13 +163,12 @@ export class McpServer {
     }
   }
 
-  async #callTool(name, args) {
+  async #callTool(name, args, session) {
     const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] })
-    const session = this.resolveSession()
 
     switch (name) {
       case 'vault_status':
-        return text(this.#status())
+        return text(this.#status(session))
 
       case 'vault_list_creds': {
         if (!session) return text({ error: 'no session', next: 'ask the human to run: agent-vault session create' })
@@ -189,7 +198,11 @@ export class McpServer {
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
         if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
         const field = cred.fields[0]
-        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses: args.uses ?? null })
+        // The grant's ceiling wins over whatever the agent asks for.
+        const ceiling = grant.policy?.placeholder_policy?.max_uses
+        const asked = args.uses ?? null
+        const uses = ceiling == null ? asked : Math.min(asked ?? ceiling, ceiling)
+        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses })
         this.vault.audit.write('placeholder.issued_via_mcp', { credential_slug: cred.slug, agent_reason_untrusted: args.reason })
         return text({
           placeholder,

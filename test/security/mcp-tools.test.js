@@ -160,3 +160,81 @@ test('the tool list is exactly the five documented tools', async () => {
     'vault_explain_denial', 'vault_get_placeholder', 'vault_http', 'vault_list_creds', 'vault_status',
   ])
 })
+
+test('a concurrent request cannot hijack a batch mid-flight', async () => {
+  // Found by an independent audit. The bearer session lived in one field on
+  // the Daemon and was read back across the `await` in the batch loop, so any
+  // other /mcp request landing in that window replaced it — and the rest of
+  // the batch ran as that other session, against credentials it was never
+  // granted. Deterministic, not a narrow race: the attacker picks the window
+  // by making its first call slow.
+  const { Daemon } = await import('../../src/daemon/server.js')
+
+  const dir2 = mkdtempSync(join(tmpdir(), 'av-race-'))
+  let slowUpstream
+  try {
+    // An upstream that holds the first request open, widening the window.
+    let held
+    slowUpstream = createServer((req, res) => {
+      if (req.url.startsWith('/slow')) {
+        held = res
+        setTimeout(() => { res.end('{}') }, 120)
+        return
+      }
+      res.end('{}')
+    })
+    await new Promise((r) => slowUpstream.listen(0, '127.0.0.1', r))
+    const port = slowUpstream.address().port
+    void held
+
+    const v = Vault.create(dir2, { factor: 'none' })
+    const mk = (slug, secret) => v.addCredential({
+      slug, kind: 'http', connector: { host: `127.0.0.1:${port}`, scheme: 'http' },
+      fields: { token: secret }, sites: { token: ['header:authorization:Bearer'] },
+    })
+    const low = mk('low', 'LOW-SECRET-000000')
+    const high = mk('high', 'HIGH-SECRET-PRODUCTION-99999')
+
+    const grantTo = (session, cred) => v.createGrant({
+      sessionId: session.id, credentialId: cred.id, fields: ['token'],
+      policy: {
+        hosts: ['127.0.0.1'], methods: ['GET'], paths: ['/**'],
+        budget: { unit: 'requests', limit: 50 }, approval: 'auto',
+      },
+    })
+    const a = v.createSession({ label: 'privileged' })
+    const b = v.createSession({ label: 'unprivileged' })
+    grantTo(a.session, high)
+    grantTo(b.session, low)
+
+    const daemon = await new Daemon(v, { port: 0, socketPath: join(dir2, 'c.sock') }).start()
+    try {
+      const rpc = (token, body) => fetch(`http://127.0.0.1:${daemon.gatewayPort}/mcp`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify(body),
+      }).then((r) => r.json())
+
+      // B sends a batch: a slow call it may make, then one it may not.
+      const batch = rpc(b.token, [
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vault_http', arguments: { cred: 'low', method: 'GET', path: '/slow' } } },
+        { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'vault_http', arguments: { cred: 'high', method: 'GET', path: '/STOLEN' } } },
+      ])
+      // A merely touches /mcp during the window.
+      await new Promise((r) => setTimeout(r, 25))
+      await rpc(a.token, { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'vault_status', arguments: {} } })
+
+      const out = JSON.stringify(await batch)
+      assert.ok(!out.includes('HIGH-SECRET-PRODUCTION-99999'),
+        'the unprivileged batch obtained the privileged credential')
+      assert.match(out, /no grant/, 'the second call should still be refused on its own merits')
+    } finally { await daemon.stop() }
+  } finally {
+    if (slowUpstream) slowUpstream.close()
+    rmSync(dir2, { recursive: true, force: true })
+  }
+})
