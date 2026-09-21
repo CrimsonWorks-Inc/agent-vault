@@ -71,6 +71,51 @@ test('every encoding of a placeholder is detected, wherever it sits', () => {
   }
 })
 
+test('wrapped base64 is still base64', () => {
+  // A minimal placeholder encodes to 80 base64 characters and the shortest run
+  // the decoder looks at is 72, so a single line break in the middle left two
+  // runs that were both too short and the placeholder was not seen at all.
+  //
+  // Every one of these is what a normal tool produces, not an evasion someone
+  // had to invent: `base64` the command wraps at 76 columns, MIME parts wrap
+  // at 76, PEM wraps at 64, and inside a JSON string those breaks are written
+  // `\n`, whose backslash ends the run just as surely.
+  const rnd = rng(8891)
+  for (let i = 0; i < 200; i++) {
+    const p = mintOne(rnd)
+    const b = Buffer.from(p.text, 'utf8').toString('base64')
+    const wrapped = {
+      unwrapped: b,
+      'PEM, 64 columns': b.replace(/(.{64})/g, '$1\n'),
+      'MIME, 76 columns with CRLF': b.replace(/(.{76})/g, '$1\r\n'),
+      'a single space': `${b.slice(0, 40)} ${b.slice(40)}`,
+      'a tab': `${b.slice(0, 33)}\t${b.slice(33)}`,
+      'JSON-escaped newlines': b.replace(/(.{64})/g, '$1\\n'),
+      'indented, as a pretty-printer would': b.replace(/(.{60})/g, '$1\n      '),
+    }
+    for (const [how, blob] of Object.entries(wrapped)) {
+      const hits = detectAll(`{"attachment":"${blob.replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"}`)
+      assert.ok(hits.some((h) => h.nonce === p.nonce), `${how} was not detected`)
+    }
+  }
+})
+
+test('the detector stays linear on a large body', () => {
+  // The detector runs over every request body up to the 16 MiB buffered limit,
+  // on a single-threaded daemon, on input an agent chooses. Linear is the
+  // requirement; the ReDoS in the policy globs was the same shape and cost 37
+  // seconds of the daemon per request.
+  const timeFor = (mb) => {
+    const body = Buffer.alloc(mb << 20, 7).toString('base64').replace(/(.{76})/g, '$1\n')
+    const started = Date.now()
+    detectAll(body)
+    return Date.now() - started
+  }
+  const one = Math.max(timeFor(1), 1)
+  const four = timeFor(4)
+  assert.ok(four < one * 12, `4 MiB took ${four}ms against ${one}ms for 1 MiB; that is not linear`)
+})
+
 test('the detector is a superset of the substituter, structurally', () => {
   // locate() routes every region through detectAll, so the two cannot drift
   // apart. This asserts the wiring rather than sampling it: a placeholder in a

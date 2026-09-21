@@ -108,9 +108,30 @@ export function detectAll(text) {
   const unescaped = jsonUnescape(text)
   if (unescaped !== text) for (const p of ph.findAll(unescaped)) push(p, 'json-escape')
 
-  for (const run of base64Runs(text)) {
-    for (const decoded of base64Decodings(run.text)) {
-      for (const p of ph.findAll(decoded)) push(p, 'base64')
+  // Base64, over every form of the text — and over each with its whitespace
+  // removed, because base64 in the wild is wrapped.
+  //
+  // A minimal placeholder encodes to 80 characters and the shortest run worth
+  // decoding is 72, so one newline in the middle leaves two runs that are both
+  // too short and the placeholder is not seen at all. That is not an exotic
+  // input: `base64` the command wraps at 76 columns, MIME parts wrap at 76,
+  // PEM wraps at 64. Inside a JSON string the same break is written `\n`,
+  // whose backslash ends the run just as surely. Piping a placeholder through
+  // any of them carried it straight past the detector.
+  //
+  // Only whitespace and its escapes are removed, so unrelated tokens can join
+  // only where nothing else separates them — and a join has to base64-decode
+  // to text bearing a valid keyed checksum before it becomes a hit, which is
+  // what the checksum is for.
+  const variants = new Set([text, pct1, unescaped])
+  for (const v of [...variants]) {
+    if (/\s|\\[nrtbf]/.test(v)) variants.add(v.replace(/\\[nrtbf]|\s+/g, ''))
+  }
+  for (const v of variants) {
+    for (const run of base64Runs(v)) {
+      for (const decoded of base64Decodings(run.text)) {
+        for (const p of ph.findAll(decoded)) push(p, 'base64')
+      }
     }
   }
 
