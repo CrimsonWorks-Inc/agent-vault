@@ -120,6 +120,27 @@ test('env prints only capabilities, never a credential', async () => {
   assert.ok(!lines.includes(SECRET))
 })
 
+test('a vault with no human factor says so, loudly, in both status and doctor', async () => {
+  // The uid boundary stops an agent reading the vault. Nothing stops it USING
+  // the vault until a factor is enrolled: every widening operation is gated on
+  // human presence, and presence cannot be required when there is nothing to
+  // require it against. In that state the first caller to reach the control
+  // socket can also set a passphrase of its own and keep the vault.
+  //
+  // The daemon creates the vault unattended, so this is the state every
+  // install starts in and the one this harness is in. It is a real window and
+  // it cannot be closed from inside the daemon — so the requirement is that it
+  // is impossible to sit in without being told.
+  const doctor = JSON.parse((await av(['doctor', '--json'])).stdout)
+  const factor = doctor.data.find((c) => c.name === 'human factor enrolled')
+  assert.ok(factor, 'doctor does not check for a human factor at all')
+  assert.equal(factor.ok, false, 'this vault has no factor, so the check must not pass')
+  assert.match(factor.note, /passphrase set/, 'the warning must name the command that fixes it')
+
+  const { stdout } = await av(['status'])
+  assert.match(stdout, /no human factor is enrolled/)
+})
+
 test('audit verify reports an intact chain', async () => {
   const { stdout } = await av(['audit', 'verify', '--json'])
   assert.equal(JSON.parse(stdout).data.ok, true)

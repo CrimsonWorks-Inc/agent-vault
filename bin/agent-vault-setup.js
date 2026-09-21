@@ -134,6 +134,21 @@ function enrolledUser() {
  * anyone but root. A root-owned file under a directory you can rename is not
  * root-owned in any way that matters.
  */
+/** True when this exact path is owned by root and not writable by others. */
+function isRootOwned(path) {
+  try {
+    const st = statSync(path)
+    return st.uid === 0 && (st.mode & 0o022) === 0
+  } catch { return false }
+}
+
+/** Say something is not ideal without refusing to continue. */
+function warn(...lines) {
+  console.error(`\n${C.y('warning')}  ${lines[0]}`)
+  for (const l of lines.slice(1)) console.error(`  ${l}`)
+  console.error('')
+}
+
 function assertRootOwnedChain(path, what) {
   let p = resolve(path)
   for (;;) {
@@ -376,10 +391,35 @@ function installRuntime(state) {
   // you replace root's interpreter, so a copy goes into the root-owned tree.
   const nodePath = process.execPath
   assertRuntimeVersion(nodePath, process.version)
+
+  // The app tree is checked for symlinks and dereferenced on copy; this
+  // branch had neither, and it is the one that copies an executable. A link
+  // here would point the daemon's own interpreter at something outside the
+  // root-owned tree, and cpSync with no options preserves links.
+  if (!DRY && lstatSync(nodePath).isSymbolicLink()) {
+    die(
+      `refusing to install: ${nodePath} is a symbolic link to ${readlinkSync(nodePath)}.`,
+      'Root would copy the link, and the daemon would run whatever it points at.',
+      'Pass --use-node with a real, root-owned Node binary.',
+    )
+  }
+  // The source is normally under a version manager in your home directory —
+  // writable by you, and therefore by anything running as you. Copying makes
+  // the daemon independent of it from here on, but the bytes copied are
+  // whatever is there at this instant, so say so rather than implying the
+  // copy launders them.
+  if (!DRY && !isRootOwned(nodePath)) {
+    warn(
+      `the Node being copied (${nodePath}) is writable by uid ${statSync(nodePath).uid}, not root.`,
+      'Whatever is at that path right now becomes the daemon\'s interpreter for good.',
+      'For an install you can fully account for, use --use-node with a root-owned Node.',
+    )
+  }
+
   const target = join(RUNTIME_DIR, 'node')
   if (!DRY) {
     mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o755 })
-    cpSync(nodePath, target)
+    cpSync(nodePath, target, { dereference: true })
     chownSync(target, 0, 0)
     chmodSync(target, 0o755)
     chownSync(RUNTIME_DIR, 0, 0)

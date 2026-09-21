@@ -538,6 +538,18 @@ const COMMANDS = {
     console.log(`  grants         ${s.grants_active} active`)
     console.log(`  placeholders   ${s.placeholders_live} live`)
     console.log(`  audit records  ${s.audit_records ?? C.dim('unavailable while locked')}`)
+    // With neither factor enrolled the control socket is open to anything
+    // running as you, and the first thing that reaches it can set a passphrase
+    // of its own choosing and keep the vault. That is a bad thing to learn
+    // later, so it is on the status line.
+    const ls = await control('GET', '/v1/lockstate').catch(() => null)
+    if (ls && !ls.has_passphrase && !ls.has_touchid) {
+      console.log()
+      console.log(`  ${C.yellow('no human factor is enrolled')}`)
+      console.log(C.dim('  Anything running as you can use every credential here, and can set a'))
+      console.log(C.dim('  passphrase of its own — after which the vault is no longer yours.'))
+      console.log(`  ${C.cyan('agent-vault passphrase set')}`)
+    }
   },
 
   async 'cred:add'(args) {
@@ -1130,6 +1142,22 @@ const COMMANDS = {
         `dev mode: anything running as you can read ${VAULT_DIR}. Install it properly: sudo ${process.execPath} ${SETUP_BIN} install`])
     }
     checks.push(['daemon reachable', existsSync(SOCKET), SOCKET])
+
+    // The uid boundary stops an agent READING the vault. Nothing stops it
+    // USING the vault until a human factor is enrolled: every widening
+    // operation is gated on presence, and presence cannot be required when
+    // there is no factor to require. Worse, in that state the first caller to
+    // reach the control socket can set a passphrase of its own and keep the
+    // vault. The daemon creates the vault unattended, so this state is the
+    // one every install passes through — it should not be quiet.
+    const lock = await control('GET', '/v1/lockstate').catch(() => null)
+    if (lock) {
+      const enrolled = Boolean(lock.has_passphrase || lock.has_touchid)
+      checks.push(['human factor enrolled', enrolled, enrolled
+        ? [lock.has_passphrase && 'passphrase', lock.has_touchid && 'authenticator'].filter(Boolean).join(' + ')
+        : `none: anything running as you can use every credential, and can claim the vault by setting its own passphrase. Run: agent-vault passphrase set`])
+    }
+
     if (JSON_OUT) return out(null, checks.map(([name, ok, note]) => ({ name, ok, note })))
     for (const [name, ok, note] of checks) {
       console.log(`${ok ? C.green('ok  ') : C.yellow('warn')} ${name.padEnd(26)} ${C.dim(note)}`)
