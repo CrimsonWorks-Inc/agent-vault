@@ -29,6 +29,14 @@ The demo starts a real daemon and a stand-in upstream, then walks through: a suc
 npm test          # 337 tests
 ```
 
+The suite is checked against itself: each critical protection was removed in
+turn to confirm the tests actually fail. Deleting the human-presence gate fails
+6 tests; the streaming scrubber's chunk handling, 1; the placeholder checksum,
+4; the injection-site encoding check, 1; host confinement, 4; the approval's
+request-hash binding, 4; stripping the session token from upstream requests, 2;
+the installer's symlink refusal, 1. A test that passes for the wrong reason is
+worse than no test.
+
 ## Use it
 
 ```bash
