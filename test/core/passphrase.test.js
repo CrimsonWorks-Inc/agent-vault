@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
@@ -146,6 +146,70 @@ test('a passphrase vault comes up locked after a restart, not crashed', () => {
   const unlocked = r.startInRecordedState(null)
   assert.equal(unlocked, false)
   assert.equal(r.locked, true)
+})
+
+test('a crash mid-append does not lock the owner out of their own vault', () => {
+  // A half-written final line in audit.jsonl is what an interrupted append
+  // leaves behind — a power cut, a SIGKILL. JSON.parse threw on it from inside
+  // unlockWith, inside a `catch` that moved on to the next factor, so every
+  // factor failed identically and the vault could never be opened again. One
+  // interrupted write, every credential gone.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-torn-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    v.setPassphrase('the-owners-passphrase')
+    v.audit.write('test.event', { n: 1 })
+    v.lock()
+
+    // Exactly what a crash mid-append leaves: a complete log plus a fragment.
+    const path = join(fresh, 'audit.jsonl')
+    writeFileSync(path, `${readFileSync(path, 'utf8')}{"seq":99,"ts":"2026`)
+
+    const reopened = Vault.open(fresh)
+    assert.equal(reopened.unlockWith({ passphrase: 'the-owners-passphrase' }), 'passphrase',
+      'a torn final line must not cost the owner their vault')
+    // And the torn line is not mistaken for someone removing a record.
+    assert.equal(reopened.audit.verify().ok, true)
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('a failed unlock leaves nothing half-open', () => {
+  // unlockWith set this.vmk and opened the audit log afterwards, so a failure
+  // in between left the key installed while the caller was told AV_LOCKED. The
+  // vault then reported locked === false, revealField worked, and this.audit
+  // was null — open for reading and recording nothing, which is the worst of
+  // both states.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-halfopen-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    v.addCredential({
+      slug: 'x', kind: 'http', connector: { host: 'h' },
+      fields: { token: 'a-secret-value-here' }, sites: { token: ['header:authorization:Bearer'] },
+    })
+    v.setPassphrase('the-owners-passphrase')
+    v.lock()
+
+    // The path that matters is the one where the passphrase is RIGHT and
+    // something afterwards fails — opening the audit log. A wrong passphrase
+    // fails before the key is ever assigned, so it never reached this state.
+    // A corrupt line in the MIDDLE of the log does: that is real corruption,
+    // not a torn tail, and it is not something to read past.
+    const path = join(fresh, 'audit.jsonl')
+    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
+    lines[1] = '{"seq":2,"this is not'
+    writeFileSync(path, `${lines.join('\n')}\n`)
+
+    const reopened = Vault.open(fresh)
+    assert.throws(() => reopened.unlockWith({ passphrase: 'the-owners-passphrase' }),
+      /AV_LOCKED/, 'a vault whose log cannot be opened must not report success')
+    assert.equal(reopened.locked, true, 'a failed unlock must leave the vault locked')
+    assert.equal(reopened.vmk, null, 'a failed unlock must leave no key behind')
+    assert.throws(() => reopened.revealField(reopened.findCredential('x').id, 'token'), /AV_LOCKED/)
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
 })
 
 test('a leftover temp file cannot hand the vault a permissive mode', () => {

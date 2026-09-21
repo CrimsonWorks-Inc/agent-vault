@@ -145,13 +145,25 @@ export class Vault {
         if (factorKey === null) continue
         const kek = crypt.deriveKek(deviceKey, factorKey)
         const vmk = Buffer.from(crypt.open(kek, wrap, `av/vmk/${wrap.class}`), 'base64')
+        // Nothing is assigned to `this` until the whole unlock has worked.
+        // It used to set this.vmk first and open the audit log after, so a
+        // failure in between — a torn last line in audit.jsonl is enough —
+        // left the key installed while the caller was told AV_LOCKED. The
+        // vault then reported `locked === false`, revealField worked, and
+        // this.audit was null, so it was open for reading and recording
+        // nothing.
+        const audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
         this.vmk = vmk
-        this.audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
+        this.audit = audit
         if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
         this.audit.write('vault.unlock', { factor: wrap.class })
         crypt.wipe(deviceKey)
         return wrap.class
-      } catch { /* try the next factor */ }
+      } catch {
+        // Whatever went wrong, leave nothing half-open behind.
+        if (this.vmk) { crypt.wipe(this.vmk); this.vmk = null }
+        this.audit = null
+      }
     }
     crypt.wipe(deviceKey)
     const wants = this.factors.filter((f) => f !== 'none')

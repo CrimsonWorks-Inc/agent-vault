@@ -88,8 +88,49 @@ export class AuditLog {
     } catch { return null }
   }
 
-  #recover() {
+  /**
+   * Every record in the file, as objects.
+   *
+   * A half-written final line is what an ordinary crash mid-append leaves — a
+   * power cut, a SIGKILL — and JSON.parse threw on it. From inside unlockWith
+   * that throw landed in a `catch` that moved on to the next factor, so every
+   * factor failed identically and one interrupted write locked the owner out
+   * of the vault for good. verify() and read() threw outright.
+   *
+   * Dropping a torn LAST line is also correct against the anchor: the anchor
+   * is written AFTER the append, so a crash mid-append leaves it pointing at
+   * the previous record, which is exactly where the log now ends. A torn line
+   * reports no truncation; a record genuinely removed still does.
+   *
+   * Only the last line. A bad line anywhere else is corruption the chain
+   * should report, not something to quietly skip past.
+   */
+  /** Rewrite the file without a half-written final line, if there is one. */
+  #dropTornTail() {
+    const text = readFileSync(this.path, 'utf8')
+    const lines = text.split('\n').filter(Boolean)
+    if (!lines.length) return
+    try { JSON.parse(lines[lines.length - 1]); return } catch { /* torn */ }
+    lines.pop()
+    writeFileSync(this.path, lines.length ? `${lines.join('\n')}\n` : '', { mode: 0o600 })
+  }
+
+  #rows() {
     const lines = readFileSync(this.path, 'utf8').split('\n').filter(Boolean)
+    if (lines.length) {
+      try { JSON.parse(lines[lines.length - 1]) } catch { lines.pop() }
+    }
+    return lines.map((l) => JSON.parse(l))
+  }
+
+  #recover() {
+    // Repair before reading, not just read around it. A torn fragment has no
+    // trailing newline, so the NEXT append concatenates onto it and produces
+    // one corrupt line holding both — turning a recoverable crash into a
+    // genuinely broken chain, one record further in, every time.
+    this.#dropTornTail()
+    const rows = this.#rows()
+    const lines = rows
     const anchor = this.#readAnchor()
     if (!lines.length) {
       // An emptied log with a live anchor is the loudest version of the same
@@ -97,7 +138,7 @@ export class AuditLog {
       if (anchor && anchor.seq > 0) this.truncation = { expected_seq: anchor.seq, found_seq: 0 }
       return
     }
-    const last = JSON.parse(lines[lines.length - 1])
+    const last = lines[lines.length - 1]
     this.seq = last.seq
     this.prevHash = last.hash
     this.sinceCheckpoint = this.seq % CHECKPOINT_EVERY
@@ -164,7 +205,7 @@ export class AuditLog {
   /** Read records, newest last. */
   read({ limit = 100, kind, sessionId, since } = {}) {
     if (!existsSync(this.path)) return []
-    let rows = readFileSync(this.path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    let rows = this.#rows()
     if (kind) rows = rows.filter((r) => r.kind === kind || r.kind.startsWith(`${kind}.`))
     if (sessionId) rows = rows.filter((r) => r.session_id === sessionId)
     if (since) rows = rows.filter((r) => r.ts >= since)
@@ -177,7 +218,7 @@ export class AuditLog {
    */
   verify() {
     if (!existsSync(this.path)) return { ok: true, count: 0 }
-    const rows = readFileSync(this.path, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const rows = this.#rows()
     let prev = '0'.repeat(64)
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]
