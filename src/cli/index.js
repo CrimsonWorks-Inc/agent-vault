@@ -124,18 +124,20 @@ async function controlWithPresence(method, path, body) {
         exit: EXIT.LOCKED, next: 'agent-vault unlock',
       })
     }
-    if (!process.stdin.isTTY) {
-      throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
-        exit: EXIT.PRESENCE,
-      })
-    }
-    // If the vault's only human factor is an authenticator, a passphrase
-    // prompt here is a dead end: there is nothing the reader could type.
-    const factors = e.problem?.factors
-    if (factors && !factors.includes('passphrase')) {
+    // Work out what would actually satisfy this before deciding how to ask.
+    // Checking the terminal first meant a vault whose only factor is an
+    // authenticator reported "needs your passphrase" — naming a secret that
+    // does not exist, which is the kind of error that costs an afternoon.
+    const factors = e.problem?.factors || ['passphrase']
+    if (!factors.includes('passphrase')) {
       throw Object.assign(new Error(`this change needs your ${factors.join(' or ')}`), {
         exit: EXIT.PRESENCE,
         next: 'agent-vault ui   (confirm it there with your authenticator)',
+      })
+    }
+    if (!process.stdin.isTTY) {
+      throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
+        exit: EXIT.PRESENCE,
       })
     }
     console.error(`${C.dim('This change needs a human.')}`)

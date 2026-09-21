@@ -11,7 +11,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest, createServer } from 'node:http'
@@ -275,4 +275,21 @@ test('an agent cannot set the first passphrase and lock the owner out', async ()
     await dm.stop()
     rmSync(d3, { recursive: true, force: true })
   }
+})
+
+test('the CLI names the factor that exists, not the one it expects', () => {
+  // Checking the terminal before checking which factors exist meant a vault
+  // whose only factor is an authenticator answered "needs your passphrase",
+  // naming a secret that does not exist. The order matters more than it looks:
+  // one of these messages sends the reader somewhere useful and the other
+  // sends them looking for a passphrase they never set.
+  const cli = readFileSync(new URL('../../src/cli/index.js', import.meta.url), 'utf8')
+  const factorsAt = cli.indexOf("const factors = e.problem?.factors")
+  const ttyAt = cli.indexOf('!process.stdin.isTTY', factorsAt - 2000)
+  assert.ok(factorsAt > 0, 'the presence handler should consult the offered factors')
+  assert.ok(factorsAt < cli.indexOf('!process.stdin.isTTY', factorsAt),
+    'the factor check must come before the terminal check')
+  assert.match(cli.slice(factorsAt, factorsAt + 600), /agent-vault ui/,
+    'and point at the UI when only an authenticator can satisfy it')
+  void ttyAt
 })
