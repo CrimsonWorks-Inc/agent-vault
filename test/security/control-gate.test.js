@@ -139,23 +139,34 @@ test('an agent cannot bind a new listener', async () => {
 
 // ------------------------------------------------ the authenticator counter
 
-test('the signature counter cannot be driven up to disable the gate', async () => {
-  // A counter below what we stored means "cloned credential" and is refused
-  // forever. Setting it to a huge number would therefore switch the presence
-  // gate off permanently — a denial of service against the control that stops
-  // an agent widening anything at all.
-  await ctl('POST', '/v1/presence', { credentialId: 'x', publicKeySpki: 'y', signCount: 5 })
-    .catch(() => {})
-  vault.db.kv.webauthn = { credentialId: 'x', publicKeySpki: 'y', signCount: 5 }
+test('the signature counter cannot be moved by anyone who asks', async () => {
+  // A counter BELOW the stored one means "cloned authenticator" and is refused
+  // forever, so being able to raise it is a permanent kill switch on the
+  // owner's own key. The route capped each STEP at 1000 and capped the total
+  // at nothing, so 300 individually-legal calls walked it to 300,005 — and the
+  // owner's real authenticator, sitting at 6, could never satisfy the presence
+  // gate again.
+  //
+  // Nothing authenticated the caller and nothing could: the UI verified its
+  // assertion against its OWN challenge, which the daemon has no way to check.
+  // So the route is gone. The daemon maintains the counter from the assertions
+  // it verifies itself, and a counter an agent can poison is worse than no
+  // counter at all.
+  vault.db.kv.webauthn = { credentialId: 'owner-key', publicKeySpki: 'y', signCount: 5 }
 
-  await ctl('PATCH', '/v1/presence', { signCount: 2_000_000_000 })
-  assert.equal(vault.db.kv.webauthn.signCount, 5, 'an absurd jump must be ignored')
+  for (const attempt of [6, 1000, 2_000_000_000, 3]) {
+    const res = await ctl('PATCH', '/v1/presence', { signCount: attempt })
+    assert.equal(res.status, 403, `signCount ${attempt} was accepted`)
+    assert.equal(res.body.rule, 'counter_not_settable')
+  }
 
-  await ctl('PATCH', '/v1/presence', { signCount: 3 })
-  assert.equal(vault.db.kv.webauthn.signCount, 5, 'going backwards must be ignored')
+  // Not one of them moved it, so the owner's key still verifies.
+  assert.equal(vault.db.kv.webauthn.signCount, 5)
 
-  await ctl('PATCH', '/v1/presence', { signCount: 6 })
-  assert.equal(vault.db.kv.webauthn.signCount, 6, 'a normal step must still be recorded')
+  // And walking it up in small legal-looking steps does nothing either, which
+  // is the shape the old per-call cap could not see.
+  for (let i = 0; i < 50; i++) await ctl('PATCH', '/v1/presence', { signCount: 5 + i })
+  assert.equal(vault.db.kv.webauthn.signCount, 5, 'the counter moved after all')
   delete vault.db.kv.webauthn
 })
 

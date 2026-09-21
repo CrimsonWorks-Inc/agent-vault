@@ -459,6 +459,44 @@ test('a bare placeholder does not authorize on a network listener', async () => 
   assert.equal(withToken.status, 200, 'a session token must still authorize from a network listener')
 })
 
+test('the successor to a one-time placeholder is also one-time', async () => {
+  // When a placeholder is spent the pipeline hands the agent a replacement in
+  // `av-placeholder-next`, unprompted, on the success path. That successor was
+  // issued with no use limit, so it got the ceiling — the grant's whole budget.
+  //
+  // A human who deliberately issued a ONE-TIME placeholder therefore got it
+  // silently replaced with one good for hundreds of calls. The narrowest thing
+  // the operator can ask for became the widest, automatically, without anyone
+  // being asked.
+  setup()
+  const oneShot = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1 })
+  assert.equal(oneShot.row.max_uses, 1)
+
+  const res = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${oneShot.placeholder}`]],
+  }))
+  assert.equal(res.status, 200)
+
+  const successorText = res.headers['av-placeholder-next']
+  assert.ok(successorText, 'the pipeline should offer a successor once the placeholder is spent')
+  const successor = Object.values(vault.db.placeholders).find((p) => p.replaces_id === oneShot.row.id)
+  assert.ok(successor, 'the successor should be in the ledger')
+  assert.equal(successor.max_uses, 1,
+    `a one-time placeholder was replaced with one good for ${successor.max_uses} calls`)
+
+  // And it really does stop after one: the ledger is what authorises, so this
+  // checks the behaviour rather than the field.
+  const first = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${successorText}`]],
+  }))
+  assert.equal(first.status, 200)
+  const second = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${successorText}`]],
+  }))
+  assert.equal(second.status, 401, 'the successor must be spent after one use')
+  assert.equal(JSON.parse(second.body).code, 'AV_PH_EXHAUSTED')
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

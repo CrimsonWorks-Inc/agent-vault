@@ -389,9 +389,14 @@ export class UiServer {
       rpId: this.rpId,
       enrolled,
     })
-    if (result.signCount > 0 && !UiServer.DAEMON_VERIFIED.has(key)) {
-      await this.#control('PATCH', '/v1/presence', { signCount: result.signCount }).catch(() => {})
-    }
+    // The counter is not reported back any more. The route that accepted it
+    // let any caller on the control socket set it, and a counter below the
+    // stored one means "cloned" — so walking it up was a permanent kill switch
+    // on the owner's authenticator. Nothing could authenticate this report:
+    // the assertion above was verified against THIS process's challenge, which
+    // the daemon has no way to check. The daemon maintains the counter from
+    // the assertions it verifies itself instead.
+    void result
   }
 
   /**

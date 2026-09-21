@@ -810,7 +810,14 @@ export class Vault {
     const existing = Object.values(this.db.placeholders)
       .find((p) => p.replaces_id === rowId && p.state === 'active' && p.uses === 0)
     if (existing) return { placeholder: null, row: existing, reused: true }
-    const { placeholder, row } = this.issuePlaceholder({ grantId: old.grant_id, field: old.field })
+    // The successor inherits the predecessor's limit. Issuing it with no
+    // `uses` gave it the ceiling instead — the grant's entire budget — so a
+    // placeholder the human deliberately made one-time was replaced, on the
+    // success path and unprompted, by one good for hundreds of calls. The
+    // narrowest thing the operator could ask for silently became the widest.
+    const { placeholder, row } = this.issuePlaceholder({
+      grantId: old.grant_id, field: old.field, uses: old.max_uses,
+    })
     row.replaces_id = rowId
     this.#persist()
     return { placeholder, row, reused: false }

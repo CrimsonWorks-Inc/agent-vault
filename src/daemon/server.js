@@ -819,21 +819,27 @@ export class Daemon {
           return json(200, { ok: true, replaced: existed })
         }
         case 'PATCH /v1/presence': {
-          // Counter bookkeeping after a successful assertion. Accepted only as
-          // a small forward step: an authenticator that reports a lower count
-          // than we stored is treated as cloned and refused forever, so a
-          // caller able to set it to an arbitrary number could permanently
-          // disable the presence gate — a denial of service against the very
-          // control that stops an agent widening anything.
-          const enrolled = this.vault.db.kv.webauthn
-          const next = Number(input.signCount)
-          if (enrolled && Number.isInteger(next) && next > (enrolled.signCount || 0)
-              && next - (enrolled.signCount || 0) <= 1000) {
-            enrolled.signCount = next
-            this.vault.save()
-            return json(200, { ok: true })
-          }
-          return json(200, { ok: true, ignored: true })
+          // Gone, deliberately, and kept as an explicit refusal so an older UI
+          // gets an answer rather than a 404 it might treat as a routing bug.
+          //
+          // This let any caller set the stored signature counter. A counter
+          // BELOW the stored one means "cloned authenticator" and is refused
+          // forever, so walking it up was a permanent kill switch on the
+          // owner's own authenticator: 300 individually-legal steps of 1000
+          // took it to 300,005, and the owner's real key, sitting at 6, could
+          // never satisfy the presence gate again. The per-call cap bounded
+          // each step and not the total, which is the same thing as no cap.
+          //
+          // Nothing authenticated the caller, and nothing could: the UI's
+          // assertion was verified against the UI's own challenge, so the
+          // daemon cannot check it. The daemon does update the counter itself
+          // from every assertion IT verifies (#verifyOpAssertion), which is
+          // the path that can actually prove something. Clone detection for
+          // UI-verified operations is weaker for this, and that is the right
+          // trade: a counter an agent can poison is worse than no counter.
+          throw deny('AV_POLICY_DENIED', 'the signature counter is not settable; the daemon maintains it from assertions it verifies itself', {
+            rule: 'counter_not_settable',
+          })
         }
 
         case 'POST /v1/lock':
