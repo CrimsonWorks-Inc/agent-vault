@@ -86,7 +86,13 @@ export class Pipeline {
       })
       return { ...result, requestId }
     } catch (e) {
-      const err = e instanceof VaultError ? e : deny('AV_INTERNAL', e.message)
+      // Every error's detail goes to the agent, including text this code did
+      // not write: the upstream-failure path interpolates the underlying
+      // error's message. This is a vault, so the one place a stray secret in
+      // an exception must not reach is the agent. Scrub all of them.
+      const err = e instanceof VaultError ? e : deny('AV_INTERNAL', this.#safeMessage(e))
+      err.detail = this.#safeMessage({ message: err.detail })
+      if (err.hint) err.hint = this.#safeMessage({ message: err.hint })
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
       if (consumed && !upstreamOpened) this.vault.refundPlaceholder(consumed.id)
@@ -166,6 +172,26 @@ export class Pipeline {
       next: { cli: ['agent-vault session create --cred <slug>'], mcp: { tool: 'vault_request_session' } },
       hint: 'Send Authorization: Bearer <session token>, or a placeholder at a declared header site.',
     })
+  }
+
+  /**
+   * Error text with any known secret removed.
+   *
+   * Defence in depth, and not purely theoretical: the upstream-failure path
+   * wraps the underlying error's message, which this code did not author. It
+   * costs one scrub on a path that is already failing.
+   */
+  #safeMessage(e) {
+    const text = String(e?.message ?? e)
+    try {
+      if (this.vault.locked) return text
+      const secrets = this.vault.allSecrets()
+      if (!secrets.length) return text
+      return new Scrubber(secrets.map((s) => ({ ...s, always: true }))).scrub(text).text
+    } catch {
+      // If the scrubber cannot even be built, say nothing rather than guess.
+      return 'internal error'
+    }
   }
 
   /** /p/<slug>/<path>  or  /t/<scheme>/<host>/<path> */

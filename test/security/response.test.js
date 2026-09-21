@@ -204,3 +204,41 @@ test('end to end over real HTTP: a gzipping upstream and a streaming upstream bo
     await new Promise((r) => upstream.close(r))
   }
 })
+
+test('a secret cannot escape through an internal error message', async () => {
+  // An unexpected error's text becomes the detail of an AV_INTERNAL and is
+  // served to the agent. Nothing builds such a message from a credential
+  // today; this makes sure a future mistake of that shape is contained
+  // rather than handed over.
+  const dir = mkdtempSync(join(tmpdir(), 'av-errleak-'))
+  try {
+    const v = Vault.create(dir, { factor: 'none' })
+    const cred = v.addCredential({
+      slug: 'prod', kind: 'http', connector: { host: '127.0.0.1:1', scheme: 'http' },
+      fields: { token: 'ERRLEAK-SECRET-00011122233' }, sites: { token: ['header:authorization:Bearer'] },
+    })
+    const made = v.createSession({ label: 'agent' })
+    const grant = v.createGrant({
+      sessionId: made.session.id, credentialId: cred.id, fields: ['token'],
+      policy: {
+        hosts: ['127.0.0.1'], methods: ['GET'], paths: ['/**'],
+        budget: { unit: 'requests', limit: 9 }, approval: 'auto',
+      },
+    })
+    const placeholder = v.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder
+
+    // Force an unexpected failure whose message carries the secret, the way a
+    // careless future `throw new Error(\`bad value: ${value}\`)` would.
+    const pipeline = new Pipeline(v)
+    pipeline.upstream = async () => { throw new Error('boom while sending ERRLEAK-SECRET-00011122233 upstream') }
+
+    const res = await pipeline.handle({
+      method: 'GET', path: '/p/prod/x', query: '',
+      headers: [['authorization', `Bearer ${placeholder}`]], body: null,
+    })
+    const text = res.body.toString('utf8')
+    assert.ok(!text.includes('ERRLEAK-SECRET-00011122233'),
+      `a credential escaped through an error message: ${text.slice(0, 200)}`)
+    assert.match(text, /\[\[av:|REDACT|boom/i, 'the error should still say something useful')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
