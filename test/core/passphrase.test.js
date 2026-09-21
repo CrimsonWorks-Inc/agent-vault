@@ -258,13 +258,16 @@ test('the placeholder ledger does not grow without bound', () => {
       policy: { hosts: ['h'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: 100000 } },
     })
 
-    const started = Date.now()
+    // The bound is what this is about. Timing it as well would make the test
+    // fail whenever the machine is busy, which teaches people to ignore it.
     for (let i = 0; i < 900; i++) v.issuePlaceholder({ grantId: g.id, field: 'token' })
-    const ms = Date.now() - started
 
     const rows = Object.keys(v.db.placeholders).length
     assert.ok(rows <= 600, `900 mints left ${rows} rows in the ledger`)
-    assert.ok(ms < 5000, `900 mints took ${ms}ms, all of it on the event loop`)
+    // The file is rewritten on every mint, so a bounded row count is what
+    // keeps the cost of one mint from growing with the age of the vault.
+    const bytes = statSync(join(fresh, 'vault.json')).size
+    assert.ok(bytes < 512 * 1024, `vault.json reached ${(bytes / 1024).toFixed(0)} KiB after 900 mints`)
 
     // The most recent ones survive, because those are the ones a replay is
     // most likely to be about.

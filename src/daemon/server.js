@@ -8,7 +8,7 @@
 //     that keeps a remote peer from growing its own grants.
 
 import { createServer } from 'node:http'
-import { unlinkSync, existsSync, chmodSync, chownSync, statSync } from 'node:fs'
+import { unlinkSync, existsSync, chmodSync, chownSync, statSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { Pipeline } from './pipeline.js'
 import { McpServer, PROTOCOL_VERSIONS, LATEST_PROTOCOL } from './mcp.js'
@@ -20,6 +20,17 @@ import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN } from '../core/scrub.js'
+
+// Read from package.json rather than written here twice. Two hardcoded copies
+// of a version string are two chances to report one the code is not, and the
+// CLI uses this to detect a daemon older than itself.
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+  } catch {
+    return '0.0.0-unknown'
+  }
+})()
 
 const MAX_BODY = 16 * 1024 * 1024
 
@@ -471,7 +482,7 @@ export class Daemon {
 
     try {
       if (url.pathname === '/v1/status') {
-        return json(200, { daemon_version: '0.1.0', api_version: '1', locked: this.vault.locked, ...this.vault.stats() })
+        return json(200, { daemon_version: VERSION, api_version: '1', locked: this.vault.locked, ...this.vault.stats() })
       }
       if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
       this.vault.assertSessionLive(session)
@@ -616,7 +627,7 @@ export class Daemon {
       const route = `${req.method} ${url.pathname}`
       switch (route) {
         case 'GET /v1/status':
-          return json(200, { daemon_version: '0.1.0', gateway_port: this.gatewayPort, ...this.vault.stats() })
+          return json(200, { daemon_version: VERSION, gateway_port: this.gatewayPort, ...this.vault.stats() })
 
         case 'POST /v1/credentials': {
           this.#requireHumanForWidening('cred add', this.#wideningOperation(route, url, input), input.presence)

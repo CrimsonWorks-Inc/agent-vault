@@ -13,7 +13,7 @@ agent                          agent-vault daemon                    upstream
   ◀──────────────────────────────┤                                        │
 ```
 
-This repository is the **M0/M1 working core** of the [v1 build spec](https://claude.ai/artifact/4kFDYZBoSCb8fujQqD4kjg). It runs, it is tested, and the central mechanism works end to end. It is not yet the production daemon; see [Honest limits](#honest-limits).
+This repository is the **M0/M1 working core** of the [v1 build spec](https://claude.ai/artifact/4kFDYZBoSCb8fujQqD4kjg), and is ready to use for what it implements: the mechanism works end to end, it is tested on Node 20, 22 and 24, and everything four independent adversarial reviews found has been fixed with a test behind it — see the [changelog](CHANGELOG.md) for what they found. What is *not* built is listed under [Honest limits](#honest-limits), and the biggest items are the language and storage choices the spec makes differently. Read that section before you point it at a credential that matters.
 
 ## Try it
 
@@ -26,12 +26,15 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 421 tests
+npm test          # 422 tests
 ```
 
 ```bash
 npm run test:mutation
 ```
+
+The changelog records what the four independent reviews found, with the
+reproductions: [CHANGELOG.md](CHANGELOG.md).
 
 The second one checks the tests against themselves: it removes each of
 twenty-nine critical protections in turn and asserts the suite notices.
@@ -309,8 +312,11 @@ reported as tampering on every upgrade — which is the clearest argument
 available that review from outside one's own head finds things review from
 inside it does not.
 
-That is still not the same as a security audit by an independent firm, and
-this has not had one. It is the single biggest reason not to trust this yet.
+It has not had a paid audit by a security firm. Very little open-source
+security software has one before its first release, and treating that as a
+release gate would be a standard this project applies to nothing else — so it
+is recorded here as what it is: an assurance this artifact does not carry, for
+you to weigh, rather than a defect. What it does carry is above.
 
 ## Honest limits
 

@@ -1,6 +1,6 @@
 {
   "name": "agent-vault",
-  "version": "0.1.0-m0",
+  "version": "0.1.0",
   "description": "Zero-trust local credential proxy for LLM agents: the agent sends placeholders, the daemon injects real secrets only at declared sites for granted destinations.",
   "type": "module",
   "license": "Apache-2.0",
@@ -18,7 +18,8 @@
     "bin",
     "src",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test test/core/*.test.js test/security/*.test.js",

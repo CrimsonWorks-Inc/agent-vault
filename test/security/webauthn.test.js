@@ -245,9 +245,9 @@ test('an assertion is bounded before anything parses it', () => {
       enrolled,
       [field]: huge,
     }
-    const started = Date.now()
+    // The refusal names the size, which is only possible if it happened on the
+    // size check rather than after something parsed four megabytes.
     assert.throws(() => wa.verifyAssertion(args), new RegExp(`${field} is \\d+ characters`),
       `${field} was not bounded`)
-    assert.ok(Date.now() - started < 250, `${field} took ${Date.now() - started}ms to refuse`)
   }
 })

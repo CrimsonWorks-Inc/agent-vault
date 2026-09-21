@@ -89,3 +89,27 @@ test('the published package runs, imports and creates a vault on its own', () =>
   if (r?.skipped) return
   assert.equal(r, 'checked')
 })
+
+test('the daemon reports the version the package actually is', () => {
+  // It was written out twice in server.js as a literal. Two hardcoded copies
+  // of a version string are two chances to report one the code is not — and
+  // the CLI uses `daemon_version` to tell a human their daemon is older than
+  // their commands, which is advice that has to be right.
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const server = readFileSync(join(ROOT, 'src/daemon/server.js'), 'utf8')
+
+  assert.ok(!/daemon_version: *'[\d.]/.test(server),
+    'the version is hardcoded in server.js again')
+  assert.match(server, /JSON\.parse\(readFileSync\(new URL\('\.\.\/\.\.\/package\.json'/,
+    'the daemon should read its version from package.json')
+
+  // And the version itself is a real one.
+  assert.match(pkg.version, /^\d+\.\d+\.\d+(-[\w.]+)?$/, `"${pkg.version}" is not a version`)
+
+  // The changelog's top entry names it, so a release cannot ship undocumented.
+  const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
+  const firstHeading = /^## +(\S+)/m.exec(changelog)
+  assert.ok(firstHeading, 'the changelog has no version heading')
+  assert.equal(firstHeading[1], pkg.version,
+    `the changelog's newest entry is ${firstHeading[1]} but the package is ${pkg.version}`)
+})

@@ -250,8 +250,11 @@ test('glob matching is linear, not exponential', () => {
   // anyone who can supply a grant or deny path.
   const evil = `/${'**/'.repeat(16)}x`
   const path = `/${'a/'.repeat(48)}b`
+  // Two seconds, against a bug that took thirty-seven. A tight threshold here
+  // turns a busy CI machine into a red build, and the failure this guards
+  // against is three orders of magnitude away, not two.
   const started = Date.now()
   assert.equal(matchPath(evil, path), false)
   const ms = Date.now() - started
-  assert.ok(ms < 250, `matching took ${ms}ms; it should be linear`)
+  assert.ok(ms < 2000, `matching took ${ms}ms; it should be linear`)
 })

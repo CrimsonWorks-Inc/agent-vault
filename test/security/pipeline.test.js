@@ -652,15 +652,20 @@ test('a refused request does not decrypt the whole vault three times', async () 
     path: '/p/gh-frozencrow/definitely/not/granted',
     headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${placeholder}`]],
   }))
-  await deny() // warm
 
-  const started = Date.now()
-  for (let i = 0; i < 120; i++) await deny()
-  const ms = Date.now() - started
-
-  // Generous, because this is a timing test on shared hardware. The point is
-  // the shape: three full decryptions per denial put this well past it.
-  assert.ok(ms < 1500, `120 denials with 51 credentials took ${ms}ms`)
+  // Counted, not timed. A wall-clock threshold on shared hardware fails when
+  // something else is busy, and a test that goes red for reasons unrelated to
+  // the code is a test people learn to ignore. What this is actually about is
+  // how many times the vault gets decrypted per refusal.
+  const real = vault.allSecrets.bind(vault)
+  let calls = 0
+  vault.allSecrets = (...args) => { calls++; return real(...args) }
+  try {
+    await deny()
+    assert.equal(calls, 1, `one refusal decrypted the vault ${calls} times`)
+  } finally {
+    vault.allSecrets = real
+  }
 
   // And the denial still says the right thing, scrubbed.
   const res = await deny()
