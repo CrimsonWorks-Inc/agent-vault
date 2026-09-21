@@ -69,6 +69,16 @@ function setJsonPointer(root, pointer, newValue) {
   node[Array.isArray(node) ? Number(last) : last] = newValue
 }
 
+/**
+ * decodeURIComponent, but a malformed escape yields the raw text instead of
+ * throwing. A lone `%` in a query key used to take down the whole scan with a
+ * URIError, and a scan that throws is a scan that never reports the
+ * placeholder sitting next to it.
+ */
+function safeDecode(s) {
+  try { return decodeURIComponent(s) } catch { return s }
+}
+
 function parseQuery(q) {
   const out = []
   if (!q) return out
@@ -99,18 +109,33 @@ export function locate(req) {
     add(hit, { region: 'path', encoding: hit.encoding })
   }
 
-  // Query string, attributed to the parameter it sits in.
+  // Query string, attributed to the parameter it sits in. The KEY is scanned
+  // as well as the value: `?<placeholder>=1` is a perfectly good way to put a
+  // placeholder on the wire, and a scan that only read values never saw it, so
+  // it was forwarded verbatim instead of refused. A key is never a site, so
+  // finding it here is exactly what makes it a violation.
   const qpairs = parseQuery(req.query || '')
   for (const [k, v] of qpairs) {
+    const key = safeDecode(k)
+    for (const hit of detect.detectAll(key)) {
+      add(hit, { region: 'query-key', key, encoding: hit.encoding })
+    }
     for (const hit of detect.detectAll(v)) {
-      add(hit, { region: 'query', key: decodeURIComponent(k), encoding: hit.encoding })
+      add(hit, { region: 'query', key, encoding: hit.encoding })
     }
   }
 
   // Headers. Authorization: Basic is decoded so its base64 is read as the
   // basic:user / basic:pass site rather than reported as a smuggled blob.
-  for (const [name, value] of req.headers) {
+  for (const [index, [name, value]] of req.headers.entries()) {
     const lower = name.toLowerCase()
+    // A header NAME can carry a placeholder just as well as a value can, and
+    // no site is ever a name, so any hit here is a violation. It went unread
+    // entirely before, which meant the one way to get a placeholder past the
+    // location check was to make it the name of the header.
+    for (const hit of detect.detectAll(name)) {
+      add(hit, { region: 'header-name', name: lower, index, encoding: hit.encoding })
+    }
     let handledAsBasic = false
     if (lower === 'authorization' && /^basic\s+/i.test(value)) {
       const b64 = value.replace(/^basic\s+/i, '').trim()
@@ -131,6 +156,11 @@ export function locate(req) {
       add(hit, {
         region: 'header',
         name: lower,
+        // Which header entry, not just which name. Two headers can share a
+        // name; apply() read and wrote the FIRST one by name, so a placeholder
+        // in the second was located, approved, and then not substituted —
+        // the request went out with the placeholder still in it.
+        index,
         scheme: hit.encoding === 'raw' ? schemeBefore(value, hit.offset) : null,
         encoding: hit.encoding,
       })
@@ -145,6 +175,7 @@ export function locate(req) {
     const text = req.body.toString('utf8')
     const ct = contentType(req)
     let structured = false
+    const firstBodyOccurrence = occurrences.length
 
     if (ct === 'application/json') {
       try {
@@ -161,9 +192,44 @@ export function locate(req) {
     } else if (ct === 'application/x-www-form-urlencoded') {
       structured = true
       for (const [k, v] of parseQuery(text)) {
-        for (const hit of detect.detectAll(detect.percentDecode(v))) {
-          add(hit, { region: 'form', key: decodeURIComponent(k), encoding: hit.encoding })
+        const key = safeDecode(k)
+        for (const hit of detect.detectAll(key)) {
+          add(hit, { region: 'form-key', key, encoding: hit.encoding })
         }
+        for (const hit of detect.detectAll(detect.percentDecode(v))) {
+          add(hit, { region: 'form', key, encoding: hit.encoding })
+        }
+      }
+    }
+
+    if (structured) {
+      // A parse is a lossy view of the bytes, and every place it loses
+      // something is a place a placeholder can hide from the location check
+      // while still arriving intact at the upstream:
+      //
+      //   {"k":"<ph>","k":"x"}   JSON.parse keeps the last duplicate. Servers
+      //                          that keep the first read the placeholder.
+      //   {"<ph>":"x"}           object keys are structure, not values, so the
+      //                          value walk never looked at them.
+      //
+      // Rather than enumerate the ways a parser can differ from a server —
+      // which is the bug, restated — reconcile: whatever the raw bytes carry
+      // and the structured view does not account for is reported against the
+      // body, where nothing is ever a site, so the request is refused.
+      const unaccounted = new Map()
+      for (const hit of detect.detectAll(text)) {
+        unaccounted.set(hit.nonce, (unaccounted.get(hit.nonce) || 0) + 1)
+      }
+      for (let i = firstBodyOccurrence; i < occurrences.length; i++) {
+        const n = occurrences[i].parsed.nonce
+        const left = unaccounted.get(n)
+        if (left) unaccounted.set(n, left - 1)
+      }
+      for (const hit of detect.detectAll(text)) {
+        const left = unaccounted.get(hit.nonce)
+        if (!left) continue
+        unaccounted.set(hit.nonce, left - 1)
+        add(hit, { region: 'body', encoding: hit.encoding, hidden_by: 'the body parser' })
       }
     }
 
@@ -207,11 +273,17 @@ export function describeLocation(location) {
   const enc = location.encoding === 'raw' ? '' : ` (${location.encoding}-encoded)`
   switch (location.region) {
     case 'header': return `header ${location.name}${enc}`
+    case 'header-name': return `the NAME of a request header${enc}`
     case 'basic': return `Authorization: Basic ${location.part} field${enc}`
     case 'query': return `query parameter ${location.key}${enc}`
+    case 'query-key': return `the NAME of a query parameter${enc}`
     case 'form': return `form field ${location.key}${enc}`
+    case 'form-key': return `the NAME of a form field${enc}`
     case 'json': return `JSON body at ${location.pointer}${enc}`
-    case 'body': return `request body${enc}`
+    case 'body':
+      return location.hidden_by
+        ? `request body, in a position ${location.hidden_by} does not expose${enc}`
+        : `request body${enc}`
     case 'path': return `request path${enc}`
     default: return `${location.region}${enc}`
   }
@@ -233,6 +305,16 @@ export function apply(req, location, placeholderText, secret) {
 
   switch (location.region) {
     case 'header': {
+      // By index when locate() recorded one, so the entry that gets the secret
+      // is the entry the placeholder was found in. Reading and writing by name
+      // always hit the first header of that name, so with two `x-api-key`
+      // headers the placeholder in the second was approved and then never
+      // substituted — and went to the upstream as a placeholder.
+      const at = location.index
+      if (Number.isInteger(at) && out.headers[at] && out.headers[at][0].toLowerCase() === location.name) {
+        out.headers[at][1] = out.headers[at][1].split(placeholderText).join(secret)
+        break
+      }
       const current = getHeader(out, location.name)
       if (current === undefined) return out
       setHeader(out, location.name, current.split(placeholderText).join(secret))
@@ -253,13 +335,13 @@ export function apply(req, location, placeholderText, secret) {
     }
     case 'query': {
       const pairs = parseQuery(out.query).map(([k, v]) =>
-        decodeURIComponent(k) === location.key ? [k, v.split(placeholderText).join(encodeURIComponent(secret))] : [k, v])
+        safeDecode(k) === location.key ? [k, v.split(placeholderText).join(encodeURIComponent(secret))] : [k, v])
       out.query = buildQuery(pairs)
       break
     }
     case 'form': {
       const pairs = parseQuery(out.body.toString('utf8')).map(([k, v]) => {
-        if (decodeURIComponent(k) !== location.key) return [k, v]
+        if (safeDecode(k) !== location.key) return [k, v]
         const decoded = detect.percentDecode(v)
         return [k, encodeURIComponent(decoded.split(placeholderText).join(secret))]
       })

@@ -176,6 +176,93 @@ test('a placeholder in an undeclared header is refused', async () => {
   assert.equal(JSON.parse(res.body).code, 'AV_BAD_LOCATION')
 })
 
+test('the places a naive scan does not look are not hiding places', async () => {
+  // locate() is what AV_BAD_LOCATION rests on. Everywhere it does not look is
+  // a place a placeholder rides out to an arbitrary upstream untouched — and a
+  // placeholder is a bearer capability: anyone holding it can spend the grant
+  // through the gateway. Each of these was a real blind spot.
+  //
+  // They divide into two kinds. Names (of headers, query parameters, form
+  // fields) were never read at all, because the scan walked values. And
+  // positions a PARSER hides: JSON.parse keeps the last of two duplicate keys,
+  // and never surfaces key text as a value, so a server that reads the first
+  // duplicate sees a placeholder this code never knew was in the request.
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 50 }, approval: 'auto' } })
+  const base = { method: 'POST', path: '/p/gh-frozencrow/repos/frozencrow/x/issues' }
+  const hidingPlaces = {
+    'a header name': {
+      ...base, headers: [['host', '127.0.0.1'], ['av-session', token], [`x-${placeholder}`, '1']],
+    },
+    'a query parameter name': {
+      ...base, query: `${encodeURIComponent(placeholder)}=1`,
+      headers: [['host', '127.0.0.1'], ['av-session', token]],
+    },
+    'a form field name': {
+      ...base,
+      headers: [['host', '127.0.0.1'], ['av-session', token], ['content-type', 'application/x-www-form-urlencoded']],
+      body: Buffer.from(`${encodeURIComponent(placeholder)}=1`),
+    },
+    'a JSON object key': {
+      ...base,
+      headers: [['host', '127.0.0.1'], ['av-session', token], ['content-type', 'application/json']],
+      body: Buffer.from(JSON.stringify({ [placeholder]: 'x' })),
+    },
+    'the first of two duplicate JSON keys': {
+      ...base,
+      headers: [['host', '127.0.0.1'], ['av-session', token], ['content-type', 'application/json']],
+      // Valid JSON. JSON.parse keeps "harmless"; plenty of servers keep the first.
+      body: Buffer.from(`{"note":"${placeholder}","note":"harmless"}`),
+    },
+  }
+
+  for (const [where, over] of Object.entries(hidingPlaces)) {
+    sent = []
+    const res = await pipeline.handle(req(over))
+    assert.equal(res.status, 403, `a placeholder in ${where} was not refused`)
+    assert.equal(JSON.parse(res.body).code, 'AV_BAD_LOCATION', `${where}: wrong code`)
+    assert.equal(sent.length, 0, `a placeholder in ${where} reached the upstream`)
+  }
+})
+
+test('a second header of the same name gets the secret, not the placeholder', async () => {
+  // The site is header:authorization:Bearer, so this placeholder IS at a
+  // declared site and must be substituted. apply() looked the header up by
+  // name and always found the first, so it rewrote a header that did not
+  // contain the placeholder and left the one that did — and the request went
+  // upstream carrying a live placeholder, past a location check that had just
+  // approved it.
+  setup()
+  const res = await pipeline.handle(req({
+    headers: [
+      ['host', '127.0.0.1'], ['av-session', token],
+      ['authorization', 'Bearer something-else'],
+      ['authorization', `Bearer ${placeholder}`],
+    ],
+  }))
+  assert.equal(res.status, 200)
+  assert.equal(sent.length, 1)
+  const wire = JSON.stringify(sent[0].headers)
+  assert.ok(!wire.includes(placeholder), 'a placeholder reached the upstream')
+  assert.ok(wire.includes(SECRET), 'the secret was never substituted')
+})
+
+test('a malformed percent-escape in a query key does not blind the scan', async () => {
+  // decodeURIComponent throws on a lone `%`, and locate() called it on the key
+  // of every pair that contained a hit. So a single stray character in the key
+  // turned the location check into a URIError on the way out of the scan: the
+  // request failed, but as an internal error rather than the refusal it is,
+  // with an audit record and an agent-facing message to match.
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 50 }, approval: 'auto' } })
+  const res = await pipeline.handle(req({
+    path: '/p/gh-frozencrow/repos/frozencrow/x/issues',
+    query: `bad%=${encodeURIComponent(placeholder)}`,
+    headers: [['host', '127.0.0.1'], ['av-session', token]],
+  }))
+  assert.equal(res.status, 403)
+  assert.equal(JSON.parse(res.body).code, 'AV_BAD_LOCATION')
+  assert.equal(sent.length, 0)
+})
+
 // ------------------------------------------------------ S04/S05: the ledger
 
 test('S05: a one-time placeholder cannot be used twice', async () => {
