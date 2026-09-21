@@ -8,7 +8,7 @@
 //     that keeps a remote peer from growing its own grants.
 
 import { createServer } from 'node:http'
-import { unlinkSync, existsSync, chmodSync, chownSync, statSync, readFileSync } from 'node:fs'
+import { unlinkSync, existsSync, chmodSync, chownSync, statSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { Pipeline } from './pipeline.js'
 import { McpServer, PROTOCOL_VERSIONS, LATEST_PROTOCOL } from './mcp.js'
