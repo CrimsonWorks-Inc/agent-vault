@@ -10,8 +10,14 @@
 // authenticated file beside it, and `audit verify` compares the two.
 //
 // Never written here: credential values in any encoding, full placeholders,
-// request or response bodies, full paths, or Authorization header values. The
-// log has to be safe to hand to someone debugging a failure.
+// request or response bodies, query strings, or Authorization header values.
+// The log has to be safe to hand to someone debugging a failure.
+//
+// The path IS written, scrubbed. Leaving it out meant a grant of
+// /repos/frozencrow/** recorded the same glob for every request, so the log
+// could say a credential had been used forty times and not which forty things
+// it had been used on — the first question anyone asks it. The query string
+// still stays out: that is where a credential actually appears in a URL.
 
 import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { createHmac } from 'node:crypto'

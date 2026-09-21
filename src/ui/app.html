@@ -962,7 +962,7 @@ ${c.cli} ui                         open this page`)}`,
       }
       return `
         <header class="page"><h1>Audit</h1></header>
-        <p class="sub">Append-only and hash-chained. No credential value, body or full path is ever recorded here.</p>
+        <p class="sub">Append-only, hash-chained, and anchored at its end. Paths are recorded and scrubbed; no credential value, body, query string or full placeholder ever is.</p>
         <div class="card"><h2>Recent</h2><div class="audit">
           ${rows.slice().reverse().map((r) => {
             const cls = r.decision === 'allow' ? 't-allow' : r.decision === 'deny' ? 't-deny' : 't-dim'

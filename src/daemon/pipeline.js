@@ -20,6 +20,7 @@ import { Scrubber } from '../core/scrub.js'
 import { deny, VaultError } from '../core/errors.js'
 import { id } from '../store/ids.js'
 import { getProfile } from '../connectors/profiles.js'
+import * as ph from '../core/placeholder.js'
 
 const HOP_BY_HOP = new Set([
   'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
@@ -82,6 +83,15 @@ export class Pipeline {
         credential_slug: route.slug,
         req: {
           host: result.host, method: req.method, path_glob_matched: result.rule, status: result.status,
+          // The path, which the log used to leave out entirely. Under a grant
+          // of /repos/frozencrow/** every request recorded the same glob, so
+          // the log could say a credential had been used forty times and not
+          // which forty things it had been used on — which is the first
+          // question anyone asks it. The query string still stays out: that is
+          // where credentials actually appear in a URL. What remains goes
+          // through the scrubber, so a secret in a path segment is redacted
+          // rather than filed.
+          path: this.#safePath(result.path),
           // A streamed response has no buffered body to measure at this point.
           bytes_down: result.body ? result.body.length : null,
           streamed: !!result.stream,
@@ -108,6 +118,16 @@ export class Pipeline {
         this.vault.audit.write(err.auditKind, {
           request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule,
           detail: err.detail,
+          // A denial recorded without what was denied says only that something
+          // happened. These are the records that matter most — a run of them
+          // is what an attempt looks like — so they get the same method and
+          // path the allow records do, scrubbed the same way. This is the
+          // request as it ARRIVED, which is the point: a denial often happens
+          // before there is any decision to read it from.
+          req: {
+            method: req.method,
+            path: this.#safePath(req.path),
+          },
           peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         })
       }
@@ -182,14 +202,22 @@ export class Pipeline {
   }
 
   /**
-   * Error text with any known secret removed.
+   * Error text with any known secret, and any placeholder, removed.
    *
    * Defence in depth, and not purely theoretical: the upstream-failure path
    * wraps the underlying error's message, which this code did not author. It
    * costs one scrub on a path that is already failing.
+   *
+   * Placeholders are redacted for the log's sake. `unknown route /allowed/av1…`
+   * interpolates the request path verbatim, so any denial naming a path that
+   * contained a placeholder filed a live bearer capability in the audit log —
+   * the file that is meant to be safe to hand to someone debugging. The agent
+   * loses nothing by the redaction: it is reading back its own placeholder.
    */
   #safeMessage(e) {
-    const text = String(e?.message ?? e)
+    const raw = String(e?.message ?? e)
+    let text = raw
+    for (const hit of ph.findAll(raw)) text = text.split(hit.text).join(`av1.<${hit.slug}_${hit.field}>`)
     try {
       if (this.vault.locked) return text
       const secrets = this.vault.allSecrets()
@@ -199,6 +227,20 @@ export class Pipeline {
       // If the scrubber cannot even be built, say nothing rather than guess.
       return 'internal error'
     }
+  }
+
+  /**
+   * A path as the audit log may hold it.
+   *
+   * Secrets are scrubbed, like any other recorded text. Placeholders have to
+   * go too, and #safeMessage does not touch them: a placeholder in the path is
+   * always DENIED, and a denial is exactly the record that now carries the
+   * path — so the one case guaranteed to put a placeholder in front of this
+   * function is the case it exists for. A placeholder is a bearer capability,
+   * and the log is meant to be evidence you can hand to someone.
+   */
+  #safePath(p) {
+    return this.#safeMessage({ message: String(p ?? '').split('?')[0] })
   }
 
   /** /p/<slug>/<path>  or  /t/<scheme>/<host>/<path> */
@@ -481,7 +523,7 @@ export class Pipeline {
     if (contentType.startsWith('text/event-stream') && res.res) {
       this.vault.audit.write('response.streamed', { request_id: requestId, content_type: contentType })
       return {
-        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, redactions: 0,
+        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, path: decision.path, redactions: 0,
         stream: scrubEventStream(res.res, scrubber, () => {
           this.vault.audit?.write('response.stream_cut', {
             request_id: requestId, reason: 'credential_split_across_events',
@@ -530,7 +572,7 @@ export class Pipeline {
 
     const result = {
       status: res.status, headers: outHeaders, body: Buffer.from(text, 'latin1'),
-      host: decision.host, rule: decision.rule, redactions,
+      host: decision.host, rule: decision.rule, path: decision.path, redactions,
     }
     // Store the scrubbed response against the approval so a duplicate resend
     // replays it rather than hitting the upstream a second time.

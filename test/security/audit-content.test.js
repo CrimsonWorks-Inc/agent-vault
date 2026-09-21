@@ -75,13 +75,25 @@ before(async () => {
   // A busy, realistic sequence: allowed calls, a denial, a misplaced
   // placeholder, a bad token, a secret-bearing body, and an agent-supplied
   // reason string.
-  await gw('/allowed/thing/with/a/long/path?token=shhh', { authorization: `Bearer ${placeholder}` })
-  await gw('/forbidden/secret-path-name', { authorization: `Bearer ${placeholder}` })
-  await gw('/allowed/x', { authorization: `Bearer ${placeholder}`, 'x-note': placeholder })
-  await gw('/allowed/x', { authorization: 'Bearer avs1.deadbeefdead.notarealtokenatall' })
-  await gw('/allowed/post', { authorization: `Bearer ${placeholder}`, 'content-type': 'application/json' },
+  //
+  // These used to be written without the /p/<slug> prefix, so every one of
+  // them was an unknown route: the "realistic sequence" was nine 404s, and the
+  // tests below passed because a request that never happened cannot leak
+  // anything. A test fixture that does not exercise the code it guards is
+  // worse than no fixture, because it reads like coverage.
+  const P = '/p/prod'
+  await gw(`${P}/allowed/thing/with/a/long/path?token=shhh`, { authorization: `Bearer ${placeholder}` })
+  await gw(`${P}/forbidden/secret-path-name`, { authorization: `Bearer ${placeholder}` })
+  await gw(`${P}/allowed/x`, { authorization: `Bearer ${placeholder}`, 'x-note': placeholder })
+  await gw(`${P}/allowed/x`, { authorization: 'Bearer avs1.deadbeefdead.notarealtokenatall' })
+  await gw(`${P}/allowed/post`, { authorization: `Bearer ${placeholder}`, 'content-type': 'application/json' },
     'POST', JSON.stringify({ note: BODY_SECRET, password: 'hunter2' }))
-  await gw('/allowed/x', { authorization: `Bearer ${placeholder}`, 'av-reason': 'because I said so' })
+  await gw(`${P}/allowed/x`, { authorization: `Bearer ${placeholder}`, 'av-reason': 'because I said so' })
+  // A placeholder in the PATH. The path is never a site, so this is denied —
+  // and the denial record is the one that carries the path, which makes this
+  // the single case guaranteed to offer the log a live placeholder.
+  await gw(`${P}/allowed/${placeholder}/x`, { authorization: `Bearer ${placeholder}` })
+  await gw(`${P}/allowed/x?key=${encodeURIComponent(SECRET)}`, { authorization: `Bearer ${placeholder}` })
   await ctl('POST', '/v1/sessions', { cred: 'prod', methods: ['GET'], paths: ['/**'] })
 })
 
@@ -105,6 +117,30 @@ test('no full placeholder and no session token reaches it either', () => {
   assert.ok(!raw.includes(token), 'a session token is in the audit log')
   // The nonce hash is the intended handle, so records can still be correlated.
   assert.match(raw, /placeholder_id/, 'records should still identify placeholders by id')
+})
+
+test('the log says which resource was reached, not just which rule matched', () => {
+  // Under a grant of /allowed/** every record used to carry the same glob, so
+  // the log could say a credential had been used forty times and not which
+  // forty things it had been used on — the first question anyone asks it.
+  const rows = vault.audit.read({ limit: 200 })
+  const allowed = rows.filter((r) => r.kind === 'request.allowed')
+  assert.ok(allowed.length > 0, 'expected some allowed requests')
+  assert.ok(
+    allowed.some((r) => r.req?.path?.includes('/allowed/thing/with/a/long/path')),
+    'an allowed request did not record the path it reached',
+  )
+  // And a denial says what was denied, not just that something was.
+  const denied = rows.filter((r) => r.decision === 'deny')
+  assert.ok(denied.length > 0, 'expected some denials')
+  assert.ok(
+    denied.some((r) => r.req?.path?.includes('/forbidden/secret-path-name')),
+    'a denial did not record what was denied',
+  )
+  // The query string stays out: that is where credentials appear in a URL.
+  const raw = readFileSync(join(dir, 'audit.jsonl'), 'utf8')
+  assert.ok(!raw.includes('token=shhh'), 'a query string reached the audit log')
+  assert.ok(!raw.includes('key='), 'a query string reached the audit log')
 })
 
 test('request bodies never reach it', () => {
