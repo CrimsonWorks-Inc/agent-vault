@@ -670,6 +670,49 @@ test('a refused request does not decrypt the whole vault three times', async () 
   assert.ok(!JSON.stringify(problem).includes(SECRET))
 })
 
+test('an approval survives a request that never reached the upstream', async () => {
+  // An approval moves to `consumed` before the upstream call — that is what
+  // makes a resend execute exactly once. A failure in between left it consumed
+  // with no stored result, so the resend read `consumed` with nothing to
+  // replay and answered 202 forever, and the approval was no longer pending so
+  // the human could not approve it again either. One DNS blip wedged the
+  // request for an hour.
+  let failing = true
+  setup({
+    policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' },
+    respond: () => {
+      if (failing) throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' })
+      return { status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"ok":true}') }
+    },
+  })
+
+  const held = await pipeline.handle(req())
+  assert.equal(held.status, 202)
+  const approvalId = JSON.parse(held.body).approval_id
+  pipeline.decideApproval(approvalId, true)
+
+  // The approved attempt fails before reaching anyone.
+  const failed = await pipeline.handle(req())
+  assert.equal(failed.status, 502)
+
+  // The approval is still the human's decision: it has not evaporated.
+  const approval = [...pipeline.approvals.values()].find((a) => a.id === approvalId)
+  assert.equal(approval.state, 'granted', `the approval was left ${approval.state} with nothing to replay`)
+
+  // So the retry goes through, without asking the human a second time.
+  failing = false
+  sent = []
+  const retried = await pipeline.handle(req())
+  assert.equal(retried.status, 200, 'the retry must not need a second approval')
+  assert.equal(sent.length, 1)
+
+  // And exactly-once still holds: a further resend replays rather than
+  // executing again.
+  const again = await pipeline.handle(req())
+  assert.equal(sent.length, 1, 'a resend executed a second time')
+  assert.equal(again.headers['av-replayed'], 'true')
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

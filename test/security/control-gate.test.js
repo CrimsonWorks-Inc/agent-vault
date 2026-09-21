@@ -11,7 +11,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest, createServer } from 'node:http'
@@ -413,6 +413,25 @@ test('every route that spends scrypt is throttled, not just the ones I remembere
 
   daemon.passphraseFailures = 0
   daemon.passphraseLockedUntil = 0
+})
+
+test('the control socket is never world-connectable, not even for an instant', async () => {
+  // listen() creates the socket with the process umask and #secureSocket only
+  // tightens it afterwards, so between those two calls the capability-widening
+  // surface of this daemon was open to any local account. The window is short;
+  // the surface behind it is everything.
+  const d = mkdtempSync(join(tmpdir(), 'av-umask-'))
+  let daemon2
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    const s2 = join(d, 'c.sock')
+    daemon2 = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const mode = statSync(s2).mode & 0o777
+    assert.equal(mode & 0o007, 0, `the socket is mode 0${mode.toString(8)}: connectable by other accounts`)
+  } finally {
+    if (daemon2) await daemon2.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
 })
 
 test('the CLI names the factor that exists, not the one it expects', () => {

@@ -91,12 +91,18 @@ export class Pipeline {
     const started = Date.now()
     let consumed = null
     let upstreamOpened = false
+    let spentApproval = null
 
     try {
       this.#refuseBrowsers(req)
       const session = this.#authenticate(req)
       const route = this.#route(req, session)
-      const result = await this.#proxy({ req, session, route, requestId, onConsume: (r) => { consumed = r }, markUpstream: () => { upstreamOpened = true } })
+      const result = await this.#proxy({
+        req, session, route, requestId,
+        onConsume: (r) => { consumed = r },
+        onApprovalSpent: (a) => { spentApproval = a },
+        markUpstream: () => { upstreamOpened = true },
+      })
       this.vault.audit.write('request.allowed', {
         request_id: requestId, session_id: session.id, grant_id: route.grantId,
         credential_slug: route.slug,
@@ -136,6 +142,19 @@ export class Pipeline {
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
       if (consumed && !upstreamOpened) this.vault.refundPlaceholder(consumed.id)
+      // And give the human's approval back, for the same reason. It moves to
+      // `consumed` before the upstream call — which is what makes a resend
+      // execute exactly once — so a failure in between left it consumed with
+      // no stored result. The resend then read `consumed` with nothing to
+      // replay, answered 202 forever, and the approval was no longer pending,
+      // so the human could not approve it again either. One DNS blip wedged
+      // the request until the entry expired an hour later.
+      if (spentApproval && !upstreamOpened && spentApproval.state === 'consumed' && !spentApproval.result) {
+        spentApproval.state = 'granted'
+        this.vault.audit?.write('approval.returned', {
+          approval_id: spentApproval.id, request_id: requestId, reason: 'the request never reached the upstream',
+        })
+      }
       err.requestId = requestId
       if (this.vault.audit) {
         this.vault.audit.write(err.auditKind, {
@@ -360,7 +379,7 @@ export class Pipeline {
     })
   }
 
-  async #proxy({ req, session, route, requestId, onConsume, markUpstream }) {
+  async #proxy({ req, session, route, requestId, onConsume, onApprovalSpent, markUpstream }) {
     const { cred, grant, profile } = route
     const effective = policyMod.intersect([profile.policyCeiling, session.policy, grant.policy])
     let approvedRequestHash = null
@@ -509,6 +528,9 @@ export class Pipeline {
         return { ...verdict.approval.result, headers: { ...verdict.approval.result.headers, 'av-replayed': 'true' } }
       }
       approvedRequestHash = requestHash
+      // Tell handle() which approval this request just spent, so it can be
+      // given back if nothing ever reaches the upstream.
+      if (verdict.status === 'granted') onApprovalSpent?.(verdict.approval)
     }
 
     // --- consume, then substitute -----------------------------------------

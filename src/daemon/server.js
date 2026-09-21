@@ -204,6 +204,7 @@ export class Daemon {
       // asking them to approve something they were not shown.
       case 'POST /v1/factors/webauthn':
         return of(input?.action === 'remove' ? 'touchid.remove' : 'touchid.enroll', input)
+      case 'POST /v1/presence': return of('presence.enroll', input)
       default: return null
     }
   }
@@ -233,7 +234,18 @@ export class Daemon {
       }
       if (existsSync(this.socketPath)) unlinkSync(this.socketPath)
       const control = createServer((req, res) => this.#guard(req, res, () => this.#onControl(req, res)))
-      await new Promise((resolve) => control.listen(this.socketPath, resolve))
+      // listen() creates the socket with the process umask, and #secureSocket
+      // only tightens it afterwards — so between those two calls the
+      // capability-widening surface of this daemon was connectable by any
+      // local account. Narrow the umask across the bind so it is never created
+      // permissively in the first place; #secureSocket then relaxes it to the
+      // group that is meant to reach it.
+      const previousUmask = process.umask(0o077)
+      try {
+        await new Promise((resolve) => control.listen(this.socketPath, resolve))
+      } finally {
+        process.umask(previousUmask)
+      }
       this.#secureSocket()
       this.servers.push(control)
     }
@@ -807,7 +819,15 @@ export class Daemon {
               hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',
             })
           }
-          this.#requireHumanForWidening('presence enroll')
+          // The operation and the assertion are passed through, so a human
+          // with the CURRENT authenticator can rotate it. They used not to be,
+          // and the comment above explains why for the FIRST enrollment —
+          // accepting an assertion to authorise the key that would produce it
+          // is circular. For a REPLACEMENT it is the opposite: an assertion
+          // from the key being replaced is the strongest proof there is that
+          // the human holds it. Without this, a vault whose passphrase had
+          // since been removed could never rotate its authenticator at all.
+          this.#requireHumanForWidening('presence enroll', this.#wideningOperation(route, url, input), input.presence)
           // Re-enrolling replaces the only thing standing between an agent and
           // the approve button, so it is audited loudly either way.
           const existed = !!this.vault.db.kv.webauthn
