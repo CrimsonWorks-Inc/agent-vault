@@ -223,6 +223,13 @@ const MUTATIONS = [
     tests: ['test/security/control-gate.test.js'],
   },
   {
+    what: 'the stdio bridge writes non-protocol bytes to stdout',
+    file: 'src/cli/index.js',
+    from: 'process.stdout.write(`${asRpc(text, line, res.status)}',
+    to: 'process.stdout.write(`${text}',
+    tests: ['test/security/bridge.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",

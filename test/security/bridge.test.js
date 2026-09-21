@@ -140,3 +140,52 @@ test('the bridge refuses to start with no session at all', async () => {
   assert.match(err, /no session/)
   assert.match(err, /session create/)
 })
+
+test('every line the bridge writes to stdout is a JSON-RPC message', async () => {
+  // On a stdio transport stdout IS the protocol channel. The bridge forwarded
+  // the daemon's HTTP body verbatim, and a denial comes back as problem+json —
+  // `{"type":"…/AV_SESSION_EXPIRED","code":…}` — which is valid JSON and not a
+  // JSON-RPC message. The client could not parse it as protocol, never saw a
+  // reply to `initialize`, and sat there until it timed out: an expired
+  // session made the whole server look unreachable, with nothing on stderr to
+  // say why.
+  //
+  // The test above this one missed it by checking that SOME json came back
+  // with the right code in it. That is true of a problem document too.
+  const only = newSession('protocol-shape')
+  const b = bridge()
+  const stderr = []
+  b.proc.stderr.setEncoding('utf8')
+  b.proc.stderr.on('data', (c) => stderr.push(c))
+  try {
+    // A denial on the very first message, which is the case that hung.
+    vault.revokeSession(only.session.id, 'test')
+    b.send({ jsonrpc: '2.0', id: 7, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } })
+    const res = await b.next()
+
+    assert.equal(res.jsonrpc, '2.0', `not a JSON-RPC message: ${JSON.stringify(res).slice(0, 120)}`)
+    assert.equal(res.id, 7, 'the reply must carry the id of the request it answers')
+    assert.ok(res.error, 'a refusal must be a JSON-RPC error, not a problem document')
+    assert.match(res.error.message, /AV_SESSION_REVOKED|AV_SESSION_REQUIRED/)
+    assert.ok(!('type' in res), 'a problem+json document reached stdout')
+
+    // And the human-readable diagnosis goes where diagnostics belong.
+    assert.match(stderr.join(''), /agent-vault mcp:.*(REVOKED|REQUIRED)/i,
+      'the reason must be on stderr, or a human sees a bare protocol error')
+  } finally { b.proc.kill() }
+})
+
+test('a successful call is still forwarded byte for byte', async () => {
+  // The translation must not touch real protocol traffic: a JSON-RPC response
+  // from the daemon has to arrive exactly as the daemon wrote it.
+  newSession('passthrough')
+  const b = bridge()
+  try {
+    b.send({ jsonrpc: '2.0', id: 11, method: 'tools/list', params: {} })
+    const res = await b.next()
+    assert.equal(res.jsonrpc, '2.0')
+    assert.equal(res.id, 11)
+    assert.ok(Array.isArray(res.result?.tools), 'a working call must come back as a result')
+    assert.ok(res.result.tools.length > 0)
+  } finally { b.proc.kill() }
+})

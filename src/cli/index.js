@@ -957,6 +957,42 @@ const COMMANDS = {
    * another uid.
    */
   async mcp() {
+    /**
+     * Whatever the daemon answered, as something the client can parse.
+     *
+     * On a stdio transport stdout IS the protocol channel, and this used to
+     * forward the HTTP body verbatim. A denial comes back as problem+json —
+     * `{"type":"…/AV_SESSION_EXPIRED","code":…}` — which is not a JSON-RPC
+     * message, so the client could not parse it, never saw a reply to
+     * `initialize`, and sat there until it timed out. An expired session made
+     * the whole server look unreachable, with nothing on stderr to say why.
+     *
+     * Anything that is not JSON-RPC becomes a JSON-RPC error carrying the
+     * request's id, with the daemon's own detail and hint attached, and a copy
+     * on stderr where diagnostics belong.
+     */
+    const asRpc = (text, requestLine, httpStatus) => {
+      const isMessage = (m) => m && typeof m === 'object' && m.jsonrpc === '2.0'
+      let payload
+      try { payload = JSON.parse(text) } catch { payload = null }
+      if (Array.isArray(payload) ? payload.length && payload.every(isMessage) : isMessage(payload)) {
+        return text
+      }
+      const id = (() => { try { return JSON.parse(requestLine).id ?? null } catch { return null } })()
+      const detail = payload?.detail || payload?.message || text.slice(0, 200)
+      const hint = payload?.hint ? ` ${payload.hint}` : ''
+      process.stderr.write(`agent-vault mcp: the daemon answered ${httpStatus} ${payload?.code || 'with a non-protocol body'}: ${detail}${hint}\n`)
+      return JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        error: {
+          code: -32603,
+          message: `${payload?.code || `HTTP ${httpStatus}`}: ${detail}`,
+          data: { hint: payload?.hint, next: payload?.next, http_status: httpStatus },
+        },
+      })
+    }
+
     // Resolved per request, not once at launch. A session lasts hours and an
     // agent outlives it; freezing the token here means that the moment it
     // expires the bridge is dead until the whole client restarts, which is a
@@ -1006,7 +1042,7 @@ const COMMANDS = {
           const sid = res.headers.get('mcp-session-id')
           if (sid) mcpSessionId = sid
           const text = await res.text()
-          if (text) process.stdout.write(`${text}\n`)
+          if (text) process.stdout.write(`${asRpc(text, line, res.status)}\n`)
         } catch (e) {
           const parsed = (() => { try { return JSON.parse(line) } catch { return {} } })()
           process.stdout.write(`${JSON.stringify({
