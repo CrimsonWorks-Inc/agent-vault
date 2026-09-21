@@ -170,7 +170,7 @@ export function locate(req) {
   // Body.
   if (req.body && req.body.length) {
     if (req.body.length > MAX_BUFFERED_BODY) {
-      return { occurrences, unscannable: 'body exceeds the 16 MiB buffered limit and streaming is not enabled for this credential' }
+      return { occurrences, unscannable: 'body exceeds the 16 MiB buffered limit, and request-body streaming is not implemented, so this body cannot be scanned for placeholders' }
     }
     const text = req.body.toString('utf8')
     const ct = contentType(req)

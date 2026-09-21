@@ -73,6 +73,13 @@ export function intersect(layers) {
       // allow. Narrow, or keep the outer value.
       commands: intersectList(out.commands ?? null, layer.commands ?? null),
       graphql: out.graphql ?? layer.graphql,
+      // Carried through the intersection for the spec's shape, but nothing
+      // reads it: request-body streaming is not implemented, so a body over
+      // the buffered limit is refused rather than streamed. It stays here
+      // because the semantics are the interesting part (every layer must
+      // agree before it is on) and because removing it would make a future
+      // implementation quietly default to open. A field that looks like a
+      // control and is not is worth a sentence.
       stream_bodies: (out.stream_bodies ?? false) && (layer.stream_bodies ?? false),
     }
   }

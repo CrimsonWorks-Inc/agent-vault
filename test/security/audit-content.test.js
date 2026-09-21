@@ -95,6 +95,20 @@ before(async () => {
   await gw(`${P}/allowed/${placeholder}/x`, { authorization: `Bearer ${placeholder}` })
   await gw(`${P}/allowed/x?key=${encodeURIComponent(SECRET)}`, { authorization: `Bearer ${placeholder}` })
   await ctl('POST', '/v1/sessions', { cred: 'prod', methods: ['GET'], paths: ['/**'] })
+
+  // The fixture checks itself, because it silently stopped working once and
+  // nothing noticed: the paths were missing their /p/<slug> prefix, so every
+  // request was an unknown route and the tests below passed by vacuum. They
+  // all look for things that must NOT be in the log, and a request that never
+  // reached the pipeline cannot put anything there. From here, a sequence that
+  // degrades to 404s fails loudly instead of reading like coverage.
+  const kinds = vault.audit.read({ limit: 200 }).map((r) => r.kind)
+  assert.ok(kinds.includes('request.allowed'), 'the fixture produced no allowed request')
+  assert.ok(kinds.includes('request.denied'), 'the fixture produced no denial')
+  assert.ok(
+    kinds.includes('placeholder.misplaced'),
+    'the fixture produced no misplaced-placeholder denial, which is the case that leaks',
+  )
 })
 
 after(async () => {

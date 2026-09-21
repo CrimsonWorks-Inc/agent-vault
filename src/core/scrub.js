@@ -12,7 +12,7 @@
 // re-encoded in a scheme not listed, or transformed by the upstream is not
 // caught. That is stated as a non-guarantee rather than papered over.
 
-const MIN_SECRET_LEN = 8
+export const MIN_SECRET_LEN = 8
 
 /** Token shapes worth redacting even when the vault never stored them. */
 export const DERIVED_PATTERNS = [

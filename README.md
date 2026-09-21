@@ -321,7 +321,7 @@ With **neither** factor enrolled the socket is open and every widening call is a
 
 **Storage is a JSON document, not SQLite.** Same entity model, same invariants, atomic rewrites. It will not hold up under concurrent daemons or a large vault.
 
-**Not implemented at all:** the Postgres, MySQL, MongoDB, SSH and SMTP connectors, mutual TLS and client certificates for network listeners, CONNECT mode, and GitHub App token minting.
+**Not implemented at all:** the Postgres, MySQL, MongoDB, SSH and SMTP connectors, mutual TLS and client certificates for network listeners, CONNECT mode, GitHub App token minting, and request-body streaming — a request body over 16 MiB is refused rather than streamed, because a body that cannot be scanned for placeholders cannot be forwarded. The `stream_bodies` policy field exists and intersects correctly; nothing reads it yet.
 
 The Postgres profile exists as a design; the L4 proxy that would carry it does not. Storing a credential against it is now **refused at creation**. It used to succeed: you got a fingerprint, a placeholder and a suggested `curl`, and the HTTP path stood ready to send a database password as URL userinfo to a Postgres port — while you believed the credential was being protected. A profile without a proxy is a plan, not a feature, and it no longer accepts secrets.
 

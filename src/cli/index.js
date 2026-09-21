@@ -575,6 +575,8 @@ const COMMANDS = {
     })
     out(`${C.green('added')} ${cred.slug} ${C.dim(`(${cred.kind}, fingerprint ${cred.fields[0].fp8})`)}\n` +
         `  placeholder goes at: ${cred.fields[0].sites.join(', ')}`, cred)
+    // A limit of the scrubber, stated at the one moment anyone can act on it.
+    for (const w of cred.warnings || []) console.error(`${C.yellow('note')} ${w}`)
   },
 
   async 'cred:list'() {

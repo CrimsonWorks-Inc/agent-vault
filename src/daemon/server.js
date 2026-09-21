@@ -19,6 +19,7 @@ import * as policyMod from '../core/policy.js'
 import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
+import { MIN_SECRET_LEN } from '../core/scrub.js'
 
 const MAX_BODY = 16 * 1024 * 1024
 
@@ -572,7 +573,18 @@ export class Daemon {
             fields: { [field]: input.value },
             sites: { [field]: input.sites || defaultSites(kind, field) },
           })
-          return json(200, cred)
+          // A value this short is scrubbed from the response to a request
+          // that injected it — that one is known exactly — but NOT from other
+          // responses, where the whole vault's secrets are matched by value
+          // and a four-character needle would redact ordinary words. So a
+          // short credential can be echoed back to the agent by an upstream
+          // it was never sent to. Say so at the moment it is stored, which is
+          // the only moment anyone can do anything about it.
+          const warnings = []
+          if (String(input.value || '').length < MIN_SECRET_LEN) {
+            warnings.push(`this value is under ${MIN_SECRET_LEN} characters, so it is only scrubbed from responses to requests that used it; another credential's response could echo it back to the agent unredacted`)
+          }
+          return json(200, warnings.length ? { ...cred, warnings } : cred)
         }
         case 'GET /v1/credentials':
           return json(200, this.vault.listCredentials())
