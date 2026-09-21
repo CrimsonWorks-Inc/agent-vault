@@ -665,8 +665,8 @@ export class Vault {
     // `?? 1000` does not catch NaN, only null and undefined, so a malformed
     // budget propagated straight into the placeholder's use ceiling — and
     // `Math.min(asked, NaN)` is NaN, which no `uses >= max_uses` ever stops.
-    const stated = grant.policy?.budget?.limit
-    const budgetLimit = Number.isFinite(stated) ? stated : 1000
+    const stated = Number(grant.policy?.budget?.limit)
+    const budgetLimit = Number.isFinite(stated) && stated > 0 ? stated : 1000
     const phPolicy = grant.policy?.placeholder_policy || {}
     const maxActive = phPolicy.max_active ?? 8
     const active = Object.values(this.db.placeholders)

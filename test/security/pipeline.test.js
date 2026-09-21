@@ -339,6 +339,29 @@ test('a budget layer that names no limit does not make the grant unlimited', asy
   assert.equal(sent.length, 2, 'only the two budgeted calls may reach the upstream')
 })
 
+test('a budget limit written as a string still counts', async () => {
+  // "50" arrives from a config file, an MCP tool argument, a hand-written
+  // policy. Refusing it would be failing closed on something that plainly
+  // means fifty — and the check that refuses a non-numeric limit is new, so
+  // it is exactly the kind of thing that breaks ordinary use while looking
+  // like caution.
+  setup()
+  const cred = vault.findCredential('gh-frozencrow')
+  const s = vault.createSession({ label: 'string budget', policy: {} })
+  const g = vault.createGrant({
+    sessionId: s.session.id, credentialId: cred.id, fields: ['token'],
+    policy: { hosts: ['api.github.com'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: '2' }, approval: 'auto' },
+  })
+  const p = vault.issuePlaceholder({ grantId: g.id, field: 'token' }).placeholder
+  const call = () => pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['av-session', s.token], ['authorization', `Bearer ${p}`]],
+  }))
+  assert.equal((await call()).status, 200)
+  assert.equal((await call()).status, 200)
+  assert.equal((await call()).status, 403, '"2" must mean two, and then stop')
+  assert.equal(sent.length, 2)
+})
+
 test('a budget limit that is not a number refuses rather than counts nothing', async () => {
   // Whatever produced it, a limit that cannot be compared must not read as
   // "no limit". Fail closed and say why.

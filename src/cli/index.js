@@ -1172,6 +1172,15 @@ const COMMANDS = {
     if (chain) {
       checks.push(['audit chain intact', chain.ok === true,
         chain.ok ? `${chain.count} records` : chain.reason])
+      // Reported separately from the chain, because it is a different claim: a
+      // log with no anchor is intact but of unproven extent. Folding it into
+      // the check above would make this permanently red on every vault written
+      // before the anchor existed, and a check that always fails is a check
+      // nobody reads.
+      if (chain.unanchored_before) {
+        checks.push(['audit log anchored throughout', false,
+          `anchored from record ${chain.unanchored_before}; nothing proves how many records came before it`])
+      }
     }
 
     const lock = await control('GET', '/v1/lockstate').catch(() => null)

@@ -173,8 +173,15 @@ function intersectBudget(a, b) {
   // `anything >= NaN` is false — so one layer written `{unit:'requests'}`
   // turned a counted grant into an uncounted one, silently, in the counter
   // itself. Take the tightest limit anyone actually stated, or none.
+  // Coerced, because a limit can arrive as "50" from a config file, an MCP
+  // tool or a hand-written policy, and refusing that would be fail-closed on
+  // something that plainly means fifty. Number('') is 0, so the empty string
+  // is excluded explicitly rather than read as a budget of nothing.
   const unit = b.unit || a.unit
-  const limits = [a.limit, b.limit].filter((n) => Number.isFinite(n))
+  const limits = [a.limit, b.limit]
+    .filter((n) => n !== null && n !== undefined && n !== '')
+    .map(Number)
+    .filter((n) => Number.isFinite(n))
   return limits.length ? { unit, limit: Math.min(...limits) } : { unit }
 }
 

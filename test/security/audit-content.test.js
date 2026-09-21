@@ -256,10 +256,16 @@ test('emptying the log entirely is detected too', () => {
   }
 })
 
-test('losing the anchor is reported rather than assumed harmless', () => {
+test('losing the anchor is recorded, but is not called tampering', () => {
   // Removing the anchor is the natural next move once truncation is caught, so
-  // its absence has to be a finding in itself. It cannot be forged: the head
-  // is authenticated under K_audit, which lives behind the uid boundary.
+  // its absence has to be recorded. It cannot be forged: the head is
+  // authenticated under K_audit, which lives behind the uid boundary.
+  //
+  // But it is the absence of evidence, not evidence of absence — the chain is
+  // intact, nothing proves how far it once reached — and every vault written
+  // before the anchor existed is in exactly this state. Reporting it as a
+  // broken chain would make the check permanently red on ordinary upgrades,
+  // and a check that always fails is a check nobody reads.
   const fresh = mkdtempSync(join(tmpdir(), 'av-anchor-'))
   try {
     const v = Vault.create(fresh, { factor: 'none' })
@@ -268,12 +274,16 @@ test('losing the anchor is reported rather than assumed harmless', () => {
     const reopened = Vault.open(fresh)
     reopened.unlockWith({})
     const res = reopened.audit.verify()
-    assert.equal(res.ok, false)
-    assert.match(res.reason, /anchor/)
+    assert.equal(res.ok, true, 'an intact chain with no anchor is not a broken chain')
+    assert.ok(Number.isInteger(res.unanchored_before), 'it must say from where the log is anchored')
+    assert.match(res.note, /nothing proves how many records preceded/)
     assert.ok(
       reopened.audit.read({ limit: 10 }).some((r) => r.kind === 'audit.anchor_missing'),
       'and it must be recorded, so deleting the anchor again does not clear it',
     )
+    // It never becomes untrue: further writes do not make it go quiet.
+    reopened.audit.write('test.event', {})
+    assert.ok(Number.isInteger(reopened.audit.verify().unanchored_before), 'the note must persist')
   } finally {
     rmSync(fresh, { recursive: true, force: true })
   }

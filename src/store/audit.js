@@ -204,15 +204,30 @@ export class AuditLog {
     // daemon keeps running and keeps appending, so within a few records the
     // chain and the anchor agree again — and everything above would go quiet
     // about a log that is known to be missing its middle.
-    const gap = rows.find((r) => r.kind === 'audit.truncation_detected' || r.kind === 'audit.anchor_missing')
-    if (gap) {
+    const cut = rows.find((r) => r.kind === 'audit.truncation_detected')
+    if (cut) {
       return {
         ok: false,
         count: rows.length,
-        brokenAt: gap.seq,
-        reason: gap.kind === 'audit.truncation_detected'
-          ? `records were removed from the end: the log restarted at ${gap.found_seq} where it should have been at ${gap.expected_seq}`
-          : 'the log was found without its head anchor, so records may have been removed from the end before this point',
+        brokenAt: cut.seq,
+        reason: `records were removed from the end: the log restarted at ${cut.found_seq} where it should have been at ${cut.expected_seq}`,
+      }
+    }
+
+    // A missing anchor is not the same finding, and reporting it as one would
+    // make this permanently red on every vault written before the anchor
+    // existed — a check that always fails is a check nobody reads. It is the
+    // absence of evidence rather than evidence of absence: the chain is
+    // intact, but nothing proves how far it once reached. Say exactly that,
+    // and say it every time, because it never becomes untrue.
+    const noAnchor = rows.find((r) => r.kind === 'audit.anchor_missing')
+    if (noAnchor) {
+      return {
+        ok: true,
+        count: rows.length,
+        head: prev,
+        unanchored_before: noAnchor.seq,
+        note: `the log had no head anchor when it was opened at record ${noAnchor.seq}, so nothing proves how many records preceded that point; everything from there on is anchored`,
       }
     }
     return { ok: true, count: rows.length, head: prev }
