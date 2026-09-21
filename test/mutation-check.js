@@ -78,7 +78,7 @@ const MUTATIONS = [
   {
     what: 'error details reach the agent unscrubbed',
     file: 'src/daemon/pipeline.js',
-    from: 'err.detail = this.#safeMessage({ message: err.detail })',
+    from: 'err.detail = this.#safeMessage({ message: err.detail }, scrubber)',
     to: '',
     tests: ['test/security/response.test.js'],
   },
@@ -99,7 +99,7 @@ const MUTATIONS = [
   {
     what: 'the MCP session is read from shared state again',
     file: 'src/daemon/server.js',
-    from: 'const r = await this.mcp.handle(m, session)',
+    from: 'const r = await this.mcp.handle(m, session, token)',
     to: 'const r = await this.mcp.handle(m)',
     tests: ['test/security/mcp-tools.test.js'],
   },
