@@ -50,10 +50,21 @@ export function encodings(secret, minLen = MIN_SECRET_LEN) {
   // Base64 at three alignments, standard and URL-safe. A secret embedded in a
   // larger base64 blob is offset by however many bytes precede it, so the
   // aligned substrings are what actually appear in the response.
+  // A base64 character is "the secret's" when every bit it encodes comes from
+  // the secret's bytes: character i covers bits [6i, 6i+6), so with `pad`
+  // bytes in front the run is [ceil(4·pad/3), floor(4·(pad+len)/3)).
+  //
+  // The end used to be `length - 4`, chopping a blunt four characters off to
+  // clear the padding. That is up to three bytes MORE than the padding, and
+  // those bytes are the secret's last three — so a token echoed inside a
+  // base64 blob came back to the agent with its tail intact. Redacting all but
+  // the last three characters of a credential is not redacting it.
+  const bytes = Buffer.from(secret, 'utf8')
   for (let pad = 0; pad < 3; pad++) {
-    const padded = Buffer.concat([Buffer.alloc(pad, 0x20), Buffer.from(secret, 'utf8')])
-    const std = padded.toString('base64')
-    const core = std.slice(Math.ceil((pad * 4) / 3), std.length - 4)
+    const std = Buffer.concat([Buffer.alloc(pad, 0x20), bytes]).toString('base64')
+    const start = Math.ceil((pad * 4) / 3)
+    const end = Math.floor((4 * (pad + bytes.length)) / 3)
+    const core = std.slice(start, end)
     add(core)
     add(core.replace(/\+/g, '-').replace(/\//g, '_'))
   }

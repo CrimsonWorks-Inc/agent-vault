@@ -104,6 +104,49 @@ test('every declared encoding of a secret is actually caught', () => {
   }
 })
 
+test('a secret inside a base64 blob does not come back with its tail intact', () => {
+  // The base64 needle trimmed a blunt four characters off the end to clear the
+  // padding. Padding is at most two characters, so that also removed up to
+  // three bytes of the SECRET — and those bytes are its last three. An
+  // upstream that echoed a token inside a base64 blob returned it to the agent
+  // missing everything but its tail, which is not redaction.
+  //
+  // The offsets matter: a secret embedded in a larger blob does not begin on a
+  // 3-byte boundary, which is what the three alignments exist for.
+  for (const len of [24, 32, 40, 41, 42, 43, 64]) {
+    const secret = `ghp_${'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.repeat(3).slice(0, len - 4)}`
+    assert.equal(secret.length, len)
+    const s = new Scrubber([{ secret, label: 'k', replacement: '[R]', always: true }])
+    for (let offset = 0; offset < 6; offset++) {
+      const blob = Buffer.concat([
+        Buffer.alloc(offset, 0x41), Buffer.from(secret, 'utf8'), Buffer.from('TRAILING', 'utf8'),
+      ]).toString('base64')
+      const { text } = s.scrub(`{"blob":"${blob}"}`)
+
+      // Whatever survived, read at every alignment. The leak was specifically
+      // the END of the secret — the four trimmed characters are its last
+      // three bytes — so that is what to look for, and three characters of a
+      // credential's tail is three more than zero. The trailing data is chosen
+      // not to contain them, so a hit here is the secret and not a collision.
+      const tail = secret.slice(-3)
+      assert.ok(!'TRAILING'.includes(tail), 'the test fixture would collide')
+      const surviving = text.replace(/\[R\]/g, ' ')
+      for (const piece of surviving.split(/[^A-Za-z0-9+/=_-]+/)) {
+        for (let skip = 0; skip < 4; skip++) {
+          let t = piece.slice(skip).replace(/=+$/, '')
+          if (t.length < 8) continue
+          if (t.length % 4 === 1) t = t.slice(0, -1)
+          const decoded = Buffer.from(t + '='.repeat((4 - (t.length % 4)) % 4), 'base64').toString('latin1')
+          assert.ok(
+            !decoded.includes(tail),
+            `len ${len} offset ${offset}: the secret's last ${tail.length} characters survived the scrub`,
+          )
+        }
+      }
+    }
+  }
+})
+
 test('a secret is scrubbed as the response actually carries it, not as a JS string', () => {
   // Bodies are read byte-for-byte as latin1 so a binary response survives
   // intact. The needles were JS strings, so a secret with any character
