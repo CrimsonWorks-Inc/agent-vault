@@ -337,7 +337,17 @@ export class Pipeline {
 
     // --- budget ------------------------------------------------------------
     const budget = effective.budget
-    if (budget && grant.budget_used >= budget.limit) {
+    // A limit that is present but not a number can only come from a bug, and
+    // the failure mode is silent and total: `used >= NaN` is false forever, so
+    // the grant is uncounted while the policy still shows a budget. Refuse
+    // rather than proceed on a counter that cannot count.
+    if (budget && budget.limit !== undefined && budget.limit !== null && !Number.isFinite(budget.limit)) {
+      throw deny('AV_POLICY_DENIED', 'this grant has a budget whose limit is not a number, so no request can be counted against it', {
+        rule: 'budget',
+        hint: 'Recreate the grant with a numeric budget limit, or with no budget at all.',
+      })
+    }
+    if (budget && Number.isFinite(budget.limit) && grant.budget_used >= budget.limit) {
       throw deny('AV_POLICY_DENIED', `grant budget of ${budget.limit} ${budget.unit || 'requests'} is spent`, {
         rule: 'budget',
         hint: 'A human must widen the grant or start a new session.',

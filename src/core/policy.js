@@ -161,7 +161,14 @@ function intersectRate(a, b) {
 function intersectBudget(a, b) {
   if (!a) return b
   if (!b) return a
-  return { unit: b.unit || a.unit, limit: Math.min(a.limit, b.limit) }
+  // A layer that names a unit but no limit constrains nothing, and Math.min
+  // with an absent limit is NaN. Every budget check is `used >= limit`, and
+  // `anything >= NaN` is false — so one layer written `{unit:'requests'}`
+  // turned a counted grant into an uncounted one, silently, in the counter
+  // itself. Take the tightest limit anyone actually stated, or none.
+  const unit = b.unit || a.unit
+  const limits = [a.limit, b.limit].filter((n) => Number.isFinite(n))
+  return limits.length ? { unit, limit: Math.min(...limits) } : { unit }
 }
 
 function intersectPh(a, b) {

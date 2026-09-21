@@ -634,7 +634,11 @@ export class Vault {
     const fieldName = field || grant.fields[0]
     if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)
 
-    const budgetLimit = grant.policy?.budget?.limit ?? 1000
+    // `?? 1000` does not catch NaN, only null and undefined, so a malformed
+    // budget propagated straight into the placeholder's use ceiling — and
+    // `Math.min(asked, NaN)` is NaN, which no `uses >= max_uses` ever stops.
+    const stated = grant.policy?.budget?.limit
+    const budgetLimit = Number.isFinite(stated) ? stated : 1000
     const phPolicy = grant.policy?.placeholder_policy || {}
     const maxActive = phPolicy.max_active ?? 8
     const active = Object.values(this.db.placeholders)
@@ -650,8 +654,9 @@ export class Vault {
     // sit on the right of a `??`, so a caller asking for a million uses got a
     // million even where the human had configured one-time placeholders.
     // Enforced here so no call site can forget it.
-    const ceiling = phPolicy.max_uses ?? budgetLimit
-    const maxUses = uses == null ? ceiling : Math.min(uses, ceiling)
+    const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : budgetLimit
+    const asked = Number(uses)
+    const maxUses = uses == null || !Number.isFinite(asked) ? ceiling : Math.min(asked, ceiling)
     const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
     const expires = Math.min(
       ttl ? Date.now() + ttl : Infinity,

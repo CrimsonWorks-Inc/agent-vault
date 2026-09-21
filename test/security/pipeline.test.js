@@ -308,6 +308,56 @@ test('S04: a placeholder from another session is refused', async () => {
   assert.equal(sent.length, 0)
 })
 
+test('a budget layer that names no limit does not make the grant unlimited', async () => {
+  // Every budget check is `used >= limit`, and `anything >= NaN` is false. So
+  // intersecting a real budget with a layer written `{unit:'requests'}` — no
+  // limit — produced Math.min(50, undefined) = NaN, and the grant stopped
+  // being counted at all. The policy still showed a budget; the counter had
+  // quietly stopped counting, which is the one failure the budget exists to
+  // make impossible.
+  setup()
+  const cred = vault.findCredential('gh-frozencrow')
+  const s = vault.createSession({
+    label: 'with a limit',
+    policy: { hosts: ['api.github.com'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: 2 } },
+  })
+  const g = vault.createGrant({
+    sessionId: s.session.id, credentialId: cred.id, fields: ['token'],
+    // A grant layer that mentions the unit and nothing else.
+    policy: { hosts: ['api.github.com'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests' }, approval: 'auto' },
+  })
+  const p = vault.issuePlaceholder({ grantId: g.id, field: 'token' }).placeholder
+  const call = () => pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['av-session', s.token], ['authorization', `Bearer ${p}`]],
+  }))
+
+  assert.equal((await call()).status, 200)
+  assert.equal((await call()).status, 200)
+  const third = await call()
+  assert.equal(third.status, 403, 'the session layer set a limit of 2; the third call must be refused')
+  assert.match(JSON.parse(third.body).detail, /budget/)
+  assert.equal(sent.length, 2, 'only the two budgeted calls may reach the upstream')
+})
+
+test('a budget limit that is not a number refuses rather than counts nothing', async () => {
+  // Whatever produced it, a limit that cannot be compared must not read as
+  // "no limit". Fail closed and say why.
+  setup()
+  const cred = vault.findCredential('gh-frozencrow')
+  const s = vault.createSession({ label: 'broken budget', policy: {} })
+  const g = vault.createGrant({
+    sessionId: s.session.id, credentialId: cred.id, fields: ['token'],
+    policy: { hosts: ['api.github.com'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: 'lots' }, approval: 'auto' },
+  })
+  const p = vault.issuePlaceholder({ grantId: g.id, field: 'token' }).placeholder
+  const res = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['av-session', s.token], ['authorization', `Bearer ${p}`]],
+  }))
+  assert.equal(res.status, 403)
+  assert.match(JSON.parse(res.body).detail, /not a number/)
+  assert.equal(sent.length, 0)
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)
