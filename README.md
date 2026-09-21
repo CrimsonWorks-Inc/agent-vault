@@ -309,6 +309,8 @@ This build is the mechanism, not the hardened deployment. Each gap below is real
 
 Attempts are charged for: five free, then each further failure doubles the wait, up to a minute, and the throttle is audited. That bounds online guessing, and it bounds something else — the check is `scryptSync`, which runs *on* the event loop, so every attempt is ~190ms during which the daemon answers nothing at all. A loop of wrong passphrases on the control socket used to be a stall of the whole vault, gateway included, at no cost to the caller. The Rust port moves the derivation off the loop; the throttle is what makes that a performance change rather than a security one.
 
+The throttle counts attempts per daemon, not per caller, because on a Unix socket there is nobody to count separately. So an agent can deliberately fail five times and make you wait, which is why the backoff caps at a minute rather than escalating without limit: a nuisance either way, but not a lockout, and it is in the audit log.
+
 The passphrase's honest limit (N3) is that a swapped CLI or an agent-owned terminal could phish it as you type. Hardware presence over the socket would remove that, and the pieces now exist — the daemon already verifies assertions — but the CLI has no way to collect one, so it tells you to confirm in the UI instead.
 
 With **neither** factor enrolled the socket is open and every widening call is audited as `control.widening_ungated`. That is the documented state of a vault with no human secret. Set a passphrase.

@@ -91,7 +91,7 @@ export class Pipeline {
           // where credentials actually appear in a URL. What remains goes
           // through the scrubber, so a secret in a path segment is redacted
           // rather than filed.
-          path: this.#safePath(result.path),
+          path: result.auditPath ?? null,
           // A streamed response has no buffered body to measure at this point.
           bytes_down: result.body ? result.body.length : null,
           streamed: !!result.stream,
@@ -216,8 +216,7 @@ export class Pipeline {
    */
   #safeMessage(e) {
     const raw = String(e?.message ?? e)
-    let text = raw
-    for (const hit of ph.findAll(raw)) text = text.split(hit.text).join(`av1.<${hit.slug}_${hit.field}>`)
+    const text = this.#redactPlaceholders(raw)
     try {
       if (this.vault.locked) return text
       const secrets = this.vault.allSecrets()
@@ -241,6 +240,13 @@ export class Pipeline {
    */
   #safePath(p) {
     return this.#safeMessage({ message: String(p ?? '').split('?')[0] })
+  }
+
+  /** Placeholder text swapped for a name. No decryption, so it is cheap. */
+  #redactPlaceholders(text) {
+    let out = String(text)
+    for (const hit of ph.findAll(out)) out = out.split(hit.text).join(`av1.<${hit.slug}_${hit.field}>`)
+    return out
   }
 
   /** /p/<slug>/<path>  or  /t/<scheme>/<host>/<path> */
@@ -502,6 +508,12 @@ export class Pipeline {
 
     // --- scrub -------------------------------------------------------------
     const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))])
+    // The path as the audit log may hold it, computed here because this
+    // scrubber already exists. Doing it in handle() meant #safeMessage, which
+    // calls allSecrets() — decrypting every credential in the vault — on every
+    // successful request rather than only on a failing one. More plaintext in
+    // memory, more often, for no benefit.
+    const auditPath = this.#redactPlaceholders(scrubber.scrub(String(decision.path ?? '').split('?')[0]).text)
 
     const outHeaders = {}
     for (const [n, v] of Object.entries(res.headers)) {
@@ -523,7 +535,7 @@ export class Pipeline {
     if (contentType.startsWith('text/event-stream') && res.res) {
       this.vault.audit.write('response.streamed', { request_id: requestId, content_type: contentType })
       return {
-        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, path: decision.path, redactions: 0,
+        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: 0,
         stream: scrubEventStream(res.res, scrubber, () => {
           this.vault.audit?.write('response.stream_cut', {
             request_id: requestId, reason: 'credential_split_across_events',
@@ -572,7 +584,7 @@ export class Pipeline {
 
     const result = {
       status: res.status, headers: outHeaders, body: Buffer.from(text, 'latin1'),
-      host: decision.host, rule: decision.rule, path: decision.path, redactions,
+      host: decision.host, rule: decision.rule, auditPath, redactions,
     }
     // Store the scrubbed response against the approval so a duplicate resend
     // replays it rather than hitting the upstream a second time.
