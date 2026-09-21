@@ -742,7 +742,12 @@ const COMMANDS = {
   async 'audit:verify'() {
     const v = await control('GET', '/v1/audit/verify')
     if (v.ok) out(`${C.green('chain intact')} ${v.count} records, head ${v.head?.slice(0, 16)}...`, v)
-    else fail(`chain broken at record ${v.brokenAt}: ${v.reason}`, EXIT.FAILURE, { problem: v })
+    // Not every finding has a record number: a log that is missing its head
+    // anchor, or that ends short of where it should, is broken between records
+    // rather than at one. "broken at record undefined" would be the daemon
+    // reporting tampering and sounding like a bug instead.
+    else if (v.brokenAt) fail(`chain broken at record ${v.brokenAt}: ${v.reason}`, EXIT.FAILURE, { problem: v })
+    else fail(`the audit log cannot be trusted: ${v.reason}`, EXIT.FAILURE, { problem: v })
   },
 
   async 'listen:add'(args) {
@@ -1150,6 +1155,15 @@ const COMMANDS = {
     // reach the control socket can set a passphrase of its own and keep the
     // vault. The daemon creates the vault unattended, so this state is the
     // one every install passes through — it should not be quiet.
+    // The log is the record of what an agent did with your credentials. A
+    // broken chain is only useful if something looks at it, and nothing did
+    // unless a human happened to run `audit verify`.
+    const chain = await control('GET', '/v1/audit/verify').catch(() => null)
+    if (chain) {
+      checks.push(['audit chain intact', chain.ok === true,
+        chain.ok ? `${chain.count} records` : chain.reason])
+    }
+
     const lock = await control('GET', '/v1/lockstate').catch(() => null)
     if (lock) {
       const enrolled = Boolean(lock.has_passphrase || lock.has_touchid)

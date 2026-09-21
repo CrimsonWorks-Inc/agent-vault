@@ -146,6 +146,15 @@ test('audit verify reports an intact chain', async () => {
   assert.equal(JSON.parse(stdout).data.ok, true)
 })
 
+test('doctor checks the audit chain, so nothing has to remember to', async () => {
+  // A broken chain is only evidence if something looks at it. Nothing did
+  // unless a human happened to run `audit verify` and think to read it.
+  const doctor = JSON.parse((await av(['doctor', '--json'])).stdout)
+  const chain = doctor.data.find((c) => c.name === 'audit chain intact')
+  assert.ok(chain, 'doctor does not check the audit chain')
+  assert.equal(chain.ok, true, `the chain should be intact here: ${chain.note}`)
+})
+
 test('listen add refuses the control surface on a network address', async () => {
   await assert.rejects(
     av(['listen', 'add', 'bad', '--address', 'eth0:7411', '--surfaces', 'gateway,control', '--json']),

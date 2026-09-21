@@ -144,3 +144,109 @@ test('the chain verifies, and editing a record breaks it', () => {
   assert.equal(after.ok, false, 'an edited record must break the chain')
   assert.ok(Number.isInteger(after.brokenAt), 'and it must name where')
 })
+
+test('cutting the end off the log is detected, and cannot be quietly continued', () => {
+  // The chain proves no record was edited or removed from the MIDDLE, because
+  // every later hash stops matching. It proves nothing about the end: delete
+  // the last fifty lines and what remains verifies perfectly, first record to
+  // last. The records anyone would want gone are always the most recent ones,
+  // so that is the whole attack, and it needs no key and no cleverness.
+  //
+  // Worse, the daemon used to resume from whatever the file ended with — so
+  // the next write continued the chain from the truncated point and the log
+  // became permanently self-consistent at its shorter length.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-trunc-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    for (let i = 0; i < 12; i++) v.audit.write('test.event', { n: i })
+    assert.equal(v.audit.verify().ok, true)
+    const full = v.audit.verify().count
+
+    const path = join(fresh, 'audit.jsonl')
+    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
+    writeFileSync(path, `${lines.slice(0, -5).join('\n')}\n`)
+
+    // The chain alone still walks cleanly. That is the point.
+    const reopened = Vault.open(fresh)
+    reopened.unlockWith({})
+    const v2 = reopened.audit.verify()
+    assert.equal(v2.ok, false, 'a truncated log must not verify')
+    assert.match(v2.reason, /removed from the end/)
+
+    // And the evidence survives the daemon continuing to write, rather than
+    // being overwritten by the next record.
+    const kinds = reopened.audit.read({ limit: 50 }).map((r) => r.kind)
+    assert.ok(kinds.includes('audit.truncation_detected'), 'the gap must be recorded in the log itself')
+    const noted = reopened.audit.read({ limit: 50 }).find((r) => r.kind === 'audit.truncation_detected')
+    assert.equal(noted.expected_seq, full)
+    assert.equal(noted.found_seq, full - 5)
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('emptying the log entirely is detected too', () => {
+  // The loudest version of the same attack, and the one a chain walk can say
+  // nothing at all about: there is nothing left to walk.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-empty-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    for (let i = 0; i < 6; i++) v.audit.write('test.event', { n: i })
+    writeFileSync(join(fresh, 'audit.jsonl'), '')
+
+    const reopened = Vault.open(fresh)
+    reopened.unlockWith({})
+    assert.equal(reopened.audit.verify().ok, false, 'an emptied log must not verify')
+    assert.ok(
+      reopened.audit.read({ limit: 10 }).some((r) => r.kind === 'audit.truncation_detected'),
+      'and the daemon must say so in the log it starts over with',
+    )
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('losing the anchor is reported rather than assumed harmless', () => {
+  // Removing the anchor is the natural next move once truncation is caught, so
+  // its absence has to be a finding in itself. It cannot be forged: the head
+  // is authenticated under K_audit, which lives behind the uid boundary.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-anchor-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    v.audit.write('test.event', {})
+    rmSync(join(fresh, 'audit.jsonl.head'))
+    const reopened = Vault.open(fresh)
+    reopened.unlockWith({})
+    const res = reopened.audit.verify()
+    assert.equal(res.ok, false)
+    assert.match(res.reason, /anchor/)
+    assert.ok(
+      reopened.audit.read({ limit: 10 }).some((r) => r.kind === 'audit.anchor_missing'),
+      'and it must be recorded, so deleting the anchor again does not clear it',
+    )
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('a normal restart is not mistaken for tampering', () => {
+  // The fail-closed direction is worthless if it fires on ordinary use. Stop
+  // and start a vault repeatedly and the log must stay clean.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-restart-'))
+  try {
+    let v = Vault.create(fresh, { factor: 'none' })
+    for (let round = 0; round < 4; round++) {
+      for (let i = 0; i < 5; i++) v.audit.write('test.event', { round, i })
+      v = Vault.open(fresh)
+      v.unlockWith({})
+      const res = v.audit.verify()
+      assert.equal(res.ok, true, `restart ${round}: ${res.reason}`)
+    }
+    assert.equal(
+      v.audit.read({ limit: 100 }).some((r) => r.kind === 'audit.truncation_detected'), false,
+      'a clean restart must not be recorded as a truncation',
+    )
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})

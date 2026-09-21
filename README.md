@@ -26,20 +26,23 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 356 tests
+npm test          # 367 tests
 ```
 
 ```bash
 npm run test:mutation
 ```
 
-The second one checks the tests against themselves: it removes each critical
-protection in turn and asserts the suite notices. Deleting the human-presence
-gate fails 6 tests, host confinement 4, the placeholder checksum 4, the
-approval's request-hash binding 4, the session-token strip 2, and the streaming
-scrubber, the injection-site encoding check, error-detail scrubbing and the
-installer's symlink refusal 1 each. A mutation that survives means the thing it
-broke is not really tested, whatever the test names say.
+The second one checks the tests against themselves: it removes each of fifteen
+critical protections in turn and asserts the suite notices. Deleting the
+human-presence gate fails 6 tests; host confinement, the placeholder checksum
+and the approval's request-hash binding 4 each; the session-token strip, the
+path control-character refusal and non-ASCII scrubbing 2 each; and the
+streaming scrubber, the injection-site encoding check, error-detail scrubbing,
+per-message MCP sessions, the ceiling on a child policy, the gate on Touch ID
+enrollment, the last-unlock-wrap guard and the installer's symlink refusal 1
+each. A mutation that survives means the thing it broke is not really tested,
+whatever the test names say.
 
 ## Use it
 
@@ -135,7 +138,7 @@ That opens the docs inside the web UI, where they are written against your actua
 
 **Approvals are bound to the request hash.** A write held for a human executes exactly once however many times the client retries; later resends replay the stored response instead of producing a second side effect.
 
-**The audit log is hash-chained.** Editing or removing a record breaks verification and `audit verify` names the record. No credential value, full placeholder, body or path ever enters it. Its key is derived from the vault master key and is dropped when the vault locks, so a locked vault genuinely cannot read its own log — `audit tail` answers `AV_LOCKED` rather than pretending otherwise.
+**The audit log is hash-chained, and its end is anchored.** Editing or removing a record breaks verification and `audit verify` names the record. The chain alone says nothing about the *end* of the log — cut the last fifty lines off and what remains verifies perfectly, which is the only edit worth making, since the records anyone would want gone are always the most recent. So the head sequence and hash are also kept in a small file beside the log, authenticated under the same key, and the daemon compares them at every start: a log that comes back short, or without its anchor, gets that fact written permanently into the chain it continues with. `doctor` checks it, so nothing depends on a human thinking to. No credential value, full placeholder, body or path ever enters it. Its key is derived from the vault master key and is dropped when the vault locks, so a locked vault genuinely cannot read its own log — `audit tail` answers `AV_LOCKED` rather than pretending otherwise.
 
 **The control API is a Unix socket and never binds a network address.** Everything that creates or widens capability lives there. A `listen` entry naming the control or database surface on a network address is refused at creation, loudly and audibly, rather than silently narrowed.
 
@@ -259,8 +262,9 @@ has read every line of this repository. Against that attacker:
   and states which side of that line each route is on.
 - It cannot approve its own held request, borrow another session's grant, or
   mint a placeholder against a credential it was not granted.
-- It cannot hide. Every refusal is audited, the log is hash-chained, and
-  `audit verify` names the record if anything was edited.
+- It cannot hide. Every refusal is audited, the log is hash-chained with an
+  authenticated head anchor, and `audit verify` names the record if anything
+  was edited or cut from the end.
 
 **What it does not defend against:**
 
