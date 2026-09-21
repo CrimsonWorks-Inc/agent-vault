@@ -190,3 +190,34 @@ test('a successful call is still forwarded byte for byte', async () => {
   } finally { b.proc.kill() }
 })
 
+
+test('a daemon restart does not leave the bridge permanently broken', async () => {
+  // The daemon keeps MCP sessions in memory, so a restart invalidates every
+  // one of them at once. The bridge cached its Mcp-Session-Id and never
+  // cleared it, so from then on every call came back
+  // AV_MCP_SESSION_UNKNOWN — for the life of the client. The bridge already
+  // recovers from a dead VAULT session by re-reading the token; this is the
+  // same papercut one layer up, and it needed the same treatment.
+  newSession('survives-restart')
+  const b = bridge()
+  try {
+    b.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } })
+    const init = await b.next()
+    assert.ok(init.result, `initialize failed: ${JSON.stringify(init).slice(0, 160)}`)
+
+    // Everything the daemon knew about MCP sessions, gone — exactly what a
+    // restart does.
+    daemon.mcp.sessions.clear()
+
+    b.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+    const res = await b.next()
+    assert.equal(res.id, 2)
+    assert.ok(!res.error, `the bridge did not recover: ${JSON.stringify(res.error)}`)
+    assert.ok(Array.isArray(res.result?.tools), 'the tools should be listable again')
+
+    // And it keeps working afterwards, rather than recovering exactly once.
+    b.send({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} })
+    const again = await b.next()
+    assert.ok(Array.isArray(again.result?.tools), 'the recovery must be durable')
+  } finally { b.proc.kill() }
+})

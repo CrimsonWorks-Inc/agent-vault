@@ -1019,6 +1019,21 @@ const COMMANDS = {
               res = await send(fresh)
             }
           }
+          if (res.status === 404 && mcpSessionId) {
+            // The MCP session id went stale — the daemon keeps those in
+            // memory, so every restart invalidates all of them at once. The
+            // bridge recovered from a dead VAULT session and not from this
+            // one, so after a daemon restart every call failed with
+            // AV_MCP_SESSION_UNKNOWN until the human restarted their client:
+            // the same papercut the per-request token lookup exists to avoid,
+            // one layer up. Drop the id and let the next request open a new
+            // one.
+            const body = await res.clone().text().catch(() => '')
+            if (body.includes('AV_MCP_SESSION_UNKNOWN')) {
+              mcpSessionId = null
+              res = await send(currentToken())
+            }
+          }
           const sid = res.headers.get('mcp-session-id')
           if (sid) mcpSessionId = sid
           const text = await res.text()
