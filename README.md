@@ -26,7 +26,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 375 tests
+npm test          # 376 tests
 ```
 
 ```bash
@@ -306,6 +306,8 @@ This build is the mechanism, not the hardened deployment. Each gap below is real
 **The daemon is JavaScript, not Rust.** The spec chose Rust for three reasons this build cannot satisfy: zeroizable memory (V8 strings cannot be wiped), peer-credential syscalls (Node has no public API for `SO_PEERCRED`), and running from a root-owned path with no interpreter the human owns. Everything language-independent, the grammar, the pipeline, the policy semantics, the wire behaviour, is implemented and tested here and ports directly.
 
 **Presence on the CLI is a passphrase; in the UI it is hardware.** Either satisfies the gate. Run `agent-vault passphrase set` and every capability-widening action on the control socket — adding or removing a credential, creating a session, issuing a placeholder, approving a held request, binding a listener — requires it, opening a five-minute window so you are not asked on every call. An enrolled authenticator counts too: the daemon mints the challenge and verifies the assertion itself, so a signature collected by the web UI satisfies the socket without the UI being trusted to vouch for it.
+
+Attempts are charged for: five free, then each further failure doubles the wait, up to a minute, and the throttle is audited. That bounds online guessing, and it bounds something else — the check is `scryptSync`, which runs *on* the event loop, so every attempt is ~190ms during which the daemon answers nothing at all. A loop of wrong passphrases on the control socket used to be a stall of the whole vault, gateway included, at no cost to the caller. The Rust port moves the derivation off the loop; the throttle is what makes that a performance change rather than a security one.
 
 The passphrase's honest limit (N3) is that a swapped CLI or an agent-owned terminal could phish it as you type. Hardware presence over the socket would remove that, and the pieces now exist — the daemon already verifies assertions — but the CLI has no way to collect one, so it tells you to confirm in the UI instead.
 

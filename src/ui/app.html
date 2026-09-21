@@ -673,6 +673,7 @@ ${c.cli} audit verify`, 'The log is hash-chained; verify proves nothing was edit
             ['AV_LOCKED', 'The vault is locked.', `<code>${esc(c.cli)} unlock</code>, or unlock from the Overview page.`],
             ['AV_PRESENCE_REQUIRED', 'Something tried to widen capability without confirmation.', 'Do it from this page with your fingerprint, or from the CLI after proving your passphrase.'],
             ['AV_PRESENCE_DENIED', 'The passphrase or signature did not verify.', 'Try again. Repeated failures are in the audit log.'],
+            ['AV_RATE_LIMITED', 'Too many passphrase attempts in a row.', 'Wait for the backoff named in the message. Each further failure doubles it, up to a minute.'],
             ['AV_SESSION_REQUIRED', 'No session token was presented.', 'Send it as <code>Authorization: Bearer</code>, or use a placeholder at a declared header site.'],
             ['AV_SESSION_EXPIRED', 'The session ran out of time or budget.', 'Create a new one.'],
             ['AV_SESSION_REVOKED', 'You revoked it.', 'Create a new one if that was not what you meant.'],

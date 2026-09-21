@@ -287,6 +287,46 @@ test('an agent cannot set the first passphrase and lock the owner out', async ()
   }
 })
 
+test('passphrase attempts are charged for, in time and in the log', async () => {
+  // Two problems, one cause. Nothing counted attempts, so an agent on the
+  // control socket could guess a passphrase as fast as the daemon could check
+  // one. And the check is scryptSync, which runs ON the event loop: ~190ms
+  // during which the daemon answers nothing at all — not the gateway, not
+  // another agent's request. A `while true` of wrong passphrases was a stall
+  // of the whole vault, free of charge.
+  daemon.presenceGraceUntil = 0
+  daemon.passphraseFailures = 0
+  daemon.passphraseLockedUntil = 0
+
+  let refusals = 0
+  for (let i = 0; i < 8; i++) {
+    const res = await ctl('POST', '/v1/presence/window', { passphrase: 'not the passphrase' })
+    if (res.body.code === 'AV_RATE_LIMITED') {
+      refusals++
+      assert.equal(res.status, 429)
+      assert.ok(res.body.detail.includes('try again in'), 'the refusal must say how long to wait')
+    } else {
+      assert.equal(res.body.code, 'AV_PRESENCE_DENIED', `attempt ${i}: ${JSON.stringify(res.body)}`)
+    }
+  }
+  assert.ok(refusals > 0, '8 wrong passphrases in a row were all checked, at ~190ms of blocked event loop each')
+
+  // And it is visible afterwards, not just felt.
+  assert.ok(
+    vault.audit.read({ limit: 50 }).some((r) => r.kind === 'presence.throttled'),
+    'the throttle must be audited',
+  )
+
+  // The real passphrase still works once the backoff passes: this is a
+  // throttle, not a lockout. A human who mistypes five times is not locked
+  // out of their own vault.
+  daemon.passphraseLockedUntil = 0
+  const ok = await ctl('POST', '/v1/presence/window', { passphrase: PASS })
+  assert.equal(ok.status, 200, `the right passphrase must still open a window: ${JSON.stringify(ok.body)}`)
+  assert.equal(daemon.passphraseFailures, 0, 'a success must clear the count')
+  daemon.presenceGraceUntil = 0
+})
+
 test('the CLI names the factor that exists, not the one it expects', () => {
   // Checking the terminal before checking which factors exist meant a vault
   // whose only factor is an authenticator answered "needs your passphrase",

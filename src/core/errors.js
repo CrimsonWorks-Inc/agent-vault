@@ -67,6 +67,8 @@ export const CODES = {
     hint: 'This change needs a human; confirm your passphrase.' },
   AV_PRESENCE_DENIED: { http: 403, exit: EXIT.PRESENCE, audit: 'presence.denied', consumes: false,
     hint: 'The passphrase did not verify.' },
+  AV_RATE_LIMITED: { http: 429, exit: EXIT.PRESENCE, audit: 'presence.throttled', consumes: false,
+    hint: 'Too many failed attempts. Wait for the backoff to expire and try again.' },
   AV_UPSTREAM_UNREACHABLE: { http: 502, exit: EXIT.UPSTREAM, audit: 'request.upstream_failed', consumes: false,
     hint: 'The upstream could not be reached; the placeholder use was refunded.' },
   AV_MCP_PROTOCOL: { http: 400, exit: EXIT.FAILURE, audit: 'mcp.protocol_rejected', consumes: false,

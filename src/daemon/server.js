@@ -27,6 +27,12 @@ const MAX_BODY = 16 * 1024 * 1024
 const MAX_OPEN_CHALLENGES = 64
 const MAX_OPERATION_BYTES = 8 * 1024
 
+// Passphrase attempts. The free ones cover an ordinary typo; after that each
+// further failure doubles the wait, which bounds both the guessing rate and
+// the amount of event loop a caller can spend on scrypt.
+const PASSPHRASE_FREE_ATTEMPTS = 5
+const PASSPHRASE_MAX_BACKOFF_MS = 60_000
+
 export class Daemon {
   constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
     this.vault = vault
@@ -54,6 +60,44 @@ export class Daemon {
     // rather than trusting the UI process, which runs as the human's account
     // and is therefore reachable by an agent.
     this.opChallenges = new Map()
+    // Consecutive failed passphrase attempts, and when to start accepting them
+    // again. Every attempt costs an scrypt — deliberately, so guessing is
+    // expensive — but scryptSync runs ON the event loop, so 188ms of "slow" is
+    // 188ms during which the daemon answers nothing at all: not the gateway,
+    // not a health check, not another agent's request. A loop of wrong
+    // passphrases on the control socket was therefore a stall of the whole
+    // vault as well as free online guessing, since nothing counted attempts.
+    this.passphraseFailures = 0
+    this.passphraseLockedUntil = 0
+  }
+
+  /**
+   * Charge for a passphrase attempt before spending any time on it.
+   * Returns nothing; throws when the caller must wait.
+   */
+  #throttlePassphrase() {
+    const now = Date.now()
+    if (now < this.passphraseLockedUntil) {
+      const wait = Math.ceil((this.passphraseLockedUntil - now) / 1000)
+      throw deny('AV_RATE_LIMITED', `too many failed passphrase attempts; try again in ${wait}s`, {
+        rule: 'passphrase_throttle',
+        retry_after_s: wait,
+      })
+    }
+  }
+
+  /** Record how an attempt went, and back off when they keep failing. */
+  #recordPassphraseAttempt(ok) {
+    if (ok) { this.passphraseFailures = 0; this.passphraseLockedUntil = 0; return }
+    this.passphraseFailures++
+    if (this.passphraseFailures < PASSPHRASE_FREE_ATTEMPTS) return
+    const over = this.passphraseFailures - PASSPHRASE_FREE_ATTEMPTS
+    const backoff = Math.min(1000 * 2 ** over, PASSPHRASE_MAX_BACKOFF_MS)
+    this.passphraseLockedUntil = Date.now() + backoff
+    this.vault.audit?.write('presence.throttled', {
+      consecutive_failures: this.passphraseFailures,
+      until: new Date(this.passphraseLockedUntil).toISOString(),
+    })
   }
 
   /**
@@ -714,10 +758,23 @@ export class Daemon {
 
         case 'POST /v1/unlock': {
           if (!this.vault.locked) return json(200, { ok: true, locked: false, already: true })
-          const factor = this.vault.unlockWith({
-            passphrase: input.passphrase ?? null,
-            prfSecret: input.prf_secret || null,
-          })
+          // Unlocking is how you supply the factor, so it cannot be gated on
+          // having supplied it. That leaves it as the one route an agent can
+          // call repeatedly for free — and each attempt runs scrypt on the
+          // event loop. Charge for the attempt instead.
+          const guessing = input.passphrase != null
+          if (guessing) this.#throttlePassphrase()
+          let factor
+          try {
+            factor = this.vault.unlockWith({
+              passphrase: input.passphrase ?? null,
+              prfSecret: input.prf_secret || null,
+            })
+          } catch (e) {
+            if (guessing) this.#recordPassphraseAttempt(false)
+            throw e
+          }
+          if (guessing) this.#recordPassphraseAttempt(true)
           return json(200, { ok: true, locked: false, factor, factors: this.vault.factors })
         }
         case 'GET /v1/unlock/webauthn-params': {
@@ -828,9 +885,10 @@ export class Daemon {
         case 'POST /v1/presence/window': {
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
           if (!this.vault.hasPassphrase) return json(200, { granted: true, ungated: true })
-          if (!this.vault.verifyPassphrase(input.passphrase || '')) {
-            throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify')
-          }
+          this.#throttlePassphrase()
+          const verified = this.vault.verifyPassphrase(input.passphrase || '')
+          this.#recordPassphraseAttempt(verified)
+          if (!verified) throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify')
           this.presenceGraceUntil = Date.now() + this.presenceGraceMs
           this.vault.audit.write('presence.window_opened', { until: new Date(this.presenceGraceUntil).toISOString() })
           return json(200, { granted: true, until: new Date(this.presenceGraceUntil).toISOString() })
