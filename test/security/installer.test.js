@@ -207,3 +207,54 @@ test('the copy dereferences, so nothing linked can survive it', () => {
   assert.ok(copyLine, 'the install copy should still be one recognisable line')
   assert.match(copyLine, /dereference: true/, 'the install copy must dereference')
 })
+
+test('no privileged helper is ever resolved through an inherited PATH', () => {
+  // This file runs as root. `execFileSync('chown', ...)` resolves through the
+  // PATH the process inherited, and that PATH came from the human's shell —
+  // which on a developer's machine is mostly directories the human, and so any
+  // agent running as them, can write to. An executable named `chown` dropped
+  // in the first writable entry would be run as root during the install: the
+  // one moment this program has that power.
+  //
+  // Whether a particular sudoers file resets PATH decides whether that is live
+  // on a given machine. It is not a property this code gets to assume.
+  const src = readFileSync(SETUP, 'utf8')
+  // Code only: the doc comment above the resolver quotes the bug it fixes, and
+  // a check that trips over its own explanation is a check nobody keeps.
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+
+  // Every spawn names an absolute path or goes through the resolver.
+  const spawns = [...code.matchAll(/execFileSync\(\s*([^,]+),/g)].map((m) => m[1].trim())
+  for (const target of spawns) {
+    // `supplied` is the operator's --use-node, resolved to an absolute path
+    // and checked for a root-owned chain before it is run.
+    const ok = target.startsWith('resolveBin(') || /^['"`]\//.test(target)
+      || target === 'bin' || target === 'supplied'
+    assert.ok(ok, `execFileSync(${target}) does not resolve to an absolute path`)
+  }
+
+  // The resolver refuses rather than falling back, which is the part that
+  // matters: a fallback would restore the bug exactly when the layout is
+  // unusual, which is the worst moment to be lenient.
+  assert.match(src, /Refusing to fall back to PATH/)
+
+  // And the children do not inherit the caller's environment either.
+  assert.match(src, /SAFE_ENV\s*=\s*\{\s*PATH: '\/usr\/bin:\/bin:\/usr\/sbin:\/sbin'/)
+  const runBody = /function run\(cmd, cmdArgs[\s\S]*?\n}/.exec(code)[0]
+  assert.match(runBody, /env: SAFE_ENV/, 'run() must not let a helper inherit the caller environment')
+})
+
+test('every helper the installer spawns is in the allow-list', () => {
+  // A new `run('somethingelse', ...)` must be a deliberate addition to the
+  // table, not a silent return to PATH resolution.
+  const src = readFileSync(SETUP, 'utf8')
+  const table = /const BIN = \{([\s\S]*?)\n\}/.exec(src)
+  assert.ok(table, 'the allow-list is gone')
+  const allowed = new Set([...table[1].matchAll(/^\s*([a-z]+):/gm)].map((m) => m[1]))
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+  const used = new Set([...code.matchAll(/\brun\('([a-z-]+)'/g)].map((m) => m[1]))
+  for (const cmd of used) {
+    assert.ok(allowed.has(cmd), `run('${cmd}') has no entry in BIN, so it would resolve through PATH`)
+  }
+  assert.ok(used.size > 5, `expected the installer to spawn several helpers, found ${used.size}`)
+})

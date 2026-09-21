@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib'
+import { gzipSync, deflateSync, brotliCompressSync, gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib'
 import { Readable } from 'node:stream'
 import { Vault } from '../../src/store/vault.js'
 import { Daemon } from '../../src/daemon/server.js'
@@ -120,6 +120,62 @@ test('a gzipped binary body round-trips through decompression unchanged', async 
   })
   const res = await p.handle(req())
   assert.ok(res.body.equals(binary))
+})
+
+test('a COMPRESSED event stream is decompressed before it is scrubbed', async () => {
+  // The event-stream branch returned before the decompression block ever ran,
+  // so a response with both `content-type: text/event-stream` and
+  // `content-encoding: gzip` had the scrubber search DEFLATE bytes for a
+  // plaintext needle. It found nothing, every time, and handed the agent the
+  // credential in full — readable with one gunzip, counted as zero redactions,
+  // and audited as a clean `response.streamed`.
+  //
+  // Not an exotic upstream either: every LLM provider streams, and compressing
+  // a stream is ordinary. An upstream that merely WANTED to defeat the
+  // scrubber only had to set one header.
+  for (const [encoding, compress] of Object.entries({
+    gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync,
+  })) {
+    const payload = `data: {"delta":"hi"}\n\ndata: {"leak":"${SECRET}"}\n\ndata: {"delta":"bye"}\n\n`
+    const p = pipelineReturning({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'content-encoding': encoding },
+      res: Readable.from([compress(Buffer.from(payload, 'utf8'))]),
+    })
+    const res = await p.handle(req())
+    assert.ok(res.stream, `${encoding}: an event stream must still stream`)
+
+    const chunks = []
+    for await (const c of res.stream) chunks.push(Buffer.from(c, 'latin1'))
+    const delivered = Buffer.concat(chunks)
+
+    // However the agent reads it — as delivered, or by trying to decompress it
+    // itself — the secret must not be there.
+    const asDelivered = delivered.toString('utf8')
+    assert.ok(!asDelivered.includes(SECRET), `${encoding}: the secret reached the agent`)
+    for (const attempt of [gunzipSync, inflateSync, brotliDecompressSync]) {
+      let out = null
+      try { out = attempt(delivered).toString('utf8') } catch { continue }
+      assert.ok(!out.includes(SECRET), `${encoding}: the secret reached the agent, decompressible`)
+    }
+    // And the stream still works: the non-secret content arrives, in order.
+    assert.ok(asDelivered.includes('hi') && asDelivered.includes('bye'), `${encoding}: the stream was destroyed`)
+    assert.ok(asDelivered.indexOf('hi') < asDelivered.indexOf('bye'), `${encoding}: order was lost`)
+    assert.ok(asDelivered.includes(placeholder), `${encoding}: the secret should be replaced by the placeholder`)
+  }
+})
+
+test('an event stream in an encoding we cannot read is refused, not passed through', async () => {
+  // Bytes that cannot be decoded cannot be scrubbed, and the buffered path
+  // already refuses those. The streaming path has to agree.
+  const p = pipelineReturning({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream', 'content-encoding': 'exotic-v9' },
+    res: Readable.from([Buffer.from('data: anything\n\n')]),
+  })
+  const res = await p.handle(req())
+  assert.equal(res.status, 502)
+  assert.equal(JSON.parse(res.body).code, 'AV_UNSCANNABLE')
 })
 
 test('a secret inside an event is scrubbed, and the rest survives', async () => {

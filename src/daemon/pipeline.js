@@ -49,6 +49,11 @@ const REPLAY_TTL_MS = 5 * 60_000     // long enough for a retrying SDK, not for 
 const DECIDED_TTL_MS = 60 * 60_000   // keep decisions visible for an hour, then forget
 const MAX_APPROVALS = 1000
 
+// The most a response may expand to once decompressed. A compressed body is an
+// amplifier and the daemon is single-threaded, so this is the ceiling on what
+// one upstream can make it hold and scan.
+const MAX_DECOMPRESSED = 64 * 1024 * 1024
+
 export class Pipeline {
   /**
    * @param {import('../store/vault.js').Vault} vault
@@ -530,15 +535,36 @@ export class Pipeline {
     }
 
     const contentType = String(res.headers['content-type'] || '')
+    const contentEncoding = String(res.headers['content-encoding'] || '').toLowerCase().trim()
 
     // Server-sent events stream through, scrubbed one event at a time. An LLM
     // provider's token stream is the main case: buffering it to the end would
     // turn a streaming response into a long silence and then a wall of text.
     if (contentType.startsWith('text/event-stream') && res.res) {
-      this.vault.audit.write('response.streamed', { request_id: requestId, content_type: contentType })
+      // A COMPRESSED event stream has to be decompressed first, or the
+      // scrubber searches DEFLATE bytes for a plaintext needle and finds
+      // nothing — every time. This branch returned before the decompression
+      // below ever ran, so `content-type: text/event-stream` plus
+      // `content-encoding: gzip` handed the agent the credential in full:
+      // scrubbed zero times, audited as `response.streamed`, and trivially
+      // readable with one gunzip. Any upstream that compresses a stream, and
+      // any upstream that wants to, defeated the scrubber completely.
+      let source = res.res
+      if (contentEncoding && contentEncoding !== 'identity') {
+        const gunzip = decompressStream(contentEncoding)
+        if (!gunzip) {
+          throw deny('AV_UNSCANNABLE', `upstream sent a ${contentEncoding} event stream that could not be decoded, so it could not be scrubbed`, {
+            rule: 'content_encoding', hint: 'The response was discarded rather than passed through unread.',
+          })
+        }
+        source = res.res.pipe(gunzip)
+      }
+      this.vault.audit.write('response.streamed', {
+        request_id: requestId, content_type: contentType, content_encoding: contentEncoding || null,
+      })
       return {
         status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: 0,
-        stream: scrubEventStream(res.res, scrubber, () => {
+        stream: scrubEventStream(source, scrubber, () => {
           this.vault.audit?.write('response.stream_cut', {
             request_id: requestId, reason: 'credential_split_across_events',
           })
@@ -548,7 +574,7 @@ export class Pipeline {
 
     // Everything else is buffered, decompressed and scrubbed whole.
     let raw = res.body ?? (await collect(res.res))
-    const encoding = String(res.headers['content-encoding'] || '').toLowerCase().trim()
+    const encoding = contentEncoding
     if (encoding && encoding !== 'identity') {
       try {
         raw = decompress(raw, encoding)
@@ -712,14 +738,41 @@ function collect(stream) {
   })
 }
 
-function decompress(buf, encoding) {
+/**
+ * A streaming decompressor for one content-encoding, or null if we cannot read
+ * it. Bounded, because a compressed stream is an amplifier: a few kilobytes of
+ * upstream bytes can expand to gigabytes in this process, and the daemon is
+ * single-threaded.
+ */
+function decompressStream(encoding) {
+  const opts = { maxOutputLength: MAX_DECOMPRESSED }
   switch (encoding) {
     case 'gzip':
-    case 'x-gzip': return zlib.gunzipSync(buf)
-    case 'deflate': return zlib.inflateSync(buf)
-    case 'br': return zlib.brotliDecompressSync(buf)
+    case 'x-gzip': return zlib.createGunzip(opts)
+    case 'deflate': return zlib.createInflate(opts)
+    case 'br': return zlib.createBrotliDecompress({ maxOutputLength: MAX_DECOMPRESSED })
     case 'zstd':
-      if (typeof zlib.zstdDecompressSync === 'function') return zlib.zstdDecompressSync(buf)
+      return typeof zlib.createZstdDecompress === 'function'
+        ? zlib.createZstdDecompress(opts)
+        : null
+    default: return null
+  }
+}
+
+function decompress(buf, encoding) {
+  // Capped. Without maxOutputLength a 219 KB upstream response expands to
+  // hundreds of megabytes in this process before anything can object, and
+  // these are the SYNCHRONOUS entry points, so the expansion happens with the
+  // event loop held. A compression bomb is the cheapest denial of service an
+  // upstream has.
+  const opts = { maxOutputLength: MAX_DECOMPRESSED }
+  switch (encoding) {
+    case 'gzip':
+    case 'x-gzip': return zlib.gunzipSync(buf, opts)
+    case 'deflate': return zlib.inflateSync(buf, opts)
+    case 'br': return zlib.brotliDecompressSync(buf, { maxOutputLength: MAX_DECOMPRESSED })
+    case 'zstd':
+      if (typeof zlib.zstdDecompressSync === 'function') return zlib.zstdDecompressSync(buf, opts)
       throw new Error('zstd is not supported by this Node build')
     default: throw new Error(`unknown content-encoding ${encoding}`)
   }

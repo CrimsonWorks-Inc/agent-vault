@@ -75,11 +75,69 @@ const die = (message, hint) => {
   process.exit(1)
 }
 
+/**
+ * Where each privileged helper actually lives.
+ *
+ * This file runs as root. `execFileSync('chown', ...)` resolves through the
+ * PATH this process inherited, and that PATH came from the human's shell —
+ * which on a developer's machine is mostly directories the human, and
+ * therefore any agent running as them, can write to. An agent that drops an
+ * executable named `chown` into the first writable entry gets it run as root
+ * during the install, which is the one moment this program has that power.
+ *
+ * Whether a given sudoers file resets PATH with `secure_path` decides whether
+ * that is live on any particular machine. That is not a property this code
+ * gets to assume: a root process resolving a privileged helper through an
+ * inherited PATH is wrong on every machine where it happens to work.
+ *
+ * Absolute paths only, and a refusal rather than a fallback if one is not
+ * there — falling back to the bare name would restore the bug precisely when
+ * the layout is unusual, which is the worst time to be lenient.
+ */
+const SAFE_ENV = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' }
+
+const BIN = {
+  id: ['/usr/bin/id'],
+  dscl: ['/usr/bin/dscl'],
+  dseditgroup: ['/usr/sbin/dseditgroup'],
+  getent: ['/usr/bin/getent'],
+  useradd: ['/usr/sbin/useradd'],
+  usermod: ['/usr/sbin/usermod'],
+  groupadd: ['/usr/sbin/groupadd'],
+  chown: ['/usr/sbin/chown', '/bin/chown'],
+  chmod: ['/bin/chmod'],
+  setfacl: ['/usr/bin/setfacl', '/bin/setfacl'],
+  launchctl: ['/bin/launchctl'],
+  systemctl: ['/usr/bin/systemctl', '/bin/systemctl'],
+  sleep: ['/bin/sleep'],
+}
+
+function resolveBin(cmd) {
+  const candidates = BIN[cmd]
+  if (!candidates) throw new Error(`refusing to run "${cmd}": not in the allow-list of privileged helpers`)
+  const found = candidates.find((p) => existsSync(p))
+  if (!found) {
+    throw new Error(
+      `cannot find ${cmd} at ${candidates.join(' or ')}. Refusing to fall back to PATH: this process is root, `
+      + 'and PATH came from a user account an agent may control.',
+    )
+  }
+  return found
+}
+
 /** Run a command, or print it under --dry-run. */
 function run(cmd, cmdArgs, { allowFail = false } = {}) {
   if (DRY) { say(`       ${C.d(`${cmd} ${cmdArgs.join(' ')}`)}`); return '' }
+  const bin = resolveBin(cmd)
   try {
-    return execFileSync(cmd, cmdArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    // A fixed, minimal environment as well as a fixed path: these helpers
+    // should not inherit anything the caller's shell set, and several of them
+    // read the environment for locale and temp-directory behaviour.
+    return execFileSync(bin, cmdArgs, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: SAFE_ENV,
+    })
   } catch (e) {
     if (allowFail) return ''
     throw new Error(`${cmd} ${cmdArgs.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`)
@@ -124,7 +182,7 @@ function enrolledUser() {
   if (DRY) {
     uid = name === userInfo().username ? userInfo().uid : 0
   } else {
-    try { uid = Number(execFileSync('id', ['-u', name], { encoding: 'utf8' }).trim()) } catch { die(`no such user: ${name}`) }
+    try { uid = Number(execFileSync(resolveBin('id'), ['-u', name], { encoding: 'utf8', env: SAFE_ENV }).trim()) } catch { die(`no such user: ${name}`) }
   }
   return { name, uid }
 }
@@ -376,10 +434,16 @@ function assertRuntimeVersion(path, version) {
 }
 
 function installRuntime(state) {
-  const supplied = value('use-node')
-  if (supplied) {
+  const given = value('use-node')
+  if (given) {
+    // Resolved once, then validated and executed as the SAME path. It used to
+    // validate `resolve(given)` and execute `given`, so a bare name would have
+    // been checked as <cwd>/name and then run through PATH — the ownership
+    // check and the thing that runs being two different paths is the bug shape
+    // this whole file exists to avoid.
+    const supplied = resolve(given)
     assertRootOwnedChain(supplied, 'the Node binary')
-    const suppliedVersion = DRY ? process.version : execFileSync(supplied, ['--version'], { encoding: 'utf8' }).trim()
+    const suppliedVersion = DRY ? process.version : execFileSync(supplied, ['--version'], { encoding: 'utf8', env: SAFE_ENV }).trim()
     assertRuntimeVersion(supplied, suppliedVersion)
     if (!DRY) writeFileSync(join(ROOT, 'runtime-path'), supplied, { mode: 0o644 })
     step(`using the root-owned Node at ${C.b(supplied)}`)
@@ -519,7 +583,7 @@ WantedBy=multi-user.target
 function serviceLoaded() {
   if (DRY) return false
   try {
-    execFileSync('launchctl', ['print', `system/${LAUNCHD_LABEL}`], { stdio: ['ignore', 'ignore', 'ignore'] })
+    execFileSync(resolveBin('launchctl'), ['print', `system/${LAUNCHD_LABEL}`], { stdio: ['ignore', 'ignore', 'ignore'], env: SAFE_ENV })
     return true
   } catch { return false }
 }
@@ -527,7 +591,7 @@ function serviceLoaded() {
 function sleepMs(ms) {
   // Deliberately synchronous: the installer is a linear script and this is the
   // only place it has to wait for the kernel to catch up.
-  execFileSync('/bin/sleep', [String(ms / 1000)], { stdio: 'ignore' })
+  execFileSync(resolveBin('sleep'), [String(ms / 1000)], { stdio: 'ignore', env: SAFE_ENV })
 }
 
 /**
@@ -556,7 +620,7 @@ function bootstrapLaunchd() {
   let lastError = null
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      execFileSync('launchctl', ['bootstrap', 'system', PLIST], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      execFileSync(resolveBin('launchctl'), ['bootstrap', 'system', PLIST], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: SAFE_ENV })
       lastError = null
       break
     } catch (e) {
@@ -569,7 +633,7 @@ function bootstrapLaunchd() {
   if (lastError && !serviceLoaded()) {
     // One more path: if launchd still has it registered, restarting is enough.
     try {
-      execFileSync('launchctl', ['kickstart', '-k', `system/${LAUNCHD_LABEL}`], { stdio: ['ignore', 'ignore', 'pipe'] })
+      execFileSync(resolveBin('launchctl'), ['kickstart', '-k', `system/${LAUNCHD_LABEL}`], { stdio: ['ignore', 'ignore', 'pipe'], env: SAFE_ENV })
       lastError = null
     } catch { /* reported below */ }
   }
