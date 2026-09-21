@@ -586,6 +586,90 @@ test('an upstream cannot choose how much of the daemon it occupies', async () =>
   assert.equal(problem.rule, 'response_size')
 })
 
+test('a use is given back when the request never reached anyone', async () => {
+  // markUpstream() was called BEFORE the upstream call, so `upstreamOpened`
+  // was always true by the time anything could fail and the refund in handle()
+  // was unreachable code — while the error told the agent its use had been
+  // refunded. An agent that hit a DNS failure lost a use and a budget unit and
+  // was told otherwise.
+  setup({
+    respond: () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND api.github.com'), { code: 'ENOTFOUND' }) },
+  })
+  const oneShot = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1 })
+  const before = vault.db.grants[grant.id].budget_used
+
+  const res = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${oneShot.placeholder}`]],
+  }))
+  assert.equal(res.status, 502)
+  const problem = JSON.parse(res.body)
+  assert.equal(problem.code, 'AV_UPSTREAM_UNREACHABLE')
+  assert.equal(problem.refunded, true, 'the agent must be told the truth about its use')
+
+  assert.equal(vault.db.placeholders[oneShot.row.id].uses, 0, 'the use was not given back')
+  assert.equal(vault.db.grants[grant.id].budget_used, before, 'the budget unit was not given back')
+
+  // And the placeholder still works, which is the whole point of refunding it.
+  pipeline.upstream = fakeUpstream()
+  const ok = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${oneShot.placeholder}`]],
+  }))
+  assert.equal(ok.status, 200, 'the refunded placeholder must still be usable')
+})
+
+test('a use is NOT given back when the request may have been delivered', async () => {
+  // A timeout or a reset might mean the server received it and acted on it.
+  // Refunding a write that happened is worse than charging for one that did
+  // not, so only failures with no connection behind them are refunded.
+  setup({
+    respond: () => { throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) },
+  })
+  const oneShot = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1 })
+  const res = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${oneShot.placeholder}`]],
+  }))
+  assert.equal(res.status, 502)
+  assert.equal(JSON.parse(res.body).refunded, false)
+  assert.equal(vault.db.placeholders[oneShot.row.id].uses, 1, 'a possibly-delivered request must still cost its use')
+})
+
+test('a refused request does not decrypt the whole vault three times', async () => {
+  // #safeMessage builds a Scrubber, and building one calls allSecrets(), which
+  // DECRYPTS every credential in the vault. The deny path called it three
+  // times — detail, hint, path — so every refusal decrypted everything three
+  // times over, on the event loop, on a path an agent triggers at will simply
+  // by asking for things it is not allowed to have.
+  setup()
+  for (let i = 0; i < 50; i++) {
+    vault.addCredential({
+      slug: `filler-${i}`, kind: 'http', connector: { host: 'example.test' },
+      fields: { token: `a-stored-secret-value-number-${i}` },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+  }
+
+  const deny = () => pipeline.handle(req({
+    path: '/p/gh-frozencrow/definitely/not/granted',
+    headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${placeholder}`]],
+  }))
+  await deny() // warm
+
+  const started = Date.now()
+  for (let i = 0; i < 120; i++) await deny()
+  const ms = Date.now() - started
+
+  // Generous, because this is a timing test on shared hardware. The point is
+  // the shape: three full decryptions per denial put this well past it.
+  assert.ok(ms < 1500, `120 denials with 51 credentials took ${ms}ms`)
+
+  // And the denial still says the right thing, scrubbed.
+  const res = await deny()
+  assert.equal(res.status, 403)
+  const problem = JSON.parse(res.body)
+  assert.ok(problem.detail.includes('/definitely/not/granted'), 'the denial must still name the path')
+  assert.ok(!JSON.stringify(problem).includes(SECRET))
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

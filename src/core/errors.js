@@ -70,7 +70,7 @@ export const CODES = {
   AV_RATE_LIMITED: { http: 429, exit: EXIT.PRESENCE, audit: 'presence.throttled', consumes: false,
     hint: 'Too many failed attempts. Wait for the backoff to expire and try again.' },
   AV_UPSTREAM_UNREACHABLE: { http: 502, exit: EXIT.UPSTREAM, audit: 'request.upstream_failed', consumes: false,
-    hint: 'The upstream could not be reached; the placeholder use was refunded.' },
+    hint: 'The upstream could not be reached. If the failure happened before a connection existed, the placeholder use was refunded; the `refunded` field says which.' },
   AV_MCP_PROTOCOL: { http: 400, exit: EXIT.FAILURE, audit: 'mcp.protocol_rejected', consumes: false,
     hint: 'Unsupported or missing MCP-Protocol-Version.' },
   AV_MCP_SESSION_UNKNOWN: { http: 404, exit: EXIT.FAILURE, audit: 'mcp.protocol_rejected', consumes: false,
@@ -105,6 +105,9 @@ export class VaultError extends Error {
     // vault has an authenticator but no passphrase can then say so, instead of
     // asking for a passphrase that does not exist.
     this.factors = extra.factors
+    // Whether a placeholder use was given back. The hint used to assert that
+    // it always was, while the refund was in fact unreachable.
+    this.refunded = extra.refunded
   }
 
   /** RFC 9457 problem+json, the shape every denied HTTP request returns. */
@@ -119,6 +122,7 @@ export class VaultError extends Error {
     if (this.requestId) body.request_id = this.requestId
     if (this.next) body.next = this.next
     if (this.factors) body.factors = this.factors
+    if (this.refunded !== undefined) body.refunded = this.refunded
     if (this.nextPlaceholder) body.next_placeholder = this.nextPlaceholder
     return body
   }

@@ -58,6 +58,16 @@ const MAX_DECOMPRESSED = 64 * 1024 * 1024
 // larger cannot be scrubbed, and a body that cannot be scrubbed is refused.
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
+// Failures that happen before any byte could have reached the server, so the
+// placeholder use is refunded. A timeout or a reset is deliberately not here:
+// the request may have been delivered and acted on, and refunding a write that
+// happened is worse than charging for one that did not.
+const PRE_CONNECT_ERRORS = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN',
+])
+
 export class Pipeline {
   /**
    * @param {import('../store/vault.js').Vault} vault
@@ -116,9 +126,13 @@ export class Pipeline {
       // not write: the upstream-failure path interpolates the underlying
       // error's message. This is a vault, so the one place a stray secret in
       // an exception must not reach is the agent. Scrub all of them.
-      const err = e instanceof VaultError ? e : deny('AV_INTERNAL', this.#safeMessage(e))
-      err.detail = this.#safeMessage({ message: err.detail })
-      if (err.hint) err.hint = this.#safeMessage({ message: err.hint })
+      // Built once for this failure and reused for every field below.
+      const scrubber = this.vault.locked ? null : (() => {
+        try { return this.#errorScrubber() } catch { return null }
+      })()
+      const err = e instanceof VaultError ? e : deny('AV_INTERNAL', this.#safeMessage(e, scrubber))
+      err.detail = this.#safeMessage({ message: err.detail }, scrubber)
+      if (err.hint) err.hint = this.#safeMessage({ message: err.hint }, scrubber)
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
       if (consumed && !upstreamOpened) this.vault.refundPlaceholder(consumed.id)
@@ -135,7 +149,7 @@ export class Pipeline {
           // before there is any decision to read it from.
           req: {
             method: req.method,
-            path: this.#safePath(req.path),
+            path: this.#safePath(req.path, scrubber),
           },
           peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         })
@@ -223,18 +237,32 @@ export class Pipeline {
    * the file that is meant to be safe to hand to someone debugging. The agent
    * loses nothing by the redaction: it is reading back its own placeholder.
    */
-  #safeMessage(e) {
+  #safeMessage(e, scrubber = null) {
     const raw = String(e?.message ?? e)
     const text = this.#redactPlaceholders(raw)
     try {
       if (this.vault.locked) return text
-      const secrets = this.vault.allSecrets()
-      if (!secrets.length) return text
-      return new Scrubber(secrets.map((s) => ({ ...s, always: true }))).scrub(text).text
+      const s = scrubber ?? this.#errorScrubber()
+      return s ? s.scrub(text).text : text
     } catch {
       // If the scrubber cannot even be built, say nothing rather than guess.
       return 'internal error'
     }
+  }
+
+  /**
+   * One scrubber for a failing request, built once.
+   *
+   * Building it calls allSecrets(), which DECRYPTS every credential in the
+   * vault. The deny path called #safeMessage three times — detail, hint, path
+   * — so every refused request decrypted the whole vault three times over. At
+   * sixty credentials that is thousands of AES-GCM opens per denial, on the
+   * event loop, on a path an agent can trigger at will simply by asking for
+   * things it is not allowed to have.
+   */
+  #errorScrubber() {
+    const secrets = this.vault.allSecrets()
+    return secrets.length ? new Scrubber(secrets.map((x) => ({ ...x, always: true }))) : null
   }
 
   /**
@@ -247,8 +275,8 @@ export class Pipeline {
    * function is the case it exists for. A placeholder is a bearer capability,
    * and the log is meant to be evidence you can hand to someone.
    */
-  #safePath(p) {
-    return this.#safeMessage({ message: String(p ?? '').split('?')[0] })
+  #safePath(p, scrubber = null) {
+    return this.#safeMessage({ message: String(p ?? '').split('?')[0] }, scrubber)
   }
 
   /** Placeholder text swapped for a name. No decryption, so it is cheap. */
@@ -520,7 +548,6 @@ export class Pipeline {
     headers.host = route.port ? `${decision.host}:${route.port}` : decision.host
     headers['accept-encoding'] = 'identity'
 
-    markUpstream()
     const authority = route.port ? `${decision.host}:${route.port}` : decision.host
     // Re-encode each segment of the path policy actually approved. The
     // decision is made on a fully decoded path; putting that straight into a
@@ -533,8 +560,22 @@ export class Pipeline {
     let res
     try {
       res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body })
+      // A response came back, so the request was certainly delivered and a
+      // side effect may have happened. No refund from here on.
+      markUpstream()
     } catch (e) {
-      throw deny('AV_UPSTREAM_UNREACHABLE', `could not reach ${decision.host}: ${e.message}`, { rule: 'upstream' })
+      // This used to be marked BEFORE the call, so `upstreamOpened` was always
+      // true by the time anything could fail and the refund in handle() was
+      // unreachable — while the error told the agent its use had been
+      // refunded. A failure with no connection behind it cannot have had a
+      // side effect, so those are refunded; anything that might have reached
+      // the server is not, because refunding a write that happened is worse
+      // than charging for one that did not.
+      if (!PRE_CONNECT_ERRORS.has(e?.code)) markUpstream()
+      throw deny('AV_UPSTREAM_UNREACHABLE', `could not reach ${decision.host}: ${e.message}`, {
+        rule: 'upstream',
+        refunded: PRE_CONNECT_ERRORS.has(e?.code),
+      })
     }
 
     // --- scrub -------------------------------------------------------------
