@@ -36,21 +36,37 @@ export function decodeCbor(buf, start = 0) {
   return { value, end: view.pos }
 }
 
-function readItem(v) {
+// A hostile attestation can declare a four-billion-item array in five bytes.
+// parseAuthData runs on attacker-supplied authenticatorData *before* the
+// signature is checked, so a sixty-byte request used to exhaust the heap and
+// kill the process. Lengths are bounded by what is actually left in the
+// buffer, and nesting by a depth no real COSE key approaches.
+const CBOR_MAX_DEPTH = 16
+
+function readItem(v, depth = 0) {
+  if (depth > CBOR_MAX_DEPTH) throw new Error('cbor: nested too deeply')
+  if (v.pos >= v.buf.length) throw new Error('cbor: truncated')
   const first = v.buf[v.pos++]
   const major = first >> 5
   const minor = first & 0x1f
   const len = readLength(v, minor)
+
+  // Every remaining item costs at least one byte, so a declared count larger
+  // than the bytes left cannot be honest.
+  const remaining = v.buf.length - v.pos
+  if ((major === 2 || major === 3) && len > remaining) throw new Error('cbor: length exceeds the buffer')
+  if (major === 4 && len > remaining) throw new Error('cbor: array longer than the buffer')
+  if (major === 5 && len * 2 > remaining) throw new Error('cbor: map larger than the buffer')
 
   switch (major) {
     case 0: return len                                   // unsigned
     case 1: return -1 - len                              // negative
     case 2: { const b = v.buf.subarray(v.pos, v.pos + len); v.pos += len; return b }   // bytes
     case 3: { const s = v.buf.toString('utf8', v.pos, v.pos + len); v.pos += len; return s } // text
-    case 4: { const a = []; for (let i = 0; i < len; i++) a.push(readItem(v)); return a }
+    case 4: { const a = []; for (let i = 0; i < len; i++) a.push(readItem(v, depth + 1)); return a }
     case 5: {
       const m = new Map()
-      for (let i = 0; i < len; i++) { const k = readItem(v); m.set(k, readItem(v)) }
+      for (let i = 0; i < len; i++) { const k = readItem(v, depth + 1); m.set(k, readItem(v, depth + 1)) }
       return m
     }
     case 7:
@@ -66,8 +82,8 @@ function readItem(v) {
 function readLength(v, minor) {
   if (minor < 24) return minor
   if (minor === 24) return v.buf[v.pos++]
-  if (minor === 25) { const n = v.buf.readUInt16BE(v.pos); v.pos += 2; return n }
-  if (minor === 26) { const n = v.buf.readUInt32BE(v.pos); v.pos += 4; return n }
+  if (minor === 25) { if (v.pos + 2 > v.buf.length) throw new Error('cbor: truncated length'); const n = v.buf.readUInt16BE(v.pos); v.pos += 2; return n }
+  if (minor === 26) { if (v.pos + 4 > v.buf.length) throw new Error('cbor: truncated length'); const n = v.buf.readUInt32BE(v.pos); v.pos += 4; return n }
   throw new Error(`cbor: unsupported length encoding ${minor}`)
 }
 

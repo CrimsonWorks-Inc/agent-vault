@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto'
 import * as ph from '../../src/core/placeholder.js'
 import { detectAll } from '../../src/core/detect.js'
 import { locate } from '../../src/core/substitute.js'
-import { intersect, evaluateHttp, normalizePath } from '../../src/core/policy.js'
+import { intersect, evaluateHttp, normalizePath, matchPath } from '../../src/core/policy.js'
 
 function rng(seed) {
   let s = seed
@@ -181,4 +181,32 @@ test('a denied path stays denied however it is spelled', () => {
     const shouldDeny = denied.some((d) => norm === d || norm.startsWith(`${d}/`))
     if (shouldDeny) assert.ok(!allows(p), `deny list escaped: ${p} normalized to ${norm}`)
   }
+})
+
+test('a child cannot widen past a ceiling with a mid-pattern **', () => {
+  // globAllows compared only the text before `**`, so a ceiling of
+  // /repos/**/pulls admitted /repos/anything-at-all. The child widened past
+  // its own ceiling, which is the single thing layering exists to prevent.
+  const ceiling = { hosts: ['api.github.com'], methods: ['GET'], paths: ['/repos/**/pulls'] }
+  const child = { hosts: ['api.github.com'], methods: ['GET'], paths: ['/repos/anything-at-all'] }
+  const effective = intersect([ceiling, child])
+  const allows = (pol, path) => {
+    try { evaluateHttp(pol, { method: 'GET', host: 'api.github.com', path }); return true } catch { return false }
+  }
+  assert.equal(allows(ceiling, '/repos/anything-at-all'), false, 'the ceiling does not allow this')
+  assert.equal(allows(effective, '/repos/anything-at-all'), false, 'so the intersection must not either')
+  // And the legitimate case still works.
+  assert.equal(allows(intersect([ceiling, { paths: ['/repos/a/pulls'] }]), '/repos/a/pulls'), true)
+})
+
+test('glob matching is linear, not exponential', () => {
+  // `**` compiled to `.*`, so a nested pattern backtracked exponentially:
+  // fourteen groups took 37 seconds of a single-threaded daemon. Reachable by
+  // anyone who can supply a grant or deny path.
+  const evil = `/${'**/'.repeat(16)}x`
+  const path = `/${'a/'.repeat(48)}b`
+  const started = Date.now()
+  assert.equal(matchPath(evil, path), false)
+  const ms = Date.now() - started
+  assert.ok(ms < 250, `matching took ${ms}ms; it should be linear`)
 })

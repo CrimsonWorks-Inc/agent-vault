@@ -55,7 +55,7 @@ export function intersect(layers) {
   for (const layer of layers) {
     if (!layer) continue
     out = {
-      kind: layer.kind || out.kind,
+      kind: out.kind || layer.kind,
       hosts: intersectHosts(out.hosts, layer.hosts),
       methods: intersectList(out.methods ?? null, layer.methods ?? null),
       paths: intersectPaths(out.paths, layer.paths),
@@ -69,8 +69,10 @@ export function intersect(layers) {
       max_concurrent: minNum(out.max_concurrent, layer.max_concurrent),
       databases: intersectList(out.databases ?? null, layer.databases ?? null),
       rcpt: intersectList(out.rcpt ?? null, layer.rcpt ?? null),
-      commands: layer.commands ?? out.commands,
-      graphql: layer.graphql ?? out.graphql,
+      // A child overriding these is the same widening the paths above used to
+      // allow. Narrow, or keep the outer value.
+      commands: intersectList(out.commands ?? null, layer.commands ?? null),
+      graphql: out.graphql ?? layer.graphql,
       stream_bodies: (out.stream_bodies ?? false) && (layer.stream_bodies ?? false),
     }
   }
@@ -98,14 +100,47 @@ function intersectPaths(a, b) {
   return [...new Set(keep)]
 }
 
-/** True when pattern `outer` permits everything pattern `inner` permits. */
+/**
+ * True when `outer` permits everything `inner` permits.
+ *
+ * This used to compare only the text before `**`, so a ceiling of
+ * `/repos/**\/pulls` admitted a child's `/repos/anything-at-all` — the child
+ * widened past its own ceiling, which is the one thing the layering exists to
+ * prevent. It is now real containment over segments, and deliberately
+ * conservative: where containment cannot be shown it answers false, which
+ * drops the entry and narrows. Erring toward narrower is the safe direction.
+ */
 function globAllows(outer, inner) {
   if (outer === inner) return true
-  if (outer.includes('**')) {
-    const prefix = outer.slice(0, outer.indexOf('**'))
-    return inner.startsWith(prefix)
+  const o = String(outer).split('/').filter((x) => x !== '')
+  const i = String(inner).split('/').filter((x) => x !== '')
+
+  const segAllows = (op, ip) => {
+    if (op === ip) return true
+    if (op === '*' || op === '**') return true      // covers any single segment
+    if (ip.includes('*')) return false              // inner is open where outer is not
+    return matchSegment(op, ip)
   }
-  return matchPath(outer, inner.replace(/\*+/g, 'x'))
+
+  const seen = new Set()
+  const go = (oi, ii) => {
+    const key = `${oi}:${ii}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    if (oi === o.length) return ii === i.length
+    if (o[oi] === '**') {
+      // Absorb nothing, or absorb one more inner segment.
+      if (go(oi + 1, ii)) return true
+      return ii < i.length && go(oi, ii + 1)
+    }
+    if (ii === i.length) return false
+    // A single outer segment cannot cover the arbitrarily many an inner `**`
+    // can produce.
+    if (i[ii] === '**') return false
+    if (!segAllows(o[oi], i[ii])) return false
+    return go(oi + 1, ii + 1)
+  }
+  return go(0, 0)
 }
 
 function hostAllows(outer, inner) {
@@ -229,33 +264,70 @@ export function normalizePath(path) {
 // Enough for any legitimate double-encoding, far short of a decode bomb.
 const MAX_DECODE_ROUNDS = 5
 
-/** Glob match: `*` spans one segment, `**` spans many. */
-export function matchPath(pattern, path) {
-  const rx = globToRegExp(pattern)
-  return rx.test(path)
-}
-
-const globCache = new Map()
-function globToRegExp(pattern) {
-  const cached = globCache.get(pattern)
-  if (cached) return cached
-  let out = '^'
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]
+/**
+ * Glob matching, done segment by segment rather than by compiling to a regex.
+ *
+ * The regex version turned `**` into `.*`, so a pattern like `/**\/**\/**...`
+ * built `^\/.*\/.*\/...$` and backtracked exponentially: fourteen groups took
+ * 37 seconds, and the daemon is single-threaded, so that is 37 seconds where
+ * nothing else in the vault answers. Anyone who can supply a grant or deny
+ * path could do it.
+ *
+ * Making the quantifiers atomic would kill the backtracking and the matching
+ * with it — `/**\/pulls` needs to backtrack to be correct. So the regex is
+ * gone. This is the usual two-dimensional glob match: linear in
+ * segments × pattern segments, with no backtracking to exploit.
+ */
+function matchSegment(pat, seg) {
+  // `*` inside one segment, e.g. `admin.*`. Same shape, one dimension.
+  const dp = new Array(seg.length + 1).fill(false)
+  dp[0] = true
+  for (let i = 0; i < pat.length; i++) {
+    const c = pat[i]
     if (c === '*') {
-      if (pattern[i + 1] === '*') { out += '.*'; i++ }
-      else out += '[^/]*'
-    } else if ('.+?^${}()|[]\\/'.includes(c)) {
-      out += `\\${c}`
+      // Once a prefix matches, every longer prefix does too.
+      let seen = false
+      for (let j = 0; j <= seg.length; j++) {
+        seen = seen || dp[j]
+        dp[j] = seen
+      }
     } else {
-      out += c
+      for (let j = seg.length; j >= 0; j--) {
+        dp[j] = j > 0 && dp[j - 1] && seg[j - 1] === c
+      }
     }
   }
-  out += '$'
-  const rx = new RegExp(out)
-  globCache.set(pattern, rx)
-  return rx
+  return dp[seg.length]
 }
+
+export function matchPath(pattern, path) {
+  const pats = String(pattern).split('/').filter((x) => x !== '')
+  const segs = String(path).split('/').filter((x) => x !== '')
+
+  // reachable[j] === "the first j path segments can be consumed by the
+  // pattern segments seen so far".
+  let reachable = new Array(segs.length + 1).fill(false)
+  reachable[0] = true
+  for (const pat of pats) {
+    const next = new Array(segs.length + 1).fill(false)
+    if (pat === '**') {
+      // Matches zero or more segments, so anything at or past a reachable
+      // point stays reachable.
+      let seen = false
+      for (let j = 0; j <= segs.length; j++) {
+        seen = seen || reachable[j]
+        next[j] = seen
+      }
+    } else {
+      for (let j = 1; j <= segs.length; j++) {
+        next[j] = reachable[j - 1] && matchSegment(pat, segs[j - 1])
+      }
+    }
+    reachable = next
+  }
+  return reachable[segs.length]
+}
+
 
 export function matchHost(pattern, host) {
   if (pattern === host) return true
