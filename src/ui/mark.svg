@@ -1,0 +1,29 @@
+<!--
+  The agent-vault mark: a keyhole.
+
+  Two forms from one geometry. The positive keyhole sits beside the wordmark;
+  the same shape punched out of a rounded square is the icon, where it needs to
+  fill its own space. Colour is currentColor, so both follow the page's light
+  and dark themes rather than shipping as two assets.
+
+  What it does not try to do is encode the placeholder idea. Earlier attempts —
+  a solid key beside a hollow one, two keys crossed into a V, a keyhole whose
+  slot was a V — all died the same way: the part carrying the meaning was the
+  first thing to disappear when the mark got small, and a keyhole slot widens
+  downward while a V narrows, so those two shapes collapse into a teardrop.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+  <defs>
+    <g id="av-keyhole">
+      <circle cx="32" cy="25" r="8.5"/>
+      <path d="M28.8,31 L24.5,45.5 A2.5,2.5 0 0 0 27,48 L37,48 A2.5,2.5 0 0 0 39.5,45.5 L35.2,31 Z"/>
+    </g>
+    <mask id="av-punch">
+      <rect width="64" height="64" fill="#fff"/>
+      <use href="#av-keyhole" fill="#000"/>
+    </mask>
+  </defs>
+
+  <!-- The icon: the keyhole taken out of a solid field. -->
+  <rect width="64" height="64" rx="15" fill="currentColor" mask="url(#av-punch)"/>
+</svg>

@@ -1,0 +1,162 @@
+// The MCP tool surface, from the agent's side of it.
+//
+// These five tools are what an agent actually drives, so they are the surface
+// most likely to be probed in anger. Everything here is a thing an agent can
+// ask for directly: a path outside its grant, a traversal out of its
+// credential's route, a header it should not be able to set, a credential it
+// was never granted.
+//
+// vault_http builds `/p/<slug><path>` from the agent's own `path` argument and
+// forwards its own `headers` object, so both are attacker-controlled by
+// construction.
+
+import { test, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createServer } from 'node:http'
+import { Vault } from '../../src/store/vault.js'
+import { McpServer } from '../../src/daemon/mcp.js'
+import { Pipeline } from '../../src/daemon/pipeline.js'
+
+let dir, vault, mcp, upstream, upPort, received, session
+
+const call = (name, args) => mcp.handle({
+  jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args },
+})
+const result = (r) => {
+  try { return JSON.parse(r?.result?.content?.[0]?.text || '{}') } catch { return {} }
+}
+
+before(async () => {
+  dir = mkdtempSync(join(tmpdir(), 'av-mcpt-'))
+  received = []
+  upstream = createServer((req, res) => {
+    received.push({ url: req.url, headers: req.headers })
+    res.end('{}')
+  })
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r))
+  upPort = upstream.address().port
+
+  vault = Vault.create(dir, { factor: 'none' })
+  const allowed = vault.addCredential({
+    slug: 'allowed', kind: 'http', connector: { host: `127.0.0.1:${upPort}`, scheme: 'http' },
+    fields: { token: 'ALLOWED-SECRET-0011223' }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  // A second credential this session is never granted. It must stay unreachable.
+  vault.addCredential({
+    slug: 'ungranted', kind: 'http', connector: { host: 'api.example.com', scheme: 'https' },
+    fields: { token: 'UNGRANTED-SECRET-0044556' }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  const made = vault.createSession({ label: 'agent' })
+  session = made.session
+  vault.createGrant({
+    sessionId: session.id, credentialId: allowed.id, fields: ['token'],
+    policy: {
+      hosts: ['127.0.0.1'], methods: ['GET', 'POST'], paths: ['/safe/**'],
+      budget: { unit: 'requests', limit: 100 }, approval: 'auto',
+    },
+  })
+  mcp = new McpServer(vault, new Pipeline(vault), () => session)
+})
+
+after(() => {
+  if (upstream) upstream.close()
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('a request inside the grant works, so the refusals below mean something', async () => {
+  received.length = 0
+  const r = result(await call('vault_http', { cred: 'allowed', method: 'GET', path: '/safe/x' }))
+  assert.equal(r.status, 200)
+  assert.equal(received.length, 1)
+  assert.equal(received[0].url, '/safe/x')
+  assert.equal(received[0].headers.authorization, 'Bearer ALLOWED-SECRET-0011223')
+})
+
+test('a path outside the grant never reaches the upstream', async () => {
+  received.length = 0
+  const r = result(await call('vault_http', { cred: 'allowed', method: 'GET', path: '/forbidden/x' }))
+  assert.equal(r.status, 403)
+  assert.deepEqual(received, [], 'nothing should have been sent')
+})
+
+test('traversal cannot climb out of the granted path', async () => {
+  // `/p/<slug>` is built by string concatenation around an argument the agent
+  // controls, so `..` is the first thing anyone would try.
+  for (const path of ['/safe/../forbidden/x', '/../../etc/passwd', '/safe/%2e%2e/forbidden/x', '/safe/./../forbidden']) {
+    received.length = 0
+    const r = result(await call('vault_http', { cred: 'allowed', method: 'GET', path }))
+    assert.ok(r.status === 403 || r.status === 400, `${path} answered ${r.status}`)
+    assert.deepEqual(received, [], `${path} reached the upstream`)
+  }
+})
+
+test('a credential this session was never granted is unreachable', async () => {
+  received.length = 0
+  const r = result(await call('vault_http', { cred: 'ungranted', method: 'GET', path: '/safe/x' }))
+  assert.match(String(r.error), /no grant/)
+  assert.deepEqual(received, [])
+})
+
+test('CRLF in a path or a header cannot smuggle anything upstream', async () => {
+  received.length = 0
+  const viaPath = result(await call('vault_http', {
+    cred: 'allowed', method: 'GET', path: '/safe/x\r\nX-Injected: 1',
+  }))
+  assert.notEqual(viaPath.status, 200)
+  const viaHeader = result(await call('vault_http', {
+    cred: 'allowed', method: 'GET', path: '/safe/x', headers: { 'X-A': 'v\r\nX-Injected: 1' },
+  }))
+  assert.notEqual(viaHeader.status, 200)
+  for (const r of received) {
+    assert.ok(!Object.keys(r.headers).some((h) => /injected/i.test(h)), 'a header was smuggled through')
+  }
+})
+
+test('the agent cannot set the daemon’s own headers through a tool argument', async () => {
+  // These used to be pushed before the daemon's, so the agent's value won and
+  // the request failed as unauthenticated. Not an escalation, but a tool
+  // argument should not be able to reach the daemon's own plumbing at all.
+  received.length = 0
+  const r = result(await call('vault_http', {
+    cred: 'allowed', method: 'GET', path: '/safe/x',
+    headers: { 'av-session': 'forged', 'AV-Reason': 'spoofed', host: 'evil.test' },
+  }))
+  assert.equal(r.status, 200, 'the request should simply proceed')
+  assert.equal(received.length, 1)
+  assert.ok(!Object.keys(received[0].headers).some((h) => h.toLowerCase().startsWith('av-')),
+    'no av-* header may reach the upstream')
+  assert.ok(!String(received[0].headers.host).includes('evil'), 'the host must be the credential’s')
+})
+
+test('vault_get_placeholder is bound to the session’s own grants', async () => {
+  const ok = result(await call('vault_get_placeholder', { cred: 'allowed', reason: 'testing' }))
+  assert.match(ok.placeholder, /^av1\./)
+  const no = result(await call('vault_get_placeholder', { cred: 'ungranted', reason: 'testing' }))
+  assert.match(String(no.error), /no grant/)
+  assert.equal(no.placeholder, undefined)
+})
+
+test('no tool returns a credential value, whatever it is asked', async () => {
+  // The one invariant the whole design rests on.
+  const outputs = []
+  outputs.push(await call('vault_status', {}))
+  outputs.push(await call('vault_list_creds', {}))
+  outputs.push(await call('vault_get_placeholder', { cred: 'allowed', reason: 'x' }))
+  outputs.push(await call('vault_http', { cred: 'allowed', method: 'GET', path: '/safe/x' }))
+  outputs.push(await call('vault_explain_denial', { request_id: 'nope' }))
+  const all = JSON.stringify(outputs)
+  assert.ok(!all.includes('ALLOWED-SECRET-0011223'), 'a credential value came back through a tool')
+  assert.ok(!all.includes('UNGRANTED-SECRET-0044556'), 'an ungranted credential value came back')
+})
+
+test('the tool list is exactly the five documented tools', async () => {
+  // A new tool is a new surface. This fails when one is added, which is the
+  // point: it should be a decision, not a drive-by.
+  const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+  assert.deepEqual(listed.result.tools.map((t) => t.name).sort(), [
+    'vault_explain_denial', 'vault_get_placeholder', 'vault_http', 'vault_list_creds', 'vault_status',
+  ])
+})

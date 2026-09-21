@@ -1,0 +1,1173 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-vault</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><mask id='k'><rect width='64' height='64' fill='%23fff'/><circle cx='32' cy='25' r='8.5'/><path d='M28.8 31L24.5 45.5A2.5 2.5 0 0 0 27 48L37 48A2.5 2.5 0 0 0 39.5 45.5L35.2 31Z'/></mask><style>.b%7Bfill:%231d6a86%7D%40media(prefers-color-scheme:dark)%7B.b%7Bfill:%2364b6d2%7D%7D</style><rect class='b' width='64' height='64' rx='15' mask='url(%23k)'/></svg>">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f8;
+    --panel: #ffffff;
+    --ink: #16202a;
+    --muted: #5f707c;
+    --line: #d9e0e5;
+    --accent: #1d6a86;
+    --accent-soft: #e3eff4;
+    --ok: #2c7a4b;
+    --warn: #a86a12;
+    --crit: #ab2e26;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10161a; --panel: #161f25; --ink: #e2e9ed; --muted: #90a1ac;
+      --line: #263139; --accent: #64b6d2; --accent-soft: #14303a;
+      --ok: #62bf89; --warn: #dfa54a; --crit: #e97a70;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: grid; grid-template-columns: 208px 1fr; min-height: 100vh;
+  }
+  @media (max-width: 720px) { body { grid-template-columns: 1fr; } nav { position: static !important; } }
+
+  nav {
+    background: var(--panel); border-right: 1px solid var(--line);
+    padding: 18px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  /* Deliberately not a flex container: the mark stands in for the hyphen, so
+     it belongs in the text flow like a glyph. As a flex item with width auto
+     an SVG has no intrinsic width and collapses to zero, which left the two
+     halves of the word with nothing between them. */
+  .brand {
+    padding: 2px 8px 16px; font-size: 15px;
+    font-weight: 650; letter-spacing: -.012em; white-space: nowrap;
+  }
+  /* Both axes in em so the lockup scales with the word. The width is the
+     viewBox ratio (18 / 33.5) applied to the height, and vertical-align seats
+     it against the letters the way a hyphen sits. */
+  .brand .mark {
+    display: inline-block; height: .82em; width: .44em;
+    margin: 0 .17em; vertical-align: -.1em; color: var(--accent);
+  }
+  nav button {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    padding: 7px 10px; border-radius: 7px; color: var(--ink); font: inherit; cursor: pointer;
+  }
+  nav button:hover { background: var(--bg); }
+  nav button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  nav .foot { margin-top: 18px; padding: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+
+  main { padding: 32px 34px 64px; max-width: 1000px; }
+
+  /* The page title has to outrank the small-caps card labels below it. At 19px
+     it did not, so the eye landed on CONFIRMATION before Overview. */
+  header.page {
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 0 7px; min-height: 30px;
+  }
+  header.page h1 {
+    font-size: 23px; line-height: 1.15; margin: 0;
+    font-weight: 650; letter-spacing: -.022em;
+  }
+  /* Baseline-aligning a pill against a 23px cap height drops it below the
+     title; centring and a hair of optical offset sits it right. */
+  header.page .pill { transform: translateY(0.5px); flex-shrink: 0; }
+  .sub {
+    color: var(--muted); margin: 0 0 24px;
+    max-width: 72ch; font-size: 13.5px; line-height: 1.5;
+  }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 16px; }
+  /* Small caps at 700 read as shouting next to a proper title; 600 is enough
+     to separate the label from the rows under it. */
+  .card > h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .075em;
+               font-weight: 600; color: var(--muted);
+               margin: 0; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+  .card > .body { padding: 14px 16px; }
+  .row { display: flex; justify-content: space-between; gap: 16px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .row .main { min-width: 0; }
+  .row .name { font-weight: 600; }
+  .row .meta { color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-word; }
+  .empty { padding: 22px 16px; color: var(--muted); }
+
+  code, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .pill { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: .05em; padding: 2px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .pill.crit { background: color-mix(in srgb, var(--crit) 15%, transparent); color: var(--crit); }
+
+  button.action {
+    font: inherit; padding: 6px 12px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); cursor: pointer;
+  }
+  button.action:hover { border-color: var(--accent); color: var(--accent); }
+  button.action.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.action.danger:hover { border-color: var(--crit); color: var(--crit); }
+  .actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select {
+    font: inherit; width: 100%; padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 12px; }
+
+  .notice { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent);
+            padding: 10px 14px; border-radius: 0 7px 7px 0; margin-bottom: 18px; color: var(--ink); font-size: 13px; }
+  .audit { font-family: var(--mono); font-size: 12px; }
+  .audit .line { display: grid; grid-template-columns: 62px 58px 190px 1fr; gap: 10px; padding: 4px 16px; }
+  .audit .line:nth-child(odd) { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+  .t-allow { color: var(--ok); } .t-deny { color: var(--crit); } .t-dim { color: var(--muted); }
+  .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; z-index: 50; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; width: min(360px, 90vw);
+           display: flex; flex-direction: column; gap: 10px; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+  .modal label { font-weight: 600; color: var(--ink); margin: 0; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  /* --- docs ------------------------------------------------------------- */
+  .docnav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 20px; }
+  .docnav button {
+    font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  }
+  .docnav button:hover { color: var(--accent); border-color: var(--accent); }
+  .docnav button[aria-current="true"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+  .prose { max-width: 68ch; }
+  .prose p { margin: 0 0 12px; }
+  /* These were set at body size, so only the weight marked them as headings
+     and a scanning eye slid straight past them. */
+  .prose h3 {
+    font-size: 15.5px; font-weight: 650; line-height: 1.3;
+    margin: 26px 0 9px; letter-spacing: -.015em; color: var(--ink);
+  }
+  .prose h3:first-child { margin-top: 0; }
+  .prose ul { margin: 0 0 12px; padding-left: 20px; }
+  .prose li { margin-bottom: 5px; }
+  .prose code { background: var(--accent-soft); color: var(--accent); padding: 1px 5px; border-radius: 4px; }
+  .prose strong { font-weight: 650; }
+  .prose a { color: var(--accent); }
+
+  .cmd { position: relative; margin: 0 0 14px; max-width: 68ch; }
+  .cmd pre {
+    margin: 0; padding: 11px 44px 11px 14px; overflow-x: auto;
+    background: color-mix(in srgb, var(--ink) 5%, var(--panel));
+    border: 1px solid var(--line); border-radius: 8px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.6;
+  }
+  .cmd .copy {
+    position: absolute; top: 7px; right: 7px; font: inherit; font-size: 11px;
+    padding: 3px 8px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  }
+  .cmd .copy:hover { color: var(--accent); border-color: var(--accent); }
+  .cmd .caption { color: var(--muted); font-size: 12.5px; margin: 0 0 5px; }
+
+  table.codes { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.codes th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                   color: var(--muted); font-weight: 600; padding: 0 12px 7px 0; }
+  table.codes td { padding: 8px 12px 8px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.codes td:first-child { font-family: var(--mono); font-size: 12px; color: var(--crit); white-space: nowrap; }
+
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+           background: var(--ink); color: var(--panel); padding: 9px 16px; border-radius: 8px;
+           font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none; }
+  #toast.show { opacity: 1; }
+</style>
+
+<nav>
+  <!-- The keyhole stands in for the hyphen, so the mark is part of the word
+       rather than an icon parked beside it. The viewBox is cropped to the
+       glyph's own bounds; the 0 0 64 64 box used by the icon and the favicon
+       would surround it with padding and float it away from the letters.
+       The path itself is identical, so the two forms cannot drift. -->
+  <div class="brand" aria-label="agent-vault">agent<svg class="mark" viewBox="23 15.5 18 33.5"
+      aria-hidden="true" fill="currentColor"><circle cx="32" cy="25" r="8.5"/><path
+      d="M28.8,31 L24.5,45.5 A2.5,2.5 0 0 0 27,48 L37,48 A2.5,2.5 0 0 0 39.5,45.5 L35.2,31 Z"/></svg>vault</div>
+  <button data-view="overview" aria-current="true">Overview</button>
+  <button data-view="credentials">Credentials</button>
+  <button data-view="sessions">Sessions</button>
+  <button data-view="approvals">Approvals <span id="approvalCount"></span></button>
+  <button data-view="audit">Audit</button>
+  <button data-view="docs">Docs</button>
+  <div class="foot">
+    No credential value is ever sent to this page, and every change needs a
+    fingerprint.
+    <div style="margin-top:8px"><button class="action danger" id="lockBtn" style="width:100%">Lock vault</button></div>
+  </div>
+</nav>
+
+<main>
+  <div id="view"></div>
+</main>
+<div id="toast" role="status"></div>
+
+<script>
+(() => {
+  const el = document.getElementById('view')
+  const toastEl = document.getElementById('toast')
+  // The fragment survives the launch-token redirect, so a link can open a
+  // particular page: /#docs, or /#docs/connect for one section of it.
+  const [hashView, hashSection] = (location.hash || '').replace(/^#/, '').split('/')
+  let current = hashView || 'overview'
+  let timer = null
+
+  const api = async (method, path, body) => {
+    const res = await fetch(`/api/${path}`, {
+      method,
+      headers: { 'x-av-ui': '1', ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || `request failed (${res.status})`)
+    return data
+  }
+
+  // --- presence -----------------------------------------------------------
+  // Everything that changes capability goes through here. The challenge comes
+  // from the daemon and is derived from the operation, so the signature cannot
+  // be replayed against a different action. An automated browser reaches the
+  // platform dialog and stops there.
+  const b64uToBuf = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
+  const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const bufToB64 = (b) => btoa(String.fromCharCode(...new Uint8Array(b)))
+  const b64ToBuf = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
+
+  // --- Touch ID unlock, via the WebAuthn PRF extension ---------------------
+  // PRF returns a stable 32-byte secret from the authenticator for our salt,
+  // which the daemon uses to unwrap the vault key. Only a real Touch ID can
+  // produce it, so it is a cryptographic factor, not just a presence tap.
+  function prfSupported() { return typeof PublicKeyCredential !== 'undefined' }
+
+  async function touchIdUnlock() {
+    const p = await api('GET', 'unlock/webauthn-params')
+    const salt = b64ToBuf(p.prf_salt)
+    let assertion
+    try {
+      assertion = await navigator.credentials.get({
+        publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          allowCredentials: [{ id: b64uToBuf(p.credential_id), type: 'public-key' }],
+          userVerification: 'required', rpId: p.rp_id, timeout: 60000,
+          extensions: { prf: { eval: { first: salt } } },
+        },
+      })
+    } catch (e) {
+      if (e.name === 'NotAllowedError') throw new Error('Touch ID was not confirmed.')
+      throw e
+    }
+    const prf = assertion.getClientExtensionResults()?.prf?.results?.first
+    if (!prf) throw new Error('This browser did not return a PRF secret. Use your passphrase to unlock.')
+    return api('POST', 'unlock/touchid', { prf_secret: bufToB64(prf) })
+  }
+
+  async function enableTouchId() {
+    const params = await api('GET', 'touchid/enroll-params')
+    if (!params.has_passphrase) throw new Error('Set a passphrase first. It is the recovery factor if Touch ID is ever lost.')
+    const salt = b64ToBuf(params.prf_salt)
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { id: params.rp_id, name: 'agent-vault' },
+        user: { id: new TextEncoder().encode('agent-vault-unlock'), name: 'vault-unlock', displayName: 'Vault unlock' },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+        extensions: { prf: { eval: { first: salt } } },
+        timeout: 120000, attestation: 'none',
+      },
+    })
+    let prf = cred.getClientExtensionResults()?.prf?.results?.first
+    if (!prf) {
+      // Some authenticators only evaluate PRF on assertion; follow up with one.
+      const asrt = await navigator.credentials.get({
+        publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          allowCredentials: [{ id: cred.rawId, type: 'public-key' }],
+          userVerification: 'required', rpId: params.rp_id, timeout: 60000,
+          extensions: { prf: { eval: { first: salt } } },
+        },
+      })
+      prf = asrt.getClientExtensionResults()?.prf?.results?.first
+    }
+    if (!prf) throw new Error('This browser or Mac does not support the WebAuthn PRF extension, so Touch ID unlock is not available here. Your passphrase still works.')
+    await gated({ op: 'touchid.enroll' }, (proof) =>
+      api('POST', 'touchid/enroll', { credential_id: bufToB64u(cred.rawId), prf_secret: bufToB64(prf), presence: proof }))
+  }
+
+  let presenceState = { enrolled: false }
+  let vaultLocked = false
+
+  async function refreshPresence() {
+    try { presenceState = await api('GET', 'presence/state') } catch { presenceState = { enrolled: false } }
+    return presenceState
+  }
+
+  /**
+   * Enrolling is the one change a fingerprint cannot authorise, because the
+   * fingerprint being enrolled is the thing in question. When a passphrase
+   * exists, the daemon wants it once, here, and never again for this device.
+   */
+  async function enroll() {
+    const ls = await api('GET', 'lockstate').catch(() => ({}))
+    if (ls.has_passphrase) {
+      const passphrase = await askSecret('Vault passphrase, to enrol this device')
+      if (passphrase == null) throw new Error('Cancelled. Nothing was enrolled.')
+      await api('POST', 'presence/window', { passphrase })
+    }
+    const opts = await api('POST', 'presence/enroll/begin')
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: b64uToBuf(opts.challenge),
+        rp: opts.rp,
+        user: { id: b64uToBuf(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'preferred',
+        },
+        timeout: 120000,
+        attestation: 'none',
+      },
+    })
+    await api('POST', 'presence/enroll/finish', {
+      attestationObject: bufToB64u(cred.response.attestationObject),
+      clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+    })
+    await refreshPresence()
+  }
+
+  /** Obtain a signature for one specific operation. */
+  async function presence(operation) {
+    const ch = await api('POST', 'presence/challenge', { operation })
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge: b64uToBuf(ch.challenge),
+        allowCredentials: ch.allowCredentials.map((c) => ({ id: b64uToBuf(c.id), type: 'public-key' })),
+        userVerification: 'required',
+        rpId: ch.rpId,
+        timeout: 60000,
+      },
+    })
+    return {
+      challengeId: ch.challengeId,
+      credentialId: bufToB64u(assertion.rawId),
+      authenticatorData: bufToB64u(assertion.response.authenticatorData),
+      clientDataJSON: bufToB64u(assertion.response.clientDataJSON),
+      signature: bufToB64u(assertion.response.signature),
+    }
+  }
+
+  /** Run a gated action: sign the operation, then send it with the signature. */
+  async function gated(operation, send) {
+    if (!presenceState.enrolled) {
+      throw new Error('No authenticator enrolled. Set one up from the Overview tab first.')
+    }
+    let proof
+    try {
+      proof = await presence(operation)
+    } catch (e) {
+      if (e.name === 'NotAllowedError') throw new Error('Not confirmed. Nothing was changed.')
+      throw e
+    }
+    return send(proof)
+  }
+
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+
+  // A masked passphrase prompt. The browser's prompt() shows the passphrase in
+  // clear text, which is exactly what this app must not do.
+  function askSecret(label) {
+    return new Promise((resolve) => {
+      const back = document.createElement('div')
+      back.className = 'modal-back'
+      back.innerHTML = `<form class="modal">
+        <label for="secretField">${esc(label)}</label>
+        <input id="secretField" type="password" autocomplete="current-password" spellcheck="false" autofocus>
+        <div class="modal-actions">
+          <button type="button" class="action" data-x="cancel">Cancel</button>
+          <button type="submit" class="action primary">Unlock</button>
+        </div>
+      </form>`
+      document.body.appendChild(back)
+      const field = back.querySelector('#secretField')
+      const close = (val) => { back.remove(); resolve(val) }
+      back.querySelector('[data-x="cancel"]').onclick = () => close(null)
+      back.onclick = (e) => { if (e.target === back) close(null) }
+      back.querySelector('.modal').onsubmit = (e) => { e.preventDefault(); close(field.value) }
+      document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape') { document.removeEventListener('keydown', esc); close(null) }
+      })
+      setTimeout(() => field.focus(), 20)
+    })
+  }
+  const toast = (msg) => {
+    toastEl.textContent = msg
+    toastEl.classList.add('show')
+    setTimeout(() => toastEl.classList.remove('show'), 2200)
+  }
+  const ago = (iso) => {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000)
+    if (s < 60) return `${Math.floor(s)}s ago`
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`
+    return `${Math.floor(s / 3600)}h ago`
+  }
+  const until = (iso) => {
+    const s = (Date.parse(iso) - Date.now()) / 1000
+    if (s <= 0) return 'expired'
+    if (s < 3600) return `${Math.floor(s / 60)}m left`
+    return `${Math.floor(s / 3600)}h left`
+  }
+
+  // ------------------------------------------------------------------- docs
+  // The commands below are built from this machine's own daemon — its port and
+  // its credential names — so the reader can paste them without translating.
+
+  let docsSection = hashSection || 'how'
+  let docsCtx = null
+
+  /** A copyable command block. `cmd` is shell text; `caption` explains it. */
+  const code = (cmd, caption) =>
+    `<div class="cmd">${caption ? `<p class="caption">${esc(caption)}</p>` : ''}
+       <pre>${esc(cmd)}</pre><button class="copy" data-copy="${esc(cmd)}">Copy</button></div>`
+
+  const DOCS = [
+    {
+      id: 'how',
+      title: 'How it works',
+      body: () => `<div class="prose">
+        <p>An agent that holds your API token can do anything that token can do, forever.
+        agent-vault takes the token away and hands the agent a <strong>placeholder</strong> instead.</p>
+        <p>A placeholder looks like this, and is not a secret:</p>
+        <div class="cmd"><pre>av1.k3m9q2x7n4p1.github_token.7hq2m4x8k1n6p3r9t5w2y7.a4f2c9</pre></div>
+        <h3>Three things make it safe</h3>
+        <ul>
+          <li><strong>It only works in one place.</strong> Every credential declares where its
+            value may be written — an <code>Authorization</code> header, an <code>x-api-key</code>
+            header, a query parameter, a field in the JSON body. A placeholder found anywhere
+            else is refused with <code>AV_BAD_LOCATION</code> and nothing is sent upstream.
+            An agent that tries to paste it into a chat message or a file it is writing gets
+            an error, not a token.</li>
+          <li><strong>It only works for one session.</strong> A placeholder is bound to the
+            session that issued it. Revoke the session and every placeholder it ever handed
+            out stops working at once.</li>
+          <li><strong>It expires.</strong> Ask for an n-use placeholder and the vault stops
+            honouring it after n substitutions.</li>
+        </ul>
+        <h3>The real value never comes back</h3>
+        <p>The daemon substitutes the credential on its way out and scrubs the response on
+        its way back, so a token echoed by an upstream API does not reach the agent.
+        The vault files are owned by a separate system user, so an agent running as you
+        cannot read them even with full shell access.</p>
+      </div>`,
+    },
+    {
+      id: 'start',
+      title: 'Start here',
+      body: (c) => `<div class="prose">
+        <p>Four steps. The first one asks for your password once; the rest do not.</p>
+        <h3>1. Install the daemon</h3>
+        </div>
+        ${code(`${c.cli} setup`, 'Creates the _agentvault system user and starts the daemon at login.')}
+        <div class="prose"><h3>2. Store a credential</h3>
+        <p>The value is read from the terminal, never from the command line, so it does not
+        land in your shell history or in the process list.</p></div>
+        ${code(`${c.cli} cred add`, 'Walks you through it. Or pass the flags yourself:')}
+        ${code(`${c.cli} cred add gh-work --kind github`)}
+        <div class="prose"><h3>3. Scope a session</h3>
+        <p>A session says what the agent holding it may do: which credential, which methods,
+        which paths, how many requests.</p></div>
+        ${code(`${c.cli} session create`, 'Walks you through it, then prints what to give the agent.')}
+        ${code(`${c.cli} session create --cred ${c.cred} --methods GET,HEAD --paths "/repos/**" --budget 200`)}
+        <div class="prose"><h3>4. Connect the agent</h3>
+        <p>See <strong>Connect your agent</strong> for the three ways to do this.
+        The shortest one is <code>${esc(c.cli)} mcp install --agent claude-code</code>.</p></div>`,
+    },
+    {
+      id: 'connect',
+      title: 'Connect your agent',
+      body: (c) => `<div class="prose">
+        <p>Three ways in, in the order you should try them.</p>
+        <h3>1. MCP over stdio — the easy one</h3>
+        <p>The vault writes itself into your agent's own config file. It merges rather than
+        overwrites, keeps a backup, and running it twice changes nothing.</p></div>
+        ${code(`${c.cli} mcp install --agent claude-code`, 'Also: cursor, gemini, codex.')}
+        ${code(`${c.cli} mcp install --agent codex --print`, 'Show the block without writing anything.')}
+        <div class="prose">
+        <p>Restart the agent afterwards. It gains five tools:</p>
+        <ul>
+          <li><code>vault_status</code> — is the vault reachable and unlocked</li>
+          <li><code>vault_list_creds</code> — what this session may use, and where each placeholder goes</li>
+          <li><code>vault_get_placeholder</code> — request one, with a reason you will see</li>
+          <li><code>vault_http</code> — make the request; the vault injects the credential</li>
+          <li><code>vault_explain_denial</code> — why that was refused, and what is allowed instead</li>
+        </ul>
+        <p>No token is written to the config file: the bridge finds your current session
+        from the CLI's own state.</p>
+        <h3>2. MCP over HTTP — for an agent on another machine</h3>
+        <p>The daemon speaks Streamable HTTP on the same port as the proxy.</p></div>
+        ${code(`${c.cli} mcp url`, 'Prints the endpoint and the Authorization header to use.')}
+        ${code(`${c.cli} mcp install --agent cursor --transport http`,
+          'Writes the HTTP form, reading the token from $AGENT_VAULT_SESSION at launch.')}
+        <div class="prose">
+        <p>By default the daemon listens on loopback only. To reach it from elsewhere, add a
+        listener explicitly — and treat that as opening a door. A listener on a network
+        address must carry TLS; plaintext there would put session tokens and substituted
+        credentials on the wire, so it is refused rather than warned about.</p></div>
+        ${code(`${c.cli} listen add lan --address 10.0.0.5:${c.gateway_port} --surfaces gateway,mcp --tls managed`)}
+        <div class="prose">
+        <h3>As a custom connector</h3>
+        <p>Claude Desktop and Claude Code refuse a connector URL that is not
+        <code>https</code>, and there is <strong>no exemption for loopback</strong>. So even
+        though nothing leaves this machine, the endpoint needs a certificate.</p>
+        <p>The daemon generates one and keeps the private key behind its own uid. What you
+        get back is the public certificate, which is also its own CA — so pointing the client
+        at that file is what makes the listener trusted.</p></div>
+        ${code(`${c.cli} tls setup`, 'Generates the certificate and writes the trust anchor where you can read it.')}
+        ${code(`${c.cli} listen add mcp-tls --address 127.0.0.1:7449 --surfaces mcp --tls managed`,
+          'Only the mcp surface. A connector cannot reach the credential proxy through it.')}
+        ${code(`${c.cli} mcp install --agent claude-code --transport http --tls`)}
+        <div class="prose">
+        <p>One more step, and it is the one people lose an afternoon to: a self-signed
+        certificate is refused until the client is told to trust it, and Node does not read
+        the macOS keychain by default. Set this in the environment the client launches
+        with:</p></div>
+        ${code(`export NODE_EXTRA_CA_CERTS="$HOME/.agent-vault/agent-vault-ca.pem"`)}
+        <div class="prose">
+        <p>Without it you get a bare TLS handshake failure that says nothing about
+        certificates. With it, <code>https://localhost:7449/mcp</code> works.</p>
+        <p>Note that this is for a client running <em>on this machine</em>. A connector added
+        on claude.ai is opened from Anthropic's servers, not your browser, so a loopback
+        address is unreachable — that would mean exposing the vault to the internet, which is
+        a different decision entirely.</p>
+        </div>
+        <div class="prose">
+        <h3>3. Environment variables — for anything else</h3>
+        <p>Any agent that can make an HTTP request can use the vault, MCP or not.</p></div>
+        ${code(`eval "$(${c.cli} env)"`, 'Exports AGENT_VAULT_URL, AGENT_VAULT_SESSION and a placeholder.')}
+        ${code(`${c.cli} exec -- <your agent command>`,
+          'Same thing, but scoped to one child process, with stale real tokens stripped from its environment.')}
+        <div class="prose"><p>The agent then makes requests through one of two routes:</p></div>
+        ${code(`curl "$AGENT_VAULT_URL/p/${c.cred}/user" \\
+  -H "Authorization: Bearer $AGENT_VAULT_SESSION" \\
+  -H "X-Agent-Vault-Cred: $AGENT_VAULT_PLACEHOLDER"`,
+          `/p/<credential>/<path> — the vault knows the host from the credential.`)}
+        ${code(`curl "$AGENT_VAULT_URL/t/https/api.github.com/user" \\
+  -H "Authorization: Bearer $AGENT_VAULT_SESSION"`,
+          '/t/<scheme>/<host>/<path> — for a host you granted explicitly.')}`,
+    },
+    {
+      id: 'models',
+      title: 'Route model keys',
+      body: (c) => `<div class="prose">
+        <p>The same machinery works for the model API key the agent runs on, which is usually
+        the most valuable secret on the machine. Store the key, then point the SDK's base URL
+        at the vault and give it a placeholder instead of the key.</p>
+        <p>Every one of these SDKs reads a base URL from the environment, so no code changes.</p>
+        <h3>Anthropic</h3></div>
+        ${code(`${c.cli} cred add anthropic-key --kind anthropic
+${c.cli} session create --cred anthropic-key --methods GET,POST --budget 5000
+eval "$(${c.cli} env)"
+export ANTHROPIC_BASE_URL="$AGENT_VAULT_URL/p/anthropic-key"
+export ANTHROPIC_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
+        <div class="prose"><h3>OpenAI</h3></div>
+        ${code(`${c.cli} cred add openai-key --kind openai
+export OPENAI_BASE_URL="$AGENT_VAULT_URL/p/openai-key"
+export OPENAI_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
+        <div class="prose"><h3>Google Gemini</h3></div>
+        ${code(`${c.cli} cred add gemini-key --kind google-genai
+export GOOGLE_GEMINI_BASE_URL="$AGENT_VAULT_URL/p/gemini-key"
+export GEMINI_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
+        <div class="prose">
+        <p>Each of these profiles already refuses the admin and organization paths that would
+        let a key mint more keys, even under a grant of <code>/**</code>. You get a request
+        budget and an audit trail as a side effect.</p></div>`,
+    },
+    {
+      id: 'locking',
+      title: 'Locking',
+      body: (c) => `<div class="prose">
+        <p>There are two separate protections here, and they are easy to confuse.</p>
+        <h3>The lock — can the vault be used at all</h3>
+        <p>While locked, every proxied request is refused with <code>AV_LOCKED</code>. The
+        lock survives restarts. Set a passphrase and the lock becomes cryptographic: the
+        credential encryption key is wrapped with it, so a locked vault on a stolen disk is
+        just ciphertext.</p></div>
+        ${code(`${c.cli} passphrase set`)}
+        ${code(`${c.cli} lock
+${c.cli} unlock`)}
+        <div class="prose">
+        <p>Once a passphrase exists you can add <strong>Touch ID unlock</strong> from the
+        Overview page. That is a real second factor, not a convenience: the authenticator
+        returns a secret that unwraps the key, and only your fingerprint can produce it.
+        Your passphrase stays as recovery, and the vault will not let you remove it while
+        Touch ID is the only other way in.</p>
+        <h3>Change confirmation — who may change what an agent can do</h3>
+        <p>Separate from the lock. Adding a credential, creating a session, approving a
+        request and revoking a session each need a fresh fingerprint, and the signature
+        covers that one operation, so it cannot be replayed against a different one.</p>
+        <p>This is what keeps an agent out of this page. An agent driving a browser can
+        click every button here and reach the platform dialog — and stop, because it has no
+        finger. Set it up on the Overview page.</p>
+        <p>Enrolling that authenticator asks for your passphrase once, and only once. It is
+        the one change a fingerprint cannot authorise, because the fingerprint being enrolled
+        is the thing in question — otherwise anything that reached the vault could install its
+        own key and use it to approve everything else. The daemon verifies each later
+        signature itself and checks it against the operation in the request it received, so a
+        page that shows one action and submits another is caught.</p>
+        <p>Both factors work everywhere: the passphrase is what the command line uses, and a
+        confirmed passphrase opens a five-minute window so you are not asked on every call.</p></div>`,
+    },
+    {
+      id: 'refused',
+      title: 'When a request is refused',
+      body: (c) => `<div class="prose">
+        <p>Every refusal carries a code and a suggested next step. The agent can ask
+        <code>vault_explain_denial</code>, or you can read the audit log.</p></div>
+        ${code(`${c.cli} audit tail --limit 40
+${c.cli} audit verify`, 'The log is hash-chained; verify proves nothing was edited or removed.')}
+        <div class="card"><div class="body"><table class="codes">
+          <tr><th>Code</th><th>What happened</th><th>What to do</th></tr>
+          ${[
+            ['AV_BAD_LOCATION', 'A placeholder appeared somewhere the credential is not allowed to go. Nothing was sent upstream.', 'Put it only where vault_list_creds says. This usually means the agent tried to copy the token somewhere.'],
+            ['AV_PH_EXHAUSTED', 'An n-use placeholder ran out of uses.', `Ask for another: <code>${esc(c.cli)} ph next &lt;cred&gt;</code>`],
+            ['AV_PH_STALE', 'The placeholder is older than the session allows.', 'Issue a fresh one. Nothing is wrong.'],
+            ['AV_PH_REPLAY', 'A placeholder that was already burned or revoked came back.', 'Reuse is treated as hostile and is logged. Get a new one.'],
+            ['AV_PH_MALFORMED', 'The placeholder failed its own checksum, so it was altered in transit.', 'Copy it whole; do not trim or re-encode it.'],
+            ['AV_PH_CROSS_SESSION', 'A placeholder from a different session was used.', 'Sessions do not share placeholders. Use this session’s own.'],
+            ['AV_PH_WRONG_CONNECTOR', 'A placeholder for one credential was sent to another credential’s route.', 'Match the placeholder to the route it belongs to.'],
+            ['AV_NO_GRANT', 'This session has no grant for that credential or host.', 'Create a session that includes it, or widen the grant.'],
+            ['AV_POLICY_DENIED', 'The method, path or host is outside what the session allows, or the profile denies it outright.', 'Check the grant. Some paths are denied by the profile no matter what you grant.'],
+            ['AV_APPROVAL_PENDING', 'The request needs you.', 'Open Approvals, or run the approve command.'],
+            ['AV_LOCKED', 'The vault is locked.', `<code>${esc(c.cli)} unlock</code>, or unlock from the Overview page.`],
+            ['AV_PRESENCE_REQUIRED', 'Something tried to widen capability without confirmation.', 'Do it from this page with your fingerprint, or from the CLI after proving your passphrase.'],
+            ['AV_PRESENCE_DENIED', 'The passphrase or signature did not verify.', 'Try again. Repeated failures are in the audit log.'],
+            ['AV_SESSION_REQUIRED', 'No session token was presented.', 'Send it as <code>Authorization: Bearer</code>, or use a placeholder at a declared header site.'],
+            ['AV_SESSION_EXPIRED', 'The session ran out of time or budget.', 'Create a new one.'],
+            ['AV_SESSION_REVOKED', 'You revoked it.', 'Create a new one if that was not what you meant.'],
+            ['AV_ENCODED_BODY', 'The request body was compressed, so placeholders in it could not be found.', 'Send identity encoding. An unreadable body is never forwarded.'],
+            ['AV_UNSCANNABLE', 'The upstream response could not be decoded for scrubbing, so it was not returned.', 'A response the vault cannot read might carry the secret back; it is withheld rather than trusted.'],
+            ['AV_BROWSER_ORIGIN', 'The request carried Origin or Sec-Fetch-Site.', 'The proxy is not for browsers. Call it from your agent or your code.'],
+            ['AV_REMOTE_FORBIDDEN', 'A remote session attempted something allowed only from this machine.', 'Do it locally.'],
+            ['AV_UPSTREAM_UNREACHABLE', 'The upstream did not answer.', 'Not your policy’s fault; the placeholder use was refunded. Retry.'],
+          ].map(([codeName, what, fix]) =>
+            `<tr><td>${esc(codeName)}</td><td>${what}</td><td>${fix}</td></tr>`).join('')}
+        </table></div></div>
+        <div class="prose"><h3>Nothing works at all</h3></div>
+        ${code(`${c.cli} doctor`, 'Checks the daemon, the socket, permissions and the listeners.')}`,
+    },
+    {
+      id: 'commands',
+      title: 'Commands',
+      body: (c) => `<div class="prose"><p>Every command takes <code>--json</code> for a
+        machine-readable envelope.</p></div>
+        ${code(`${c.cli} setup                      install the daemon and its system user
+${c.cli} status                     is it running, and what is live
+${c.cli} doctor                     diagnose a broken install
+${c.cli} quickstart                 credential, session, and what to hand the agent
+
+${c.cli} cred add [slug] [--kind K] store a credential (value read from the terminal)
+${c.cli} cred list | cred rm SLUG
+${c.cli} profiles                   the built-in connector kinds and their ceilings
+
+${c.cli} session create [--cred S] [--methods M] [--paths P] [--budget N]
+${c.cli} session list | session revoke [SID]
+${c.cli} ph next CRED [--uses N]    issue a placeholder
+${c.cli} ph check PLACEHOLDER       is this one still valid
+${c.cli} ph pattern                 the regex that recognises one
+
+${c.cli} env                        shell exports for an agent
+${c.cli} exec -- COMMAND            run a command with those exports
+${c.cli} mcp                        stdio transport
+${c.cli} mcp url                    the Streamable HTTP endpoint
+${c.cli} mcp install --agent AGENT  write the config for that tool
+
+${c.cli} approvals | approve ID | deny ID
+${c.cli} audit tail [--limit N] | audit verify
+${c.cli} lock | unlock
+${c.cli} passphrase set | passphrase remove
+${c.cli} listen add ID --address HOST:PORT | listen list | listen rm ID
+${c.cli} ui                         open this page`)}`,
+    },
+  ]
+
+  // ------------------------------------------------------- session handoff
+  // What to give the agent, shown once after a session is created. None of it
+  // is a secret: the token and the placeholder are capabilities the agent is
+  // about to hold anyway, and neither can be turned back into a credential.
+  // Withholding them only meant a session made here could not be used.
+
+  let lastSession = null
+
+  /**
+   * A curl line that puts the placeholder where this credential declares it
+   * goes. Anywhere else and the daemon refuses with AV_BAD_LOCATION, so a
+   * generic example would be an example of the error.
+   */
+  function exampleCall(s) {
+    const site = (s.sites || [])[0] || ''
+    const [kind, name, scheme] = site.split(':')
+    const auth = `  -H "Authorization: Bearer ${s.token}"`
+    if (kind === 'header') {
+      const header = `${name}: ${scheme ? `${scheme} ` : ''}${s.placeholder}`
+      return `curl "${s.base_url}${s.probe || '/'}" \\\n${auth} \\\n  -H "${header}"`
+    }
+    // Non-header sites (basic auth, a form field, a JSON pointer) do not fit a
+    // one-liner; the usage list above is the authoritative answer.
+    return `curl "${s.base_url}${s.probe || '/'}" \\\n${auth}\n\n# then put the placeholder at: ${site}`
+  }
+
+  function handoffCard() {
+    if (!lastSession) return ''
+    const s = lastSession
+    const curl = exampleCall(s)
+    return `
+      <div class="card"><h2>Hand this to the agent</h2><div class="body">
+        <p class="caption">Session <span class="mono">${esc(s.session_id)}</span>, ${esc(until(s.expires_at))}.
+          Shown once — reload this page and it is gone.</p>
+        ${codeRow('Base URL', s.base_url)}
+        ${codeRow('Session token', s.token)}
+        ${codeRow('Placeholder', s.placeholder)}
+        <p class="caption" style="margin-top:14px">The placeholder goes here, and nowhere else:</p>
+        <ul class="prose" style="margin-bottom:14px">${(s.usage || []).map((u) => `<li><code>${esc(u)}</code></li>`).join('')}</ul>
+        ${(s.lint || []).length ? `<div class="notice">${(s.lint || []).map(esc).join('<br>')}</div>` : ''}
+        <p class="caption">A request that exercises it:</p>
+        ${code(curl)}
+        <button class="action" data-act="dismiss-handoff">Done</button>
+      </div></div>`
+  }
+
+  const codeRow = (label, value) => `
+    <div class="cmd"><p class="caption">${esc(label)}</p>
+      <pre>${esc(value)}</pre><button class="copy" data-copy="${esc(value)}">Copy</button></div>`
+
+  // ------------------------------------------------------------------ views
+
+  const views = {
+    async overview() {
+      const [status, creds, sessions, approvals] = await Promise.all([
+        api('GET', 'status'), api('GET', 'credentials'), api('GET', 'sessions'), api('GET', 'approvals'),
+      ])
+      const live = sessions.filter((s) => s.state === 'active')
+      await refreshPresence()
+      const gate = presenceState.enrolled
+        ? `<div class="card"><h2>Confirmation</h2><div class="row">
+             <div class="main"><div class="name">Authenticator enrolled <span class="pill ok">active</span></div>
+             <div class="meta">Every change asks for Touch ID, and the signature covers that one operation.
+               A browser driven by software reaches the dialog and stops there.</div></div></div></div>`
+        : `<div class="notice"><strong>Changes need confirmation.</strong>
+             Set up Touch ID to confirm changes — adding a credential, approving a request, revoking a
+             session. (This is separate from unlocking the vault, which you set up below.)
+             Enrolling asks for your passphrase once; after that, changes need only your fingerprint.
+             <div style="margin-top:10px"><button class="action primary" data-act="enroll">Set up change confirmation</button></div>
+           </div>`
+      let lockBanner = ''
+      if (status.locked) {
+        const ls = await api('GET', 'unlock/state').catch(() => ({}))
+        const touchBtn = ls.has_touchid && prfSupported()
+          ? `<button class="action primary" data-act="touchid-unlock">Unlock with Touch ID</button>`
+          : ''
+        // If Touch ID unlock is possible but not yet enabled, say how.
+        const hint = !ls.has_touchid && ls.has_passphrase && prfSupported()
+          ? `<div class="meta" style="margin-top:8px">Want to unlock with a fingerprint next time? Unlock once with your passphrase, then turn on <strong>Touch ID unlock</strong> on this page.</div>`
+          : ''
+        const passBtn = ls.has_passphrase
+          ? `<button class="action ${touchBtn ? '' : 'primary'}" data-act="unlock">Use passphrase</button>`
+          : `<button class="action primary" data-act="unlock">Unlock</button>`
+        lockBanner = `<div class="notice"><strong>The vault is locked.</strong>
+             Every proxied request is refused until it is unlocked, and it stays locked across restarts.
+             <div style="margin-top:10px;display:flex;gap:8px">${touchBtn}${passBtn}</div>${hint}
+           </div>`
+      }
+      // When unlocked with a passphrase, offer to add or remove Touch ID unlock.
+      let touchIdRow = ''
+      if (!status.locked) {
+        const ls = await api('GET', 'unlock/state').catch(() => ({}))
+        if (ls.has_passphrase && prfSupported()) {
+          touchIdRow = ls.has_touchid
+            ? `<div class="row"><div class="main"><div class="name">Touch ID unlock <span class="pill ok">on</span></div>
+                 <div class="meta">Unlock with a fingerprint; your passphrase still works as recovery.</div></div>
+                 <div class="actions"><button class="action" data-act="touchid-disable">Turn off</button></div></div>`
+            : `<div class="row"><div class="main"><div class="name">Touch ID unlock</div>
+                 <div class="meta">Unlock the vault with a fingerprint instead of typing the passphrase. Your passphrase stays as a backup.</div></div>
+                 <div class="actions"><button class="action primary" data-act="touchid-enable">Enable</button></div></div>`
+        }
+      }
+      return `
+        <header class="page"><h1>Overview</h1>
+          <span class="pill ${status.locked ? 'crit' : 'ok'}">${status.locked ? 'locked' : 'unlocked'}</span></header>
+        <p class="sub">Daemon ${esc(status.daemon_version)} on gateway port ${esc(status.gateway_port)}.</p>
+        ${lockBanner}${gate}
+        ${touchIdRow ? `<div class="card"><h2>Unlocking</h2>${touchIdRow}</div>` : ''}
+        ${approvals.length ? `<div class="notice"><strong>${approvals.length} request${approvals.length > 1 ? 's' : ''} waiting for you.</strong>
+          Open Approvals to decide.</div>` : ''}
+        <div class="card"><h2>At a glance</h2>
+          <div class="row"><div class="main"><div class="name">${creds.length}</div>
+            <div class="meta">credentials stored</div></div></div>
+          <div class="row"><div class="main"><div class="name">${live.length}</div>
+            <div class="meta">active sessions</div></div></div>
+          <div class="row"><div class="main"><div class="name">${status.placeholders_live}</div>
+            <div class="meta">live placeholders</div></div></div>
+          <div class="row"><div class="main"><div class="name">${status.audit_records ?? '&mdash;'}</div>
+            <div class="meta">audit records${status.audit_records == null ? ' (unavailable while locked)' : ''}</div></div>
+            <div class="actions"><button class="action" data-act="verify">Verify chain</button></div></div>
+        </div>`
+    },
+
+    async credentials() {
+      const creds = await api('GET', 'credentials')
+      const rows = creds.length ? creds.map((c) => `
+        <div class="row">
+          <div class="main">
+            <div class="name">${esc(c.slug)} <span class="pill">${esc(c.kind)}</span></div>
+            <div class="meta">${esc(c.connector.host || 'no host set')} &middot;
+              fingerprint <span class="mono">${esc(c.fields[0]?.fp8 || '')}</span> &middot;
+              injected at <span class="mono">${esc((c.fields[0]?.sites || []).join(', '))}</span></div>
+          </div>
+          <div class="actions"><button class="action danger" data-act="rm-cred" data-slug="${esc(c.slug)}">Remove</button></div>
+        </div>`).join('') : '<div class="empty">No credentials yet. Add one below.</div>'
+
+      return `
+        <header class="page"><h1>Credentials</h1></header>
+        <p class="sub">The value is write-only. It goes straight to the daemon and is never sent back to this page.</p>
+        <div class="card"><h2>Stored</h2>${rows}</div>
+        <div class="card"><h2>Add a credential</h2><div class="body">
+          <div class="grid">
+            <div><label for="slug">Name</label><input id="slug" placeholder="gh-frozencrow" autocomplete="off"></div>
+            <div><label for="kind">Kind</label><select id="kind">
+              <option value="github">github</option><option value="slack">slack</option>
+              <option value="anthropic">anthropic</option><option value="openai">openai</option>
+              <option value="google-genai">google-genai</option><option value="http">http (generic)</option>
+            </select></div>
+            <div><label for="host">Host <span style="opacity:.7">(generic only)</span></label>
+              <input id="host" placeholder="api.example.com" autocomplete="off"></div>
+          </div>
+          <div style="margin-bottom:12px"><label for="value">Value</label>
+            <input id="value" type="password" autocomplete="new-password" spellcheck="false"
+                   placeholder="paste the token; it is not echoed and never returned"></div>
+          <button class="action primary" data-act="add-cred">Store credential</button>
+        </div></div>`
+    },
+
+    async sessions() {
+      const [sessions, creds] = await Promise.all([api('GET', 'sessions'), api('GET', 'credentials')])
+      const rows = sessions.length ? sessions.map((s) => `
+        <div class="row">
+          <div class="main">
+            <div class="name">${esc(s.label)}
+              <span class="pill ${s.state === 'active' ? 'ok' : ''}">${esc(s.state)}</span>
+              ${s.remote ? '<span class="pill warn">remote</span>' : ''}</div>
+            <div class="meta"><span class="mono">${esc(s.id)}</span> &middot; ${s.grants} grant(s) &middot;
+              ${esc(until(s.expires_at))}</div>
+          </div>
+          <div class="actions">${s.state === 'active'
+            ? `<button class="action danger" data-act="revoke" data-sid="${esc(s.id)}">Revoke</button>` : ''}</div>
+        </div>`).join('') : '<div class="empty">No sessions yet.</div>'
+
+      const options = creds.map((c) => `<option value="${esc(c.slug)}">${esc(c.slug)}</option>`).join('')
+      return `
+        <header class="page"><h1>Sessions</h1></header>
+        <p class="sub">A session is what an agent holds. Revoking one cuts off every placeholder it issued.</p>
+        ${handoffCard()}
+        <div class="card"><h2>Sessions</h2>${rows}</div>
+        ${creds.length ? `<div class="card"><h2>New session</h2><div class="body">
+          <div class="grid">
+            <div><label for="sCred">Credential</label><select id="sCred">${options}</select></div>
+            <div><label for="sLabel">Label</label><input id="sLabel" placeholder="issue triage" autocomplete="off"></div>
+            <div><label for="sMethods">Methods</label><input id="sMethods" value="GET,HEAD" autocomplete="off"></div>
+            <div><label for="sPaths">Paths</label><input id="sPaths" value="/**" autocomplete="off"></div>
+            <div><label for="sBudget">Budget</label><input id="sBudget" type="number" value="500" min="1"></div>
+            <div><label for="sApproval">Writes</label><select id="sApproval">
+              <option value="on-write">ask me (on-write)</option>
+              <option value="each">ask me every time</option>
+              <option value="auto">no approval</option>
+            </select></div>
+          </div>
+          <button class="action primary" data-act="add-session">Create session</button>
+        </div></div>` : ''}`
+    },
+
+    async approvals() {
+      const pending = await api('GET', 'approvals')
+      if (!pending.length) {
+        return `<header class="page"><h1>Approvals</h1></header>
+          <p class="sub">Requests an agent cannot make without you.</p>
+          <div class="card"><div class="empty">Nothing waiting.</div></div>`
+      }
+      return `
+        <header class="page"><h1>Approvals</h1><span class="pill warn">${pending.length} waiting</span></header>
+        <p class="sub">The summary is written by the daemon from the request it actually received.
+          The reason is whatever the agent claimed, and is not verified.</p>
+        ${pending.map((a) => `
+          <div class="card"><div class="body">
+            <div class="mono" style="font-size:14px;font-weight:600;margin-bottom:6px">${esc(a.summary)}</div>
+            <div class="meta" style="color:var(--muted);margin-bottom:10px">
+              grant <span class="mono">${esc(a.grant_id)}</span> &middot; asked ${esc(ago(a.created_at))}</div>
+            ${a.reason ? `<div class="notice">Claimed by the agent, unverified: ${esc(a.reason)}</div>` : ''}
+            <div class="actions">
+              <button class="action primary" data-act="approve" data-id="${esc(a.id)}">Approve once</button>
+              <button class="action danger" data-act="deny" data-id="${esc(a.id)}">Deny</button>
+            </div>
+          </div></div>`).join('')}`
+    },
+
+    async audit() {
+      // The log is encrypted with a key derived from the vault key, so while
+      // the vault is locked there is nothing to show and that is the answer,
+      // not an error.
+      let rows
+      try {
+        rows = await api('GET', 'audit?limit=60')
+      } catch (e) {
+        // Ask the vault rather than reading the error text: an older daemon
+        // reports this as an internal error instead of a lock.
+        const ls = await api('GET', 'lockstate').catch(() => ({}))
+        if (!ls.locked) throw e
+        return `<header class="page"><h1>Audit</h1><span class="pill crit">locked</span></header>
+          <p class="sub">The log is encrypted with the vault key, so it cannot be read while the vault is locked.</p>
+          <div class="notice"><strong>Unlock to read the audit log.</strong>
+            <div style="margin-top:10px"><button class="action primary" data-act="goto-overview">Go to Overview</button></div></div>`
+      }
+      return `
+        <header class="page"><h1>Audit</h1></header>
+        <p class="sub">Append-only and hash-chained. No credential value, body or full path is ever recorded here.</p>
+        <div class="card"><h2>Recent</h2><div class="audit">
+          ${rows.slice().reverse().map((r) => {
+            const cls = r.decision === 'allow' ? 't-allow' : r.decision === 'deny' ? 't-deny' : 't-dim'
+            const note = r.reason_code || r.credential_slug || r.detail || ''
+            return `<div class="line"><span class="t-dim">${esc(r.ts.slice(11, 19))}</span>
+              <span class="${cls}">${esc(r.decision || '')}</span>
+              <span>${esc(r.kind)}</span><span class="t-dim">${esc(note)}</span></div>`
+          }).join('')}
+        </div></div>`
+    },
+
+    async docs() {
+      if (!docsCtx) {
+        docsCtx = await api('GET', 'docs/context').catch(() => ({}))
+        docsCtx.cli = docsCtx.cli || 'agent-vault'
+        docsCtx.gateway_port = docsCtx.gateway_port || 7411
+        // Use a credential the reader actually has, so the examples are theirs.
+        docsCtx.cred = docsCtx.cred_slugs?.[0] || 'gh-work'
+      }
+      const section = DOCS.find((d) => d.id === docsSection) || DOCS[0]
+      return `
+        <header class="page"><h1>Docs</h1>
+          ${docsCtx.version ? `<span class="pill">v${esc(docsCtx.version)}</span>` : ''}</header>
+        <p class="sub">Written against this install, so the commands below are yours to paste.</p>
+        <div class="docnav">${DOCS.map((d) =>
+          `<button data-doc="${esc(d.id)}" aria-current="${d.id === section.id}">${esc(d.title)}</button>`).join('')}</div>
+        ${section.body(docsCtx)}`
+    },
+  }
+
+  // ---------------------------------------------------------------- actions
+
+  const actions = {
+    async verify() {
+      const v = await api('GET', 'audit/verify')
+      toast(v.ok ? `Chain intact across ${v.count} records` : `Chain broken at record ${v.brokenAt}`)
+    },
+    async 'goto-overview'() {
+      current = 'overview'
+      syncNav()
+      render()
+    },
+    async 'touchid-unlock'() {
+      await touchIdUnlock()
+      vaultLocked = false
+      toast('Unlocked with Touch ID')
+      render()
+    },
+    async 'touchid-enable'() {
+      await enableTouchId()
+      toast('Touch ID unlock enabled')
+      render()
+    },
+    async 'touchid-disable'() {
+      await gated({ op: 'touchid.remove' }, (proof) => api('POST', 'touchid/remove', { presence: proof }))
+      toast('Touch ID unlock turned off')
+      render()
+    },
+    async unlock() {
+      // Unlocking is the way in, so it is not behind the change-confirmation
+      // gate: the passphrase itself is the proof. Routing it through that gate
+      // wrongly required a confirmation authenticator to exist first.
+      const state = await api('GET', 'lockstate')
+      const passphrase = state.needs_secret ? await askSecret('Vault passphrase') : null
+      if (state.needs_secret && passphrase == null) return toast('Cancelled')
+      const res = await api('POST', 'unlock/passphrase', { passphrase })
+      if (res.locked) return toast('That passphrase did not unlock the vault')
+      vaultLocked = false
+      toast('Unlocked')
+      render()
+    },
+    async enroll() {
+      await enroll()
+      toast('Authenticator enrolled')
+      render()
+    },
+    async 'add-cred'() {
+      const slug = document.getElementById('slug').value.trim()
+      const value = document.getElementById('value').value
+      const kind = document.getElementById('kind').value
+      const host = document.getElementById('host').value.trim()
+      if (!slug || !value) return toast('A name and a value are both required')
+      await gated({ op: 'cred.add', slug, kind }, (proof) =>
+        api('POST', 'credentials', { slug, kind, value, host: host || undefined, presence: proof }))
+      document.getElementById('value').value = ''
+      toast(`Stored ${slug}`)
+      render()
+    },
+    async 'rm-cred'(btn) {
+      const slug = btn.dataset.slug
+      if (!confirm(`Remove ${slug}? Every grant using it is revoked.`)) return
+      await gated({ op: 'cred.remove', slug }, (proof) =>
+        api('DELETE', `credentials?slug=${encodeURIComponent(slug)}`, { presence: proof }))
+      toast('Removed')
+      render()
+    },
+    async 'add-session'() {
+      const body = {
+        cred: document.getElementById('sCred').value,
+        label: document.getElementById('sLabel').value.trim() || 'ui session',
+        methods: document.getElementById('sMethods').value.split(',').map((m) => m.trim()).filter(Boolean),
+        paths: document.getElementById('sPaths').value.split(',').map((p) => p.trim()).filter(Boolean),
+        budget: Number(document.getElementById('sBudget').value),
+        approval: document.getElementById('sApproval').value,
+      }
+      const s = await gated(
+        { op: 'session.create', cred: body.cred, methods: body.methods, paths: body.paths },
+        (proof) => api('POST', 'sessions', { ...body, presence: proof }),
+      )
+      // Carry the credential's own injection site through, so the example call
+      // puts the placeholder where this credential actually accepts it.
+      const creds = await api('GET', 'credentials').catch(() => [])
+      const cred = creds.find((c) => c.slug === body.cred)
+      lastSession = { ...s, sites: cred?.fields?.[0]?.sites || [], probe: cred?.probe_path || '' }
+      toast(`Session ${s.session_id} created`)
+      render()
+    },
+    async 'dismiss-handoff'() {
+      lastSession = null
+      render()
+    },
+    async revoke(btn) {
+      const sid = btn.dataset.sid
+      await gated({ op: 'session.revoke', sid }, (proof) =>
+        api('DELETE', `sessions?sid=${encodeURIComponent(sid)}`, { presence: proof }))
+      toast('Revoked')
+      render()
+    },
+    async approve(btn) {
+      const id = btn.dataset.id
+      await gated({ op: 'approval.approve', id }, (proof) =>
+        api('POST', 'approvals', { id, granted: true, presence: proof }))
+      toast('Approved')
+      render()
+    },
+    async deny(btn) {
+      const id = btn.dataset.id
+      await gated({ op: 'approval.deny', id }, (proof) =>
+        api('POST', 'approvals', { id, granted: false, presence: proof }))
+      toast('Denied')
+      render()
+    },
+  }
+
+  document.addEventListener('click', async (e) => {
+    const navBtn = e.target.closest('nav button[data-view]')
+    if (navBtn) {
+      current = navBtn.dataset.view
+      syncNav()
+      return render()
+    }
+    if (e.target.id === 'lockBtn') {
+      try {
+        if (vaultLocked) {
+          await actions.unlock()
+        } else {
+          if (!confirm('Lock the vault? Every proxied request is refused until it is unlocked.')) return
+          await gated({ op: 'vault.lock' }, (proof) => api('POST', 'lock', { presence: proof }))
+          toast('Vault locked')
+          render()
+        }
+      } catch (err) { toast(err.message) }
+      return
+    }
+    const docBtn = e.target.closest('[data-doc]')
+    if (docBtn) {
+      docsSection = docBtn.dataset.doc
+      syncNav()
+      return render()
+    }
+    const copyBtn = e.target.closest('[data-copy]')
+    if (copyBtn) {
+      try {
+        await navigator.clipboard.writeText(copyBtn.dataset.copy)
+        copyBtn.textContent = 'Copied'
+        setTimeout(() => { copyBtn.textContent = 'Copy' }, 1400)
+      } catch { toast('Your browser would not let the page copy. Select the text instead.') }
+      return
+    }
+    const actBtn = e.target.closest('[data-act]')
+    if (actBtn && actions[actBtn.dataset.act]) {
+      try { await actions[actBtn.dataset.act](actBtn) } catch (err) { toast(err.message) }
+    }
+  })
+
+  async function render() {
+    try {
+      el.innerHTML = await views[current]()
+    } catch (err) {
+      el.innerHTML = `<header class="page"><h1>Cannot reach the daemon</h1></header>
+        <p class="sub">${esc(err.message)}</p>
+        <div class="card"><div class="body">Start it with <code>agent-vault daemon</code>, or check
+        <code>agent-vault status</code>.</div></div>`
+    }
+    await refreshChrome()
+  }
+
+  /** Keep the sidebar telling the truth, whichever view is open. */
+  async function refreshChrome() {
+    try {
+      const state = await api('GET', 'lockstate')
+      vaultLocked = state.locked
+      const btn = document.getElementById('lockBtn')
+      btn.textContent = vaultLocked ? 'Unlock vault' : 'Lock vault'
+      btn.className = vaultLocked ? 'action primary' : 'action danger'
+      btn.title = vaultLocked
+        ? 'Every proxied request is refused until you unlock'
+        : 'Refuse every proxied request until you unlock'
+    } catch { /* the main panel already reports an unreachable daemon */ }
+
+    try {
+      const pending = await api('GET', 'approvals')
+      const badge = document.getElementById('approvalCount')
+      badge.textContent = pending.length ? ` (${pending.length})` : ''
+      badge.className = pending.length ? 'pill warn' : ''
+    } catch { /* the error is already shown in the main panel */ }
+  }
+
+  /** Keep the sidebar and the address bar agreeing with what is on screen. */
+  function syncNav() {
+    document.querySelectorAll('nav button[data-view]').forEach((b) =>
+      b.setAttribute('aria-current', String(b.dataset.view === current)))
+    const want = current === 'docs' ? `#docs/${docsSection}` : `#${current}`
+    if (location.hash !== want) history.replaceState(null, '', want)
+  }
+
+  syncNav()
+  render()
+  timer = setInterval(() => {
+    if (current === 'approvals' || current === 'overview') render()
+    else refreshChrome()
+  }, 5000)
+})()
+</script>

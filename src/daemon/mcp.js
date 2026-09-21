@@ -1,0 +1,285 @@
+// MCP, implemented once and exposed over two transports.
+//
+// The tools live here, in the daemon, and both `agent-vault mcp` (stdio) and
+// POST /mcp (Streamable HTTP) drive this same handler. One implementation is
+// the point: if the transports had separate code, they would drift, and the
+// drift would be in policy evaluation and scrubbing rather than in framing.
+//
+// No tool returns a secret, creates a credential, or approves anything.
+
+import { randomUUID } from 'node:crypto'
+import { getProfile } from '../connectors/profiles.js'
+import * as sitesMod from '../core/sites.js'
+import { VaultError } from '../core/errors.js'
+
+export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26']
+export const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
+
+const SERVER_INFO = { name: 'agent-vault', version: '0.1.0' }
+
+const INSTRUCTIONS = [
+  'Credentials are placeholders, never real secrets. Never ask the user for a real secret.',
+  'Prefer vault_http for API calls; use vault_get_placeholder only for tools that must run natively.',
+  'Put a placeholder only where the usage field says. A placeholder anywhere else is refused.',
+  'On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry.',
+  'On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives.',
+].join(' ')
+
+export class McpServer {
+  /**
+   * @param {import('../store/vault.js').Vault} vault
+   * @param {import('./pipeline.js').Pipeline} pipeline
+   * @param {() => object|null} resolveSession  returns the session for this transport
+   */
+  constructor(vault, pipeline, resolveSession) {
+    this.vault = vault
+    this.pipeline = pipeline
+    this.resolveSession = resolveSession
+    this.sessions = new Map() // Mcp-Session-Id -> { created, lastEventId, events: [] }
+  }
+
+  /** Create an MCP transport session. It is a routing key, never a credential. */
+  openSession() {
+    const sid = randomUUID()
+    this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1 })
+    this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
+    return sid
+  }
+
+  closeSession(sid) {
+    if (this.sessions.delete(sid)) this.vault.audit?.write('mcp.session_closed', { mcp_session_id: sid })
+  }
+
+  hasSession(sid) { return this.sessions.has(sid) }
+
+  get tools() {
+    return [
+      {
+        name: 'vault_status',
+        description: 'Whether the vault is reachable and unlocked, and a summary of the current session.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'vault_list_creds',
+        description: 'Credentials this session may use, with the exact place a placeholder goes for each.',
+        inputSchema: { type: 'object', properties: { available_only: { type: 'boolean' } } },
+      },
+      {
+        name: 'vault_get_placeholder',
+        description: 'Get a placeholder for a credential. Returns the placeholder plus where to put it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            cred: { type: 'string', description: 'credential slug' },
+            reason: { type: 'string', description: 'why you need it; shown to the human as an unverified claim' },
+            uses: { type: 'number', description: 'optional: make it n-use instead of session-lifetime' },
+          },
+          required: ['cred', 'reason'],
+        },
+      },
+      {
+        name: 'vault_http',
+        description: 'Make an HTTP request through the vault. The credential is injected by the daemon; you never handle it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            cred: { type: 'string' },
+            method: { type: 'string' },
+            path: { type: 'string' },
+            query: { type: 'string' },
+            headers: { type: 'object' },
+            body: { type: 'string' },
+            reason: { type: 'string' },
+          },
+          required: ['cred', 'method', 'path', 'reason'],
+        },
+      },
+      {
+        name: 'vault_explain_denial',
+        description: 'Explain why a request was denied and what this session is allowed to do instead.',
+        inputSchema: { type: 'object', properties: { request_id: { type: 'string' } }, required: ['request_id'] },
+      },
+    ]
+  }
+
+  /** Handle one JSON-RPC message. Returns a response object, or null for notifications. */
+  async handle(message) {
+    const { id, method, params } = message
+    const ok = (result) => (id === undefined ? null : { jsonrpc: '2.0', id, result })
+    const fail = (code, msg, data) => (id === undefined ? null : { jsonrpc: '2.0', id, error: { code, message: msg, data } })
+
+    try {
+      switch (method) {
+        case 'initialize':
+          return ok({
+            protocolVersion: PROTOCOL_VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : LATEST_PROTOCOL,
+            capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
+            serverInfo: SERVER_INFO,
+            instructions: INSTRUCTIONS,
+          })
+        case 'notifications/initialized':
+          return null
+        case 'ping':
+          return ok({})
+        case 'tools/list':
+          return ok({ tools: this.tools })
+        case 'resources/list':
+          return ok({ resources: [{ uri: 'agent-vault://session', name: 'Current session', mimeType: 'application/json' }] })
+        case 'resources/read':
+          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(), null, 2) }] })
+        case 'tools/call':
+          return ok(await this.#callTool(params?.name, params?.arguments || {}))
+        default:
+          return fail(-32601, `unknown method: ${method}`)
+      }
+    } catch (e) {
+      if (e instanceof VaultError) {
+        return ok({
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify({ code: e.code, detail: e.detail, hint: e.hint, next: e.next }, null, 2) }],
+        })
+      }
+      return fail(-32603, e.message)
+    }
+  }
+
+  #status() {
+    const session = this.resolveSession()
+    return {
+      daemon: 'agent-vault', version: SERVER_INFO.version,
+      locked: this.vault.locked,
+      session: session ? { id: session.id, label: session.label, expires_at: session.expires_at } : null,
+      credentials_available: session ? this.vault.grantsForSession(session.id).length : 0,
+    }
+  }
+
+  async #callTool(name, args) {
+    const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] })
+    const session = this.resolveSession()
+
+    switch (name) {
+      case 'vault_status':
+        return text(this.#status())
+
+      case 'vault_list_creds': {
+        if (!session) return text({ error: 'no session', next: 'ask the human to run: agent-vault session create' })
+        const out = this.vault.grantsForSession(session.id).map((g) => {
+          const cred = this.vault.db.credentials[g.credential_id]
+          const profile = getProfile(cred.connector_kind)
+          return {
+            slug: cred.slug,
+            kind: cred.connector_kind,
+            base_url: `/p/${cred.slug}`,
+            allowed: { methods: g.policy?.methods, paths: g.policy?.paths, hosts: g.policy?.hosts },
+            budget_remaining: (g.policy?.budget?.limit ?? 0) - g.budget_used,
+            usage: cred.fields.map((f) => ({
+              field: f.name,
+              put_placeholder_at: f.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s))),
+            })),
+            profile_denies: profile.deny_paths.slice(0, 5),
+          }
+        })
+        return text(out)
+      }
+
+      case 'vault_get_placeholder': {
+        if (!session) return text({ error: 'no session' })
+        const cred = this.vault.findCredential(args.cred)
+        if (!cred) return text({ error: `no credential ${args.cred}`, known: this.vault.listCredentials().map((c) => c.slug) })
+        const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
+        if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
+        const field = cred.fields[0]
+        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses: args.uses ?? null })
+        this.vault.audit.write('placeholder.issued_via_mcp', { credential_slug: cred.slug, agent_reason_untrusted: args.reason })
+        return text({
+          placeholder,
+          usage: {
+            put_it_at: field.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)),
+            url: `/p/${cred.slug}/<path>`,
+            warning: 'A placeholder anywhere other than the site above is refused and audited.',
+          },
+        })
+      }
+
+      case 'vault_http': {
+        if (!session) return text({ error: 'no session' })
+        const cred = this.vault.findCredential(args.cred)
+        if (!cred) return text({ error: `no credential ${args.cred}` })
+        const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
+        if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
+        const field = cred.fields[0]
+        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
+
+        // The MCP path runs the identical pipeline: same policy, same site
+        // check, same scrubber, same audit. Only the framing differs.
+        const site = sitesMod.parseSite(field.sites[0])
+        const headers = [['host', '127.0.0.1']]
+        for (const [k, v] of Object.entries(args.headers || {})) {
+          // The daemon sets its own av-* headers below. Letting the caller
+          // supply them first meant an agent's value shadowed the real one and
+          // the request failed as unauthenticated — confusing, and not
+          // something a tool argument should be able to reach.
+          if (/^av-/i.test(k) || k.toLowerCase() === 'host') continue
+          headers.push([k, v])
+        }
+        if (site.kind === 'header') {
+          headers.push([site.name, site.scheme ? `${site.scheme} ${placeholder}` : placeholder])
+        }
+        headers.push(['av-session', this.#tokenFor(session)])
+        if (args.reason) headers.push(['av-reason', args.reason])
+        if (args.body) headers.push(['content-type', args.headers?.['content-type'] || 'application/json'])
+
+        const res = await this.pipeline.handle({
+          method: args.method, path: `/p/${cred.slug}${args.path}`, query: args.query || '',
+          headers, body: args.body ? Buffer.from(args.body) : null,
+        })
+        return text({
+          status: res.status,
+          request_id: res.requestId,
+          decision: res.headers['av-decision'],
+          headers: res.headers,
+          body: res.body.toString('utf8').slice(0, 256 * 1024),
+        })
+      }
+
+      case 'vault_explain_denial': {
+        const rows = this.vault.audit.read({ limit: 200 }).filter((r) => r.request_id === args.request_id)
+        if (!rows.length) return text({ error: `no record of request ${args.request_id}` })
+        const denial = rows.find((r) => r.decision === 'deny') || rows[rows.length - 1]
+        return text({
+          request_id: args.request_id,
+          decision: denial.decision,
+          code: denial.reason_code,
+          rule: denial.rule,
+          detail: denial.detail,
+          allowed_here: session ? this.vault.grantsForSession(session.id).map((g) => g.policy) : [],
+        })
+      }
+
+      default:
+        return text({ error: `unknown tool ${name}` })
+    }
+  }
+
+  /** The MCP process holds the session token it was started with. */
+  #tokenFor(session) { return this.sessionToken || session.__token || '' }
+}
+
+/** Frame the MCP server onto stdio: newline-delimited JSON-RPC. */
+export function serveStdio(server, input = process.stdin, output = process.stdout) {
+  let buffer = ''
+  input.setEncoding('utf8')
+  input.on('data', async (chunk) => {
+    buffer += chunk
+    let nl
+    while ((nl = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, nl).trim()
+      buffer = buffer.slice(nl + 1)
+      if (!line) continue
+      let message
+      try { message = JSON.parse(line) } catch { continue }
+      const response = await server.handle(message)
+      if (response) output.write(`${JSON.stringify(response)}\n`)
+    }
+  })
+}

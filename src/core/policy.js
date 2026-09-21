@@ -1,0 +1,366 @@
+// The policy engine.
+//
+// Effective policy = profile ceiling n workspace n session n grant, where n
+// intersects lists, takes the minimum of numeric limits, the stricter approval
+// mode and the narrower enum. A child can never widen: that single rule is what
+// makes `session fork` safe to hand to an agent without a presence prompt.
+
+import { deny } from './errors.js'
+
+export const APPROVAL_ORDER = ['auto', 'first-use', 'on-write', 'each']
+export const SQL_ORDER = ['read-only', 'read-write', 'raw']
+export const SSH_MODE_ORDER = ['run', 'agent']
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+/** Suffixes where a wildcard host would span unrelated tenants. */
+export const MULTI_TENANT_SUFFIXES = [
+  's3.amazonaws.com', 'cloudfront.net', 'github.io', 'herokuapp.com',
+  'ngrok.io', 'azurewebsites.net', 'vercel.app', 'pages.dev', 'workers.dev',
+  'blob.core.windows.net', 'storage.googleapis.com', 'firebaseapp.com',
+]
+
+/** Intersect two lists; an absent list means "no constraint at this level". */
+function intersectList(a, b) {
+  if (a == null) return b == null ? null : [...b]
+  if (b == null) return [...a]
+  const bs = new Set(b)
+  return a.filter((x) => bs.has(x))
+}
+
+function minNum(a, b) {
+  if (a == null) return b
+  if (b == null) return a
+  return Math.min(a, b)
+}
+
+function stricter(a, b, order) {
+  if (a == null) return b
+  if (b == null) return a
+  return order.indexOf(a) >= order.indexOf(b) ? a : b
+}
+
+function narrower(a, b, order) {
+  if (a == null) return b
+  if (b == null) return a
+  return order.indexOf(a) <= order.indexOf(b) ? a : b
+}
+
+/**
+ * Intersect a chain of policy layers, outermost (ceiling) first.
+ * @param {object[]} layers
+ */
+export function intersect(layers) {
+  let out = {}
+  for (const layer of layers) {
+    if (!layer) continue
+    out = {
+      kind: layer.kind || out.kind,
+      hosts: intersectHosts(out.hosts, layer.hosts),
+      methods: intersectList(out.methods ?? null, layer.methods ?? null),
+      paths: intersectPaths(out.paths, layer.paths),
+      deny_paths: [...(out.deny_paths || []), ...(layer.deny_paths || [])],
+      approval: stricter(out.approval, layer.approval, APPROVAL_ORDER),
+      sql_profile: narrower(out.sql_profile, layer.sql_profile, SQL_ORDER),
+      mode: narrower(out.mode, layer.mode, SSH_MODE_ORDER),
+      rate: intersectRate(out.rate, layer.rate),
+      budget: intersectBudget(out.budget, layer.budget),
+      placeholder_policy: intersectPh(out.placeholder_policy, layer.placeholder_policy),
+      max_concurrent: minNum(out.max_concurrent, layer.max_concurrent),
+      databases: intersectList(out.databases ?? null, layer.databases ?? null),
+      rcpt: intersectList(out.rcpt ?? null, layer.rcpt ?? null),
+      commands: layer.commands ?? out.commands,
+      graphql: layer.graphql ?? out.graphql,
+      stream_bodies: (out.stream_bodies ?? false) && (layer.stream_bodies ?? false),
+    }
+  }
+  return out
+}
+
+// Hosts and paths intersect by "is this entry allowed by the outer layer",
+// so an inner layer naming api.github.com under an outer *.github.com keeps the
+// narrower entry rather than producing an empty set.
+function intersectHosts(a, b) {
+  if (a == null) return b == null ? null : [...b]
+  if (b == null) return [...a]
+  const keep = []
+  for (const hb of b) if (a.some((ha) => hostAllows(ha, hb))) keep.push(hb)
+  for (const ha of a) if (b.some((hb) => hostAllows(hb, ha)) && !keep.includes(ha)) keep.push(ha)
+  return [...new Set(keep)]
+}
+
+function intersectPaths(a, b) {
+  if (a == null) return b == null ? null : [...b]
+  if (b == null) return [...a]
+  const keep = []
+  for (const pb of b) if (a.some((pa) => globAllows(pa, pb))) keep.push(pb)
+  for (const pa of a) if (b.some((pb) => globAllows(pb, pa)) && !keep.includes(pa)) keep.push(pa)
+  return [...new Set(keep)]
+}
+
+/** True when pattern `outer` permits everything pattern `inner` permits. */
+function globAllows(outer, inner) {
+  if (outer === inner) return true
+  if (outer.includes('**')) {
+    const prefix = outer.slice(0, outer.indexOf('**'))
+    return inner.startsWith(prefix)
+  }
+  return matchPath(outer, inner.replace(/\*+/g, 'x'))
+}
+
+function hostAllows(outer, inner) {
+  if (outer === inner) return true
+  if (outer.startsWith('*.')) {
+    const suffix = outer.slice(1)
+    return inner === outer || inner.endsWith(suffix)
+  }
+  return false
+}
+
+function intersectRate(a, b) {
+  if (!a) return b
+  if (!b) return a
+  return { count: Math.min(a.count, b.count), per: a.per }
+}
+
+function intersectBudget(a, b) {
+  if (!a) return b
+  if (!b) return a
+  return { unit: b.unit || a.unit, limit: Math.min(a.limit, b.limit) }
+}
+
+function intersectPh(a, b) {
+  if (!a) return b
+  if (!b) return a
+  return {
+    max_uses: minNum(a.max_uses, b.max_uses),
+    ttl: minNum(a.ttl, b.ttl),
+    max_active: minNum(a.max_active ?? 8, b.max_active ?? 8),
+  }
+}
+
+/**
+ * Normalize a destination before any grant match. Anything that cannot be
+ * normalized unambiguously is refused rather than guessed at.
+ */
+export function normalizeHost(host) {
+  if (!host) throw deny('AV_POLICY_DENIED', 'no destination host')
+  let h = String(host).trim().toLowerCase()
+  if (h.includes('@')) throw deny('AV_POLICY_DENIED', 'destination contains userinfo')
+  if (h.includes('\\') || h.includes('\0')) throw deny('AV_POLICY_DENIED', 'destination contains an illegal character')
+  h = h.replace(/\.$/, '')
+  try { h = new URL(`https://${h}`).hostname } catch { throw deny('AV_POLICY_DENIED', `unparseable host: ${host}`) }
+  return h
+}
+
+/**
+ * Normalize a path: percent-decode, collapse traversal, reject what cannot be
+ * resolved. Matching happens on the normalized form so %2e%2e and /../ cannot
+ * walk outside an allowed prefix.
+ */
+export function normalizePath(path) {
+  let p = String(path || '/')
+  const q = p.indexOf('?')
+  if (q !== -1) p = p.slice(0, q)
+  let decoded = p
+  for (let i = 0; i < 2; i++) {
+    try {
+      const next = decodeURIComponent(decoded)
+      if (next === decoded) break
+      decoded = next
+    } catch { throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape') }
+  }
+  if (decoded.includes('\0')) throw deny('AV_POLICY_DENIED', 'path contains a null byte')
+  const segments = []
+  for (const seg of decoded.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
+      segments.pop()
+      continue
+    }
+    segments.push(seg)
+  }
+  return `/${segments.join('/')}`
+}
+
+/** Glob match: `*` spans one segment, `**` spans many. */
+export function matchPath(pattern, path) {
+  const rx = globToRegExp(pattern)
+  return rx.test(path)
+}
+
+const globCache = new Map()
+function globToRegExp(pattern) {
+  const cached = globCache.get(pattern)
+  if (cached) return cached
+  let out = '^'
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '*') {
+      if (pattern[i + 1] === '*') { out += '.*'; i++ }
+      else out += '[^/]*'
+    } else if ('.+?^${}()|[]\\/'.includes(c)) {
+      out += `\\${c}`
+    } else {
+      out += c
+    }
+  }
+  out += '$'
+  const rx = new RegExp(out)
+  globCache.set(pattern, rx)
+  return rx
+}
+
+export function matchHost(pattern, host) {
+  if (pattern === host) return true
+  if (pattern.startsWith('*.')) {
+    const suffix = pattern.slice(1)
+    return host.endsWith(suffix) && host.length > suffix.length
+  }
+  return false
+}
+
+/**
+ * The hosts a credential may ever reach: its own connector host, plus the
+ * built-in profile's host list. A grant is confined to this set, so an agent
+ * that mints its own grant still cannot point the credential anywhere else.
+ */
+export function credentialHostCeiling(cred, profileHosts = []) {
+  const set = []
+  const add = (h) => {
+    if (!h) return
+    // Compare on the hostname; the port travels with the connection, not the
+    // allowlist, so a smuggled port cannot widen the set.
+    let host = String(h).toLowerCase()
+    if (host.startsWith('[')) host = host.slice(0, host.indexOf(']') + 1)
+    else host = host.split(':')[0]
+    host = host.replace(/\.$/, '')
+    if (host && !set.includes(host)) set.push(host)
+  }
+  add(cred?.connector?.host)
+  for (const h of profileHosts || []) add(h)
+  return set
+}
+
+/** Hostname only, lowercased, port and trailing dot removed. */
+export function hostOnly(authority) {
+  let h = String(authority || '').toLowerCase().trim()
+  if (h.startsWith('[')) return h.slice(0, h.indexOf(']') + 1)
+  return h.split(':')[0].replace(/\.$/, '')
+}
+
+/**
+ * Confine a set of requested hosts to a credential's ceiling. Returns the
+ * confined list; throws AV_POLICY_DENIED naming the offending host if any
+ * requested host is outside the ceiling. An empty request defaults to the
+ * whole ceiling.
+ */
+export function confineHosts(requested, ceiling) {
+  if (!ceiling.length) {
+    throw deny('AV_POLICY_DENIED', 'this credential declares no host it may reach', { rule: 'credential_host' })
+  }
+  if (requested == null || !requested.length) return [...ceiling]
+  const out = []
+  for (const req of requested) {
+    const h = hostOnly(req)
+    const allowed = ceiling.some((c) => matchHost(c, h))
+    if (!allowed) {
+      throw deny('AV_POLICY_DENIED', `host ${h} is outside what credential permits (${ceiling.join(', ')})`, {
+        rule: 'credential_host',
+        hint: 'A grant can only reach the hosts the credential itself declares.',
+      })
+    }
+    if (!out.includes(h)) out.push(h)
+  }
+  return out
+}
+
+/** Is a wildcard host pattern spanning a shared, multi-tenant suffix? */
+export function isMultiTenantWildcard(pattern) {
+  if (!pattern.startsWith('*.')) return false
+  const suffix = pattern.slice(2)
+  return MULTI_TENANT_SUFFIXES.some((s) => suffix === s || suffix.endsWith(`.${s}`))
+}
+
+/**
+ * Evaluate an HTTP request against an effective policy.
+ * Throws a VaultError on denial; returns the matched rule name on success.
+ */
+export function evaluateHttp(policy, { method, host, path }) {
+  const m = String(method || 'GET').toUpperCase()
+  const h = normalizeHost(host)
+  const p = normalizePath(path)
+
+  if (policy.hosts && !policy.hosts.some((pat) => matchHost(pat, h))) {
+    throw deny('AV_NO_GRANT', `no grant allows host ${h}`, {
+      rule: 'hosts',
+      hint: policy.hosts.length
+        ? `This session may reach: ${policy.hosts.join(', ')}.`
+        : 'This session has no host grants at all.',
+    })
+  }
+  if (policy.methods && !policy.methods.includes(m)) {
+    throw deny('AV_POLICY_DENIED', `method ${m} is not allowed`, {
+      rule: 'methods',
+      hint: `Allowed methods: ${(policy.methods || []).join(', ') || 'none'}.`,
+    })
+  }
+  for (const dp of policy.deny_paths || []) {
+    if (matchPath(dp, p)) {
+      throw deny('AV_POLICY_DENIED', `path ${p} is on a deny list`, {
+        rule: `deny_paths:${dp}`,
+        hint: 'This path is denied by the connector profile and cannot be granted.',
+      })
+    }
+  }
+  if (policy.paths && !policy.paths.some((pat) => matchPath(pat, p))) {
+    throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
+      rule: 'paths',
+      hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,
+    })
+  }
+  return { host: h, path: p, method: m, rule: 'allow' }
+}
+
+/** Does this request need a human approval under the effective policy? */
+export function needsApproval(policy, { method, firstUse }) {
+  const mode = policy.approval || 'auto'
+  const m = String(method || 'GET').toUpperCase()
+  switch (mode) {
+    case 'auto': return false
+    case 'first-use': return !!firstUse
+    case 'on-write': return !SAFE_METHODS.has(m)
+    case 'each': return true
+    default: return false
+  }
+}
+
+/** Static checks that run before a policy is stored, surfaced by `policy lint`. */
+export function lint(policy, { kind } = {}) {
+  const problems = []
+  if (!policy.budget || policy.budget.limit == null) {
+    problems.push({ level: 'error', rule: 'budget', message: 'every grant must set a budget; add budget: { requests: N }' })
+  }
+  for (const host of policy.hosts || []) {
+    if (isMultiTenantWildcard(host)) {
+      problems.push({ level: 'error', rule: 'hosts', message: `${host} spans a shared multi-tenant suffix; name exact hosts` })
+    }
+  }
+  for (const p of policy.paths || []) {
+    if (p === '/**' || p === '**') {
+      problems.push({ level: 'warn', rule: 'paths', message: 'a root ** grant allows every path this connector permits' })
+    }
+  }
+  const ph = policy.placeholder_policy
+  if (ph && ph.max_uses != null && ph.max_uses < 100 && (kind === 'http' || kind === 'github' || kind === 'slack')) {
+    problems.push({
+      level: 'warn', rule: 'placeholder_policy',
+      message: 'a low max_uses breaks SDK pagination and retries; session-lifetime is the default for a reason',
+    })
+  }
+  if ((policy.methods || []).some((m) => !SAFE_METHODS.has(m)) && (policy.approval || 'auto') === 'auto') {
+    problems.push({ level: 'warn', rule: 'approval', message: 'write methods with approval: auto; on-write is the default for a reason' })
+  }
+  return problems
+}

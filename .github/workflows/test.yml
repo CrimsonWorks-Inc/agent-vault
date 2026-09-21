@@ -1,0 +1,58 @@
+# The README claims this runs on Node 20, 22 and 24. Until this file existed
+# that was an assertion rather than a fact — it had only ever been run on one
+# machine on one version.
+#
+# There is nothing to install: the package has no dependencies, which is what
+# makes a matrix this cheap.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from package.json engines, the current LTS, and current.
+        node: ['20.10', '20', '22', '24']
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version
+      - name: Run the suite
+        run: npm test
+
+  # The security tests are the ones that encode an attack and its refusal. They
+  # run in the matrix above too; this job exists so a failure here is legible as
+  # "a security property broke" rather than one red cell among eight.
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test test/security/*.test.js
+
+  # The property tests generate their own inputs from a fixed seed, so they are
+  # deterministic in CI. This runs them alone so a failure names the seed
+  # without scrolling past three hundred other results.
+  properties:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test test/core/*-fuzz.test.js
