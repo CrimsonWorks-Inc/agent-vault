@@ -32,7 +32,14 @@ const MAX_OPERATION_BYTES = 8 * 1024
 // further failure doubles the wait, which bounds both the guessing rate and
 // the amount of event loop a caller can spend on scrypt.
 const PASSPHRASE_FREE_ATTEMPTS = 5
-const PASSPHRASE_MAX_BACKOFF_MS = 60_000
+// Capped deliberately low. The throttle counts per daemon, because a Unix
+// socket gives nobody to count separately — so an agent's wrong guesses make
+// the OWNER wait too. Only attempts that were actually checked extend the
+// backoff (one refused during a backoff does not), so an agent cannot hold it
+// open indefinitely; but the owner's worst case is still this number, and the
+// difference between 30s and 60s is small for defence and doubles the wait for
+// the person who owns the vault.
+const PASSPHRASE_MAX_BACKOFF_MS = 30_000
 
 export class Daemon {
   constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
@@ -203,7 +210,11 @@ export class Daemon {
 
 
   async start() {
-    const gateway = createServer((req, res) => this.#onGateway(req, res))
+    // Every handler below is async and its promise is not awaited by Node, so
+    // any rejection that escapes is an UNHANDLED rejection — which ends the
+    // process. A daemon holding everyone's credentials must not be stoppable
+    // by one malformed request, whatever the bug behind it turns out to be.
+    const gateway = createServer((req, res) => this.#guard(req, res, () => this.#onGateway(req, res)))
     await new Promise((resolve) => gateway.listen(this.port, this.host, resolve))
     this.servers.push(gateway)
     this.gatewayPort = gateway.address().port
@@ -221,7 +232,7 @@ export class Daemon {
         )
       }
       if (existsSync(this.socketPath)) unlinkSync(this.socketPath)
-      const control = createServer((req, res) => this.#onControl(req, res))
+      const control = createServer((req, res) => this.#guard(req, res, () => this.#onControl(req, res)))
       await new Promise((resolve) => control.listen(this.socketPath, resolve))
       this.#secureSocket()
       this.servers.push(control)
@@ -265,7 +276,7 @@ export class Daemon {
     const surfaces = new Set(entry.surfaces || [])
     const remote = !isLoopbackHost(host)
 
-    const handler = (req, res) => {
+    const handler = (req, res) => this.#guard(req, res, async () => {
       // What the pipeline uses to decide whether this request came from the
       // machine or from the network.
       req.listener = {
@@ -285,7 +296,7 @@ export class Daemon {
         }))
       }
       return this.#onGateway(req, res)
-    }
+    })
 
     let server
     if (entry.tls) {
@@ -387,6 +398,26 @@ export class Daemon {
   }
 
   // ------------------------------------------------------------- the gateway
+
+  /**
+   * Run a request handler so that a rejection becomes a 500 rather than the
+   * end of the daemon. The specific bug this was added for is fixed; the
+   * reason it is here is that the NEXT one should cost one request, not the
+   * whole process.
+   */
+  async #guard(req, res, fn) {
+    try {
+      await fn()
+    } catch (e) {
+      this.vault.audit?.write('daemon.handler_error', { detail: String(e?.message ?? e).slice(0, 200) })
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/problem+json' })
+        res.end(JSON.stringify({ code: 'AV_INTERNAL', detail: 'the request could not be handled' }))
+      } else {
+        res.end()
+      }
+    }
+  }
 
   async #onGateway(req, res) {
     const body = await readBody(req, res)
@@ -502,6 +533,19 @@ export class Daemon {
 
     let message
     try { message = JSON.parse(body.toString('utf8')) } catch { return send(400, { jsonrpc: '2.0', error: { code: -32700, message: 'parse error' } }) }
+
+    // `JSON.parse('null')` returns null rather than throwing, so the parse
+    // guard above let it straight through and `message.method` then threw
+    // inside an async handler nobody was awaiting — an unhandled rejection,
+    // which ends the process. One request with a valid session and a two-word
+    // body stopped the daemon for everything on the machine.
+    const isRequestObject = (m) => m !== null && typeof m === 'object' && !Array.isArray(m)
+    const invalid = { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'invalid request' } }
+    if (Array.isArray(message)) {
+      if (!message.length || !message.every(isRequestObject)) return send(400, invalid)
+    } else if (!isRequestObject(message)) {
+      return send(400, invalid)
+    }
 
     const isInitialize = (Array.isArray(message) ? message[0]?.method : message.method) === 'initialize'
 
@@ -943,11 +987,29 @@ export class Daemon {
           if (!this.vault.hasPassphrase) {
             this.#requireHumanForWidening('first passphrase', { op: 'passphrase.first' }, input.presence)
           }
-          if (input.action === 'remove') {
-            const removed = this.vault.removePassphrase(input.current || null)
-            return json(200, { ok: true, removed })
+          // Both branches below verify the CURRENT passphrase with scrypt
+          // when one exists, and this route had no throttle at all — so it was
+          // an unlimited guessing oracle, and each guess also held the event
+          // loop for ~190ms. The throttle was added to the other two routes
+          // that spend scrypt and this one was missed, which is the whole
+          // reason to count the surface rather than the fix.
+          const verifying = this.vault.hasPassphrase
+          if (verifying) this.#throttlePassphrase()
+          try {
+            if (input.action === 'remove') {
+              const removed = this.vault.removePassphrase(input.current || null)
+              if (verifying) this.#recordPassphraseAttempt(true)
+              return json(200, { ok: true, removed })
+            }
+            this.vault.setPassphrase(input.passphrase, input.current || null)
+          } catch (e) {
+            // Only a failed PROOF counts. A rejected new passphrase (too
+            // short, say) is not a guess at the old one, and counting it would
+            // let a typo lock the owner out of their own vault.
+            if (verifying && e?.code === 'AV_LOCKED') this.#recordPassphraseAttempt(false)
+            throw e
           }
-          this.vault.setPassphrase(input.passphrase, input.current || null)
+          if (verifying) this.#recordPassphraseAttempt(true)
           return json(200, { ok: true, has_passphrase: true })
         }
         case 'GET /v1/lockstate':

@@ -368,6 +368,42 @@ test('passphrase attempts are charged for, in time and in the log', async () => 
   daemon.presenceGraceUntil = 0
 })
 
+test('every route that spends scrypt is throttled, not just the ones I remembered', async () => {
+  // Three routes verify a passphrase, and each verification is ~190ms of
+  // blocked event loop on a single-threaded daemon. Two were throttled and
+  // /v1/passphrase was missed — an unlimited guessing oracle against the
+  // CURRENT passphrase, and an unlimited stall, on the route whose whole job
+  // is to protect the passphrase.
+  //
+  // This walks the surface rather than the fix, which is the only way the next
+  // one gets caught.
+  const routes = [
+    ['POST', '/v1/presence/window', { passphrase: 'wrong-passphrase-here' }],
+    ['POST', '/v1/passphrase', { passphrase: 'a-new-passphrase', current: 'wrong-passphrase-here' }],
+  ]
+  for (const [method, path, body] of routes) {
+    daemon.passphraseFailures = 0
+    daemon.passphraseLockedUntil = 0
+    let throttled = false
+    for (let i = 0; i < 9 && !throttled; i++) {
+      const res = await ctl(method, path, body)
+      if (res.body.code === 'AV_RATE_LIMITED') throttled = true
+    }
+    assert.ok(throttled, `${method} ${path} checked nine wrong passphrases without throttling`)
+  }
+
+  // A refusal issued DURING a backoff must not extend it, or an agent could
+  // hold the owner out of their own vault indefinitely by retrying.
+  daemon.passphraseFailures = 99
+  daemon.passphraseLockedUntil = Date.now() + 5000
+  const before = daemon.passphraseLockedUntil
+  await ctl('POST', '/v1/presence/window', { passphrase: 'still wrong' })
+  assert.equal(daemon.passphraseLockedUntil, before, 'a refused attempt must not push the backoff out')
+
+  daemon.passphraseFailures = 0
+  daemon.passphraseLockedUntil = 0
+})
+
 test('the CLI names the factor that exists, not the one it expects', () => {
   // Checking the terminal before checking which factors exist meant a vault
   // whose only factor is an authenticator answered "needs your passphrase",
