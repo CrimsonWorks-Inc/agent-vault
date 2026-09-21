@@ -151,7 +151,20 @@ function saveState(patch) {
   writeFileSync(STATE, JSON.stringify({ ...current, ...patch }, null, 2), { mode: 0o600 })
 }
 function loadState() {
-  return existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {}
+  const raw = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {}
+  // This file holds no secrets by design, so it lives in the human's home
+  // directory and anything running as them can edit it — including an agent.
+  // The port went straight into `http://127.0.0.1:${port}/...`, so a value of
+  // `1@attacker.example` made `127.0.0.1:1` the userinfo and the attacker's
+  // name the HOST. `agent-vault env` then exported that URL, and the session
+  // token with it, to somewhere else entirely — and it kept working long after
+  // the agent that wrote it was gone.
+  if (raw.gateway_port !== undefined) {
+    const port = Number(raw.gateway_port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) delete raw.gateway_port
+    else raw.gateway_port = port
+  }
+  return raw
 }
 
 /**

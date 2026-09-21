@@ -1050,8 +1050,21 @@ export function parseAddress(address) {
 }
 
 export function isLoopbackHost(host) {
-  return ['127.0.0.1', '::1', 'localhost', '[::1]'].includes(String(host))
-    || /^127\./.test(String(host))
+  const h = String(host)
+  if (['127.0.0.1', '::1', 'localhost', '[::1]'].includes(h)) return true
+  // `/^127\./` matched NAMES as well as addresses, so `127.evil.com` and
+  // `127.0.0.1.attacker.test` were both classified as loopback — and that
+  // classification is what decides whether a listener may run without TLS and
+  // whether a bare placeholder is allowed to authorize on it. A name resolves
+  // to whatever its owner points it at, so a listener on one was a plaintext
+  // network listener that the daemon believed was on the machine.
+  //
+  // 127.0.0.0/8, as an actual dotted quad and nothing else.
+  const quad = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h)
+  if (!quad) return false
+  const octets = quad.slice(1).map(Number)
+  if (octets.some((n) => n > 255)) return false
+  return octets[0] === 127
 }
 
 function readBody(req, res) {

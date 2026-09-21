@@ -3,7 +3,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -219,4 +219,29 @@ test('the CLI refuses to run as root and names the command to use instead', asyn
 
 test('an unknown command lists what is available instead of just failing', async () => {
   await assert.rejects(av(['frobnicate']), (e) => /unknown command/.test(e.stdout || e.stderr || ''))
+})
+
+test('a tampered gateway port in the CLI state file cannot redirect the URL', async () => {
+  // cli-state.json holds no secrets, so it lives in the human's home directory
+  // where anything running as them can edit it. The port went straight into
+  // `http://127.0.0.1:${port}/`, so `1@attacker.example` made `127.0.0.1:1`
+  // the userinfo and the attacker's name the HOST — and `env` exported that
+  // URL, with the session token, to somewhere else entirely. It kept working
+  // long after the agent that wrote it was gone.
+  const statePath = join(dir, 'cli-state.json')
+  const original = JSON.parse(readFileSync(statePath, 'utf8'))
+  try {
+    for (const evil of ['1@attacker.example', '7411/../@evil.test', 'x', '-1', '99999']) {
+      writeFileSync(statePath, JSON.stringify({ ...original, gateway_port: evil }))
+      const { stdout } = await av(['env', '--json'])
+      const envText = JSON.parse(stdout).data.env.join('\n')
+      const url = /AGENT_VAULT_URL=(\S+)/.exec(envText)?.[1]
+      assert.ok(url, 'env should still produce a URL')
+      assert.equal(new URL(url).hostname, '127.0.0.1',
+        `a tampered port pointed the gateway at ${new URL(url).hostname}`)
+      assert.equal(new URL(url).username, '', 'the URL must carry no userinfo')
+    }
+  } finally {
+    writeFileSync(statePath, JSON.stringify(original))
+  }
 })

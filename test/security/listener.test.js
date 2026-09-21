@@ -62,6 +62,21 @@ test('addresses parse, and nonsense is refused rather than half-bound', () => {
   assert.throws(() => parseAddress('127.0.0.1:99999'), /bad port/)
 })
 
+test('a hostname that merely starts with 127 is not loopback', () => {
+  // The test was `/^127\./`, which matches NAMES as well as addresses. That
+  // classification decides whether a listener may run without TLS and whether
+  // a bare placeholder is allowed to authorize on it — so a listener on
+  // `127.evil.com` was a plaintext network listener that the daemon believed
+  // was on the machine, and a name resolves to whatever its owner points it at.
+  for (const host of ['127.evil.com', '127.0.0.1.attacker.test', '127.0.0.1.nip.io', '1270.0.0.1', '127.0.0.999']) {
+    assert.equal(isLoopbackHost(host), false, `${host} was treated as loopback`)
+  }
+  // And the whole of 127.0.0.0/8 still is, because it genuinely is.
+  for (const host of ['127.0.0.1', '127.1.2.3', '127.255.255.254']) {
+    assert.equal(isLoopbackHost(host), true, `${host} should be loopback`)
+  }
+})
+
 test('loopback is recognised in every form it arrives in', () => {
   for (const h of ['127.0.0.1', '127.0.0.53', '::1', 'localhost']) {
     assert.equal(isLoopbackHost(h), true, h)
