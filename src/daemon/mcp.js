@@ -111,11 +111,17 @@ export class McpServer {
    *   that await let a concurrent request swap it mid-batch: one agent's
    *   second call ran as another agent's session.
    */
-  async handle(message, forSession) {
+  async handle(message, forSession, forToken) {
     const { id, method, params } = message
     // Resolved once, here, and then carried explicitly. Reading it again
     // deeper in would reintroduce the race this parameter exists to close.
     const session = forSession !== undefined ? forSession : this.resolveSession()
+    // The token travels with the message too, for exactly the reason the
+    // session does. It was a field on this object, set per HTTP request, so a
+    // concurrent request overwrote it between two messages of the same batch
+    // and the rest of the batch authenticated as somebody else. Fixing the
+    // session and leaving the token behind fixed half a race.
+    const token = forToken !== undefined ? forToken : this.sessionToken
     const ok = (result) => (id === undefined ? null : { jsonrpc: '2.0', id, result })
     const fail = (code, msg, data) => (id === undefined ? null : { jsonrpc: '2.0', id, error: { code, message: msg, data } })
 
@@ -275,7 +281,7 @@ export class McpServer {
   }
 
   /** The MCP process holds the session token it was started with. */
-  #tokenFor(session) { return this.sessionToken || session.__token || '' }
+  #tokenFor(session, token) { return token || session?.__token || '' }
 }
 
 /** Frame the MCP server onto stdio: newline-delimited JSON-RPC. */

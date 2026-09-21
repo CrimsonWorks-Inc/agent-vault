@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
+import { Readable } from 'node:stream'
 import { Pipeline } from '../../src/daemon/pipeline.js'
 
 const SECRET = 'ghp_REALSECRET0000111122223333444455556666'
@@ -533,6 +534,56 @@ test('an approval does not carry over to a request with different headers', asyn
   }))
   assert.equal(tampered.status, 202, 'a different set of headers must be held for its own approval')
   assert.equal(sent.length, 0, 'a header the human never saw reached the upstream under their approval')
+})
+
+test('a fractional use count does not persist state the log never records', async () => {
+  // canonicalize refuses floats, so a fractional `uses` made the audit write
+  // throw — AFTER the ledger had already been persisted. The placeholder
+  // existed and nothing recorded that it did, which is the one thing this
+  // project says must never happen: a change that cannot be audited must not
+  // happen. `vault_get_placeholder {uses: 1.5}` was enough, over MCP.
+  setup()
+  const before = vault.audit.read({ limit: 200 }).length
+  const rowsBefore = Object.keys(vault.db.placeholders).length
+
+  const issued = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1.5 })
+  assert.equal(issued.row.max_uses, 1, 'a fractional request must be floored, not stored')
+  assert.ok(Number.isInteger(issued.row.max_uses))
+
+  const added = vault.audit.read({ limit: 200 }).length - before
+  const rowsAdded = Object.keys(vault.db.placeholders).length - rowsBefore
+  assert.equal(rowsAdded, 1)
+  assert.equal(added, 1, 'the ledger changed and the log did not')
+
+  // And nonsense is refused rather than silently becoming the ceiling of zero.
+  for (const bad of [0, -3, 0.2, NaN, 'lots']) {
+    const r = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: bad })
+    assert.ok(Number.isInteger(r.row.max_uses) && r.row.max_uses >= 1,
+      `uses=${bad} produced max_uses=${r.row.max_uses}`)
+  }
+})
+
+test('an upstream cannot choose how much of the daemon it occupies', async () => {
+  // collect() had no cap, so the upstream decided how much memory a single
+  // request would take — in one process holding everyone's credentials. The
+  // buffered path exists because a body has to be scannable, and a body too
+  // large to hold is a body that cannot be scanned, which already has an
+  // answer.
+  setup({
+    respond: () => ({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      // A stream that keeps going well past the limit.
+      res: Readable.from((function* () {
+        for (let i = 0; i < 400; i++) yield Buffer.alloc(1024 * 1024, 0x41)
+      })()),
+    }),
+  })
+  const res = await pipeline.handle(req())
+  assert.equal(res.status, 502)
+  const problem = JSON.parse(res.body)
+  assert.equal(problem.code, 'AV_UNSCANNABLE')
+  assert.equal(problem.rule, 'response_size')
 })
 
 test('a revoked session stops working immediately', async () => {

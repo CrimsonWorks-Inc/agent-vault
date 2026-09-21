@@ -54,6 +54,10 @@ const MAX_APPROVALS = 1000
 // one upstream can make it hold and scan.
 const MAX_DECOMPRESSED = 64 * 1024 * 1024
 
+// The most of an upstream response the daemon will hold to scan it. Anything
+// larger cannot be scrubbed, and a body that cannot be scrubbed is refused.
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
 export class Pipeline {
   /**
    * @param {import('../store/vault.js').Vault} vault
@@ -749,10 +753,31 @@ function defaultUpstream({ url, method, headers, body }) {
   })
 }
 
-function collect(stream) {
+/**
+ * Read a whole response into memory, bounded.
+ *
+ * This had no cap at all, so an upstream decided how much of the daemon's
+ * memory a single request would take — and the daemon is one process holding
+ * everyone's credentials. The buffered path exists because a body has to be
+ * scannable; a body too large to hold is a body that cannot be scanned, which
+ * is already the documented answer.
+ */
+function collect(stream, limit = MAX_RESPONSE_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = []
-    stream.on('data', (c) => chunks.push(c))
+    let size = 0
+    stream.on('data', (c) => {
+      size += c.length
+      if (size > limit) {
+        stream.destroy()
+        reject(deny('AV_UNSCANNABLE', `the upstream sent more than ${Math.round(limit / 1024 / 1024)} MiB, which is more than can be buffered and scanned`, {
+          rule: 'response_size',
+          hint: 'The response was discarded rather than passed through unread.',
+        }))
+        return
+      }
+      chunks.push(c)
+    })
     stream.on('end', () => resolve(Buffer.concat(chunks)))
     stream.on('error', reject)
   })

@@ -716,8 +716,14 @@ export class Vault {
     // million even where the human had configured one-time placeholders.
     // Enforced here so no call site can forget it.
     const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : budgetLimit
-    const asked = Number(uses)
-    const maxUses = uses == null || !Number.isFinite(asked) ? ceiling : Math.min(asked, ceiling)
+    // Floored to an integer. A fractional `uses` reached the audit record as a
+    // float, and canonicalize refuses floats — so write() threw AFTER the
+    // ledger had already been persisted, leaving a placeholder that existed
+    // and a change nobody recorded. An agent could ask for 1.5 uses.
+    const asked = Math.floor(Number(uses))
+    const maxUses = uses == null || !Number.isFinite(asked) || asked < 1
+      ? ceiling
+      : Math.min(asked, ceiling)
     const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
     const expires = Math.min(
       ttl ? Date.now() + ttl : Infinity,

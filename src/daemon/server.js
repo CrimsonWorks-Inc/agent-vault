@@ -510,7 +510,7 @@ export class Daemon {
     if (!session) return send(401, { code: 'AV_SESSION_REQUIRED', detail: 'send Authorization: Bearer <session token>' })
     try { this.vault.assertSessionLive(session) } catch (e) { return send(401, e.toProblem()) }
     this.currentMcpSession = session
-    this.mcp.sessionToken = token
+    // Not stored on the server object: it is passed with each message below.
 
     if (req.method === 'DELETE') {
       const sid = req.headers['mcp-session-id']
@@ -574,7 +574,7 @@ export class Daemon {
       // on this Daemon, across the await below, so a concurrent request could
       // replace it between two messages of the same batch — and the rest of
       // the batch ran as somebody else's session, against their credentials.
-      const r = await this.mcp.handle(m, session)
+      const r = await this.mcp.handle(m, session, token)
       if (r) responses.push(r)
     }
     if (!responses.length) return send(202, null, extra)
