@@ -64,12 +64,26 @@ export function open(key, sealed, aad = '') {
 /** Per-credential data-encryption key. */
 export function dek(vmk, credId) { return hkdf(vmk, `av/dek/${credId}`) }
 export function kPh(vmk) { return hkdf(vmk, 'av/ph') }
+/**
+ * A separate key for the fingerprints shown in the UI and CLI.
+ *
+ * These used to be HMACs under K_ph — the same key the placeholder checksum
+ * uses. A fingerprint is computed over a value the CALLER chooses and then
+ * displayed, so that was a chosen-message oracle for K_ph: add a credential
+ * whose value is `av1.<sid>.<label>.<nonce>`, read the fingerprint back from
+ * `cred list`, and you have the first 32 bits of the same HMAC the 30-bit
+ * checksum is taken from. Any placeholder's checksum, forged, without the key.
+ */
+export function kFingerprint(vmk) { return hkdf(vmk, 'av/fingerprint') }
 export function kAudit(vmk) { return hkdf(vmk, 'av/audit') }
 export function kToken(vmk) { return hkdf(vmk, 'av/token') }
 
-/** Short fingerprint shown in the UI and CLI in place of a value. */
-export function fingerprint8(kPhKey, value) {
-  return createHmac('sha256', kPhKey).update(value).digest('hex').slice(0, 8)
+/**
+ * Short fingerprint shown in the UI and CLI in place of a value. Keyed
+ * separately from the placeholder checksum: see kFingerprint above.
+ */
+export function fingerprint8(key, value) {
+  return createHmac('sha256', key).update(value).digest('hex').slice(0, 8)
 }
 
 export function constantTimeEqual(a, b) {

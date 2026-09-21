@@ -26,7 +26,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 402 tests
+npm test          # 404 tests
 ```
 
 ```bash
@@ -34,7 +34,7 @@ npm run test:mutation
 ```
 
 The second one checks the tests against themselves: it removes each of
-twenty-one critical protections in turn and asserts the suite notices. Deleting the
+twenty-nine critical protections in turn and asserts the suite notices. Deleting the
 human-presence gate fails 6 tests; host confinement, the placeholder checksum
 and the approval's request-hash binding 4 each; the session-token strip, the
 path control-character refusal and non-ASCII scrubbing 2 each; and the

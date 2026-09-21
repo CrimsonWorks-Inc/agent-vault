@@ -347,6 +347,19 @@ export class Pipeline {
     // --- resolve and site-check each occurrence ----------------------------
     const substitutions = []
     for (const occ of located.occurrences) {
+      // The keyed checksum, checked before anything is looked up. It was
+      // minted on every placeholder and then verified nowhere — ph.verify()
+      // had no call site in the whole of src/ — so the one cheap test for
+      // "this vault made this" was dead code, and the key it depends on was
+      // shared with the fingerprints shown in `cred list`, which are taken
+      // over a value the caller chooses. Both halves of that are fixed: the
+      // keys are separate, and the check runs.
+      if (!ph.verify(this.vault.kPh, occ.parsed)) {
+        throw deny('AV_PH_MALFORMED', `that placeholder was not minted by this vault (${sub.describeLocation(occ.location)})`, {
+          rule: 'checksum',
+          hint: 'Ask for a placeholder with vault_get_placeholder, or agent-vault ph next.',
+        })
+      }
       const row = this.vault.resolvePlaceholder(occ.parsed)
       if (!row) {
         // Shape-valid but unknown: either forged or long dead. Either way it is

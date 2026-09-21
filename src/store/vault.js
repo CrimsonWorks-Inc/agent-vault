@@ -392,6 +392,8 @@ export class Vault {
   }
 
   get kPh() { this.#requireUnlocked(); return crypt.kPh(this.vmk) }
+  /** Keyed apart from kPh, because a fingerprint is taken over caller-chosen text. */
+  get kFingerprint() { this.#requireUnlocked(); return crypt.kFingerprint(this.vmk) }
 
   // ------------------------------------------------------------ credentials
 
@@ -413,7 +415,7 @@ export class Vault {
       stored.push({
         name, ...sealed, key_version: 1,
         sites: sites[name] || [],
-        fp8: crypt.fingerprint8(this.kPh, value),
+        fp8: crypt.fingerprint8(this.kFingerprint, value),
         length: value.length,
       })
     }

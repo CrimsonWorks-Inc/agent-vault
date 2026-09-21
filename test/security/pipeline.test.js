@@ -543,12 +543,62 @@ test('a revoked session stops working immediately', async () => {
   assert.equal(sent.length, 1)
 })
 
-test('a forged placeholder that never existed is refused as a replay', async () => {
+test('a forged placeholder is refused by its checksum, before any lookup', async () => {
+  // The keyed checksum says "this vault minted this". It was computed on every
+  // placeholder and verified nowhere — ph.verify() had no call site in the
+  // whole of src/ — so a forgery fell through to the ledger and came back as a
+  // replay, which is a true statement about the wrong thing.
+  //
+  // It is checked now, which also means the key it uses has to be its own: it
+  // used to be shared with the fingerprints printed by `cred list`, and those
+  // are HMACs over a value the caller chooses. Add a credential whose value is
+  // `av1.<sid>.<label>.<nonce>`, read the fingerprint, and you have the bits
+  // the checksum is taken from.
   const forged = 'av1.7f2x0k9m3qzr.gh-frozencrow_token.5a8e1n0t2rc7q9x4wz6vhb3pdk.c4d9tz'
   const res = await pipeline.handle(req({ headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${forged}`]] }))
-  assert.equal(res.status, 403)
-  assert.equal(JSON.parse(res.body).code, 'AV_PH_REPLAY')
+  assert.equal(res.status, 400)
+  const problem = JSON.parse(res.body)
+  assert.equal(problem.code, 'AV_PH_MALFORMED')
+  assert.equal(problem.rule, 'checksum')
   assert.equal(sent.length, 0)
+})
+
+test('a real placeholder with one character changed does not verify', async () => {
+  // The property the checksum is for: near-misses, not just inventions.
+  for (let i = 0; i < placeholder.length; i += 7) {
+    const ch = placeholder[i]
+    if (ch === '.') continue
+    const swapped = ch === 'a' ? 'b' : 'a'
+    const tampered = placeholder.slice(0, i) + swapped + placeholder.slice(i + 1)
+    if (tampered === placeholder) continue
+    sent = []
+    const res = await pipeline.handle(req({
+      headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${tampered}`]],
+    }))
+    assert.ok(res.status >= 400, `a placeholder altered at ${i} was accepted`)
+    assert.equal(sent.length, 0, `a placeholder altered at ${i} reached the upstream`)
+  }
+})
+
+test('the fingerprint shown in cred list is not an oracle for the checksum key', async () => {
+  // fingerprint8 was keyed with K_ph, the placeholder checksum's key, and is
+  // computed over a credential VALUE the caller supplies and then displayed.
+  // That is a chosen-message oracle: ask for the fingerprint of the exact
+  // string the checksum is taken over, and read back its first 32 bits.
+  setup()
+  const sid = session.id
+  const chkMessage = `av1.${sid}.gh-frozencrow_token.5a8e1n0t2rc7q9x4wz6vhb3pdk`
+  const probe = vault.addCredential({
+    slug: 'probe', kind: 'http', connector: { host: 'example.test' },
+    fields: { token: chkMessage }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  const fp = probe.fields[0].fp8
+
+  // The two must not be derived from the same key, so the fingerprint cannot
+  // tell you anything about the checksum.
+  const { fingerprint8, kPh } = await import('../../src/store/crypto.js')
+  const underKPh = fingerprint8(kPh(vault.vmk), chkMessage)
+  assert.notEqual(fp, underKPh, 'the fingerprint is still an HMAC under the checksum key')
 })
 
 // --------------------------------------------------------- S09: response scrub
