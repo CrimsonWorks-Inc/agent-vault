@@ -16,6 +16,7 @@ import { Vault } from '../../src/store/vault.js'
 import { Daemon } from '../../src/daemon/server.js'
 import { UiServer } from '../../src/ui/server.js'
 
+const PASSPHRASE = 'ui-test-passphrase'
 const SECRET = 'ghp_UITEST00112233445566778899aabbccddee'
 let dir, vault, daemon, ui, cookie, origin
 
@@ -80,7 +81,15 @@ before(async () => {
     sessionId: s.session.id, credentialId: cred.id, fields: ['token'],
     policy: { hosts: ['api.example.com'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: 10 } },
   })
+  // A passphrase first, because enrolling an authenticator now requires one.
+  // Without that ordering an agent on a fresh vault could enrol a key of its
+  // own, become the only party able to satisfy the presence gate, and leave
+  // the owner permanently unable to set a passphrase — which is itself gated,
+  // and would by then need the agent's authenticator.
+  vault.setPassphrase(PASSPHRASE)
   daemon = await new Daemon(vault, { port: 0, socketPath: join(dir, 'c.sock') }).start()
+  // The human is present: this is what the CLI's passphrase prompt opens.
+  daemon.presenceGraceUntil = Date.now() + 60_000
   ui = await new UiServer(join(dir, 'c.sock'), { port: 0 }).start()
   origin = ui.origin
 
@@ -243,8 +252,9 @@ test('a valid signature for the right operation is accepted exactly once', async
 
 test('the enrollment is recorded in the audit log', () => {
   // The test above locked the vault, which drops the audit key along with the
-  // master key it came from. Reading the log means unlocking first.
-  vault.unlockWith({})
+  // master key it came from. Reading the log means unlocking first — with the
+  // passphrase, since this vault has one now.
+  vault.unlockWith({ passphrase: PASSPHRASE })
   const kinds = vault.audit.read({ limit: 100 }).map((r) => r.kind)
   assert.ok(kinds.includes('presence.factor_added'))
 })

@@ -420,6 +420,45 @@ test('a stale pending approval is forgotten, so the cap is not permanent', async
   assert.equal(pipeline.approvals.size, 1, 'the stale approval should have been swept, leaving only the new one')
 })
 
+test('a bare placeholder does not authorize on a network listener', async () => {
+  // Across a network a placeholder in a URL or a proxy log becomes a bearer
+  // credential anyone who reads it can spend, so the carrier shortcut is
+  // loopback-only. The rule was written and then never ran once: the field it
+  // reads, `req.listener`, was dropped between the server and the pipeline, so
+  // for the whole life of this code a placeholder alone authorized on a
+  // network listener exactly as it does on loopback.
+  setup()
+  const bare = {
+    method: 'GET', path: '/p/gh-frozencrow/user', query: '',
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${placeholder}`]],
+    body: null,
+  }
+
+  // On loopback the shortcut is the documented convenience, and still works.
+  const local = await pipeline.handle({ ...bare, listener: { id: 'l', kind: 'tcp', remote: false } })
+  assert.equal(local.status, 200, 'the loopback shortcut must keep working')
+  assert.equal(sent.length, 1)
+
+  // Off the machine it is refused, and nothing reaches the upstream.
+  sent = []
+  const remote = await pipeline.handle({ ...bare, listener: { id: 'r', kind: 'tls', remote: true } })
+  assert.equal(remote.status, 401, `a network listener must refuse a bare placeholder: ${remote.body}`)
+  const problem = JSON.parse(remote.body)
+  assert.equal(problem.code, 'AV_SESSION_REQUIRED')
+  assert.equal(problem.rule, 'remote_carrier')
+  assert.equal(sent.length, 0, 'the credential reached the upstream from a network listener')
+
+  // And the documented way through still works from the network: the session
+  // token as well as the placeholder. A rule that cannot be satisfied is a
+  // broken feature, not a safe one.
+  const withToken = await pipeline.handle({
+    ...bare,
+    headers: [...bare.headers, ['av-session', token]],
+    listener: { id: 'r', kind: 'tls', remote: true },
+  })
+  assert.equal(withToken.status, 200, 'a session token must still authorize from a network listener')
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

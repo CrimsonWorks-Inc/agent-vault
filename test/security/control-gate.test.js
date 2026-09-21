@@ -253,6 +253,47 @@ test('an enrolled authenticator counts as a human factor on its own', async () =
   }
 })
 
+test('an agent cannot enrol its own key on a fresh vault and take it over', async () => {
+  // The gate cannot refuse anything on a vault with no factor — there is
+  // nothing to check against. So on a fresh vault an agent could enrol a
+  // software key of its own, and from that moment it was the only party able
+  // to satisfy any presence gate. The owner could not even set a passphrase,
+  // because setting the first one is itself gated and by then needed the
+  // agent's authenticator. Not a race the owner might win: a takeover with no
+  // way back.
+  //
+  // A passphrase must exist first, which matches the unlock factor — that has
+  // always refused to enrol before one exists, for exactly this reason.
+  const d = mkdtempSync(join(tmpdir(), 'av-takeover-'))
+  let daemon2
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    const s2 = join(d, 'c.sock')
+    daemon2 = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const call = (method, path, body) => new Promise((resolve) => {
+      const r = unixRequest({ socketPath: s2, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+      })
+      r.on('error', () => resolve({ status: 0, body: {} }))
+      r.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    const enrol = await call('POST', '/v1/presence', { credentialId: 'agent-key', publicKeySpki: 'AAAA' })
+    assert.equal(enrol.status, 403, `an agent enrolled its own key on a fresh vault: ${JSON.stringify(enrol.body)}`)
+    assert.match(enrol.body.detail, /set a passphrase before/)
+    assert.equal(v.db.kv.webauthn, undefined, 'no key may have been stored')
+
+    // And the owner can still do the thing that should come first.
+    const pass = await call('POST', '/v1/passphrase', { passphrase: 'the-owners-passphrase' })
+    assert.equal(pass.status, 200, `the owner must still be able to set a passphrase: ${JSON.stringify(pass.body)}`)
+  } finally {
+    if (daemon2) await daemon2.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})
+
 test('an agent cannot set the first passphrase and lock the owner out', async () => {
   // Setting the first passphrase drops the 'none' wrap, so afterwards only
   // whoever chose the phrase can open the vault. On a vault whose owner has

@@ -209,3 +209,46 @@ function https(port, path, ca, { method = 'GET', headers = {}, body } = {}) {
     req.end(body)
   })
 }
+
+test('the listener a request arrived on reaches the pipeline at all', async () => {
+  // #bindListener set `req.listener` on the Node request; #onGateway then
+  // built a fresh object for pipeline.handle() without it, so the field was
+  // dropped one call later and was `undefined` for the pipeline's whole life.
+  //
+  // Three things depended on it and none of them had ever run: the rule
+  // refusing a bare placeholder as a carrier on a network listener, a
+  // listener's `advertise` host list, and the peer recorded in the audit log
+  // — which said `loopback`/`local` for every request ever made, including any
+  // that crossed a network.
+  //
+  // A loopback TLS listener is enough to see it: `peer.kind` must name the
+  // listener the request actually came in on.
+  const daemon = await daemonOnFreshSocket()
+  try {
+    const added = await control('POST', '/v1/listeners', {
+      id: 'peer-test', address: '127.0.0.1:0', surfaces: ['gateway'], tls: { managed: true },
+    })
+    assert.equal(added.status, 200)
+    await daemon.stop()
+
+    const d2 = await daemonOnFreshSocket()
+    try {
+      const bound = d2.listeners.find((l) => l.id === 'peer-test')
+      assert.ok(bound, 'the listener should have bound')
+      const before = vault.audit.read({ limit: 500 }).length
+
+      const ca = readFileSync(tlsPaths(dir).cert)
+      await https(bound.port, '/p/nope/whatever', ca, { headers: { host: '127.0.0.1' } })
+
+      const fresh = vault.audit.read({ limit: 500 }).slice(before)
+      const record = fresh.find((r) => r.peer)
+      assert.ok(record, 'the request produced no audited record at all')
+      assert.equal(record.peer.listener_id, 'peer-test',
+        'the audit log did not record which listener the request arrived on')
+      assert.equal(record.peer.kind, 'tls',
+        `peer.kind was "${record.peer.kind}": the listener never reached the pipeline`)
+    } finally { await d2.stop() }
+  } finally {
+    await control('DELETE', '/v1/listeners?id=peer-test').catch(() => {})
+  }
+})

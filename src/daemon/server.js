@@ -402,6 +402,15 @@ export class Daemon {
       query: url.search.slice(1),
       headers: Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : v]),
       body: body.length ? body : null,
+      // Which listener this arrived on. #bindListener sets this on the Node
+      // request and then this function built a fresh object without it, so it
+      // was dropped one call later and `req.listener` inside the pipeline was
+      // always undefined. Three things depended on it and none of them had
+      // ever run: the rule refusing a bare placeholder as a carrier on a
+      // network listener, a listener's `advertise` host list, and the peer
+      // recorded in the audit log — which therefore said `loopback` for every
+      // request, including ones that crossed the network.
+      listener: req.listener || null,
     })
     res.writeHead(result.status, result.headers)
     if (result.stream) {
@@ -735,6 +744,25 @@ export class Daemon {
           // this socket must not be able to install its own key and then let
           // that key authorise everything else, so this is passphrase-only —
           // accepting an assertion here would be circular.
+          //
+          // A passphrase must already exist, and that is the load-bearing part.
+          // The gate below cannot refuse anything on a vault with no factor —
+          // there is nothing to check against — so on a fresh vault an agent
+          // could enrol a software key of its own, become the only party able
+          // to satisfy every presence gate, and leave the owner permanently
+          // unable to set a passphrase, because setting the first one is
+          // itself gated and now needs the agent's authenticator. Not a race
+          // the owner might win: a takeover with no way back.
+          //
+          // Requiring the passphrase first makes that impossible and matches
+          // the unlock factor, which has always refused to enrol before one
+          // exists for the same reason.
+          if (!this.vault.hasPassphrase) {
+            throw deny('AV_POLICY_DENIED', 'set a passphrase before enrolling an authenticator', {
+              rule: 'factor_order',
+              hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',
+            })
+          }
           this.#requireHumanForWidening('presence enroll')
           // Re-enrolling replaces the only thing standing between an agent and
           // the approve button, so it is audited loudly either way.
