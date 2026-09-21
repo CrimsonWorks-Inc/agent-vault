@@ -199,6 +199,22 @@ export function verifyAssertion({
   if (credentialId !== enrolled.credentialId) {
     throw new Error('this assertion is from a credential that was never enrolled')
   }
+  // Sizes first, before anything parses anything.
+  //
+  // A real assertion is tiny: authenticatorData is 37 bytes plus any
+  // extensions, clientDataJSON a few hundred, the signature about seventy.
+  // Nothing bounded them, and every one of them was parsed BEFORE the
+  // signature was checked — so an unauthenticated caller on the control
+  // socket could hand over megabytes and have the daemon decode all of it on
+  // the event loop, per request, before rejecting it. Work done on behalf of
+  // a caller who has proved nothing should be work that fits in a breath.
+  const LIMITS = { authenticatorData: 8 * 1024, clientDataJSON: 8 * 1024, signature: 2 * 1024 }
+  for (const [field, value] of Object.entries({ authenticatorData, clientDataJSON, signature })) {
+    if (typeof value !== 'string') throw new Error(`${field} must be a base64url string`)
+    if (value.length > LIMITS[field]) {
+      throw new Error(`${field} is ${value.length} characters; a real assertion is under ${LIMITS[field]}`)
+    }
+  }
   parseClientData(clientDataJSON, { expectedType: 'webauthn.get', expectedChallenge, expectedOrigins })
 
   const authData = Buffer.from(authenticatorData, 'base64url')

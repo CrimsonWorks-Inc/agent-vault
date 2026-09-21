@@ -219,3 +219,35 @@ test('only ES256 on P-256 is accepted', () => {
 test('the CBOR reader rejects what it does not understand rather than guessing', () => {
   assert.throws(() => wa.decodeCbor(Buffer.from([0xff])), /cbor:/)
 })
+
+test('an assertion is bounded before anything parses it', () => {
+  // A real assertion is tiny: authenticatorData is 37 bytes plus extensions,
+  // clientDataJSON a few hundred, the signature about seventy. Nothing bounded
+  // any of them, and all three were parsed BEFORE the signature was checked —
+  // so an unauthenticated caller on the control socket could hand over
+  // megabytes and have the daemon decode all of it on the event loop, per
+  // request, before rejecting it.
+  //
+  // Work done for a caller who has proved nothing should fit in a breath.
+  const enrolled = { credentialId: 'c', publicKeySpki: Buffer.alloc(91).toString('base64'), signCount: 0 }
+  const huge = 'A'.repeat(4 * 1024 * 1024)
+  const small = Buffer.from('{}').toString('base64url')
+
+  for (const field of ['authenticatorData', 'clientDataJSON', 'signature']) {
+    const args = {
+      credentialId: 'c',
+      authenticatorData: small,
+      clientDataJSON: small,
+      signature: small,
+      expectedChallenge: Buffer.alloc(32),
+      expectedOrigins: ['http://localhost:1'],
+      rpId: 'localhost',
+      enrolled,
+      [field]: huge,
+    }
+    const started = Date.now()
+    assert.throws(() => wa.verifyAssertion(args), new RegExp(`${field} is \\d+ characters`),
+      `${field} was not bounded`)
+    assert.ok(Date.now() - started < 250, `${field} took ${Date.now() - started}ms to refuse`)
+  }
+})

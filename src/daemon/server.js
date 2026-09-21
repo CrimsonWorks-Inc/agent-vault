@@ -930,8 +930,17 @@ export class Daemon {
           // and refuse rather than evict — evicting would let a flood cancel
           // the confirmation a human is looking at.
           for (const [k, v] of this.opChallenges) if (v.expires < Date.now()) this.opChallenges.delete(k)
-          if (this.opChallenges.size >= MAX_OPEN_CHALLENGES) {
-            throw deny('AV_POLICY_DENIED', 'too many confirmations are already open; try again in a minute')
+          // Evict the oldest rather than refuse. Refusing at the cap bounded
+          // the memory and handed an agent a way to block the human entirely:
+          // mint sixty-four and the owner can no longer get a challenge to
+          // confirm anything with. Evicting keeps the bound and leaves the
+          // human a way through — their next attempt always succeeds, because
+          // it is the newest. A challenge is single-use and good for a minute,
+          // so nothing durable is lost either way.
+          while (this.opChallenges.size >= MAX_OPEN_CHALLENGES) {
+            const oldest = this.opChallenges.keys().next().value
+            if (oldest === undefined) break
+            this.opChallenges.delete(oldest)
           }
           this.opChallenges.set(id, {
             challenge, operation, origins: input.origins || [], expires: Date.now() + 60_000,
