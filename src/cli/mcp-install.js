@@ -156,6 +156,15 @@ function renderTomlTable(key, name, entry) {
 export function install({ agent, scope, name = 'agent-vault', entry, print = false, cwd, home, env }) {
   const spec = AGENTS[agent]
   if (!spec) throw new Error(`unknown agent: ${agent}. Known: ${Object.keys(AGENTS).join(', ')}`)
+  // The name is interpolated straight into a TOML table header, so a `]` and a
+  // newline in it close this table and open one the caller chose — an
+  // arbitrary MCP server, with an arbitrary `command`, in the config file of
+  // an agent that will run it at next start. This function edits somebody
+  // else's config file on their behalf; it does not get to write whatever it
+  // is handed. Checked here rather than at the CLI so every caller is covered.
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) {
+    throw new Error(`invalid server name ${JSON.stringify(name)}: letters, digits, dash and underscore only, up to 64 characters`)
+  }
   scope = scope || spec.defaultScope || 'project'
   const path = targetPath(agent, scope, { cwd, home, env })
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''

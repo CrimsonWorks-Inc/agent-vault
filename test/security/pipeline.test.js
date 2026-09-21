@@ -358,6 +358,45 @@ test('a budget limit that is not a number refuses rather than counts nothing', a
   assert.equal(sent.length, 0)
 })
 
+test('held approvals are bounded, and do not hold response bodies forever', async () => {
+  // The approvals map had no sweep at all: every held request added an entry
+  // and nothing removed one, in a daemon that runs for weeks. A consumed
+  // approval also keeps its entire scrubbed response body so a retry can
+  // replay it. An agent under `approval: each` produces a distinct request
+  // hash per call, so it could grow both without limit just by asking — which
+  // is the one thing an agent can always do.
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 5000 }, approval: 'each' } })
+  const hold = (n) => pipeline.handle(req({ path: `/p/gh-frozencrow/repos/frozencrow/x/${n}` }))
+
+  for (let i = 0; i < 1200; i++) {
+    const res = await hold(i)
+    if (res.status === 403) {
+      // The cap is reached and the daemon says so, rather than growing.
+      assert.match(JSON.parse(res.body).detail, /waiting for approval/)
+      assert.ok(pipeline.approvals.size <= 1000, `the map grew to ${pipeline.approvals.size}`)
+      return
+    }
+    assert.equal(res.status, 202, `request ${i} should have been held`)
+  }
+  assert.fail(`1200 held requests produced a map of ${pipeline.approvals.size} with no cap`)
+})
+
+test('a stale pending approval is forgotten, so the cap is not permanent', async () => {
+  // Refusing at the cap is only safe if the cap drains. A human who has not
+  // answered in a quarter of an hour is not going to.
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 100 }, approval: 'each' } })
+  const first = await pipeline.handle(req({ path: '/p/gh-frozencrow/repos/frozencrow/x/old' }))
+  assert.equal(first.status, 202)
+  assert.equal(pipeline.approvals.size, 1)
+
+  // Age it past the pending TTL.
+  for (const a of pipeline.approvals.values()) {
+    a.created_at = new Date(Date.now() - 20 * 60_000).toISOString()
+  }
+  await pipeline.handle(req({ path: '/p/gh-frozencrow/repos/frozencrow/x/new' }))
+  assert.equal(pipeline.approvals.size, 1, 'the stale approval should have been swept, leaving only the new one')
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

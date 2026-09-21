@@ -41,6 +41,13 @@ const CONSUMED = new Set(['av-session', 'av-reason', 'av-expect-placeholders'])
  */
 const SESSION_TOKEN = /avs1\.[0-9a-z]{12}\.[A-Za-z0-9_-]{20,}/
 
+// Bounds on the approval map. It is the one structure an agent can grow simply
+// by making requests, and it holds response bodies.
+const PENDING_TTL_MS = 15 * 60_000   // a human who has not answered by now will not
+const REPLAY_TTL_MS = 5 * 60_000     // long enough for a retrying SDK, not for a process lifetime
+const DECIDED_TTL_MS = 60 * 60_000   // keep decisions visible for an hour, then forget
+const MAX_APPROVALS = 1000
+
 export class Pipeline {
   /**
    * @param {import('../store/vault.js').Vault} vault
@@ -534,6 +541,29 @@ export class Pipeline {
     return result
   }
 
+  /**
+   * Drop approvals that can no longer do anything useful.
+   *
+   * The map had no sweep at all. Every held request added an entry and nothing
+   * ever removed one, in a daemon that runs for weeks — and a consumed
+   * approval holds its entire scrubbed response body so a retry can replay it.
+   * An agent with a grant set to `approval: each` produces a distinct request
+   * hash per call, so it could grow this without limit simply by asking, which
+   * is the one thing an agent is always able to do.
+   */
+  #sweepApprovals() {
+    const now = Date.now()
+    for (const [hash, a] of this.approvals) {
+      const age = now - Date.parse(a.created_at)
+      // A human who has not answered in a quarter of an hour is not about to.
+      if (a.state === 'pending' && age > PENDING_TTL_MS) { this.approvals.delete(hash); continue }
+      // The replay window exists for an SDK retrying in seconds, not for a
+      // response body to be held for the life of the process.
+      if (a.result && now - Date.parse(a.decided_at || a.created_at) > REPLAY_TTL_MS) a.result = null
+      if (a.state !== 'pending' && age > DECIDED_TTL_MS) this.approvals.delete(hash)
+    }
+  }
+
   /** Approval state machine, keyed by the request hash so retries are safe. */
   #approval(requestHash, { grant, decision, requestId, reason }) {
     const existing = this.approvals.get(requestHash)
@@ -552,6 +582,18 @@ export class Pipeline {
       if (existing.state === 'denied') return { status: 'denied', approval: existing }
       return { status: 'pending', approval: existing }
     }
+
+    this.#sweepApprovals()
+    if (this.approvals.size >= MAX_APPROVALS) {
+      // Refuse rather than evict. Evicting would drop an approval a human may
+      // be looking at right now, and it would let an agent flush a pending
+      // request it did not like by making a thousand more.
+      throw deny('AV_POLICY_DENIED', `too many requests are waiting for approval (${this.approvals.size})`, {
+        rule: 'approval',
+        hint: 'Approve or deny the waiting requests, or wait for them to expire.',
+      })
+    }
+
     const approval = {
       id: id.approval(),
       request_hash: requestHash,

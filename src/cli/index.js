@@ -857,6 +857,14 @@ const COMMANDS = {
     const transport = args.transport || 'stdio'
     const name = args.name || 'agent-vault'
 
+    // `Number('nope')` is NaN, and writing `https://localhost:NaN/mcp` into a
+    // config file is a failure the reader only discovers when their agent
+    // cannot connect and the URL looks almost right.
+    const port = args.port === undefined ? 7443 : Number(args.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return fail(`--port must be a number between 1 and 65535, not ${JSON.stringify(args.port)}`, EXIT.USAGE)
+    }
+
     // Prefer the bare name when a shim is on PATH. Absolute paths to this
     // interpreter and this checkout work on this machine and nowhere else —
     // which made project scope, whose whole point is that you can commit the
@@ -875,7 +883,7 @@ const COMMANDS = {
       // plain http, and there is no exemption for loopback. --tls points at the
       // TLS listener instead of the plain gateway.
       url: args.tls
-        ? `https://localhost:${Number(args.port || 7443)}/mcp`
+        ? `https://localhost:${port}/mcp`
         : `http://127.0.0.1:${loadState().gateway_port || 7411}/mcp`,
     })
 

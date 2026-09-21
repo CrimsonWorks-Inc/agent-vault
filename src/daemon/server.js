@@ -22,6 +22,11 @@ import { randomBytes } from 'node:crypto'
 
 const MAX_BODY = 16 * 1024 * 1024
 
+// Bounds on the pending-confirmation map. Both are reachable from the control
+// socket, which an agent running as the human can reach.
+const MAX_OPEN_CHALLENGES = 64
+const MAX_OPERATION_BYTES = 8 * 1024
+
 export class Daemon {
   constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
     this.vault = vault
@@ -764,13 +769,26 @@ export class Daemon {
           const enrolled = this.vault.db?.kv?.webauthn
           if (!enrolled) throw deny('AV_PRESENCE_REQUIRED', 'no authenticator is enrolled')
           const operation = input.operation || {}
+          // The operation is held in memory until it expires and is whatever
+          // the caller sent. An operation nobody will ever read back is not a
+          // real one, and a megabyte of it a thousand times over is a way to
+          // spend the daemon's memory from the control socket.
+          if (JSON.stringify(operation).length > MAX_OPERATION_BYTES) {
+            throw deny('AV_POLICY_DENIED', 'that operation description is too large to sign')
+          }
           const challenge = webauthn.challengeForOperation(randomBytes(32), operation)
           const id = randomBytes(12).toString('base64url')
+          // Sweeping only the expired ones bounds nothing: a caller can mint
+          // as many as it likes inside one 60-second window. Cap the map too,
+          // and refuse rather than evict — evicting would let a flood cancel
+          // the confirmation a human is looking at.
+          for (const [k, v] of this.opChallenges) if (v.expires < Date.now()) this.opChallenges.delete(k)
+          if (this.opChallenges.size >= MAX_OPEN_CHALLENGES) {
+            throw deny('AV_POLICY_DENIED', 'too many confirmations are already open; try again in a minute')
+          }
           this.opChallenges.set(id, {
             challenge, operation, origins: input.origins || [], expires: Date.now() + 60_000,
           })
-          // Never let a stale map grow without bound.
-          for (const [k, v] of this.opChallenges) if (v.expires < Date.now()) this.opChallenges.delete(k)
           return json(200, {
             challengeId: id,
             challenge: webauthn.b64url(challenge),
