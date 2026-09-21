@@ -34,7 +34,10 @@ npm run test:mutation
 ```
 
 The second one checks the tests against themselves: it removes each of
-twenty-nine critical protections in turn and asserts the suite notices. Deleting the
+twenty-nine critical protections in turn and asserts the suite notices.
+It has already earned its keep twice by catching its own anchors drifting
+after a refactor — it cannot tell a moved line from a deleted one, so it
+reports the drift and fails rather than quietly passing. Deleting the
 human-presence gate fails 6 tests; host confinement, the placeholder checksum
 and the approval's request-hash binding 4 each; the session-token strip, the
 path control-character refusal and non-ASCII scrubbing 2 each; and the
@@ -287,9 +290,27 @@ has read every line of this repository. Against that attacker:
 - **Anything at rest on a stolen, unlocked machine.** Lock the vault, and set a
   passphrase so locking is cryptographic rather than a policy flag.
 
-**Never audited by anyone but its author.** Every finding in "Where the spec and
-the code disagree" was found from inside. That is the single biggest reason not
-to trust this yet.
+**Audited, but never by anyone independent of the project.** Four separate
+adversarial reviews — the crypto and storage layer, the request pipeline, the
+control surface and MCP, and the privileged installer — went through this code
+without being told what had already been fixed, and were asked for
+reproductions rather than opinions. They returned three findings rated
+critical, twelve rated high, and a long tail below that. Every one that
+survived my own re-verification is fixed, and each carries a test that fails
+without the fix; several are in the mutation inventory. The reproductions are
+worth reading: a gzipped event stream defeated the response scrubber
+completely, the installer resolved `chown` through the caller's PATH while
+running as root, and an agent could enrol its own authenticator on a fresh
+vault and lock the owner out permanently.
+
+Two of those reviews also found false positives in fixes I had made hours
+earlier — a check that refused ordinary JSON bodies, and a missing anchor
+reported as tampering on every upgrade — which is the clearest argument
+available that review from outside one's own head finds things review from
+inside it does not.
+
+That is still not the same as a security audit by an independent firm, and
+this has not had one. It is the single biggest reason not to trust this yet.
 
 ## Honest limits
 
