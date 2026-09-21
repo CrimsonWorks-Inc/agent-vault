@@ -336,6 +336,12 @@ The code is the spec's design, built. Where building it taught something, the co
 - **Locking now drops the audit key too.** `lock()` wiped the master key but left the `AuditLog` handle alive, so a key derived from it stayed in the daemon's memory for the life of the process — locking was not quite the zeroization it claimed. The handle is now dropped with the key, which also turned a null dereference on `audit tail` (reported as an internal error) into a plain `AV_LOCKED`. `test/security/locked.test.js` covers what a locked daemon answers.
 - **The UI is a web page, by request.** The spec chose a native shell specifically to stay off the browser automation surface. The web UI compensates with the presence gate described above, which the spec's native design also needs and which is now the stronger of the two mechanisms.
 
+## Reporting a vulnerability
+
+Email eric@frozencrow.com with `agent-vault security` in the subject, rather than
+opening a public issue. [SECURITY.md](SECURITY.md) says what is in scope and
+what is documented-rather-than-accidental, and why.
+
 ## License
 
 Apache-2.0.

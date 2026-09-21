@@ -16,7 +16,9 @@
   },
   "files": [
     "bin",
-    "src"
+    "src",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "scripts": {
     "test": "node --test test/core/*.test.js test/security/*.test.js",
