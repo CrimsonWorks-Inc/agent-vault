@@ -256,34 +256,76 @@ test('emptying the log entirely is detected too', () => {
   }
 })
 
-test('losing the anchor is recorded, but is not called tampering', () => {
-  // Removing the anchor is the natural next move once truncation is caught, so
-  // its absence has to be recorded. It cannot be forged: the head is
-  // authenticated under K_audit, which lives behind the uid boundary.
+test('truncating and then deleting the anchor does not launder the truncation', () => {
+  // The anchor catches a short log. Deleting the anchor as well used to turn
+  // that straight back into "chain intact" — and each round erased the
+  // previous round's evidence record, so it worked repeatedly. `rm` is
+  // strictly easier than the truncation it was covering for.
   //
-  // But it is the absence of evidence, not evidence of absence — the chain is
-  // intact, nothing proves how far it once reached — and every vault written
-  // before the anchor existed is in exactly this state. Reporting it as a
-  // broken chain would make the check permanently red on ordinary upgrades,
-  // and a check that always fails is a check nobody reads.
+  // What tells tampering from an upgrade is a stamp in the VAULT, a different
+  // file: removing the anchor does not remove the knowledge that there was one.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-launder-'))
+  try {
+    let v = Vault.create(fresh, { factor: 'none' })
+    for (let i = 0; i < 10; i++) v.audit.write('test.event', { n: i })
+    assert.equal(v.audit.verify().ok, true)
+
+    for (let round = 1; round <= 3; round++) {
+      const path = join(fresh, 'audit.jsonl')
+      const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
+      writeFileSync(path, `${lines.slice(0, -3).join('\n')}\n`)
+      rmSync(join(fresh, 'audit.jsonl.head'), { force: true })
+
+      v = Vault.open(fresh)
+      v.unlockWith({})
+      const res = v.audit.verify()
+      assert.equal(res.ok, false, `round ${round}: the truncation was laundered`)
+      assert.match(res.reason, /anchor was removed|removed from the end/)
+    }
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('a vault upgraded from a build without anchors is not accused of tampering', () => {
+  // Two different things wear the same symptom. On a vault KNOWN to keep an
+  // anchor, its absence is somebody having removed it — the test above. On a
+  // vault written before anchoring existed there is no evidence either way:
+  // the chain is intact, nothing proves how far it once reached.
+  //
+  // Reporting the second as tampering would make the check permanently red on
+  // every upgrade, and a check that always fails is a check nobody reads. What
+  // separates them is the stamp in the vault, so this reproduces the genuine
+  // pre-anchor state: a log, no anchor, and no stamp.
   const fresh = mkdtempSync(join(tmpdir(), 'av-anchor-'))
   try {
     const v = Vault.create(fresh, { factor: 'none' })
-    v.audit.write('test.event', {})
-    rmSync(join(fresh, 'audit.jsonl.head'))
-    const reopened = Vault.open(fresh)
-    reopened.unlockWith({})
-    const res = reopened.audit.verify()
-    assert.equal(res.ok, true, 'an intact chain with no anchor is not a broken chain')
+    for (let i = 0; i < 4; i++) v.audit.write('test.event', { n: i })
+
+    // Exactly what a pre-anchor build left behind.
+    const db = JSON.parse(readFileSync(join(fresh, 'vault.json'), 'utf8'))
+    delete db.kv.audit_anchored
+    writeFileSync(join(fresh, 'vault.json'), JSON.stringify(db, null, 1))
+    rmSync(join(fresh, 'audit.jsonl.head'), { force: true })
+
+    const upgraded = Vault.open(fresh)
+    upgraded.unlockWith({})
+    const res = upgraded.audit.verify()
+    assert.equal(res.ok, true, `an upgrade must not read as tampering: ${res.reason}`)
     assert.ok(Number.isInteger(res.unanchored_before), 'it must say from where the log is anchored')
     assert.match(res.note, /nothing proves how many records preceded/)
     assert.ok(
-      reopened.audit.read({ limit: 10 }).some((r) => r.kind === 'audit.anchor_missing'),
-      'and it must be recorded, so deleting the anchor again does not clear it',
+      upgraded.audit.read({ limit: 10 }).some((r) => r.kind === 'audit.anchor_missing'),
+      'the absence must still be recorded',
     )
-    // It never becomes untrue: further writes do not make it go quiet.
-    reopened.audit.write('test.event', {})
-    assert.ok(Number.isInteger(reopened.audit.verify().unanchored_before), 'the note must persist')
+
+    // And from here the vault IS anchored, so a later removal is caught -
+    // the benign note must not become a permanent hiding place.
+    rmSync(join(fresh, 'audit.jsonl.head'), { force: true })
+    const after = Vault.open(fresh)
+    after.unlockWith({})
+    assert.equal(after.audit.verify().ok, false,
+      'once anchored, a later removal must be reported even though an older benign note exists')
   } finally {
     rmSync(fresh, { recursive: true, force: true })
   }

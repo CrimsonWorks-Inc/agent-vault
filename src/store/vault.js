@@ -68,9 +68,28 @@ export class Vault {
     v.db = db
     v.vmk = vmk
     v.#persist()
-    v.audit = new AuditLog(v.auditPath, crypt.kAudit(vmk))
+    v.audit = new AuditLog(v.auditPath, crypt.kAudit(vmk), v.#anchorStamp())
     v.audit.write('vault.created', { factor, schema_version: SCHEMA_VERSION })
     return v
+  }
+
+  /**
+   * Whether this vault is known to keep an audit anchor, and how to record
+   * that it does. Kept in the vault rather than beside the log, so removing
+   * `audit.jsonl.head` does not also remove the knowledge that there was one —
+   * which is what let a truncation be laundered into "chain intact" by
+   * deleting the anchor as well.
+   */
+  #anchorStamp() {
+    return {
+      anchored: !!this.db?.kv?.audit_anchored,
+      markAnchored: () => {
+        if (this.db?.kv && !this.db.kv.audit_anchored) {
+          this.db.kv.audit_anchored = true
+          this.#persist()
+        }
+      },
+    }
   }
 
   #wrapVmk(deviceKey, vmk, factor, material) {
@@ -127,7 +146,7 @@ export class Vault {
         const kek = crypt.deriveKek(deviceKey, factorKey)
         const vmk = Buffer.from(crypt.open(kek, wrap, `av/vmk/${wrap.class}`), 'base64')
         this.vmk = vmk
-        this.audit = new AuditLog(this.auditPath, crypt.kAudit(vmk))
+        this.audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
         if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
         this.audit.write('vault.unlock', { factor: wrap.class })
         crypt.wipe(deviceKey)

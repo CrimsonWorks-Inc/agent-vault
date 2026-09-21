@@ -30,10 +30,19 @@ export class AuditLog {
    * @param {string} path  JSONL file (the spec's production store is SQLite
    *                       with insert-only triggers; the chain is identical)
    * @param {Buffer} key   K_audit
+   * @param {{anchored: boolean, markAnchored: () => void}} [stamp]
+   *   Whether this vault is known to keep an anchor, held in the VAULT rather
+   *   than beside the log. Without it, deleting the anchor file is
+   *   indistinguishable from a vault written before anchors existed — so
+   *   `rm audit.jsonl.head` alongside a truncation turned a detected
+   *   tampering back into "chain intact", repeatably, erasing the previous
+   *   round's evidence each time. The stamp lives in a different file, so
+   *   removing the anchor no longer removes the knowledge that there was one.
    */
-  constructor(path, key) {
+  constructor(path, key, stamp = null) {
     this.path = path
     this.key = key
+    this.stamp = stamp
     // Where the chain had got to, kept outside the log. The chain proves no
     // record was edited or removed from the middle, because every later hash
     // would stop matching. It proves nothing about the END: delete the last
@@ -56,6 +65,10 @@ export class AuditLog {
     if (this.truncation) this.write('audit.truncation_detected', this.truncation)
     else if (this.anchorMissing) this.write('audit.anchor_missing', this.anchorMissing)
     else this.#anchor()
+    // From here this vault is known to keep an anchor, so a later absence is
+    // tampering rather than an upgrade. Written after the first anchor exists,
+    // so a crash in between leaves the weaker claim rather than a false one.
+    this.stamp?.markAnchored?.()
   }
 
   /** The (seq, hash) the log should end at, authenticated under K_audit. */
@@ -95,10 +108,14 @@ export class AuditLog {
     } else if (!anchor) {
       // Deleting the anchor is the obvious next move once truncation is
       // caught, and re-creating it at whatever length the log now has would
-      // launder exactly the edit it exists to catch. A log that exists without
-      // one is a finding in its own right — including, honestly, for a vault
-      // written before the anchor existed.
-      this.anchorMissing = { found_seq: last.seq }
+      // launder exactly the edit it exists to catch.
+      //
+      // Whether that absence is tampering or an upgrade is decided by the
+      // stamp in the vault — a different file, which an adversary removing the
+      // anchor has not necessarily touched. Known to be anchored and the
+      // anchor is gone: someone took it. No stamp: this vault predates
+      // anchoring, which is not evidence of anything.
+      this.anchorMissing = { found_seq: last.seq, was_anchored: !!this.stamp?.anchored }
     }
   }
 
@@ -214,14 +231,35 @@ export class AuditLog {
       }
     }
 
-    // A missing anchor is not the same finding, and reporting it as one would
-    // make this permanently red on every vault written before the anchor
-    // existed — a check that always fails is a check nobody reads. It is the
-    // absence of evidence rather than evidence of absence: the chain is
-    // intact, but nothing proves how far it once reached. Say exactly that,
-    // and say it every time, because it never becomes untrue.
-    const noAnchor = rows.find((r) => r.kind === 'audit.anchor_missing')
+    // A missing anchor means one of two different things, and collapsing them
+    // was a real bug in both directions.
+    //
+    // On a vault KNOWN to have kept one, the anchor's absence is somebody
+    // having removed it, which is the same act as the truncation it exists to
+    // catch — and reporting that as intact let an adversary truncate, delete
+    // the anchor, and get a clean bill of health, repeatedly, erasing the
+    // previous round's evidence each time.
+    //
+    // On a vault written before anchoring existed there is no evidence either
+    // way: the chain is intact, nothing proves how far it once reached.
+    // Reporting THAT as tampering would make the check permanently red on
+    // every upgrade, and a check that always fails is a check nobody reads.
+    // Any removal-after-anchoring anywhere in the log is the finding, not just
+    // the first absence: a vault upgraded from a pre-anchor build carries a
+    // permanent benign note at its start, and taking the first record would
+    // let every later removal hide behind it forever.
+    const absences = rows.filter((r) => r.kind === 'audit.anchor_missing')
+    const removed = absences.find((r) => r.was_anchored)
+    const noAnchor = removed || absences[0]
     if (noAnchor) {
+      if (noAnchor.was_anchored) {
+        return {
+          ok: false,
+          count: rows.length,
+          brokenAt: noAnchor.seq,
+          reason: `the head anchor was removed from a vault that kept one: at record ${noAnchor.seq} the log was found without it, so records may have been removed from the end`,
+        }
+      }
       return {
         ok: true,
         count: rows.length,
