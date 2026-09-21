@@ -817,14 +817,45 @@ export class Vault {
   }
 
   /** Give back a use when the daemon failed before the first upstream byte. */
+  /**
+   * Give back a use and a budget unit when a request never reached anyone.
+   *
+   * It used to revive ANY exhausted row unconditionally, without re-checking
+   * the grant or the session and without recording anything — so a placeholder
+   * whose grant had been revoked in the meantime came back to life, and the
+   * log kept the `placeholder.resolved` record saying the use had happened.
+   * Ledger and log disagreed by one on every refund.
+   *
+   * That used to be unreachable through the pipeline, because markUpstream()
+   * fired before the upstream call and left no await between consuming and
+   * marking. Moving the mark to AFTER the call — so the refund could happen at
+   * all — put a real await in that gap, and made this live.
+   */
   refundPlaceholder(rowId) {
     const row = this.db.placeholders[rowId]
     if (!row) return
+    const grant = this.db.grants[row.grant_id]
+    const session = this.db.sessions[row.sid]
+    // Revoked in the meantime: the use stays spent and the row stays dead.
+    // Refunding into a revoked grant would hand back capability a human took
+    // away, which is the one direction a refund must never go.
+    const stillLive = grant?.state === 'active' && session?.state === 'active'
+    if (!stillLive) {
+      this.audit?.write('placeholder.refund_refused', {
+        placeholder_id: rowId,
+        grant_state: grant?.state ?? 'missing',
+        session_state: session?.state ?? 'missing',
+      })
+      return
+    }
     if (row.uses > 0) row.uses -= 1
     if (row.state === 'dead' && row.dead_reason === 'exhausted') { row.state = 'active'; row.dead_reason = null }
-    const grant = this.db.grants[row.grant_id]
-    if (grant && grant.budget_used > 0) grant.budget_used -= 1
-    this.#persist()
+    if (grant.budget_used > 0) grant.budget_used -= 1
+    this.#persist({ durable: false })
+    // Recorded, so the ledger and the log agree about how many uses happened.
+    this.audit?.write('placeholder.refunded', {
+      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses, max_uses: row.max_uses,
+    })
   }
 
   burnPlaceholder(rowId, reason = 'burned') {

@@ -490,13 +490,21 @@ export function evaluateHttp(policy, { method, host, path }) {
       })
     }
   }
-  if (policy.paths && !policy.paths.some((pat) => matchPath(pat, p))) {
-    throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
-      rule: 'paths',
-      hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,
-    })
+  // Which pattern let it through, not merely that something did. The audit
+  // log records this as `path_glob_matched`, and it was the literal string
+  // "allow" on every record ever written — a field named for the glob that
+  // never once held a glob.
+  let matched = null
+  if (policy.paths) {
+    matched = policy.paths.find((pat) => matchPath(pat, p)) ?? null
+    if (matched === null) {
+      throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
+        rule: 'paths',
+        hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,
+      })
+    }
   }
-  return { host: h, path: p, method: m, rule: 'allow' }
+  return { host: h, path: p, method: m, rule: matched ?? 'allow', matched }
 }
 
 /** Does this request need a human approval under the effective policy? */

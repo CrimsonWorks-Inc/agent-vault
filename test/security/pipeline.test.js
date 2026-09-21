@@ -713,6 +713,71 @@ test('an approval survives a request that never reached the upstream', async () 
   assert.equal(again.headers['av-replayed'], 'true')
 })
 
+test('a refund into a revoked grant is refused, not quietly granted', async () => {
+  // refundPlaceholder revived any exhausted row unconditionally — no re-check
+  // of the grant or the session, and no audit record — so a placeholder whose
+  // grant had been revoked came back to life, while the log kept the
+  // `placeholder.resolved` record saying the use had happened. Ledger and log
+  // disagreed by one on every refund.
+  //
+  // This was unreachable while markUpstream() fired before the upstream call.
+  // Moving it after, so the refund could happen at all, put a real await in
+  // that gap and made it live.
+  setup()
+  const oneShot = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1 })
+  vault.consumePlaceholder(oneShot.row.id)
+  assert.equal(vault.db.placeholders[oneShot.row.id].state, 'dead')
+
+  vault.revokeSession(session.id)
+  vault.refundPlaceholder(oneShot.row.id)
+
+  const row = vault.db.placeholders[oneShot.row.id]
+  assert.notEqual(row.state, 'active', 'a revoked grant must not get its capability back')
+  assert.equal(row.uses, 1, 'the use stays spent')
+  assert.ok(
+    vault.audit.read({ limit: 50 }).some((r) => r.kind === 'placeholder.refund_refused'),
+    'the refusal must be recorded',
+  )
+})
+
+test('a legitimate refund is recorded, so the ledger and the log agree', () => {
+  setup()
+  const oneShot = vault.issuePlaceholder({ grantId: grant.id, field: 'token', uses: 1 })
+  vault.consumePlaceholder(oneShot.row.id)
+  vault.refundPlaceholder(oneShot.row.id)
+
+  const row = vault.db.placeholders[oneShot.row.id]
+  assert.equal(row.state, 'active', 'a live grant gets its use back')
+  assert.equal(row.uses, 0)
+  assert.ok(
+    vault.audit.read({ limit: 50 }).some((r) => r.kind === 'placeholder.refunded'),
+    'a refund must be recorded, or the log says one more use happened than did',
+  )
+})
+
+test('a placeholder cannot be spent under a grant it was not issued under', async () => {
+  // Only the session and the credential were checked, while consumePlaceholder
+  // charges `row.grant_id` and the policy check uses the ROUTE's grant. With
+  // two grants for one credential in one session, a placeholder minted under
+  // the narrow grant would be evaluated against the wide one's policy and
+  // billed to the narrow one's budget.
+  setup()
+  const cred = vault.findCredential('gh-frozencrow')
+  const narrow = vault.createGrant({
+    sessionId: session.id, credentialId: cred.id, fields: ['token'],
+    policy: { hosts: ['api.github.com'], methods: ['GET'], paths: ['/user'], budget: { unit: 'requests', limit: 2 }, approval: 'auto' },
+  })
+  const fromNarrow = vault.issuePlaceholder({ grantId: narrow.id, field: 'token' }).placeholder
+
+  // The route resolves to the session's first grant, which is the wide one.
+  const res = await pipeline.handle(req({
+    headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${fromNarrow}`]],
+  }))
+  assert.equal(res.status, 403, 'a placeholder from another grant must not be spent here')
+  assert.equal(JSON.parse(res.body).rule, 'placeholder_grant')
+  assert.equal(sent.length, 0)
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

@@ -151,6 +151,14 @@ test('the log says which resource was reached, not just which rule matched', () 
     denied.some((r) => r.req?.path?.includes('/forbidden/secret-path-name')),
     'a denial did not record what was denied',
   )
+  // And which rule let it through, which is what the field is named for. It
+  // held the literal string "allow" on every record ever written.
+  const withGlob = allowed.find((r) => r.req?.path_glob_matched)
+  assert.ok(withGlob, 'no allowed request recorded a matched path rule')
+  assert.notEqual(withGlob.req.path_glob_matched, 'allow',
+    'path_glob_matched must name the glob that matched, not that something did')
+  assert.match(withGlob.req.path_glob_matched, /\*|\//, 'it should look like a path pattern')
+
   // The query string stays out: that is where credentials appear in a URL.
   const raw = readFileSync(join(dir, 'audit.jsonl'), 'utf8')
   assert.ok(!raw.includes('token=shhh'), 'a query string reached the audit log')

@@ -1003,7 +1003,18 @@ export class Daemon {
         }
         case 'POST /v1/presence/window': {
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
-          if (!this.vault.hasPassphrase) return json(200, { granted: true, ungated: true })
+          if (!this.vault.hasPassphrase) {
+            // No passphrase means no window to open — every widening call is
+            // already ungated, and audited as such. This answered
+            // `granted: true`, which reads as "a window is open" to anything
+            // that checks, so say what is actually true instead.
+            return json(200, {
+              granted: false,
+              ungated: true,
+              detail: 'this vault has no passphrase, so nothing is gated and no window was opened',
+              next: 'agent-vault passphrase set',
+            })
+          }
           this.#throttlePassphrase()
           const verified = this.vault.verifyPassphrase(input.passphrase || '')
           this.#recordPassphraseAttempt(verified)

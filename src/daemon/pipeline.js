@@ -425,6 +425,20 @@ export class Pipeline {
           rule: 'placeholder_session',
         })
       }
+      // The grant it was issued under is the grant it spends against. Only
+      // the session and the credential were checked, while consumePlaceholder
+      // charges `row.grant_id` and the policy check uses the ROUTE's grant —
+      // so with two grants for one credential in a session, a placeholder
+      // minted under the narrow one would be evaluated against the wide one's
+      // policy and billed to the narrow one's budget. A session only ever gets
+      // one such grant today, which is what kept it theoretical; it is one
+      // `grantsForSession` change away from not being.
+      if (row.grant_id !== grant.id) {
+        throw deny('AV_PH_WRONG_CONNECTOR', 'that placeholder was issued under a different grant', {
+          rule: 'placeholder_grant',
+          hint: 'Use a placeholder issued under the grant that covers this route.',
+        })
+      }
       const phCred = this.vault.db.credentials[row.credential_id]
       if (phCred.id !== cred.id) {
         throw deny('AV_PH_WRONG_CONNECTOR', `that placeholder is for ${phCred.slug}, but the route is ${cred.slug}`, {
