@@ -238,3 +238,54 @@ test('a leftover temp file cannot hand the vault a permissive mode', () => {
     rmSync(fresh, { recursive: true, force: true })
   }
 })
+
+test('the placeholder ledger does not grow without bound', () => {
+  // `max_active` caps how many placeholders are ACTIVE by marking the excess
+  // dead. Nothing ever removed a row, so the ledger grew forever and every
+  // write rewrote all of it: 1400 mints produced 1400 rows and a 744 KiB
+  // vault.json, at 13.5ms of blocked event loop per mint. An agent decides how
+  // often to mint.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-ledger-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    const cred = v.addCredential({
+      slug: 'x', kind: 'http', connector: { host: 'h' },
+      fields: { token: 'a-secret-value-here' }, sites: { token: ['header:authorization:Bearer'] },
+    })
+    const s = v.createSession({ label: 'a' })
+    const g = v.createGrant({
+      sessionId: s.session.id, credentialId: cred.id, fields: ['token'],
+      policy: { hosts: ['h'], methods: ['GET'], paths: ['/**'], budget: { unit: 'requests', limit: 100000 } },
+    })
+
+    const started = Date.now()
+    for (let i = 0; i < 900; i++) v.issuePlaceholder({ grantId: g.id, field: 'token' })
+    const ms = Date.now() - started
+
+    const rows = Object.keys(v.db.placeholders).length
+    assert.ok(rows <= 600, `900 mints left ${rows} rows in the ledger`)
+    assert.ok(ms < 5000, `900 mints took ${ms}ms, all of it on the event loop`)
+
+    // The most recent ones survive, because those are the ones a replay is
+    // most likely to be about.
+    const live = Object.values(v.db.placeholders).filter((p) => p.state === 'active')
+    assert.ok(live.length > 0, 'the active placeholders must not be collected')
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
+})
+
+test('key material is still written durably, whatever the ledger does', () => {
+  // The fsync split is only safe if the half that matters keeps it. A lost
+  // placeholder is one the agent asks for again; a lost credential is gone.
+  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
+  const nonDurable = [...src.matchAll(/#persist\(\{ durable: false \}\)/g)].length
+  assert.ok(nonDurable > 0 && nonDurable <= 4,
+    `${nonDurable} non-durable writes: this should be the placeholder ledger and nothing else`)
+
+  // The credential and factor paths must not be among them.
+  for (const fn of ['addCredential', 'setPassphrase', 'removePassphrase', 'addWebauthnUnlock', 'removeWebauthnUnlock']) {
+    const body = new RegExp(`${fn}\\\\([^)]*\\\\) \\\\{[\\\\s\\\\S]*?\\\\n  \\\\}`).exec(src)?.[0] || ''
+    assert.ok(!body.includes('durable: false'), `${fn} writes key material without an fsync`)
+  }
+})

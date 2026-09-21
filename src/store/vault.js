@@ -20,6 +20,10 @@ import { PROFILES } from '../connectors/profiles.js'
 
 export const SCHEMA_VERSION = 1
 
+// How many placeholder rows the ledger keeps. Active ones are capped per grant
+// by `max_active`; this bounds the dead ones, which nothing used to remove.
+const MAX_PLACEHOLDER_ROWS = 512
+
 const EMPTY = {
   schema_version: SCHEMA_VERSION,
   kv: { vmk_wraps: [], presence_factors: [], settings: {} },
@@ -380,7 +384,7 @@ export class Vault {
    * from. So: fsync the data before the rename, and fsync the directory
    * after, because the directory entry needs flushing too.
    */
-  #persist() {
+  #persist({ durable = true } = {}) {
     const tmp = `${this.dbPath}.tmp`
     const text = JSON.stringify(this.db, null, 1)
     // The mode argument to writeFileSync applies at CREATION only. A temp file
@@ -390,17 +394,28 @@ export class Vault {
     try {
       writeFileSync(fd, text)
       fchmodSync(fd, 0o600)
-      fsyncSync(fd)
+      // The fsync is what makes a write survive a power cut, and it costs
+      // several milliseconds against a growing file. Key material and
+      // credentials get it: losing one of those is unrecoverable. The
+      // placeholder ledger does not, because the rename is atomic either way —
+      // the file is never torn, only possibly one write behind — and one lost
+      // placeholder issuance is something the agent simply asks for again.
+      //
+      // Without this split, minting placeholders cost 13.5ms each, all of it
+      // on the event loop, and an agent chooses how often to mint.
+      if (durable) fsyncSync(fd)
     } finally {
       closeSync(fd)
     }
     renameSync(tmp, this.dbPath)
     // Best effort: a filesystem that will not let us open the directory is not
     // a reason to fail the write that already succeeded.
-    try {
-      const dirFd = openSync(this.dir, 'r')
-      try { fsyncSync(dirFd) } finally { closeSync(dirFd) }
-    } catch { /* not every platform allows this */ }
+    if (durable) {
+      try {
+        const dirFd = openSync(this.dir, 'r')
+        try { fsyncSync(dirFd) } finally { closeSync(dirFd) }
+      } catch { /* not every platform allows this */ }
+    }
   }
 
   get kPh() { this.#requireUnlocked(); return crypt.kPh(this.vmk) }
@@ -729,6 +744,7 @@ export class Vault {
       ttl ? Date.now() + ttl : Infinity,
       Date.parse(session.expires_at),
     )
+    this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
     const row = {
       id: id.placeholder(), grant_id: grantId, credential_id: cred.id, field: fieldName,
@@ -739,7 +755,9 @@ export class Vault {
       last_used_at: null,
     }
     this.db.placeholders[row.id] = row
-    this.#persist()
+    // Ledger churn, not key material: the rename is atomic either way, so the
+    // worst a power cut costs is one placeholder the agent asks for again.
+    this.#persist({ durable: false })
     this.audit.write('placeholder.issued', {
       placeholder_id: row.id, grant_id: grantId, session_id: session.id,
       credential_slug: cred.slug, field: fieldName, max_uses: maxUses,
@@ -778,13 +796,13 @@ export class Vault {
       })
     }
     if (Date.parse(row.expires_at) <= Date.now()) {
-      row.state = 'dead'; row.dead_reason = 'expired'; this.#persist()
+      row.state = 'dead'; row.dead_reason = 'expired'; this.#persist({ durable: false })
       throw deny('AV_PH_STALE', 'placeholder expired', {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
     if (row.uses >= row.max_uses) {
-      row.state = 'dead'; row.dead_reason = 'exhausted'; this.#persist()
+      row.state = 'dead'; row.dead_reason = 'exhausted'; this.#persist({ durable: false })
       throw deny('AV_PH_EXHAUSTED', `placeholder used ${row.uses}/${row.max_uses} times`, {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
@@ -841,6 +859,29 @@ export class Vault {
     row.replaces_id = rowId
     this.#persist()
     return { placeholder, row, reused: false }
+  }
+
+  /**
+   * Forget the oldest dead placeholders.
+   *
+   * `max_active` caps how many are ACTIVE by marking the excess dead; nothing
+   * ever removed a row, so the ledger grew forever and every write rewrote all
+   * of it. 1400 mints produced 1400 rows and a 744 KiB vault.json, at 13.5ms
+   * per mint — and an agent decides how often to mint.
+   *
+   * Recent dead ones are kept so a replay gets the specific answer it deserves
+   * (`exhausted`, `revoked`) rather than the generic one. Past that the
+   * checksum still proves the vault minted it and the ledger still refuses it;
+   * only the reason becomes less precise.
+   */
+  #collectDeadPlaceholders() {
+    const rows = Object.entries(this.db.placeholders)
+    if (rows.length <= MAX_PLACEHOLDER_ROWS) return
+    const dead = rows
+      .filter(([, p]) => p.state !== 'active')
+      .sort((a, b) => String(a[1].created_at).localeCompare(String(b[1].created_at)))
+    const overBy = rows.length - MAX_PLACEHOLDER_ROWS
+    for (const [id] of dead.slice(0, overBy)) delete this.db.placeholders[id]
   }
 
   listPlaceholders(sid) {

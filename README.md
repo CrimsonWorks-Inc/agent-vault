@@ -26,7 +26,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 411 tests
+npm test          # 413 tests
 ```
 
 ```bash
@@ -321,7 +321,7 @@ With **neither** factor enrolled the socket is open and every widening call is a
 
 **Crypto substitutions.** ChaCha20-Poly1305 with a 96-bit nonce instead of XChaCha20's 192, and scrypt instead of Argon2id, because Node has neither without a native dependency. Per-field keys keep each key's record count far below the birthday bound, so the nonce size is not a practical problem at this scale, but it is not what the spec specifies.
 
-**Storage is a JSON document, not SQLite.** Same entity model, same invariants, atomic rewrites. It will not hold up under concurrent daemons or a large vault.
+**Storage is a JSON document, not SQLite.** Same entity model, same invariants, atomic rewrites. Every write rewrites the whole document, so the placeholder ledger is bounded rather than allowed to grow, and the two halves are written differently: key material and credentials are fsynced, the placeholder ledger is not. The rename is atomic either way, so the file is never torn — the most a power cut costs there is one placeholder issuance, which the agent simply asks for again. It will not hold up under concurrent daemons or a large vault.
 
 **Not implemented at all:** the Postgres, MySQL, MongoDB, SSH and SMTP connectors, mutual TLS and client certificates for network listeners, CONNECT mode, GitHub App token minting, and request-body streaming — a request body over 16 MiB is refused rather than streamed, because a body that cannot be scanned for placeholders cannot be forwarded. The `stream_bodies` policy field exists and intersects correctly; nothing reads it yet.
 
