@@ -134,7 +134,7 @@ That opens the docs inside the web UI, where they are written against your actua
 
 **A use is consumed before the first upstream byte**, inside the same step that re-checks session, grant and budget. Twenty concurrent uses of a one-time placeholder produce exactly one upstream request.
 
-**Responses are scrubbed** against every injected secret and every other stored credential, in seven encodings, including across streaming chunk boundaries. Tokens the vault never stored (a minted installation token, an AWS key) are redacted by shape.
+**Responses are scrubbed** against every injected secret and every other stored credential, in every encoding a response is likely to carry it in — raw, the UTF-8 bytes as the wire actually delivers them, percent-encoded, escaped-slash, JSON-escaped, `\u`-escaped, hex, HTML entities, and base64 at all three byte alignments in both alphabets — including across streaming chunk boundaries. Tokens the vault never stored (a minted installation token, an AWS key) are redacted by shape.
 
 **Approvals are bound to the request hash.** A write held for a human executes exactly once however many times the client retries; later resends replay the stored response instead of producing a second side effect.
 

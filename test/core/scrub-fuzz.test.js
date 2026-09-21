@@ -91,8 +91,11 @@ test('text with no secret in it is passed through byte for byte', () => {
 })
 
 test('every declared encoding of a secret is actually caught', () => {
-  // scrub.js claims seven encodings. This asserts the claim rather than
-  // trusting the comment.
+  // Whatever set encodings() declares, every member of it must actually be
+  // caught. This asserts the list rather than trusting a count in prose: the
+  // README said "seven" while the function produced twelve distinct forms for
+  // a secret with punctuation in it, and a number in a comment is the first
+  // thing to go stale.
   const rnd = rng(31337)
   for (let i = 0; i < 400; i++) {
     const { secret } = makeCase(rnd)
