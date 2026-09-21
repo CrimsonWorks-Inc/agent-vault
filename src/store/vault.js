@@ -8,7 +8,7 @@
 // placeholder ledger is the only thing that authorizes an injection, and
 // consume() happens before any upstream byte.
 
-import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs'
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, chmodSync, openSync, closeSync, fsyncSync, fchmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import * as crypt from './crypto.js'
@@ -338,10 +338,38 @@ export class Vault {
     if (this.locked) throw deny('AV_LOCKED', 'the vault is locked')
   }
 
+  /**
+   * Write the vault out. Temp file, then rename, which is the atomic part —
+   * a reader sees the old file or the new one, never half of either.
+   *
+   * The rename being atomic is not the same as it being durable. Without an
+   * fsync the bytes can still be in the page cache when the rename is
+   * recorded, so a power loss can leave vault.json present, renamed, and
+   * empty — which is every credential in it, gone, with nothing to recover
+   * from. So: fsync the data before the rename, and fsync the directory
+   * after, because the directory entry needs flushing too.
+   */
   #persist() {
     const tmp = `${this.dbPath}.tmp`
-    writeFileSync(tmp, JSON.stringify(this.db, null, 1), { mode: 0o600 })
+    const text = JSON.stringify(this.db, null, 1)
+    // The mode argument to writeFileSync applies at CREATION only. A temp file
+    // left behind by a crash is written into with whatever mode it already
+    // has, so reassert it rather than inherit it.
+    const fd = openSync(tmp, 'w', 0o600)
+    try {
+      writeFileSync(fd, text)
+      fchmodSync(fd, 0o600)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
     renameSync(tmp, this.dbPath)
+    // Best effort: a filesystem that will not let us open the directory is not
+    // a reason to fail the write that already succeeded.
+    try {
+      const dirFd = openSync(this.dir, 'r')
+      try { fsyncSync(dirFd) } finally { closeSync(dirFd) }
+    } catch { /* not every platform allows this */ }
   }
 
   get kPh() { this.#requireUnlocked(); return crypt.kPh(this.vmk) }

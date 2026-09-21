@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
@@ -146,4 +146,31 @@ test('a passphrase vault comes up locked after a restart, not crashed', () => {
   const unlocked = r.startInRecordedState(null)
   assert.equal(unlocked, false)
   assert.equal(r.locked, true)
+})
+
+test('a leftover temp file cannot hand the vault a permissive mode', () => {
+  // #persist writes a temp file and renames it over the vault, so vault.json
+  // ends up with whatever mode the TEMP file had. writeFileSync's mode option
+  // applies at creation only — write into a file that already exists and the
+  // mode is ignored — so a temp file left behind by a crash, with a mode
+  // somebody else set, became the mode of the vault itself. A world-readable
+  // vault.json is every credential in it, to every account on the machine.
+  const fresh = mkdtempSync(join(tmpdir(), 'av-mode-'))
+  try {
+    const v = Vault.create(fresh, { factor: 'none' })
+    const tmp = join(fresh, 'vault.json.tmp')
+    writeFileSync(tmp, 'left over from a crash', { mode: 0o666 })
+    chmodSync(tmp, 0o666)
+
+    // Anything that persists.
+    v.addCredential({
+      slug: 'x', kind: 'http', connector: { host: 'example.com' },
+      fields: { token: 'value-long-enough' }, sites: { token: ['header:authorization:Bearer'] },
+    })
+
+    const mode = statSync(join(fresh, 'vault.json')).mode & 0o777
+    assert.equal(mode, 0o600, `the vault ended up mode 0${mode.toString(8)}`)
+  } finally {
+    rmSync(fresh, { recursive: true, force: true })
+  }
 })
