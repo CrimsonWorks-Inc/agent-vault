@@ -214,6 +214,44 @@ export function normalizeHost(host) {
  * resolved. Matching happens on the normalized form so %2e%2e and /../ cannot
  * walk outside an allowed prefix.
  */
+/**
+ * Encode one decided path for the wire, so a URL parser reads back exactly the
+ * path the policy approved.
+ *
+ * Not encodeURIComponent, which was what this used to be. That encodes
+ * everything outside `A-Za-z0-9-_.!~*'()` — including `:` `@` `$` `&` `+` `,`
+ * `;` `=`, all of which RFC 3986 allows in a path segment and several of which
+ * carry meaning:
+ *
+ *   /v1beta/models/gemini-pro:generateContent   the Gemini endpoint, in this
+ *                                               project's own README
+ *   /@scope/package                             every scoped npm package
+ *   /Products(1)/Name                           OData
+ *
+ * All three were approved by the policy and then sent somewhere else. The
+ * point of encoding here is that the two readings agree, not that the path be
+ * unreadable, so this encodes exactly what is not a legal path character:
+ * `/`, `?` and `#` (which would re-split or truncate it), `%` (so a literal
+ * one round-trips), and anything else outside pchar.
+ */
+const PCHAR_SAFE = /[A-Za-z0-9\-._~!$&'()*+,;=:@]/
+
+export function encodePathSegment(segment) {
+  let out = ''
+  for (const ch of String(segment)) {
+    if (PCHAR_SAFE.test(ch)) { out += ch; continue }
+    for (const byte of Buffer.from(ch, 'utf8')) {
+      out += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+    }
+  }
+  return out
+}
+
+/** A whole path, segment by segment. The separators are the only bare slashes. */
+export function encodePathForWire(path) {
+  return String(path).split('/').map(encodePathSegment).join('/')
+}
+
 export function normalizePath(path) {
   let p = String(path || '/')
 

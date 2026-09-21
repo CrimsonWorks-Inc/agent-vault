@@ -14,16 +14,31 @@
 
 export const MIN_SECRET_LEN = 8
 
-/** Token shapes worth redacting even when the vault never stored them. */
+/**
+ * Token shapes worth redacting even when the vault never stored them.
+ *
+ * Every one starts at a token boundary. Without that, `sk-` matched in the
+ * MIDDLE of ordinary words: `disk-usage_by_repository_over_time` came back as
+ * `di[[av:derived]]`, and `task-oriented_approach_to_the_problem` as
+ * `ta[[av:derived]]`. On a streamed response the same match cut the stream
+ * with AV_UNSCANNABLE. A scrubber that corrupts ordinary English is not a
+ * cautious scrubber, it is a broken proxy — and this pattern class is a
+ * heuristic for tokens the vault never stored, so a missed one costs a
+ * heuristic while a false one costs every response that mentions a repository.
+ *
+ * The vault's OWN secrets are matched exactly, by value, and are unaffected by
+ * any of this.
+ */
+const BOUNDARY = '(?<![A-Za-z0-9_-])'
 export const DERIVED_PATTERNS = [
-  { name: 'github', re: /gh[pousr]_[A-Za-z0-9]{20,}/g },
-  { name: 'github-pat', re: /github_pat_[A-Za-z0-9_]{40,}/g },
-  { name: 'slack', re: /xox[abpors]-[0-9A-Za-z-]{10,}/g },
-  { name: 'aws', re: /AKIA[0-9A-Z]{16}/g },
-  { name: 'google-oauth', re: /ya29\.[0-9A-Za-z_-]{20,}/g },
-  { name: 'google-api', re: /AIza[0-9A-Za-z_-]{35}/g },
-  { name: 'anthropic', re: /sk-ant-[A-Za-z0-9_-]{20,}/g },
-  { name: 'openai', re: /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g },
+  { name: 'github', re: new RegExp(`${BOUNDARY}gh[pousr]_[A-Za-z0-9]{20,}`, 'g') },
+  { name: 'github-pat', re: new RegExp(`${BOUNDARY}github_pat_[A-Za-z0-9_]{40,}`, 'g') },
+  { name: 'slack', re: new RegExp(`${BOUNDARY}xox[abpors]-[0-9A-Za-z-]{10,}`, 'g') },
+  { name: 'aws', re: new RegExp(`${BOUNDARY}AKIA[0-9A-Z]{16}`, 'g') },
+  { name: 'google-oauth', re: new RegExp(`${BOUNDARY}ya29\\.[0-9A-Za-z_-]{20,}`, 'g') },
+  { name: 'google-api', re: new RegExp(`${BOUNDARY}AIza[0-9A-Za-z_-]{35}`, 'g') },
+  { name: 'anthropic', re: new RegExp(`${BOUNDARY}sk-ant-[A-Za-z0-9_-]{20,}`, 'g') },
+  { name: 'openai', re: new RegExp(`${BOUNDARY}sk-(?:proj-)?[A-Za-z0-9_-]{20,}`, 'g') },
   { name: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
 ]
 

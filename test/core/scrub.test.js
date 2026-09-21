@@ -115,3 +115,53 @@ test('a short OTHER vault secret keeps the length floor, to avoid shredding pros
   const { text } = s.scrub('this is a test of ordinary prose that says test twice')
   assert.equal(text, 'this is a test of ordinary prose that says test twice')
 })
+
+test('the derived-token shapes do not match ordinary English', () => {
+  // Every shape used to match mid-word, because none of them required a token
+  // boundary. `disk-usage_by_repository_over_time` came back as
+  // `di[[av:derived]]`, and on a streamed response the same match cut the
+  // stream with AV_UNSCANNABLE. A scrubber that corrupts ordinary prose is not
+  // a cautious scrubber, it is a broken proxy — and these shapes are a
+  // heuristic for tokens the vault never stored, so a miss costs a heuristic
+  // while a false hit costs every response that mentions a repository.
+  const s = new Scrubber([])
+  const innocent = [
+    'a disk-usage_by_repository_over_time report',
+    'we took a task-oriented_approach_to_the_whole_thing',
+    'see also: brisk-and_efficient_processing_of_requests',
+    'the file lives at src/disk-cache_manager_implementation.ts',
+    'highp_precision_floating_point_values_only please',
+    'the boxox-abcdefghijklmnop identifier',
+  ]
+  for (const text of innocent) {
+    const r = s.scrub(text)
+    assert.equal(r.redactions, 0, `ordinary text was redacted: ${JSON.stringify(r.text)}`)
+    assert.equal(r.text, text, 'ordinary text must pass through byte for byte')
+  }
+})
+
+test('the derived-token shapes still catch real tokens the vault never stored', () => {
+  // The other half: a boundary that stops false hits must not stop true ones.
+  // These are the minted credentials the vault has no stored copy of — an
+  // installation token, a key an upstream just issued — so shape is the only
+  // thing there is to go on.
+  const s = new Scrubber([])
+  const real = {
+    github: 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+    'github-pat': `github_pat_${'A'.repeat(44)}`,
+    slack: 'xoxb-1234567890-0987654321-abcdefghijkl',
+    aws: 'AKIAIOSFODNN7EXAMPLE',
+    'google-oauth': `ya29.${'a'.repeat(30)}`,
+    'google-api': `AIza${'B'.repeat(35)}`,
+    anthropic: `sk-ant-api03-${'c'.repeat(30)}`,
+    openai: `sk-proj-${'d'.repeat(30)}`,
+    'private-key': '-----BEGIN RSA PRIVATE KEY-----',
+  }
+  for (const [name, token] of Object.entries(real)) {
+    for (const context of [`${token}`, `value: ${token}`, `{"key":"${token}"}`, `\n${token}\n`]) {
+      const r = s.scrub(context)
+      assert.ok(r.redactions > 0, `${name} was not caught in ${JSON.stringify(context.slice(0, 30))}`)
+      assert.ok(!r.text.includes(token), `${name} survived: ${r.text.slice(0, 60)}`)
+    }
+  }
+})

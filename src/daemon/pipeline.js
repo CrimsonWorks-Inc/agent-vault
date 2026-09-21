@@ -422,6 +422,13 @@ export class Pipeline {
       method: decision.method, host: decision.host, path: decision.path,
       query: req.query, bodySha256: bodySha,
       placeholderIds: substitutions.map((s) => s.row.id),
+      // Only what will actually be forwarded: the daemon strips its own
+      // headers and the hop-by-hop ones before sending, so including them
+      // would make an approval depend on bytes no upstream ever sees.
+      headers: req.headers.filter(([n]) => {
+        const lower = String(n).toLowerCase()
+        return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
+      }),
     })
     if (policyMod.needsApproval(effective, { method: decision.method, firstUse: grant.counters.requests === 0 })) {
       const verdict = this.#approval(requestHash, { grant, decision, requestId, reason: sub.getHeader(req, 'av-reason') })
@@ -504,7 +511,7 @@ export class Pipeline {
     // tab, a `#` or a `?` ended up naming one resource here and another on
     // the wire. Encoding per segment makes the two readings identical by
     // construction.
-    const wirePath = decision.path.split('/').map((seg) => encodeURIComponent(seg)).join('/')
+    const wirePath = policyMod.encodePathForWire(decision.path)
     const upstreamUrl = `${route.scheme === 'http' ? 'http' : 'https'}://${authority}${wirePath}${outgoing.query ? `?${outgoing.query}` : ''}`
     let res
     try {
@@ -810,10 +817,38 @@ async function* scrubEventStream(source, scrubber, onLeak) {
     .map((l) => l.slice(5).replace(/^ /, ''))
     .join('')
 
-  /** True when the payload so far, ignoring punctuation, contains a secret. */
+  /**
+   * The payload so far, as a client would actually put it back together.
+   *
+   * An LLM token stream is `{"delta":"ghp_SSE"}` then `{"delta":"CRET"}`, and
+   * every client concatenates the VALUES. So this pulls out the JSON string
+   * literals that are not object keys — a literal followed by `:` is a key —
+   * and joins them. That reconstructs exactly what the reader ends up with.
+   *
+   * It used to strip all punctuation instead, which is wrong in both
+   * directions: it glued the key text onto the value (`delta` + `ghp_...`),
+   * so an exact secret could only be caught by the loose shape patterns, and
+   * those then had to match without a leading boundary — which is what made
+   * them fire on ordinary English like `disk-usage_by_repository`.
+   */
+  const jsonValues = (text) => {
+    let out = ''
+    const literal = /"((?:[^"\\]|\\.)*)"(\s*:)?/g
+    let m
+    while ((m = literal.exec(text)) !== null) {
+      if (m[2]) continue // a key, not a value
+      out += m[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+    }
+    return out
+  }
+
+  /** True when the payload so far, however reassembled, contains a secret. */
   const leaked = (text) => {
     if (scrubber.scrub(text).redactions > 0) return true
-    // Application framing between the fragments: compare with it removed.
+    // As a JSON client reassembles it: values only, concatenated.
+    const values = jsonValues(text)
+    if (values && scrubber.scrub(values).redactions > 0) return true
+    // And a last, cruder pass for framing that is not JSON at all.
     const bare = text.replace(/[^A-Za-z0-9_\-+/=]/g, '')
     return scrubber.scrub(bare).redactions > 0
   }

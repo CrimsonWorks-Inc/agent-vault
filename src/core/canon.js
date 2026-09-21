@@ -46,7 +46,7 @@ export function hmac(key, value) {
  * bound to this, so an SDK that retries a request after a 202 attaches to the
  * same approval instead of prompting the human twice or sending twice.
  */
-export function requestHash({ method, host, path, query, bodySha256, placeholderIds }) {
+export function requestHash({ method, host, path, query, bodySha256, placeholderIds, headers }) {
   return hash({
     method: String(method || '').toUpperCase(),
     host: String(host || '').toLowerCase(),
@@ -54,6 +54,17 @@ export function requestHash({ method, host, path, query, bodySha256, placeholder
     query: query || '',
     body: bodySha256 || '',
     placeholders: [...(placeholderIds || [])].sort(),
+    // The headers that will actually be forwarded. Whatever is NOT in this
+    // hash is what an agent can change under someone else's approval, and
+    // headers were not in it: after a human approved `POST /x`, the same
+    // method, host, path and body with different headers hashed identically
+    // and executed as approved. `X-HTTP-Method-Override: DELETE` is the sharp
+    // version — plenty of frameworks honour it, so the approved POST reaches
+    // the upstream as a delete. The human was shown method, host and path,
+    // and a header can change what all three mean.
+    headers: [...(headers || [])]
+      .map(([n, v]) => [String(n).toLowerCase(), String(v)])
+      .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : (a[0] < b[0] ? -1 : 1))),
   })
 }
 

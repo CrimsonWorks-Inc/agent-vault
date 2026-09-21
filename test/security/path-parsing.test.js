@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { evaluateHttp, normalizePath } from '../../src/core/policy.js'
+import { evaluateHttp, normalizePath, encodePathForWire } from '../../src/core/policy.js'
 
 const POLICY = {
   hosts: ['api.github.com'],
@@ -98,9 +98,48 @@ test('whatever the spelling, the policy reads what the wire will carry', () => {
   for (const spelled of spellings) {
     if (!allows(spelled)) continue
     const decided = normalizePath(spelled)
-    const onTheWire = asUrlWouldRead(decided.split('/').map(encodeURIComponent).join('/'))
+    // The pipeline's own encoder, not a stand-in for it. Testing a different
+    // function than the one that runs is how the wire and the policy drifted
+    // apart in the first place.
+    const onTheWire = asUrlWouldRead(encodePathForWire(decided))
     assert.equal(decodeURIComponent(onTheWire), decided,
       `${spelled}: policy decided ${decided} but the wire would carry ${onTheWire}`)
+  }
+})
+
+test('encoding for the wire keeps the characters a path is allowed to contain', () => {
+  // This used to be encodeURIComponent, which encodes `:` `@` `$` `&` `+` `,`
+  // `;` `=` — all legal in a path segment per RFC 3986, and several of them
+  // load-bearing. The policy approved one path and the upstream was asked for
+  // another, so these endpoints simply did not work:
+  //
+  //   /v1beta/models/gemini-pro:generateContent   Gemini, in this repo's README
+  //   /@scope/package                             every scoped npm package
+  //   /Products(1)/Name                           OData
+  const kept = [
+    '/v1beta/models/gemini-pro:generateContent',
+    '/@scope/package',
+    '/Products(1)/Name',
+    "/a,b;c=d/e+f/g&h/i$j/k'l/m!n/o*p/q(r)s",
+    '/plain/path/with-dashes_and.dots~here',
+  ]
+  for (const p of kept) {
+    assert.equal(encodePathForWire(p), p, `${p} was re-encoded when it did not need to be`)
+  }
+
+  // And what must be encoded still is, or the wire would name something else.
+  for (const [raw, encoded] of Object.entries({
+    '/a b': '/a%20b',
+    '/a?b': '/a%3Fb',
+    '/a#b': '/a%23b',
+    '/a%b': '/a%25b',
+    '/a"b': '/a%22b',
+    '/caf\u00e9': '/caf%C3%A9',
+  })) {
+    assert.equal(encodePathForWire(raw), encoded)
+    // The round trip is the property that matters: what a URL parser reads
+    // back has to be the path the policy decided on.
+    assert.equal(decodeURIComponent(new URL(`https://h${encoded}`).pathname), raw)
   }
 })
 

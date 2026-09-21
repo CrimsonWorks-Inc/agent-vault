@@ -497,6 +497,44 @@ test('the successor to a one-time placeholder is also one-time', async () => {
   assert.equal(JSON.parse(second.body).code, 'AV_PH_EXHAUSTED')
 })
 
+test('an approval does not carry over to a request with different headers', async () => {
+  // Whatever is not in the request hash is what an agent can change under
+  // someone else's approval. Headers were not in it — so after a human
+  // approved `POST /issues`, the same method, host, path and body with
+  // different headers hashed identically and executed as approved.
+  //
+  // `X-HTTP-Method-Override: DELETE` is the sharp version: plenty of
+  // frameworks honour it, so the approved write reaches the upstream as a
+  // delete. The human is shown a method, a host and a path, and a header can
+  // change what all three mean.
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' } })
+  const base = {
+    method: 'POST', path: '/p/gh-frozencrow/repos/frozencrow/x/issues',
+    headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${placeholder}`]],
+    body: Buffer.from('{"title":"a"}'),
+  }
+
+  const held = await pipeline.handle(req(base))
+  assert.equal(held.status, 202)
+  const approvalId = JSON.parse(held.body).approval_id
+  pipeline.decideApproval(approvalId, true)
+
+  // The approved request goes through, as it must.
+  sent = []
+  const approved = await pipeline.handle(req(base))
+  assert.equal(approved.status, 200, 'the request the human approved must execute')
+  assert.equal(sent.length, 1)
+
+  // The same request with an extra header is NOT that request.
+  sent = []
+  const tampered = await pipeline.handle(req({
+    ...base,
+    headers: [...base.headers, ['x-http-method-override', 'DELETE']],
+  }))
+  assert.equal(tampered.status, 202, 'a different set of headers must be held for its own approval')
+  assert.equal(sent.length, 0, 'a header the human never saw reached the upstream under their approval')
+})
+
 test('a revoked session stops working immediately', async () => {
   assert.equal((await pipeline.handle(req())).status, 200)
   vault.revokeSession(session.id)

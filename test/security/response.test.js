@@ -327,6 +327,35 @@ test('a secret cannot escape through an internal error message', async () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('a token stream that merely mentions a repository is not cut', async () => {
+  // The reassembly check used to strip all punctuation before looking, which
+  // glued object keys onto values — so an exact secret could only be caught by
+  // the loose shape patterns, and those had to match without a leading
+  // boundary to see it. That is what made them fire on ordinary English:
+  // `disk-usage_by_repository_over_time` contains `sk-` followed by twenty-odd
+  // word characters, so a stream discussing disk usage was CUT with
+  // AV_UNSCANNABLE and the rest of the answer thrown away.
+  const events = [
+    `data: {"delta":"here is the disk-usage_by_repository"}\n\n`,
+    `data: {"delta":"_over_time report you asked for"}\n\n`,
+    `data: {"delta":", plus a task-oriented_summary_of_findings"}\n\n`,
+  ]
+  const p = pipelineReturning({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    res: Readable.from(events.map((e) => Buffer.from(e))),
+  })
+  const res = await p.handle(req())
+  const chunks = []
+  for await (const c of res.stream) chunks.push(c)
+  const all = Buffer.concat(chunks.map((c) => Buffer.from(c, 'latin1'))).toString('utf8')
+
+  assert.ok(!all.includes('AV_UNSCANNABLE'), `an innocent stream was cut: ${all.slice(0, 160)}`)
+  assert.ok(!all.includes('[[av:derived]]'), 'ordinary prose was redacted')
+  assert.ok(all.includes('disk-usage_by_repository'), 'the content must arrive intact')
+  assert.ok(all.includes('task-oriented_summary_of_findings'), 'the whole stream must arrive')
+})
+
 test('a secret split across two SSE events is caught', async () => {
   // Every SSE client concatenates the data: fields, so scrubbing each event on
   // its own is not scrubbing at all — `data: ghp_REAL` then `data: SECRET`
