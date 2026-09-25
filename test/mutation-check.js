@@ -258,6 +258,23 @@ const MUTATIONS = [
     tests: ['test/security/session-requests.test.js'],
   },
   {
+    what: 'pending session requests are lost on a restart',
+    file: 'src/daemon/session-requests.js',
+    from: '    this.#load()',
+    to: '    // disabled',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
+    what: 'an approved token is persisted to disk',
+    file: 'src/daemon/session-requests.js',
+    // Copies, like the real code, so change-detection still works — it just
+    // keeps `result`. A mutation that also broke persistence would mask the
+    // leak rather than reveal it, which is what the first attempt did.
+    from: "      .filter((r) => r.state === 'pending' || r.state === 'denied')\n      .map(({ result, ...rest }) => rest)",
+    to: '      .map((r) => ({ ...r }))',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",
@@ -267,6 +284,27 @@ const MUTATIONS = [
 ]
 
 let survived = 0
+
+// Restore on the way out, however we leave.
+//
+// The `finally` below covers a thrown error, and nothing else. A SIGINT, a
+// SIGTERM, or a harness that gives up on a slow run all skip it and leave a
+// protection disabled in the working tree — which is exactly what happened:
+// `if (!ph.verify(...))` sat as `if (false)` for several commits' worth of
+// work, and only the drift report caught it. A tool that can silently switch
+// off a security check is worse than no tool.
+const inFlight = new Map()
+const restoreAll = () => {
+  for (const [path, original] of inFlight) {
+    try { writeFileSync(path, original) } catch { /* nothing better to do while exiting */ }
+  }
+  inFlight.clear()
+}
+process.on('exit', restoreAll)
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => { restoreAll(); process.exit(130) })
+}
+
 console.log(`Checking ${MUTATIONS.length} protections against the suite.\n`)
 
 for (const m of MUTATIONS) {
@@ -279,6 +317,7 @@ for (const m of MUTATIONS) {
     continue
   }
 
+  inFlight.set(path, original)
   writeFileSync(path, original.replace(m.from, m.to))
   try {
     const res = spawnSync(node, ['--test', ...m.tests.map((t) => join(ROOT, t))], { encoding: 'utf8' })
@@ -291,9 +330,10 @@ for (const m of MUTATIONS) {
       survived++
     }
   } finally {
-    // Always, even if the run threw. A half-mutated tree is worse than a
-    // failing check.
+    // Always, even if the run threw — and the exit and signal handlers above
+    // cover the ways a `finally` never runs at all.
     writeFileSync(path, original)
+    inFlight.delete(path)
   }
 }
 

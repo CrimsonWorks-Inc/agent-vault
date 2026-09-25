@@ -960,7 +960,12 @@ export class Vault {
 
   // ------------------------------------------------------------------ misc
 
-  save() { this.#persist() }
+  /**
+   * Write the document out. `durable: false` skips the fsync, for state that is
+   * cheap to lose — a pending question an agent will ask again, not key
+   * material. The rename is atomic either way, so the file is never torn.
+   */
+  save(opts) { this.#persist(opts) }
 
   /** What unlocking this vault actually requires. */
   get factors() { return (this.db?.kv?.presence_factors || []).map((f) => f.class) }

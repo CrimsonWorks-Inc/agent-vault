@@ -380,3 +380,126 @@ test('a denial records nothing', async () => {
     rmSync(d, { recursive: true, force: true })
   }
 })
+
+test('a pending request survives a daemon restart', async () => {
+  // These lived only in memory, so every restart threw them away — and a
+  // restart is not rare: `agent-vault upgrade` does one and launchd will too.
+  // In practice this was the feature's dominant failure mode rather than an
+  // edge case. Eric lost the same request three times in a row: sent it, the
+  // daemon restarted, and it vanished with nothing to say it had existed.
+  //
+  // A pending request holds no secret — a credential slug, a proposed policy,
+  // and a sentence an agent wrote — so it persists, even while the vault is
+  // locked, because none of it needs the key.
+  const d = mkdtempSync(join(tmpdir(), 'av-sr-restart-'))
+  let first, second
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    v.addCredential({
+      slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+      fields: { token: 'ghp_RESTART00112233445566778899' },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+    const s2 = join(d, 'c.sock')
+    const call = (sock) => (method, path, body) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: sock, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    first = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const c1 = call(s2)
+    const asked = await c1('POST', '/v1/session-requests', {
+      cred: 'gh', methods: ['GET'], paths: ['/user'], reason: 'survive a restart',
+    })
+    assert.ok(asked.id)
+    await first.stop()
+    first = null
+
+    // A new process, against the same vault on disk. This is `upgrade`. It
+    // gets its own socket, because what has to survive is the vault, not the
+    // path — and reusing a just-unlinked socket races the old listener.
+    const s3 = join(d, 'c2.sock')
+    const reopened = Vault.open(d)
+    reopened.startInRecordedState(null)
+    second = await new Daemon(reopened, { port: 0, socketPath: s3 }).start()
+    const c2 = call(s3)
+
+    const waiting = await c2('GET', '/v1/session-requests')
+    assert.equal(waiting.length, 1, 'the request did not survive the restart')
+    assert.equal(waiting[0].id, asked.id)
+    assert.equal(waiting[0].summary, asked.summary, 'and it must come back saying the same thing')
+    assert.equal(waiting[0].agent_reason_untrusted, 'survive a restart')
+
+    // And it is still answerable, which is the point of keeping it.
+    const decided = await c2('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
+    assert.ok(decided.granted, `it should still be answerable: ${JSON.stringify(decided)}`)
+  } finally {
+    if (first) await first.stop()
+    if (second) await second.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})
+
+test('an approved token is never written to disk', async () => {
+  // The other half of persisting: the question survives, the answer does not.
+  // A session token on disk that nobody has asked for is a live capability
+  // lying around, so `result` stays in memory — and if the daemon restarts
+  // between an approval and its collection, the human approves once more.
+  const d = mkdtempSync(join(tmpdir(), 'av-sr-notoken-'))
+  let first, second
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    v.addCredential({
+      slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+      fields: { token: 'ghp_NOTOKEN00112233445566778899' },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+    const s2 = join(d, 'c.sock')
+    const call = (method, path, body) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: s2, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    first = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const asked = await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths: ['/user'] })
+    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
+
+    // Approved and NOT collected. The token exists in memory right now.
+    const onDisk = readFileSync(join(d, 'vault.json'), 'utf8')
+    assert.ok(!onDisk.includes('avs1.'), 'a session token was written to disk')
+    assert.ok(!/"result":\s*\{/.test(onDisk), 'the approval result was persisted')
+
+    await first.stop()
+    first = null
+
+    const s3 = join(d, 'c2.sock')
+    const reopened = Vault.open(d)
+    reopened.startInRecordedState(null)
+    second = await new Daemon(reopened, { port: 0, socketPath: s3 }).start()
+    const call2 = (method, path) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: s3, path, method }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end()
+    })
+    const collect = await call2('GET', `/v1/session-requests/collect?id=${asked.id}`)
+    assert.equal(collect.token, undefined, 'a token survived a restart on disk')
+  } finally {
+    if (first) await first.stop()
+    if (second) await second.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})

@@ -772,6 +772,7 @@ export class Daemon {
           const result = record.result
           record.result = null
           record.state = 'collected'
+          this.sessionRequests.persist()
           this.vault.audit?.write('session_request.collected', { request_id: record.id })
           return json(200, { state: 'approved', ...result })
         }
@@ -804,6 +805,7 @@ export class Daemon {
           if (!input.granted) {
             record.state = 'denied'
             record.decided_at = new Date().toISOString()
+            this.sessionRequests.persist()
             this.vault.audit?.write('session_request.denied', { request_id: record.id })
             return json(200, SessionRequests.redact(record))
           }
@@ -819,6 +821,7 @@ export class Daemon {
           record.decided_at = new Date().toISOString()
           record.granted_proposal = final
           record.result = created
+          this.sessionRequests.persist()
           this.vault.audit?.write('session_request.approved', {
             request_id: record.id,
             session_id: created.session_id,

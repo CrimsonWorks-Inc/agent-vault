@@ -244,6 +244,7 @@ export class McpServer {
           const result = record.result
           record.result = null
           record.state = 'collected'
+          this.daemon.sessionRequests.persist()
           this.vault.audit?.write('session_request.collected', { request_id: record.id, via: 'mcp' })
           return text({
             state: 'approved',

@@ -75,12 +75,61 @@ export class SessionRequests {
   constructor(vault = null) {
     this.items = new Map()
     this.vault = vault
+    this.#load()
+  }
+
+  /**
+   * Read back the questions a human has not answered.
+   *
+   * These used to live only in memory, so every daemon restart threw them away
+   * — and a restart is not rare: `agent-vault upgrade` does one, and launchd
+   * will too. In practice this was the feature's dominant failure mode rather
+   * than an edge case: a human sent a request, the daemon restarted, and the
+   * request vanished with nothing to say it ever existed.
+   *
+   * A pending request holds no secret. It is a credential slug, a policy
+   * somebody is proposing, and a sentence an agent wrote — the same kind of
+   * thing already sitting in vault.json beside it. So it persists, and it
+   * persists even while the vault is LOCKED, because none of it needs the key.
+   */
+  #load() {
+    const rows = this.vault?.db?.kv?.session_requests
+    if (!Array.isArray(rows)) return
+    for (const row of rows) {
+      // `result` is never persisted, so anything approved-but-uncollected comes
+      // back without its token. That is the right way round: the token would be
+      // a live capability written to disk for no one, and a human approving
+      // again is a small price for never doing that.
+      if (row?.id) this.items.set(row.id, { ...row, result: null })
+    }
+  }
+
+  /**
+   * Write the questions back. Never the answers.
+   *
+   * `result` carries a session token, and a token on disk that nobody asked for
+   * is a capability lying around. It stays in memory: if the daemon restarts
+   * between an approval and its collection, the human approves once more.
+   */
+  #save() {
+    if (!this.vault?.db?.kv) return
+    const keep = [...this.items.values()]
+      .filter((r) => r.state === 'pending' || r.state === 'denied')
+      .map(({ result, ...rest }) => rest)
+    const before = JSON.stringify(this.vault.db.kv.session_requests ?? null)
+    if (before === JSON.stringify(keep)) return
+    this.vault.db.kv.session_requests = keep
+    // Not durable: a question lost to a power cut is one an agent asks again,
+    // and the fsync cost belongs to key material.
+    try { this.vault.save?.({ durable: false }) } catch { /* a locked or absent vault is not fatal here */ }
   }
 
   get audit() { return this.vault?.audit ?? null }
 
   #sweep() {
     const now = Date.now()
+    const sizeBefore = this.items.size
+    const statesBefore = [...this.items.values()].map((r) => r.state).join(',')
     for (const [key, r] of this.items) {
       const age = now - Date.parse(r.created_at)
       if (r.state === 'pending' && age > PENDING_TTL_MS) { this.items.delete(key); continue }
@@ -93,6 +142,8 @@ export class SessionRequests {
         this.audit?.write('session_request.uncollected', { request_id: r.id })
       }
     }
+    if (this.items.size !== sizeBefore
+      || [...this.items.values()].map((r) => r.state).join(',') !== statesBefore) this.#save()
   }
 
   /**
@@ -122,6 +173,7 @@ export class SessionRequests {
       result: null,
     }
     this.items.set(record.id, record)
+    this.#save()
     this.audit?.write('session_request.opened', {
       request_id: record.id, summary: record.summary, fingerprint: record.fingerprint,
       agent_reason_untrusted: record.reason_untrusted,
@@ -130,6 +182,9 @@ export class SessionRequests {
   }
 
   get(id_) { this.#sweep(); return this.items.get(id_) || null }
+
+  /** Called by whoever settled or collected a request, so the change survives. */
+  persist() { this.#save() }
 
   pending() {
     this.#sweep()
