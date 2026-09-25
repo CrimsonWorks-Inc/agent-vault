@@ -227,7 +227,20 @@ export class McpServer {
             return text({ state: 'pending', detail: 'a human has not answered yet; poll again or carry on without it' })
           }
           if (record.state === 'denied') return text({ state: 'denied', detail: 'a human declined; do not ask again for the same thing' })
-          if (!record.result) return text({ state: record.state, detail: 'the answer is no longer available; ask again' })
+          if (!record.result) {
+            // The human's own client collected it when they approved — the
+            // daemon cannot write their state file, so whichever client they
+            // answered with does, and the bridge reads that file on every
+            // request. So the session is already live for this agent; there is
+            // nothing to hand over and nothing wrong.
+            if (record.state === 'collected') {
+              return text({
+                state: 'approved',
+                detail: 'a human approved this and your session is already active — the bridge found it. Call vault_status to see it, and use the tools normally.',
+              })
+            }
+            return text({ state: record.state, detail: 'the answer is no longer available; ask again' })
+          }
           const result = record.result
           record.result = null
           record.state = 'collected'

@@ -32,7 +32,7 @@ import { request as socketRequest } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import * as webauthn from './webauthn.js'
 import { rememberSession } from '../client-state.js'
-import { fetchPending, parseOverrides } from '../pending.js'
+import { fetchPending, parseOverrides, collectApproved } from '../pending.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -369,13 +369,34 @@ export class UiServer {
         // two behind one endpoint and having to guess which signature to make.
         // WHICH route applies to an id is the shared module's answer, carried
         // on the item the page was given.
-        case 'POST session-requests/decide':
-          return this.#send(res, 200, await this.#control('POST', '/v1/session-requests/decide', {
+        case 'POST session-requests/decide': {
+          const answered = await this.#control('POST', '/v1/session-requests/decide', {
             id: body?.id,
             granted: !!body?.granted,
             overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
             presence: body?.presence,
-          }))
+          })
+          if (!body?.granted) return this.#send(res, 200, answered)
+          // Recorded here for the same reason the CLI does it: the daemon runs
+          // as its own uid and cannot write the human's state file. This process
+          // can, and the MCP bridge re-reads that file per request — so a
+          // session approved in this page reaches a running agent on its next
+          // call without anyone copying a token.
+          const collected = await collectApproved(
+            { id: body.id, kind: 'session' },
+            {
+              get: (p) => this.#control('GET', p),
+              remember: (s) => rememberSession(s, this.statePath),
+            },
+          ).catch(() => null)
+          // The token itself never goes to the page. It went to the state file,
+          // which is where local clients look; showing it here would put a live
+          // capability in a browser for no reason.
+          return this.#send(res, 200, {
+            ...answered,
+            recorded: collected ? { session_id: collected.session_id, expires_at: collected.expires_at } : null,
+          })
+        }
         case 'POST lock':
           return this.#send(res, 200, await this.#control('POST', '/v1/lock', {}))
         case 'POST unlock':

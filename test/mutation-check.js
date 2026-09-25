@@ -251,6 +251,13 @@ const MUTATIONS = [
     tests: ['test/security/session-requests.test.js'],
   },
   {
+    what: 'approving a session request records nothing',
+    file: 'src/pending.js',
+    from: '  remember(got)',
+    to: '  void got',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",

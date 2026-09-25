@@ -14,12 +14,14 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest } from 'node:http'
 import { Vault } from '../../src/store/vault.js'
 import { Daemon } from '../../src/daemon/server.js'
+import { collectApproved } from '../../src/pending.js'
+import { rememberSession } from '../../src/client-state.js'
 
 const PASS = 'correct horse battery staple'
 let dir, vault, daemon, sock
@@ -270,6 +272,109 @@ test('a request is audited on a vault that started locked, which is every real o
     assert.equal(opened.length, 2,
       `both requests must be recorded; found ${opened.length}. A cached handle writes to a log with a wiped key.`)
     assert.equal(reopened.audit.verify().ok, true, 'and the chain must still verify')
+  } finally {
+    if (daemon2) await daemon2.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})
+
+test('approving records the session where a running agent will find it', async () => {
+  // The whole point of the flow: a human answers, and the agent can work. No
+  // token pasted anywhere.
+  //
+  // The daemon cannot do this part. It runs as its own uid and the state file
+  // belongs to the human — that is the boundary the design rests on — so
+  // whichever client they approved with collects and records it. The MCP bridge
+  // re-reads that file on every request, so this reaches an agent that is
+  // already running, on its next call.
+  const d = mkdtempSync(join(tmpdir(), 'av-sr-record-'))
+  let daemon2
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    v.addCredential({
+      slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+      fields: { token: 'ghp_RECORDTEST001122334455667788' },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+    const s2 = join(d, 'c.sock')
+    const statePath = join(d, 'cli-state.json')
+    daemon2 = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const call = (method, path, body) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: s2, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    const asked = await call('POST', '/v1/session-requests', {
+      cred: 'gh', methods: ['GET'], paths: ['/user'], reason: 'to be recorded',
+    })
+
+    // Nothing recorded yet: asking is not getting, and it is not recording either.
+    assert.equal(existsSync(statePath), false, 'asking wrote state')
+
+    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
+
+    // The approving client's half, through the same shared step both the CLI
+    // and the UI use.
+    const collected = await collectApproved({ id: asked.id, kind: 'session' }, {
+      get: (p) => call('GET', p),
+      remember: (row) => rememberSession(row, statePath),
+    })
+    assert.ok(collected?.token, 'the approving client should have collected a token')
+
+    // And it is where every local client looks, at the right mode.
+    const state = JSON.parse(readFileSync(statePath, 'utf8'))
+    assert.equal(state.token, collected.token, 'the session did not reach the shared store')
+    assert.equal(state.session_id, collected.session_id)
+    assert.equal(statSync(statePath).mode & 0o077, 0, 'the state file must not be readable by others')
+
+    // The token is handed out once, so a later poll has nothing to give — and
+    // must say something true rather than sounding like a failure.
+    const again = await call('GET', `/v1/session-requests/collect?id=${asked.id}`)
+    assert.equal(again.token, undefined, 'the token was handed out twice')
+    assert.equal(again.state, 'collected')
+  } finally {
+    if (daemon2) await daemon2.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})
+
+test('a denial records nothing', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'av-sr-deny-'))
+  let daemon2
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    v.addCredential({
+      slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+      fields: { token: 'ghp_DENYTEST0011223344556677889' },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+    const s2 = join(d, 'c.sock')
+    const statePath = join(d, 'cli-state.json')
+    daemon2 = await new Daemon(v, { port: 0, socketPath: s2 }).start()
+    const call = (method, path, body) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: s2, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    const asked = await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths: ['/user'] })
+    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: false })
+
+    const collected = await collectApproved({ id: asked.id, kind: 'session' }, {
+      get: (p) => call('GET', p),
+      remember: () => assert.fail('a denied request must not be recorded'),
+    })
+    assert.equal(collected, null)
+    assert.equal(existsSync(statePath), false, 'a denial wrote state')
   } finally {
     if (daemon2) await daemon2.stop()
     rmSync(d, { recursive: true, force: true })

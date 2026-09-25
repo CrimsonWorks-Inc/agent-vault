@@ -91,6 +91,29 @@ export function parseOverrides(args = {}) {
   return out
 }
 
+/**
+ * Collecting an approved session, and recording it where local clients look.
+ *
+ * The daemon cannot do this. It runs as its own uid and the state file belongs
+ * to the human — that is the boundary the whole design rests on. So whichever
+ * client the human approved with collects the token and records it: the CLI and
+ * the web UI both run as them.
+ *
+ * That is better than the agent collecting it anyway. The MCP bridge re-reads
+ * the state file on every request, so a session recorded here reaches a RUNNING
+ * agent on its next call, with no restart and nothing copied by hand.
+ *
+ * The token is handed out once, so this is the one collection. `remember` is the
+ * caller's writer, already bound to the right path.
+ */
+export async function collectApproved(item, { get, remember }) {
+  if (item.kind !== 'session') return null
+  const got = await get(`/v1/session-requests/collect?id=${encodeURIComponent(item.id)}`).catch(() => null)
+  if (!got || got.state !== 'approved' || !got.token) return null
+  remember(got)
+  return got
+}
+
 /** What a human actually granted, in the words they would use themselves. */
 export function describeGranted(g = {}) {
   const bits = [`session for ${g.cred}`]

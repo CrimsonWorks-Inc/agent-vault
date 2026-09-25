@@ -18,7 +18,7 @@ import { listProfiles } from '../connectors/profiles.js'
 import { EXIT } from '../core/errors.js'
 import * as ph from '../core/placeholder.js'
 import { loadState, saveState, rememberSession, statePath, stateDir } from '../client-state.js'
-import { fetchPending, decision, parseOverrides, describeGranted } from '../pending.js'
+import { fetchPending, decision, parseOverrides, describeGranted, collectApproved } from '../pending.js'
 
 // A system install puts the vault behind its own uid. The CLI finds it by the
 // state file the privileged installer writes, and falls back to a dev vault in
@@ -728,6 +728,12 @@ const COMMANDS = {
   async approve(args) {
     const r = await decide(args, true)
     out(`${C.green('approved')} ${r.summary || describeGranted(r.granted)}`, r)
+    if (r.collected) {
+      // The store holds one session, so this is now THE session every local
+      // client uses. Saying so beats letting someone discover it.
+      console.log(C.dim(`  session ${r.collected.session_id} is now the one your agents use`))
+      console.log(C.dim('  a running MCP bridge picks it up on its next call'))
+    }
   },
 
   async deny(args) {
@@ -1305,7 +1311,18 @@ async function decide(args, granted) {
     }
   }
   const { path, body } = decision(item, { granted, overrides })
-  return controlWithPresence('POST', path, body)
+  const answered = await controlWithPresence('POST', path, body)
+  if (!granted) return answered
+
+  // Record it here, because the daemon cannot: it runs as its own uid and the
+  // state file belongs to you. The MCP bridge re-reads that file per request,
+  // so a session recorded now reaches a RUNNING agent on its next call — no
+  // restart, nothing pasted by hand.
+  const collected = await collectApproved(item, {
+    get: (p) => control('GET', p),
+    remember: (s) => rememberSession(s, STATE),
+  })
+  return collected ? { ...answered, collected } : answered
 }
 
 function printHelp() {
