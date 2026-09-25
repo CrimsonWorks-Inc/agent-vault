@@ -81,7 +81,7 @@ export class Daemon {
     // and is therefore reachable by an agent.
     this.opChallenges = new Map()
     // Sessions an agent has asked for and a human has not yet answered.
-    this.sessionRequests = new SessionRequests(vault.audit)
+    this.sessionRequests = new SessionRequests(vault)
     // Consecutive failed passphrase attempts, and when to start accepting them
     // again. Every attempt costs an scrypt — deliberately, so guessing is
     // expensive — but scryptSync runs ON the event loop, so 188ms of "slow" is

@@ -196,3 +196,82 @@ test('every request and answer is in the audit log', async () => {
   assert.ok(raw.includes('agent_reason_untrusted'))
   assert.ok(!raw.includes('avs1.'), 'a session token reached the audit log')
 })
+
+test('a request is audited on a vault that started locked, which is every real one', async () => {
+  // The store used to be handed `vault.audit` at construction. A vault with a
+  // passphrase comes up LOCKED and sets that to null until someone unlocks it,
+  // so the store captured null and every write after was a silent no-op: an
+  // agent asking for capability went unrecorded on exactly the vaults where
+  // recording it matters. Locking sets it back to null too, so there is no
+  // moment at which caching it is safe.
+  //
+  // The tests above missed it because their vault has no passphrase and so is
+  // unlocked when the daemon is built. This one reproduces the real startup:
+  // a locked vault, a daemon built against it, then a human unlocking.
+  const d = mkdtempSync(join(tmpdir(), 'av-sr-locked-'))
+  let daemon2
+  try {
+    const v = Vault.create(d, { factor: 'none' })
+    v.addCredential({
+      slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+      fields: { token: 'ghp_LOCKEDSTART0011223344556677' },
+      sites: { token: ['header:authorization:Bearer'] },
+    })
+    v.setPassphrase(PASS)
+    v.lock()
+
+    // Exactly what the service does at boot.
+    const reopened = Vault.open(d)
+    reopened.startInRecordedState(null)
+    assert.equal(reopened.locked, true, 'a passphrase vault must come up locked')
+    assert.equal(reopened.audit, null, 'and with no audit handle, which is the trap')
+
+    const s2 = join(d, 'c.sock')
+    daemon2 = await new Daemon(reopened, { port: 0, socketPath: s2 }).start()
+    const call = (method, path, body) => new Promise((resolve) => {
+      const req = unixRequest({ socketPath: s2, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+        const c = []
+        res.on('data', (x) => c.push(x))
+        res.on('end', () => resolve(JSON.parse(Buffer.concat(c).toString() || '{}')))
+      })
+      req.on('error', () => resolve({}))
+      req.end(body ? JSON.stringify(body) : undefined)
+    })
+
+    // The human unlocks, which is when an audit handle appears.
+    await call('POST', '/v1/unlock', { passphrase: PASS })
+    assert.ok(reopened.audit, 'unlocking should give the vault an audit log')
+
+    const asked = await call('POST', '/v1/session-requests', {
+      cred: 'gh', methods: ['GET'], paths: ['/user'], reason: 'after an unlock',
+    })
+    assert.ok(asked.id, `the request should have opened: ${JSON.stringify(asked)}`)
+
+    const kinds = reopened.audit.read({ limit: 50 }).map((r) => r.kind)
+    assert.ok(kinds.includes('session_request.opened'),
+      'an agent asked for capability and nothing recorded it')
+
+    // And again across a lock. Caching the handle lazily instead of eagerly
+    // survives the first half of this test and fails here: locking wipes the
+    // audit key and unlocking builds a NEW log, so a handle cached at any point
+    // is stale the moment the vault is locked. There is no safe moment to keep
+    // one — it has to be read through the vault every time.
+    await call('POST', '/v1/lock', {})
+    assert.equal(reopened.audit, null, 'locking must drop the audit handle')
+    await call('POST', '/v1/unlock', { passphrase: PASS })
+
+    const second = await call('POST', '/v1/session-requests', {
+      cred: 'gh', methods: ['GET'], paths: ['/repos'], reason: 'after a lock and unlock',
+    })
+    assert.ok(second.id, `the second request should have opened: ${JSON.stringify(second)}`)
+
+    const after = reopened.audit.read({ limit: 50 })
+    const opened = after.filter((r) => r.kind === 'session_request.opened')
+    assert.equal(opened.length, 2,
+      `both requests must be recorded; found ${opened.length}. A cached handle writes to a log with a wiped key.`)
+    assert.equal(reopened.audit.verify().ok, true, 'and the chain must still verify')
+  } finally {
+    if (daemon2) await daemon2.stop()
+    rmSync(d, { recursive: true, force: true })
+  }
+})

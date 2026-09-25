@@ -62,7 +62,7 @@ before(async () => {
   // The session-request store lives on the daemon, because a request outlives
   // any one MCP connection — the human answers in their own time.
   mcp = new McpServer(vault, new Pipeline(vault), () => session, {
-    sessionRequests: new SessionRequests(vault.audit),
+    sessionRequests: new SessionRequests(vault),
   })
 })
 

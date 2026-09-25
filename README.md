@@ -26,7 +26,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 440 tests
+npm test          # 441 tests
 ```
 
 ```bash
@@ -37,7 +37,7 @@ The changelog records what the four independent reviews found, with the
 reproductions: [CHANGELOG.md](CHANGELOG.md).
 
 The second one checks the tests against themselves: it removes each of
-thirty-one critical protections in turn and asserts the suite notices.
+thirty-three critical protections in turn and asserts the suite notices.
 It has already earned its keep twice by catching its own anchors drifting
 after a refactor — it cannot tell a moved line from a deleted one, so it
 reports the drift and fails rather than quietly passing. Deleting the

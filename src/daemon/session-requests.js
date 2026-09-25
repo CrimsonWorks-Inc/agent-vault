@@ -60,10 +60,24 @@ export function summarize(p) {
 }
 
 export class SessionRequests {
-  constructor(audit = null) {
+  /**
+   * @param {{audit: object|null}} vault
+   *
+   * The VAULT, not its audit handle. A vault with a passphrase comes up locked
+   * and sets `audit` to null until someone unlocks it, so capturing the handle
+   * at construction captured null — and every `audit?.write` after that was a
+   * silent no-op. An agent asking for capability went unrecorded on every
+   * properly configured vault, which is the one kind where it matters.
+   *
+   * Locking sets it back to null too, so there is no moment at which caching it
+   * is safe. Read it through the vault, every time.
+   */
+  constructor(vault = null) {
     this.items = new Map()
-    this.audit = audit
+    this.vault = vault
   }
+
+  get audit() { return this.vault?.audit ?? null }
 
   #sweep() {
     const now = Date.now()

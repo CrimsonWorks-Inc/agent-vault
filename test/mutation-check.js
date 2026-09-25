@@ -244,6 +244,13 @@ const MUTATIONS = [
     tests: ['test/security/session-requests.test.js'],
   },
   {
+    what: 'the session-request store caches a null audit handle',
+    file: 'src/daemon/session-requests.js',
+    from: '  get audit() { return this.vault?.audit ?? null }',
+    to: '  get audit() { return this._c ?? (this._c = this.vault?.audit ?? null) }',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     what: 'the installer accepts a symlinked checkout',
     file: 'bin/agent-vault-setup.js',
     from: "assertNoSymlinks(source, ['src', 'bin', 'package.json'])",
