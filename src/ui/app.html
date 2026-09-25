@@ -782,7 +782,7 @@ ${c.cli} ui                         open this page`)}`,
   const views = {
     async overview() {
       const [status, creds, sessions, approvals] = await Promise.all([
-        api('GET', 'status'), api('GET', 'credentials'), api('GET', 'sessions'), api('GET', 'approvals'),
+        api('GET', 'status'), api('GET', 'credentials'), api('GET', 'sessions'), api('GET', 'pending'),
       ])
       const live = sessions.filter((s) => s.state === 'active')
       await refreshPresence()
@@ -835,7 +835,7 @@ ${c.cli} ui                         open this page`)}`,
         <p class="sub">Daemon ${esc(status.daemon_version)} on gateway port ${esc(status.gateway_port)}.</p>
         ${lockBanner}${gate}
         ${touchIdRow ? `<div class="card"><h2>Unlocking</h2>${touchIdRow}</div>` : ''}
-        ${approvals.length ? `<div class="notice"><strong>${approvals.length} request${approvals.length > 1 ? 's' : ''} waiting for you.</strong>
+        ${approvals.length ? `<div class="notice"><strong>${approvals.length} ${approvals.some((a) => a.kind === 'session') ? 'decision' : 'request'}${approvals.length > 1 ? 's' : ''} waiting for you.</strong>
           Open Approvals to decide.</div>` : ''}
         <div class="card"><h2>At a glance</h2>
           <div class="row"><div class="main"><div class="name">${creds.length}</div>
@@ -924,7 +924,13 @@ ${c.cli} ui                         open this page`)}`,
     },
 
     async approvals() {
-      const pending = await api('GET', 'approvals')
+      // Everything here comes from GET pending, which the server builds with
+      // src/pending.js — the same module the CLI renders from. This function
+      // paints what it is given and decides nothing: which kinds exist, what
+      // they are called, what may be narrowed and which route settles them all
+      // live in one place, so a new kind of decision shows up in both
+      // interfaces at once instead of in whichever one someone remembered.
+      const pending = await api('GET', 'pending')
       if (!pending.length) {
         return `<header class="page"><h1>Approvals</h1></header>
           <p class="sub">Requests an agent cannot make without you.</p>
@@ -932,17 +938,31 @@ ${c.cli} ui                         open this page`)}`,
       }
       return `
         <header class="page"><h1>Approvals</h1><span class="pill warn">${pending.length} waiting</span></header>
-        <p class="sub">The summary is written by the daemon from the request it actually received.
+        <p class="sub">The summary is written by the daemon from what it actually received.
           The reason is whatever the agent claimed, and is not verified.</p>
-        ${pending.map((a) => `
+        ${pending.map((item) => `
           <div class="card"><div class="body">
-            <div class="mono" style="font-size:14px;font-weight:600;margin-bottom:6px">${esc(a.summary)}</div>
-            <div class="meta" style="color:var(--muted);margin-bottom:10px">
-              grant <span class="mono">${esc(a.grant_id)}</span> &middot; asked ${esc(ago(a.created_at))}</div>
-            ${a.reason ? `<div class="notice">Claimed by the agent, unverified: ${esc(a.reason)}</div>` : ''}
+            <div class="meta" style="color:var(--muted);margin-bottom:6px">
+              ${item.kind === 'session' ? 'session requested' : 'held request'}
+              &middot; <span class="mono">${esc(item.id)}</span>
+              &middot; asked ${esc(ago(item.created_at))}</div>
+            <div class="mono" style="font-size:14px;font-weight:600;margin-bottom:6px">${esc(item.headline)}</div>
+            ${item.claim ? `<div class="notice">Claimed by the agent, unverified: ${esc(item.claim)}</div>` : ''}
+            ${item.caution ? `<div class="notice warn">${esc(item.caution)}</div>` : ''}
+            ${item.narrowable.length ? `
+              <div class="meta" style="color:var(--muted);margin:10px 0 6px">Narrow it before approving, if it asks for more than it needs:</div>
+              <div class="narrow" data-for="${esc(item.id)}">
+                ${item.narrowable.map((f) => `
+                  <label class="field"><span>${esc(f)}</span>
+                    <input class="narrow-input" data-field="${esc(f)}"
+                      placeholder="${esc(String(item.proposal[f] ?? 'unchanged'))}"></label>`).join('')}
+              </div>` : ''}
             <div class="actions">
-              <button class="action primary" data-act="approve" data-id="${esc(a.id)}">Approve once</button>
-              <button class="action danger" data-act="deny" data-id="${esc(a.id)}">Deny</button>
+              <button class="action primary" data-act="decide" data-id="${esc(item.id)}"
+                data-kind="${esc(item.kind)}" data-granted="1">
+                ${item.kind === 'session' ? 'Approve session' : 'Approve once'}</button>
+              <button class="action danger" data-act="decide" data-id="${esc(item.id)}"
+                data-kind="${esc(item.kind)}" data-granted="">Deny</button>
             </div>
           </div></div>`).join('')}`
     },
@@ -1096,18 +1116,33 @@ ${c.cli} ui                         open this page`)}`,
       toast('Revoked')
       render()
     },
-    async approve(btn) {
+    /**
+     * Answer one waiting decision, of whichever kind.
+     *
+     * The kind and the id both came from GET pending, so this does not decide
+     * what can be narrowed or which route settles it — it carries what it was
+     * given. The signature covers the verdict AND any narrowing, so an approval
+     * of "GET /user only" cannot be replayed to grant the wide original.
+     */
+    async decide(btn) {
       const id = btn.dataset.id
-      await gated(await operationFor('approval.approve', { id, granted: true }), (proof) =>
-        api('POST', 'approvals', { id, granted: true, presence: proof }))
-      toast('Approved')
-      render()
-    },
-    async deny(btn) {
-      const id = btn.dataset.id
-      await gated(await operationFor('approval.deny', { id, granted: false }), (proof) =>
-        api('POST', 'approvals', { id, granted: false, presence: proof }))
-      toast('Denied')
+      const granted = btn.dataset.granted === '1'
+      const overrides = {}
+      if (granted) {
+        for (const input of document.querySelectorAll(`.narrow[data-for="${id}"] .narrow-input`)) {
+          if (input.value.trim()) overrides[input.dataset.field] = input.value.trim()
+        }
+      }
+      if (btn.dataset.kind === 'session') {
+        const op = await operationFor('session_request.decide', { id, granted, ...overrides })
+        await gated(op, (proof) => api('POST', 'session-requests/decide', {
+          id, granted, overrides: granted ? overrides : undefined, presence: proof,
+        }))
+      } else {
+        const op = await operationFor(granted ? 'approval.approve' : 'approval.deny', { id, granted })
+        await gated(op, (proof) => api('POST', 'approvals', { id, granted, presence: proof }))
+      }
+      toast(granted ? 'Approved' : 'Denied')
       render()
     },
   }
@@ -1179,7 +1214,7 @@ ${c.cli} ui                         open this page`)}`,
     } catch { /* the main panel already reports an unreachable daemon */ }
 
     try {
-      const pending = await api('GET', 'approvals')
+      const pending = await api('GET', 'pending')
       const badge = document.getElementById('approvalCount')
       badge.textContent = pending.length ? ` (${pending.length})` : ''
       badge.className = pending.length ? 'pill warn' : ''

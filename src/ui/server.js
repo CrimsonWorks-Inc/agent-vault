@@ -32,6 +32,7 @@ import { request as socketRequest } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import * as webauthn from './webauthn.js'
 import { rememberSession } from '../client-state.js'
+import { fetchPending, parseOverrides } from '../pending.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -171,7 +172,7 @@ export class UiServer {
    */
   static GATED = new Set([
     'POST credentials', 'DELETE credentials', 'POST sessions',
-    'DELETE sessions', 'POST approvals', 'POST lock',
+    'DELETE sessions', 'POST approvals', 'POST session-requests/decide', 'POST lock',
     'POST touchid/enroll', 'POST touchid/remove',
   ])
 
@@ -318,7 +319,13 @@ export class UiServer {
         case 'GET status': return this.#send(res, 200, await this.#control('GET', '/v1/status'))
         case 'GET credentials': return this.#send(res, 200, await this.#control('GET', '/v1/credentials'))
         case 'GET sessions': return this.#send(res, 200, await this.#control('GET', '/v1/sessions'))
-        case 'GET approvals': return this.#send(res, 200, await this.#control('GET', '/v1/approvals'))
+        // Everything waiting for a human, normalised by src/pending.js — the
+        // same module the CLI renders from. The page paints whatever this
+        // returns and decides nothing, so a new kind of decision appears in
+        // both interfaces at once instead of in whichever one someone
+        // remembered.
+        case 'GET pending':
+          return this.#send(res, 200, await fetchPending((path) => this.#control('GET', path)))
         case 'GET listeners': return this.#send(res, 200, await this.#control('GET', '/v1/listeners'))
         case 'GET audit': return this.#send(res, 200, await this.#control('GET', `/v1/audit?limit=${Number(url.searchParams.get('limit') || 40)}`))
 
@@ -357,6 +364,18 @@ export class UiServer {
           return this.#send(res, 200, await this.#control('DELETE', `/v1/sessions?sid=${encodeURIComponent(url.searchParams.get('sid'))}`))
         case 'POST approvals':
           return this.#send(res, 200, await this.#control('POST', '/v1/approvals', body))
+        // A session request is settled by its own control route, which verifies
+        // its own operation shape — so this mirrors it rather than merging the
+        // two behind one endpoint and having to guess which signature to make.
+        // WHICH route applies to an id is the shared module's answer, carried
+        // on the item the page was given.
+        case 'POST session-requests/decide':
+          return this.#send(res, 200, await this.#control('POST', '/v1/session-requests/decide', {
+            id: body?.id,
+            granted: !!body?.granted,
+            overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
+            presence: body?.presence,
+          }))
         case 'POST lock':
           return this.#send(res, 200, await this.#control('POST', '/v1/lock', {}))
         case 'POST unlock':
@@ -438,6 +457,13 @@ export class UiServer {
       case 'POST sessions': return of('session.create', body)
       case 'DELETE sessions': return of('session.revoke', { sid: url.searchParams.get('sid') })
       case 'POST approvals': return of(body?.granted === false ? 'approval.deny' : 'approval.approve', body)
+      case 'POST session-requests/decide':
+        // The same fields the daemon binds its own check to: the id, the
+        // verdict and any narrowing. A signature for "approve, narrowed to GET
+        // /user" therefore cannot be replayed to grant the wide original.
+        return of('session_request.decide', {
+          id: body?.id, granted: !!body?.granted, ...parseOverrides(body?.overrides || {}),
+        })
       case 'POST lock': return of('vault.lock', {})
       case 'POST touchid/enroll': return of('touchid.enroll', body)
       case 'POST touchid/remove': return of('touchid.remove', {})

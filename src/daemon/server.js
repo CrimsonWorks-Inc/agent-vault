@@ -788,10 +788,16 @@ export class Daemon {
           // headers, and an approved POST arrived as a DELETE. Whatever is
           // outside the binding is what an agent can change afterwards.
           const final = proposalOf({ ...record.proposal, ...proposalOf(input.overrides || {}) })
+          // Bound to the decision AS SENT — the id, the verdict, and any
+          // narrowing — which is the convention every other gated route uses
+          // and the only thing a client can sign without predicting a merge.
+          // It binds the outcome just as tightly, because the stored proposal
+          // is written once when the agent asks and never touched again: the
+          // id plus the overrides determine `final` exactly.
           this.#requireHumanForWidening(
             'session request approval',
             webauthn.operationFor('session_request.decide', {
-              id: record.id, granted: !!input.granted, ...final,
+              id: record.id, granted: !!input.granted, ...proposalOf(input.overrides || {}),
             }),
             input.presence,
           )
