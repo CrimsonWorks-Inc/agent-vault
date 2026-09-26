@@ -92,6 +92,10 @@ export class McpServer {
             methods: { type: 'array', items: { type: 'string' }, description: 'ask for the least you need' },
             paths: { type: 'array', items: { type: 'string' } },
             budget: { type: 'number', description: 'how many requests' },
+            // Without this an agent could not ask for a short session even when
+            // it wanted one, so every request took the eight-hour default and
+            // the human was shown no lifetime at all to narrow.
+            ttl_minutes: { type: 'number', description: 'how long you need it for; ask for the least you need' },
             poll_id: { type: 'string', description: 'an id from an earlier call: check whether it has been answered' },
           },
           required: ['reason'],

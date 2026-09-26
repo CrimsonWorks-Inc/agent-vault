@@ -34,7 +34,13 @@ function describe(kind, raw) {
       // A session is hours and a budget; a held request is one call. Saying so
       // is the difference between an informed yes and a reflex one.
       caution: 'This grants hours of access, not one call.',
-      narrowable: ['methods', 'paths', 'budget', 'uses'],
+      // One list, read by the CLI's hint, the CLI's validation and the UI's
+      // inputs — so a dimension missing here is missing from every interface.
+      // `ttl_minutes` was: `summarize()` renders it and `#createSession`
+      // honours it, but no interface could set it and no human could narrow it.
+      // The one dimension a session request states in plain minutes could only
+      // be reached by hand-writing the HTTP body.
+      narrowable: ['methods', 'paths', 'budget', 'uses', 'ttl_minutes'],
       proposal: raw.proposal || {},
       decide: { path: '/v1/session-requests/decide', idField: 'id' },
     }
@@ -88,6 +94,11 @@ export function parseOverrides(args = {}) {
   if (args.paths) out.paths = Array.isArray(args.paths) ? args.paths : [String(args.paths)]
   if (args.budget !== undefined && args.budget !== null && args.budget !== '') out.budget = Number(args.budget)
   if (args.uses !== undefined && args.uses !== null && args.uses !== '') out.uses = Number(args.uses)
+  // The generated hint spells this `--ttl_minutes`, because it is generated
+  // from the field name and there is only one list. `--ttl-minutes` is the
+  // spelling a hand would reach for, so accept both.
+  const ttl = args.ttl_minutes ?? args['ttl-minutes']
+  if (ttl !== undefined && ttl !== null && ttl !== '') out.ttl_minutes = Number(ttl)
   return out
 }
 

@@ -271,3 +271,27 @@ test('a concurrent request cannot hijack a batch mid-flight', async () => {
     rmSync(dir2, { recursive: true, force: true })
   }
 })
+
+// An agent has to be able to ask for a SHORT session.
+//
+// `vault_request_session` took cred, methods, paths and budget — but not a
+// lifetime, although `ttl_minutes` is one of the six fields a proposal may
+// name, `summarize()` renders it, and the daemon honours it. So every request
+// an agent could actually make took the eight-hour default, and the human
+// approving it was shown no lifetime at all. The tool's own description says
+// "ask for the least you need"; on the one dimension measured in minutes, it
+// could not.
+test('an agent can ask for the least lifetime it needs, not just the least scope', async () => {
+  const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+  const ask = listed.result.tools.find((t) => t.name === 'vault_request_session')
+  const props = ask.inputSchema.properties
+
+  assert.ok(props.ttl_minutes, 'an agent cannot ask for a short session')
+  assert.equal(props.ttl_minutes.type, 'number')
+
+  // Every other dimension a proposal carries is already askable; the point is
+  // that the set is complete, not that one field exists.
+  for (const field of ['cred', 'methods', 'paths', 'budget']) {
+    assert.ok(props[field], `vault_request_session cannot name ${field}`)
+  }
+})

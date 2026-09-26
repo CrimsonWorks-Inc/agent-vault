@@ -119,3 +119,36 @@ test('a new kind of decision reaches both interfaces by construction', () => {
       `${name} enumerates the kinds itself; that list belongs in pending.js`)
   }
 })
+
+// Every dimension a human can be asked for, a human can narrow.
+//
+// `narrowable` is one list, read by the CLI's hint, the CLI's validation of
+// --flags, and the UI's inputs. `ttl_minutes` was missing from it, so a
+// lifetime could be proposed but not edited: `av approve --ttl_minutes 5` was
+// refused as not applying, and the UI drew no field for it. A dimension that
+// can only be accepted whole is not narrowable, which is the opposite of what
+// an approval screen is for.
+test('a lifetime can be narrowed, like every other dimension of a proposal', async () => {
+  const { fetchPending, parseOverrides } = await import('../../src/pending.js')
+
+  const [item] = await fetchPending(async (path) => (
+    path === '/v1/session-requests'
+      ? [{ id: 'sr_x', summary: 's', proposal: { cred: 'c', ttl_minutes: 30 }, created_at: new Date().toISOString() }]
+      : []
+  ))
+  assert.ok(item.narrowable.includes('ttl_minutes'), 'a human cannot shorten a session they are approving')
+
+  // Both spellings: the hint is generated from the field name, so it prints
+  // --ttl_minutes, while a hand reaches for --ttl-minutes.
+  assert.deepEqual(parseOverrides({ ttl_minutes: '5' }), { ttl_minutes: 5 })
+  assert.deepEqual(parseOverrides({ 'ttl-minutes': '5' }), { ttl_minutes: 5 })
+
+  // And the whole proposal is reachable: anything summarize() can render, a
+  // human can edit.
+  const { proposalOf } = await import('../../src/daemon/session-requests.js')
+  const fields = Object.keys(proposalOf({ cred: 'c', methods: [], paths: [], budget: 1, uses: 1, ttl_minutes: 1 }))
+  for (const f of fields) {
+    if (f === 'cred') continue // which credential is the request, not a dimension of it
+    assert.ok(item.narrowable.includes(f), `a proposal can name ${f} but a human cannot narrow it`)
+  }
+})
