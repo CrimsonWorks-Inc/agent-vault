@@ -746,7 +746,7 @@ export class Daemon {
               ...SessionRequests.redact(record),
               next: {
                 agent: 'poll GET /v1/session-requests/collect?id=<id> until a human answers',
-                human: [`agent-vault requests`, `agent-vault approve ${record.id}`],
+                human: [`agent-vault approvals`, `agent-vault approve ${record.id}`],
               },
             })
           } catch (e) {

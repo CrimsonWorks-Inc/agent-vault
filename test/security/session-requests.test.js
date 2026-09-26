@@ -14,7 +14,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest } from 'node:http'
@@ -502,4 +502,96 @@ test('an approved token is never written to disk', async () => {
     if (second) await second.stop()
     rmSync(d, { recursive: true, force: true })
   }
+})
+
+// Every command a hint tells a human to run must be a command that exists.
+//
+// A session request's `next.human` answered with `agent-vault requests`, which
+// was never a command. The person being asked to approve is the ONLY one who
+// can, and the instruction handed to them printed "unknown command" — the same
+// dead end as the two error paths that once named a `vault_request_session`
+// tool that did not exist, which is why this file exists at all.
+test('a session request tells the human a command they can actually run', async () => {
+  const { COMMAND_NAMES } = await import('../../src/cli/index.js')
+
+  // Its own vault, daemon and socket: an earlier test in this file deliberately
+  // fills the pending store to its cap, so every later request on the shared
+  // daemon is refused and this one would pass by never reaching the hint.
+  const own = mkdtempSync(join(tmpdir(), 'av-hint-'))
+  const v = Vault.create(own, { factor: 'none' })
+  v.addCredential({
+    slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+    fields: { token: 'ghp_HINTCHECK00112233445566778899' },
+    sites: { token: ['header:authorization:Bearer'] },
+  })
+  const ownSock = join(own, 'c.sock')
+  const d = await new Daemon(v, { port: 0, socketPath: ownSock }).start()
+  try {
+    const res = await new Promise((resolve) => {
+      const req = unixRequest({ socketPath: ownSock, path: '/v1/session-requests', method: 'POST', headers: { 'content-type': 'application/json' } }, (r) => {
+        const c = []
+        r.on('data', (x) => c.push(x))
+        r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+      })
+      req.on('error', () => resolve({ status: 0, body: {} }))
+      req.end(JSON.stringify({ cred: 'gh', methods: ['GET'], paths: ['/user'] }))
+    })
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+
+    const hints = res.body.next?.human ?? []
+    assert.ok(hints.length > 0, 'a request with no instruction for the human is a dead end')
+    for (const hint of hints) {
+      const words = hint.replace(/^agent-vault /, '').split(' ')
+      assert.ok(
+        COMMAND_NAMES.includes(words[0]) || COMMAND_NAMES.includes(words.slice(0, 2).join(' ')),
+        `the human is told to run "${hint}", which is not a command`,
+      )
+    }
+  } finally {
+    await d.stop()
+    rmSync(own, { recursive: true, force: true })
+  }
+})
+
+// The same check over the whole source, because the next wrong hint will be
+// written somewhere else.
+test('no hint anywhere names an agent-vault command that does not exist', async () => {
+  const { COMMAND_NAMES } = await import('../../src/cli/index.js')
+  const firstWords = new Set(COMMAND_NAMES.map((n) => n.split(' ')[0]))
+
+  // The binary name is not always followed by a command. It appears in
+  // sentences ("agent-vault needs a passphrase", "agent-vault takes the token
+  // away"), in an SSE comment line, and inside an X.509 subject. Each of these
+  // words is listed rather than pattern-matched, so adding one is a visible
+  // edit and a genuinely new bad hint still fails.
+  const NOT_A_COMMAND = new Set([
+    'needs', 'under', 'will', 'takes',   // prose
+    'notification',                      // ': agent-vault notification stream'
+    'localhost',                         // '/CN=agent-vault localhost'
+  ])
+
+  const files = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue
+      const p = join(dir, entry.name)
+      if (entry.isDirectory()) walk(p)
+      else if (/\.(js|html)$/.test(entry.name)) files.push(p)
+    }
+  }
+  walk(new URL('../../src', import.meta.url).pathname)
+
+  const bad = []
+  for (const file of files) {
+    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      // Comments discuss commands, including ones that were removed on purpose.
+      const t = line.trim()
+      if (t.startsWith('*') || t.startsWith('//') || t.startsWith('<!--')) return
+      for (const m of line.matchAll(/\bagent-vault ([a-z][a-z-]*)/g)) {
+        if (NOT_A_COMMAND.has(m[1]) || firstWords.has(m[1])) continue
+        bad.push(`${file.replace(/^.*\/src\//, 'src/')}:${i + 1} → "agent-vault ${m[1]}"`)
+      }
+    })
+  }
+  assert.deepEqual(bad, [], `hints naming commands that do not exist:\n${bad.join('\n')}`)
 })

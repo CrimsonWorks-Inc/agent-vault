@@ -1382,6 +1382,16 @@ ${C.dim('--json on any command prints a machine-readable envelope.')}`)
 
 // --------------------------------------------------------------------- entry
 
+/**
+ * Every command the CLI accepts, as a human would type it.
+ *
+ * Exported so a test can check the other direction: that every `agent-vault
+ * <cmd>` a hint tells someone to run is a command that exists. A session
+ * request answered with `agent-vault requests` — which never existed — left the
+ * one person who could approve it with a command that only prints an error.
+ */
+export const COMMAND_NAMES = Object.keys(COMMANDS).map((k) => k.replace(':', ' '))
+
 export async function main(argv = process.argv.slice(2)) {
   // R3: root never runs agent-writable code. This file lives in a directory the
   // agent can write to, so it must never be what sudo executes. The privileged
@@ -1415,8 +1425,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const command = COMMANDS[name]
   if (!command) {
-    const known = Object.keys(COMMANDS).map((k) => k.replace(':', ' ')).join(', ')
-    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: `one of: ${known}` })
+    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: `one of: ${COMMAND_NAMES.join(', ')}` })
   }
 
   try {
