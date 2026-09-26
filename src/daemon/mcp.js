@@ -102,6 +102,17 @@ export class McpServer {
         },
       },
       {
+        name: 'vault_approval_status',
+        description: 'Whether a human has answered a held request. The 202 from a held write names this tool and the id to pass.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            approval_id: { type: 'string', description: 'the approval_id from the 202' },
+          },
+          required: ['approval_id'],
+        },
+      },
+      {
         name: 'vault_http',
         description: 'Make an HTTP request through the vault. The credential is injected by the daemon; you never handle it.',
         inputSchema: {
@@ -295,6 +306,13 @@ export class McpServer {
             warning: 'A placeholder anywhere other than the site above is refused and audited.',
           },
         })
+      }
+
+      case 'vault_approval_status': {
+        if (!session) return text({ error: 'no session' })
+        const status = this.pipeline.approvalStatus(args.approval_id)
+        if (!status) return text({ error: `no approval ${args.approval_id}`, detail: 'it may have expired, or already been spent' })
+        return text(status)
       }
 
       case 'vault_http': {

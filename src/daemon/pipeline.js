@@ -96,7 +96,7 @@ export class Pipeline {
     // inside the try, so the catch could not see them: every policy denial was
     // filed with no session and no credential, even though authentication had
     // already succeeded and both were known. With more than one live session on
-    // a credential - the normal case - a run of refusals could not be pinned to
+    // a credential — the normal case — a run of refusals could not be pinned to
     // the agent making it, which is the one question a run of refusals raises.
     // They stay null when the failure came before there was anything to name.
     let session = null
@@ -511,7 +511,7 @@ export class Pipeline {
 
     // --- approval ----------------------------------------------------------
     // The placeholder's TEXT is in the headers and may be in the body, so
-    // swapping the id out of the hash is not enough on its own - the value
+    // swapping the id out of the hash is not enough on its own — the value
     // churns wherever it appears. Each occurrence is replaced by what it
     // stands for, exactly as substitution finds it, leaving a hash over what
     // the human was actually shown.
@@ -821,6 +821,35 @@ export class Pipeline {
       agent_reason_untrusted: approval.reason,
     })
     return { status: 'pending', approval }
+  }
+
+  /**
+   * What happened to an approval, for the agent that is waiting on it.
+   *
+   * The 202 has always told agents to call `vault_approval_status`, and that
+   * tool did not exist — the third error path in this codebase to name
+   * something that was never built. It lands on the busiest one: every held
+   * write hits it, and an agent that follows the instruction gets a
+   * tool-not-found with no other way to learn the human answered.
+   *
+   * Read-only, and it reveals nothing the agent did not already send: a state,
+   * and the hash it was given in the 202.
+   */
+  approvalStatus(approvalId) {
+    for (const approval of this.approvals.values()) {
+      if (approval.id !== approvalId) continue
+      return {
+        approval_id: approval.id,
+        state: approval.state,
+        request_hash: approval.request_hash,
+        created_at: approval.created_at ?? null,
+        decided_at: approval.decided_at ?? null,
+        next: approval.state === 'granted'
+          ? 'resend the request; it will execute exactly once'
+          : approval.state === 'pending' ? 'a human has not answered yet' : null,
+      }
+    }
+    return null
   }
 
   decideApproval(approvalId, granted) {

@@ -12,7 +12,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -164,8 +164,8 @@ test('the tool list is exactly the documented tools', async () => {
   // agents to call for months while it did not exist.
   const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
   assert.deepEqual(listed.result.tools.map((t) => t.name).sort(), [
-    'vault_explain_denial', 'vault_get_placeholder', 'vault_http', 'vault_list_creds',
-    'vault_request_session', 'vault_status',
+    'vault_approval_status', 'vault_explain_denial', 'vault_get_placeholder', 'vault_http',
+    'vault_list_creds', 'vault_request_session', 'vault_status',
   ])
 })
 
@@ -294,4 +294,54 @@ test('an agent can ask for the least lifetime it needs, not just the least scope
   for (const field of ['cred', 'methods', 'paths', 'budget']) {
     assert.ok(props[field], `vault_request_session cannot name ${field}`)
   }
+})
+
+// Every tool an error path tells an agent to call has to exist.
+//
+// The 202 from a held write has always named `vault_approval_status`, and it
+// was never built — the THIRD instance of this in the codebase, after the two
+// error paths that named `vault_request_session` before it existed. It sits on
+// the busiest path in the system: every held write reaches it, and an agent
+// that follows the instruction gets a tool-not-found with no other way to learn
+// the human answered.
+//
+// This morning's sweep checked `agent-vault <cmd>` hints against the CLI's
+// commands and walked straight past this, because a tool name is not a command.
+test('no error path names an MCP tool that does not exist', async () => {
+  const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+  const names = new Set(listed.result.tools.map((t) => t.name))
+
+  const files = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules') continue
+      const p = join(dir, entry.name)
+      if (entry.isDirectory()) walk(p)
+      else if (/\.(js|html|md)$/.test(entry.name)) files.push(p)
+    }
+  }
+  walk(new URL('../../src', import.meta.url).pathname)
+
+  const bad = []
+  for (const file of files) {
+    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      const t = line.trim()
+      if (t.startsWith('*') || t.startsWith('//')) return
+      for (const m of line.matchAll(/\bvault_[a-z_]+/g)) {
+        if (names.has(m[0])) continue
+        bad.push(`${file.replace(/^.*\/src\//, 'src/')}:${i + 1} → ${m[0]}`)
+      }
+    })
+  }
+  assert.deepEqual(bad, [], `error paths naming tools that do not exist:\n${bad.join('\n')}`)
+})
+
+// And the tool the 202 names actually answers the question it was named for.
+test('an agent can find out whether the human answered', async () => {
+  const held = await mcp.handle({
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'vault_approval_status', arguments: { approval_id: 'ap_doesnotexist' } },
+  })
+  const missing = JSON.parse(held.result.content[0].text)
+  assert.match(missing.error, /no approval/, 'an unknown id should say so, not crash')
 })
