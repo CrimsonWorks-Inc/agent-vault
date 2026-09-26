@@ -886,11 +886,24 @@ const COMMANDS = {
     const shim = ['agent-vault', 'av'].find((name) => (process.env.PATH || '').split(':')
       .some((d) => d && existsSync(join(d, name))))
     const portable = shim && scope === 'project'
+
+    // User scope is every project on this machine, and it launches from a GUI
+    // app's environment rather than a shell. Writing this checkout's path plus
+    // whichever interpreter happened to run the install pins a machine-wide
+    // server to a working copy that gets edited, branched and moved, and to one
+    // nvm version that `nvm install` retires. The system install is the stable
+    // answer to both: root-owned, its own bundled runtime, and kept current by
+    // `agent-vault upgrade`. Prefer it whenever it is the vault actually in use.
+    // Project scope keeps the bare shim, because that file is for a team.
+    const systemNode = join(SYSTEM_ROOT, 'runtime', 'node')
+    const systemBin = join(SYSTEM_ROOT, 'app', 'bin', 'agent-vault.js')
+    const useSystem = !portable && USING_SYSTEM && existsSync(systemNode) && existsSync(systemBin)
+
     const entry = serverEntry({
       transport,
       format: spec.format,
-      command: portable ? shim : process.execPath,
-      args: portable ? ['mcp'] : [selfBin, 'mcp'],
+      command: portable ? shim : (useSystem ? systemNode : process.execPath),
+      args: portable ? ['mcp'] : [useSystem ? systemBin : selfBin, 'mcp'],
       // A connector URL must be https: Claude Desktop and Claude Code refuse
       // plain http, and there is no exemption for loopback. --tls points at the
       // TLS listener instead of the plain gateway.

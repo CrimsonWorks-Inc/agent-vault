@@ -148,8 +148,8 @@ test('project scope produces a config that is portable', () => {
   const cli = readFileSync(new URL('../../src/cli/index.js', import.meta.url), 'utf8')
   assert.match(cli, /const portable = shim && scope === 'project'/,
     'project scope should prefer a shim on PATH')
-  assert.match(cli, /command: portable \? shim : process\.execPath/,
-    'and fall back to the interpreter only when there is no shim')
+  assert.match(cli, /command: portable \? shim :/,
+    'and only fall back to an absolute path when there is no shim')
 
   // The shape itself carries no machine-specific path.
   const entry = serverEntry({ transport: 'stdio', command: 'agent-vault', args: ['mcp'] })
@@ -188,3 +188,30 @@ test('a server name cannot close the table and open one of its own', () => scrat
   assert.equal(ok.wrote, true)
   assert.match(readFileSync(ok.path, 'utf8'), /\[mcp_servers\.agent-vault-2\]/)
 }))
+
+// User scope is machine-wide, and it is launched by a GUI app rather than a
+// shell — so what it names has to keep working after the things around it move.
+test('user scope names the system install rather than a checkout', () => {
+  const cli = readFileSync(new URL('../../src/cli/index.js', import.meta.url), 'utf8')
+
+  // It used to write `process.execPath` plus this checkout: a server for every
+  // project on the machine, pinned to one nvm version that `nvm install`
+  // retires and to a working copy that gets edited, branched and moved. The
+  // system install is root-owned, carries its own runtime, and is what
+  // `agent-vault upgrade` keeps current.
+  assert.match(cli, /const systemNode = join\(SYSTEM_ROOT, 'runtime', 'node'\)/,
+    'user scope should be able to name the bundled runtime')
+  assert.match(cli, /const systemBin = join\(SYSTEM_ROOT, 'app', 'bin', 'agent-vault\.js'\)/,
+    'user scope should be able to name the installed app')
+
+  // Only when that install is the vault actually in use. An explicit
+  // AGENT_VAULT_DIR means someone is on a dev vault and wants their checkout.
+  assert.match(cli, /const useSystem = !portable && USING_SYSTEM &&/,
+    'the system install should be preferred only when it is the one in use')
+  assert.match(cli, /existsSync\(systemNode\) && existsSync\(systemBin\)/,
+    'and only when both files are actually there')
+
+  // Project scope is unaffected: that file is for a team, so it stays a shim.
+  assert.match(cli, /const useSystem = !portable/,
+    'a committable project config must not gain an absolute machine path')
+})
