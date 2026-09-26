@@ -92,11 +92,20 @@ export class Pipeline {
     let consumed = null
     let upstreamOpened = false
     let spentApproval = null
+    // Declared out here so a DENIAL can say who was denied. Both were `const`
+    // inside the try, so the catch could not see them: every policy denial was
+    // filed with no session and no credential, even though authentication had
+    // already succeeded and both were known. With more than one live session on
+    // a credential - the normal case - a run of refusals could not be pinned to
+    // the agent making it, which is the one question a run of refusals raises.
+    // They stay null when the failure came before there was anything to name.
+    let session = null
+    let route = null
 
     try {
       this.#refuseBrowsers(req)
-      const session = this.#authenticate(req)
-      const route = this.#route(req, session)
+      session = this.#authenticate(req)
+      route = this.#route(req, session)
       const result = await this.#proxy({
         req, session, route, requestId,
         onConsume: (r) => { consumed = r },
@@ -160,6 +169,12 @@ export class Pipeline {
         this.vault.audit.write(err.auditKind, {
           request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule,
           detail: err.detail,
+          // Whoever got this far. Null before authentication, which is itself
+          // the useful answer: an unauthenticated probe and a session exceeding
+          // its grant are different events and no longer look the same.
+          session_id: session?.id ?? null,
+          credential_slug: route?.slug ?? null,
+          grant_id: route?.grantId ?? null,
           // A denial recorded without what was denied says only that something
           // happened. These are the records that matter most — a run of them
           // is what an attempt looks like — so they get the same method and

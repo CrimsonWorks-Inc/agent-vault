@@ -27,6 +27,14 @@ const node = process.execPath
  */
 const MUTATIONS = [
   {
+    // A denial nobody can be attributed to cannot be investigated.
+    what: 'a policy denial is filed without the session that was refused',
+    file: 'src/daemon/pipeline.js',
+    from: 'session_id: session?.id ?? null,',
+    to: 'session_id: null,',
+    tests: ['test/security/audit-content.test.js'],
+  },
+  {
     what: 'the human-presence gate never refuses',
     file: 'src/daemon/server.js',
     from: "throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human",

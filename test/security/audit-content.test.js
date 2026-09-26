@@ -21,7 +21,7 @@ import { Daemon } from '../../src/daemon/server.js'
 const SECRET = 'ghp_AUDITCONTENT0011223344556677889'
 const OTHER = 'xoxb-9999-AUDITOTHERSECRETVALUE'
 const BODY_SECRET = 'body-only-marker-0xdeadbeef'
-let dir, vault, daemon, sock, placeholder, token, upstream, upPort
+let dir, vault, daemon, sock, placeholder, token, upstream, upPort, sessionId, grantId
 
 const ctl = (method, path, body) => new Promise((resolve) => {
   const req = unixRequest({ socketPath: sock, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
@@ -60,6 +60,7 @@ before(async () => {
   })
   const made = vault.createSession({ label: 'agent' })
   token = made.token
+  sessionId = made.session.id
   const grant = vault.createGrant({
     sessionId: made.session.id, credentialId: cred.id, fields: ['token'],
     policy: {
@@ -67,6 +68,7 @@ before(async () => {
       budget: { unit: 'requests', limit: 50 }, approval: 'auto',
     },
   })
+  grantId = grant.id
   placeholder = vault.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder
 
   sock = join(dir, 'c.sock')
@@ -359,4 +361,43 @@ test('a normal restart is not mistaken for tampering', () => {
   } finally {
     rmSync(fresh, { recursive: true, force: true })
   }
+})
+
+// A denial has to say WHO was denied.
+//
+// `session` and `route` were `const` inside the try, so the catch that writes
+// the denial could not see them: every policy refusal was filed with no session,
+// no credential and no grant, although authentication had already succeeded and
+// all three were known. The record said something was refused, never by whom —
+// and with several live sessions on one credential, which is the normal case, a
+// run of refusals could not be pinned to the agent making it. A run of refusals
+// is the thing this log exists to make visible.
+test('a policy denial names the session, credential and grant that were refused', () => {
+  const denials = vault.audit.read({ limit: 200 }).filter((r) => r.kind === 'request.denied')
+  const policy = denials.filter((r) => r.rule === 'paths' || r.reason_code === 'AV_POLICY_DENIED')
+  assert.ok(policy.length > 0, 'the fixture produced no policy denial to check')
+
+  for (const r of policy) {
+    assert.equal(r.session_id, sessionId, `a policy denial filed without its session: ${JSON.stringify(r)}`)
+    assert.equal(r.credential_slug, 'prod', `a policy denial filed without its credential: ${JSON.stringify(r)}`)
+    assert.equal(r.grant_id, grantId, `a policy denial filed without its grant: ${JSON.stringify(r)}`)
+  }
+})
+
+// And the absence has to mean something, rather than being the same blank.
+test('a denial before authentication names no session, which is the answer', () => {
+  const denials = vault.audit.read({ limit: 200 }).filter((r) => r.kind === 'request.denied')
+  const unauth = denials.filter((r) => String(r.reason_code).startsWith('AV_SESSION'))
+  assert.ok(unauth.length > 0, 'the fixture produced no unauthenticated denial')
+
+  for (const r of unauth) {
+    assert.equal(r.session_id, null, 'a rejected token was credited with a session')
+    assert.equal(r.grant_id, null, 'a rejected token was credited with a grant')
+  }
+
+  // The two cases must be distinguishable, which is the whole point: an
+  // unauthenticated probe and a session exceeding its grant are different
+  // events and used to produce identically anonymous records.
+  const attributed = denials.filter((r) => r.session_id)
+  assert.ok(attributed.length > 0, 'no denial in the log can be attributed to anyone')
 })
