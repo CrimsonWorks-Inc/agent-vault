@@ -1044,3 +1044,75 @@ test('a locked vault still answers questions that reveal nothing', () => {
   assert.equal(vault.stats().locked, true)
   assert.throws(() => vault.revealField(vault.findCredential('gh-frozencrow').id, 'token'), /AV_LOCKED/)
 })
+
+// A held write has to be resendable, or the approval is never spent.
+//
+// The 202 says "resend the byte-identical request; it will execute exactly
+// once". The hash behind that promise covered the placeholder's ROW ID, and
+// the placeholder's TEXT sits in the very header the request carries — so two
+// calls that differ only by which placeholder was minted hashed differently.
+// `vault_http` mints one per call, so over MCP a held write could never be
+// resent at all: each retry opened ANOTHER approval and asked the human again.
+// Observed live — two approvals granted, neither ever executed.
+test('a held write is resendable with a freshly minted placeholder', async () => {
+  setup({
+    policy: {
+      hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/user'],
+      budget: { unit: 'requests', limit: 50 }, approval: 'on-write',
+    },
+  })
+  const body = Buffer.from(JSON.stringify({ note: 'the bytes a human approved' }))
+  const send = (ph) => pipeline.handle(req({
+    method: 'POST', path: '/p/gh-frozencrow/user', body,
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${ph}`], ['content-type', 'application/json']],
+  }))
+
+  const first = await send(placeholder)
+  assert.equal(first.status, 202, 'the write should be held for a human')
+  const held = JSON.parse(first.body.toString())
+  assert.equal(held.code, 'AV_APPROVAL_PENDING')
+
+  // A different placeholder for the same grant and field: identical capability,
+  // and the only thing an agent cannot hold still between two calls.
+  const second = vault.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder
+  assert.notEqual(second, placeholder, 'the fixture minted the same placeholder twice')
+
+  const again = await send(second)
+  assert.equal(again.status, 202)
+  const retry = JSON.parse(again.body.toString())
+  assert.equal(retry.request_hash, held.request_hash, 'the same request hashed differently')
+  assert.equal(retry.approval_id, held.approval_id, 'a resend opened a second approval to ask the human again')
+  assert.equal(pipeline.approvals.size, 1, `${pipeline.approvals.size} approvals for one request`)
+
+  // And the approval, once granted, is spent by that resend.
+  const approval = pipeline.approvals.get(held.request_hash)
+  approval.state = 'granted'
+  const executed = await send(vault.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder)
+  assert.equal(executed.status, 200, `approved write did not execute: ${executed.body}`)
+  assert.equal(sent.at(-1).headers.authorization, `Bearer ${SECRET}`)
+})
+
+// The other half: what the human WAS shown still binds.
+test('a resend cannot change what the human approved', async () => {
+  setup({
+    policy: {
+      hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/user', '/user/**'],
+      budget: { unit: 'requests', limit: 50 }, approval: 'on-write',
+    },
+  })
+  const send = (over) => pipeline.handle(req({
+    method: 'POST', path: '/p/gh-frozencrow/user', body: Buffer.from('{"a":1}'),
+    headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${placeholder}`], ['content-type', 'application/json']],
+    ...over,
+  }))
+
+  const held = JSON.parse((await send({})).body.toString())
+  for (const [what, over] of [
+    ['a different body', { body: Buffer.from('{"a":2}') }],
+    ['a different path', { path: '/p/gh-frozencrow/user/emails' }],
+    ['an extra header', { headers: [['host', '127.0.0.1'], ['authorization', `Bearer ${placeholder}`], ['content-type', 'application/json'], ['x-http-method-override', 'DELETE']] }],
+  ]) {
+    const other = JSON.parse((await send(over)).body.toString())
+    assert.notEqual(other.request_hash, held.request_hash, `${what} reused the approval`)
+  }
+})

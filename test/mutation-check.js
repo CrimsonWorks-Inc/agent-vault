@@ -27,6 +27,30 @@ const node = process.execPath
  */
 const MUTATIONS = [
   {
+    // The approval hash. Binding the placeholder's identity instead of its
+    // capability made every held write un-resendable over MCP.
+    what: 'an approval is bound to which placeholder carried the credential',
+    file: 'src/daemon/pipeline.js',
+    from: 'credentials: substitutions.map((s) => `${s.row.grant_id}:${s.row.field}`),',
+    to: 'credentials: substitutions.map((s) => s.row.id),',
+    tests: ['test/security/pipeline.test.js'],
+  },
+  {
+    // The other half: the placeholder's TEXT is in the headers it rides in.
+    what: 'the placeholder text is hashed raw, so a resend never matches',
+    file: 'src/daemon/pipeline.js',
+    from: '}).map(([n, v]) => [n, stable(v)]),',
+    to: '}),',
+    tests: ['test/security/pipeline.test.js'],
+  },
+  {
+    what: 'a resend may change the bytes the human approved',
+    file: 'src/daemon/pipeline.js',
+    from: "const bodySha = req.body ? canon.sha256(Buffer.from(stable(req.body.toString('latin1')), 'latin1')) : ''",
+    to: "const bodySha = ''",
+    tests: ['test/security/pipeline.test.js'],
+  },
+  {
     // An approved lifetime that use can extend is not a lifetime.
     what: 'idle activity extends a session past its approved lifetime',
     file: 'src/store/vault.js',

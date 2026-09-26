@@ -46,14 +46,24 @@ export function hmac(key, value) {
  * bound to this, so an SDK that retries a request after a 202 attaches to the
  * same approval instead of prompting the human twice or sending twice.
  */
-export function requestHash({ method, host, path, query, bodySha256, placeholderIds, headers }) {
+export function requestHash({ method, host, path, query, bodySha256, credentials, headers }) {
   return hash({
     method: String(method || '').toUpperCase(),
     host: String(host || '').toLowerCase(),
     path: path || '/',
     query: query || '',
     body: bodySha256 || '',
-    placeholders: [...(placeholderIds || [])].sort(),
+    // WHICH credential field gets injected, as `<grant>:<field>` — not which
+    // placeholder carried it. A placeholder is a bearer token with a fresh
+    // nonce every time one is minted, so hashing its identity made the hash
+    // change on every call. `vault_http` mints one per request, so a held write
+    // could never be resent: each retry hashed differently, opened ANOTHER
+    // approval, and asked the human again. The feature that stops a write going
+    // out unattended instead asked for consent in a loop and never spent it.
+    //
+    // Two placeholders from the same grant and field carry identical
+    // capability, so nothing the human was shown can differ between them.
+    credentials: [...(credentials || [])].sort(),
     // The headers that will actually be forwarded. Whatever is NOT in this
     // hash is what an agent can change under someone else's approval, and
     // headers were not in it: after a human approved `POST /x`, the same

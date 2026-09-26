@@ -510,18 +510,32 @@ export class Pipeline {
     }
 
     // --- approval ----------------------------------------------------------
-    const bodySha = req.body ? canon.sha256(req.body) : ''
+    // The placeholder's TEXT is in the headers and may be in the body, so
+    // swapping the id out of the hash is not enough on its own - the value
+    // churns wherever it appears. Each occurrence is replaced by what it
+    // stands for, exactly as substitution finds it, leaving a hash over what
+    // the human was actually shown.
+    const canonical = new Map(
+      substitutions.map((s) => [s.occ.text, `<av:${s.row.grant_id}:${s.row.field}>`]),
+    )
+    const stable = (value) => {
+      let out = String(value)
+      for (const [text, marker] of canonical) out = out.split(text).join(marker)
+      return out
+    }
+    // Read and rebuilt through latin1 so a binary body survives byte-for-byte.
+    const bodySha = req.body ? canon.sha256(Buffer.from(stable(req.body.toString('latin1')), 'latin1')) : ''
     const requestHash = canon.requestHash({
       method: decision.method, host: decision.host, path: decision.path,
-      query: req.query, bodySha256: bodySha,
-      placeholderIds: substitutions.map((s) => s.row.id),
+      query: stable(req.query || ''), bodySha256: bodySha,
+      credentials: substitutions.map((s) => `${s.row.grant_id}:${s.row.field}`),
       // Only what will actually be forwarded: the daemon strips its own
       // headers and the hop-by-hop ones before sending, so including them
       // would make an approval depend on bytes no upstream ever sees.
       headers: req.headers.filter(([n]) => {
         const lower = String(n).toLowerCase()
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
-      }),
+      }).map(([n, v]) => [n, stable(v)]),
     })
     if (policyMod.needsApproval(effective, { method: decision.method, firstUse: grant.counters.requests === 0 })) {
       const verdict = this.#approval(requestHash, { grant, decision, requestId, reason: sub.getHeader(req, 'av-reason') })
