@@ -595,3 +595,62 @@ test('no hint anywhere names an agent-vault command that does not exist', async 
   }
   assert.deepEqual(bad, [], `hints naming commands that do not exist:\n${bad.join('\n')}`)
 })
+
+// A lifetime is the one thing a session request spells out in minutes, and it
+// was the one thing the approval did not bind.
+//
+// `touchSession` raises `expires_at` towards `max_expires_at` on every request,
+// and `max_expires_at` was creation + 24h regardless of what was asked for. A
+// session approved for THIRTY MINUTES became a two-hour session on its first
+// call, and an agent that kept working could hold it open for a day. Observed
+// on a live vault: approved 15:15 for 30m, expiry 15:45; one request at 15:15
+// and the expiry read 17:15.
+test('an approved lifetime is a ceiling, not an opening bid', () => {
+  const own = mkdtempSync(join(tmpdir(), 'av-ttl-'))
+  try {
+    const v = Vault.create(own, { factor: 'none' })
+    const { session } = v.createSession({ label: 'approved for 30 minutes', ttlMs: 30 * 60_000 })
+    const approvedUntil = Date.parse(session.expires_at)
+    assert.ok(approvedUntil - Date.now() <= 30 * 60_000 + 1000, 'the session did not start with the lifetime it was given')
+
+    // Work the session the way an agent would.
+    for (let i = 0; i < 5; i++) v.touchSession(session)
+
+    assert.equal(
+      Date.parse(session.expires_at), approvedUntil,
+      `use extended a 30-minute session to ${session.expires_at}`,
+    )
+    assert.ok(
+      Date.parse(session.max_expires_at) <= approvedUntil,
+      'the idle ceiling outlives the lifetime that was approved',
+    )
+  } finally {
+    rmSync(own, { recursive: true, force: true })
+  }
+})
+
+// And the cap has to be a cap. `assertSessionLive` reads `expires_at` alone, so
+// a lifetime longer than `max_expires_at` was simply honoured: asking for 48
+// hours produced a session that outlived the 24-hour ceiling by a day.
+test('a requested lifetime cannot exceed the hard ceiling', () => {
+  const own = mkdtempSync(join(tmpdir(), 'av-ttl2-'))
+  try {
+    const v = Vault.create(own, { factor: 'none' })
+    for (const [remote, capHours] of [[false, 24], [true, 8]]) {
+      const { session } = v.createSession({ label: 'greedy', ttlMs: 48 * 3600_000, remote })
+      const hours = (Date.parse(session.expires_at) - Date.now()) / 3600_000
+      assert.ok(hours <= capHours + 0.01, `a ${remote ? 'remote' : 'local'} session was granted ${hours.toFixed(1)}h against a ${capHours}h ceiling`)
+      assert.ok(Date.parse(session.expires_at) <= Date.parse(session.max_expires_at), 'expiry outlives its own maximum')
+    }
+
+    // A session that names no lifetime still gets the default and its idle
+    // extension: this narrows what was asked for, not what was not.
+    const { session: plain } = v.createSession({ label: 'default' })
+    assert.ok(
+      Date.parse(plain.max_expires_at) > Date.parse(plain.expires_at),
+      'a session with no requested lifetime lost its idle extension',
+    )
+  } finally {
+    rmSync(own, { recursive: true, force: true })
+  }
+})

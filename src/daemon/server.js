@@ -136,7 +136,7 @@ export class Daemon {
           if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
           const profile = getProfile(cred.connector_kind)
           const { session, token } = this.vault.createSession({
-            label: input.label, ttlMs: (input.ttl_hours ?? 8) * 3600_000, policy: {}, remote: !!input.remote,
+            label: input.label, ttlMs: input.ttl_hours ? input.ttl_hours * 3600_000 : null, policy: {}, remote: !!input.remote,
           })
           // A grant can only reach the hosts the credential itself declares.
           // Without this an agent minting its own session could aim the

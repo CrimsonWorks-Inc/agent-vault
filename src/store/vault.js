@@ -541,20 +541,43 @@ export class Vault {
 
   // --------------------------------------------------------------- sessions
 
-  createSession({ workspaceId, label, ttlMs = 8 * 3600_000, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  /**
+   * @param {{ttlMs?: number|null}} opts ttlMs is a LIFETIME the caller asked
+   *   for, not an opening bid. Omit it to take the default and its idle
+   *   extension; give it to say how long this session may live.
+   *
+   * `max_expires_at` used to be creation + 24h no matter what was asked for,
+   * and `touchSession` raises `expires_at` towards it on every request. A
+   * session a human approved for THIRTY MINUTES jumped to two hours on its
+   * first call and could be held open for a day by an agent that kept working
+   * — a lifetime is the one dimension a session request spells out, and it was
+   * the one dimension the approval did not bind.
+   *
+   * The same field was never a ceiling either: `assertSessionLive` reads only
+   * `expires_at`, so asking for 48 hours produced a session that outlived the
+   * 24-hour cap by a day. It is now both: what is asked for is clamped down to
+   * the cap, and what was asked for caps the idle extension.
+   */
+  createSession({ workspaceId, label, ttlMs = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
     this.#requireUnlocked()
     const sid = ph.newSid()
     const secret = randomBytes(33).toString('base64url')
     const token = `avs1.${sid}.${secret}`
     const now = Date.now()
+    const hardCapMs = (remote ? 8 : 24) * 3600_000
+    // What this session actually gets, never more than the cap.
+    const life = Math.min(ttlMs ?? 8 * 3600_000, hardCapMs)
+    // How far idle activity may push that out. A requested lifetime is its own
+    // ceiling; only a session that never named one gets the generous default.
+    const ceiling = ttlMs == null ? hardCapMs : life
     const session = {
       id: sid, workspace_id: workspaceId || null, label: label || 'session',
       token_hash: createHash('sha256').update(token).digest('hex'),
       policy, owner_uid: peerUid ?? null, remote, client_name: clientName,
       state: 'active',
       created_at: new Date(now).toISOString(),
-      expires_at: new Date(now + ttlMs).toISOString(),
-      max_expires_at: new Date(now + (remote ? 8 : 24) * 3600_000).toISOString(),
+      expires_at: new Date(now + life).toISOString(),
+      max_expires_at: new Date(now + ceiling).toISOString(),
       idle_timeout_ms: (remote ? 1 : 2) * 3600_000,
       last_seen_at: new Date(now).toISOString(),
     }

@@ -27,6 +27,21 @@ const node = process.execPath
  */
 const MUTATIONS = [
   {
+    // An approved lifetime that use can extend is not a lifetime.
+    what: 'idle activity extends a session past its approved lifetime',
+    file: 'src/store/vault.js',
+    from: 'const ceiling = ttlMs == null ? hardCapMs : life',
+    to: 'const ceiling = hardCapMs',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
+    what: 'a requested lifetime may exceed the hard ceiling',
+    file: 'src/store/vault.js',
+    from: 'const life = Math.min(ttlMs ?? 8 * 3600_000, hardCapMs)',
+    to: 'const life = ttlMs ?? 8 * 3600_000',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     // A denial nobody can be attributed to cannot be investigated.
     what: 'a policy denial is filed without the session that was refused',
     file: 'src/daemon/pipeline.js',
