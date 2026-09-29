@@ -1,4 +1,19 @@
-# agent-vault
+<p align="center">
+  <img src="docs/logo.svg" width="96" height="96" alt="agent-vault">
+</p>
+
+<h1 align="center">agent-vault</h1>
+
+<p align="center"><strong>Your coding agent never holds a credential.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/test.yml"><img src="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/test.yml/badge.svg" alt="tests"></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-5468FF" alt="Apache 2.0">
+  <img src="https://img.shields.io/badge/node-%E2%89%A5%2020.10-5468FF" alt="Node 20.10 or newer">
+  <img src="https://img.shields.io/badge/dependencies-0-5468FF" alt="no dependencies">
+</p>
+
+<p align="center">Free and open source: a gift to the community from <a href="https://iolitelabs.com/agent-vault">ioLite Labs</a>.</p>
 
 A local credential proxy for coding agents. The agent sends a **placeholder**; the daemon replaces it with the real secret, but only at the exact place that credential is ever injected, only for a destination the grant allows, and only while the placeholder has uses left. The response comes back scrubbed. The agent never holds a credential.
 
@@ -13,11 +28,11 @@ agent                          agent-vault daemon                    upstream
   ◀──────────────────────────────┤                                        │
 ```
 
-This repository is the **M0/M1 working core** of the [v1 build spec](https://claude.ai/artifact/4kFDYZBoSCb8fujQqD4kjg), and is ready to use for what it implements: the mechanism works end to end, it is tested on Node 20, 22 and 24, and everything four independent adversarial reviews found has been fixed with a test behind it — see the [changelog](CHANGELOG.md) for what they found. What is *not* built is listed under [Honest limits](#honest-limits), and the biggest items are the language and storage choices the spec makes differently. Read that section before you point it at a credential that matters.
+This repository is the **M0/M1 working core** of the v1 build spec, and is ready to use for what it implements: the mechanism works end to end, it is tested on Node 20.10 through 24 on Linux and macOS, and everything four independent adversarial reviews found has been fixed with a test behind it — see the [changelog](CHANGELOG.md) for what they found. What is *not* built is listed under [Honest limits](#honest-limits), and the biggest items are the language and storage choices the spec makes differently. Read that section before you point it at a credential that matters.
 
 ## Try it
 
-Requires Node 20.10 or newer. The suite has been run on 20, 22 and 24 on macOS; `.github/workflows/test.yml` adds Linux and the 20.10 floor, but has not executed yet — this is not in a remote. No dependencies to install.
+Requires Node 20.10 or newer. CI runs the suite on Linux and macOS on Node 20.10, 20, 22 and 24, with the security, property and mutation suites as separate jobs so a failure names what broke. No dependencies to install.
 
 ```bash
 node demo/demo.js
@@ -26,7 +41,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 445 tests
+npm test          # 458 tests
 ```
 
 ```bash

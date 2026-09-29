@@ -2,7 +2,7 @@
 
 ## 0.1.0 — first release
 
-The M0/M1 core of the [v1 build spec](https://claude.ai/artifact/4kFDYZBoSCb8fujQqD4kjg): an
+The M0/M1 core of the v1 build spec: an
 agent sends a placeholder, the daemon substitutes the real secret at the one
 declared injection site, for a destination the grant allows, while the
 placeholder has uses left. The response comes back scrubbed.
