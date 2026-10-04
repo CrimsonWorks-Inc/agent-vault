@@ -2,6 +2,22 @@
   "name": "agent-vault",
   "version": "0.1.0",
   "description": "Zero-trust local credential proxy for LLM agents: the agent sends placeholders, the daemon injects real secrets only at declared sites for granted destinations.",
+  "homepage": "https://iolitelabs.com/agent-vault",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CrimsonWorks-Inc/agent-vault.git"
+  },
+  "keywords": [
+    "ai-agents",
+    "credentials",
+    "secrets",
+    "security",
+    "mcp",
+    "prompt-injection",
+    "claude-code",
+    "cursor",
+    "llm"
+  ],
   "type": "module",
   "license": "Apache-2.0",
   "engines": {

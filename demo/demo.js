@@ -45,7 +45,8 @@ try {
     fields: { token: REAL_TOKEN },
     sites: { token: ['header:authorization:Bearer'] },
   })
-  line('stored', `${cred.slug}  ${C.d(`fingerprint ${cred.fields[0].fp8}, ${cred.fields[0].length} bytes`)}`)
+  // The public view gives a size bucket, not the exact length: a length narrows an offline guess.
+  line('stored', `${cred.slug}  ${C.d(`fingerprint ${cred.fields[0].fp8}, ${cred.fields[0].size} length`)}`)
   line('real value', C.r(REAL_TOKEN))
   line('injected only at', cred.fields[0].sites.join(', '))
 

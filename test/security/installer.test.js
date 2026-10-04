@@ -35,9 +35,14 @@ test('the plan names the boundary explicitly', () => {
 
 test('the vault directory is owned by the service user, not root and not you', () => {
   const out = dryRun('install')
+  // The plan names the vault as the boundary. Its path differs by platform
+  // (/var/db/agent-vault/vault on macOS, /var/lib/agent-vault on Linux), so
+  // find it from that line rather than from a path that only one of them has.
+  const vault = out.match(/would (\S+) 0700 \S+ - this is the boundary/)?.[1]
+  assert.ok(vault, 'the plan must name the vault directory as the boundary')
   // The service uid placeholder in a dry run is 399; what matters is that the
   // vault is not owned by uid 0 or by the invoking user.
-  const line = out.split('\n').find((l) => l.includes('/vault') && l.includes('mkdir'))
+  const line = out.split('\n').find((l) => l.includes(`mkdir -m 0700 ${vault} `))
   assert.ok(line, 'the plan must create the vault directory')
   assert.match(line, /owner 399:399/)
   assert.ok(!line.includes('owner 0:0'), 'a root-owned vault would not exclude the agent')
