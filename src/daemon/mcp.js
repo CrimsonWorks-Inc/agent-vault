@@ -178,9 +178,9 @@ export class McpServer {
         case 'resources/list':
           return ok({ resources: [{ uri: 'agent-vault://session', name: 'Current session', mimeType: 'application/json' }] })
         case 'resources/read':
-          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(session), null, 2) }] })
+          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(session, token), null, 2) }] })
         case 'tools/call':
-          return ok(await this.#callTool(params?.name, params?.arguments || {}, session))
+          return ok(await this.#callTool(params?.name, params?.arguments || {}, session, token))
         default:
           return fail(-32601, `unknown method: ${method}`)
       }
@@ -195,24 +195,63 @@ export class McpServer {
     }
   }
 
-  #status(session) {
+  #status(session, token) {
     return {
       daemon: 'agent-vault', version: SERVER_INFO.version,
       locked: this.vault.locked,
       session: session ? { id: session.id, label: session.label, expires_at: session.expires_at } : null,
+      // Why there is no session, when there is none. This is the tool an agent
+      // reaches for when something stopped working, and "session: null" does
+      // not distinguish never-had-one from expired-an-hour-ago.
+      session_problem: session ? null : this.#sessionProblem(token),
       credentials_available: session ? this.vault.grantsForSession(session.id).length : 0,
     }
   }
 
-  async #callTool(name, args, session) {
+  /**
+   * Why the token on this connection does not yield a live session.
+   *
+   * Resolved from the token that travels WITH the message, never from shared
+   * state: the same race that made `handle` take the session and token as
+   * parameters would otherwise report one agent's expiry to another.
+   */
+  #sessionProblem(token) {
+    if (!token) return 'no session token was sent with this connection'
+    const found = this.vault.sessionByToken(token)
+    if (!found) return 'that session token is not recognised; it may belong to a vault that was reset'
+    try { this.vault.assertSessionLive(found); return null } catch (e) { return e.detail || e.message }
+  }
+
+  /**
+   * A refusal the caller can see as a refusal.
+   *
+   * `isError` is how MCP marks a failed tool call, and a client that does not
+   * read it still gets the reason in the text. Returning a plain result would
+   * make "you have no session" look like an answer.
+   */
+  #needsSession(token) {
+    return {
+      isError: true,
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: 'this tool needs a live session',
+          detail: this.#sessionProblem(token),
+          next: 'call vault_request_session to ask a human for one, or ask them to run: agent-vault session create --cred <slug>',
+        }, null, 2),
+      }],
+    }
+  }
+
+  async #callTool(name, args, session, token) {
     const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] })
 
     switch (name) {
       case 'vault_status':
-        return text(this.#status(session))
+        return text(this.#status(session, token))
 
       case 'vault_list_creds': {
-        if (!session) return text({ error: 'no session', next: 'ask the human to run: agent-vault session create' })
+        if (!session) return this.#needsSession(token)
         const out = this.vault.grantsForSession(session.id).map((g) => {
           const cred = this.vault.db.credentials[g.credential_id]
           const profile = getProfile(cred.connector_kind)
@@ -286,7 +325,7 @@ export class McpServer {
       }
 
       case 'vault_get_placeholder': {
-        if (!session) return text({ error: 'no session' })
+        if (!session) return this.#needsSession(token)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}`, known: this.vault.listCredentials().map((c) => c.slug) })
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
@@ -309,14 +348,14 @@ export class McpServer {
       }
 
       case 'vault_approval_status': {
-        if (!session) return text({ error: 'no session' })
+        if (!session) return this.#needsSession(token)
         const status = this.pipeline.approvalStatus(args.approval_id)
         if (!status) return text({ error: `no approval ${args.approval_id}`, detail: 'it may have expired, or already been spent' })
         return text(status)
       }
 
       case 'vault_http': {
-        if (!session) return text({ error: 'no session' })
+        if (!session) return this.#needsSession(token)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}` })
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)

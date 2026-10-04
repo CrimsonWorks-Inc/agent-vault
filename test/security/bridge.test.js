@@ -119,11 +119,22 @@ test('with no replacement to find, the failure is still reported', async () => {
 
     vault.revokeSession(only.session.id, 'test')
     // State still names the revoked token, so there is nothing to swap to.
-    b.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+    //
+    // Asserted on a tool that SPENDS capability rather than on `tools/list`.
+    // Listing tool names is not capability and no longer requires a session -
+    // binding the protocol to one made a client whose session died report the
+    // whole server as unreachable. What must not survive a revocation is the
+    // ability to reach a credential.
+    b.send({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'vault_list_creds', arguments: {} },
+    })
     const res = await b.next()
-    const text = JSON.stringify(res)
-    assert.ok(!res.result?.tools, 'a revoked session must not still list tools')
-    assert.match(text, /AV_SESSION_REVOKED|AV_SESSION_REQUIRED|error/i)
+    assert.equal(res.id, 2, 'the reply must answer the request that was sent')
+    assert.equal(res.result?.isError, true, 'a revoked session still reached a credential')
+    const said = res.result.content[0].text
+    assert.match(said, /needs a live session/i, said.slice(0, 160))
+    assert.match(said, /revoked/i, `the agent is not told why: ${said.slice(0, 160)}`)
   } finally { b.proc.kill() }
 })
 
@@ -158,20 +169,38 @@ test('every line the bridge writes to stdout is a JSON-RPC message', async () =>
   b.proc.stderr.setEncoding('utf8')
   b.proc.stderr.on('data', (c) => stderr.push(c))
   try {
-    // A denial on the very first message, which is the case that hung.
+    // The original trigger was `initialize` under a dead session, because the
+    // endpoint answered 401 problem+json before parsing anything. It no longer
+    // does: the handshake does not depend on capability, which is the point.
+    // So the shape is asserted over the handshake AND the refusal that
+    // replaced it - every line on this channel is still a JSON-RPC message
+    // carrying the id of the request it answers.
     vault.revokeSession(only.session.id, 'test')
     b.send({ jsonrpc: '2.0', id: 7, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } })
-    const res = await b.next()
+    const hello = await b.next()
+    assert.equal(hello.jsonrpc, '2.0', `not a JSON-RPC message: ${JSON.stringify(hello).slice(0, 120)}`)
+    assert.equal(hello.id, 7, 'the reply must carry the id of the request it answers')
+    assert.ok(hello.result?.serverInfo, 'a dead session must not stop the handshake')
 
+    b.send({
+      jsonrpc: '2.0', id: 8, method: 'tools/call',
+      params: { name: 'vault_http', arguments: { cred: 'gh', method: 'GET', path: '/x', reason: 'r' } },
+    })
+    const res = await b.next()
     assert.equal(res.jsonrpc, '2.0', `not a JSON-RPC message: ${JSON.stringify(res).slice(0, 120)}`)
-    assert.equal(res.id, 7, 'the reply must carry the id of the request it answers')
-    assert.ok(res.error, 'a refusal must be a JSON-RPC error, not a problem document')
-    assert.match(res.error.message, /AV_SESSION_REVOKED|AV_SESSION_REQUIRED/)
+    assert.equal(res.id, 8, 'the reply must carry the id of the request it answers')
+    assert.equal(res.result?.isError, true, 'a refusal must be marked as one, not returned as an answer')
     assert.ok(!('type' in res), 'a problem+json document reached stdout')
 
-    // And the human-readable diagnosis goes where diagnostics belong.
-    assert.match(stderr.join(''), /agent-vault mcp:.*(REVOKED|REQUIRED)/i,
-      'the reason must be on stderr, or a human sees a bare protocol error')
+    // And the reason reaches the caller IN BAND. It used to go to stderr,
+    // because the daemon's answer was a problem document the bridge had to
+    // translate and the translation was all there was to report. Now the
+    // refusal is a tool result, which is strictly better: a client that never
+    // shows stderr still shows this.
+    const why = res.result.content[0].text
+    assert.match(why, /revoked/i, `the agent is not told why: ${why.slice(0, 160)}`)
+    assert.match(why, /vault_request_session/, 'the refusal does not say how to recover')
+    assert.equal(stderr.join('').includes('problem'), false, 'a problem document was logged as protocol noise')
   } finally { b.proc.kill() }
 })
 
@@ -220,4 +249,83 @@ test('a daemon restart does not leave the bridge permanently broken', async () =
     const again = await b.next()
     assert.ok(Array.isArray(again.result?.tools), 'the recovery must be durable')
   } finally { b.proc.kill() }
+})
+
+// Whatever the daemon says, stdout stays protocol.
+//
+// On a stdio transport stdout IS the protocol channel, and the bridge used to
+// forward the daemon's HTTP body verbatim. A problem+json document is valid
+// JSON and not a JSON-RPC message, so the client never saw a reply and sat
+// there until it timed out.
+//
+// That used to be reachable through the real daemon, because a dead session
+// made `initialize` answer 401 problem+json. It no longer does - the handshake
+// is not bound to a session any more - and rewriting those tests quietly left
+// this protection untested, which the mutation check caught and I had not.
+//
+// So it is driven against a stub that answers the way the daemon still can:
+// a browser Origin, a wrong method, a 5xx, anything not written as protocol.
+test('a non-protocol answer from the daemon still reaches the client as JSON-RPC', async () => {
+  const { createServer } = await import('node:http')
+  const stubDir = mkdtempSync(join(tmpdir(), 'av-stub-'))
+  const sock = join(stubDir, 'control.sock')
+
+  // The gateway the bridge will be told to talk to, answering /mcp with a
+  // problem document rather than a JSON-RPC message.
+  const gateway = createServer((req, res) => {
+    res.writeHead(503, { 'content-type': 'application/problem+json' })
+    res.end(JSON.stringify({
+      type: 'https://agent-vault.dev/errors/AV_UPSTREAM', code: 'AV_UPSTREAM',
+      detail: 'the vault is having a bad day', hint: 'try later',
+    }))
+  })
+  await new Promise((r) => gateway.listen(0, '127.0.0.1', r))
+
+  // The control socket the bridge reads its endpoint from.
+  const control = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ gateway_port: gateway.address().port }))
+  })
+  await new Promise((r) => control.listen(sock, r))
+
+  writeFileSync(join(stubDir, 'cli-state.json'), JSON.stringify({ token: 'avs1.stub.notreal' }), { mode: 0o600 })
+
+  const proc = spawn(process.execPath, [CLI, 'mcp'], {
+    env: { ...process.env, AGENT_VAULT_DIR: stubDir, AGENT_VAULT_SESSION: '' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const out = []
+  const stderr = []
+  proc.stdout.setEncoding('utf8')
+  proc.stderr.setEncoding('utf8')
+  proc.stdout.on('data', (c) => out.push(c))
+  proc.stderr.on('data', (c) => stderr.push(c))
+
+  try {
+    proc.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 42, method: 'initialize', params: {} })}\n`)
+    const deadline = Date.now() + 5000
+    while (!out.join('').includes('\n') && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    const lines = out.join('').split('\n').filter((l) => l.trim())
+    assert.ok(lines.length, 'the bridge answered nothing at all, which is the hang this prevents')
+
+    for (const line of lines) {
+      const msg = JSON.parse(line)
+      assert.equal(msg.jsonrpc, '2.0', `not a JSON-RPC message: ${line.slice(0, 140)}`)
+      assert.equal(msg.id, 42, 'the reply must carry the id of the request it answers')
+      assert.ok(msg.error, 'a refusal must be a JSON-RPC error, not a problem document')
+      assert.match(msg.error.message, /AV_UPSTREAM|bad day/, msg.error.message)
+      assert.ok(!('type' in msg), 'a problem+json document reached stdout')
+    }
+
+    // And the diagnosis goes where diagnostics belong, since there is no tool
+    // result to carry it on this path.
+    assert.match(stderr.join(''), /agent-vault mcp:/, 'nothing on stderr to say what happened')
+  } finally {
+    proc.kill()
+    gateway.close()
+    control.close()
+    rmSync(stubDir, { recursive: true, force: true })
+  }
 })

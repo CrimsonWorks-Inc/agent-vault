@@ -27,6 +27,24 @@ const node = process.execPath
  */
 const MUTATIONS = [
   {
+    // Binding the PROTOCOL to capability, which is what broke reconnects.
+    what: 'the MCP endpoint refuses the handshake without a live session',
+    file: 'src/daemon/server.js',
+    from: 'let session = this.vault.sessionByToken(token)',
+    to: "let session = this.vault.sessionByToken(token); if (!session) return send(401, { code: 'AV_SESSION_REQUIRED' })",
+    tests: ['test/security/mcp.test.js'],
+  },
+  {
+    // And the other direction: the tools must still check for themselves. The
+    // anchor carries the case label, because the guard line alone appears four
+    // times and the checker refuses an ambiguous anchor rather than guessing.
+    what: 'a tool that spends capability runs without a session',
+    file: 'src/daemon/mcp.js',
+    from: "case 'vault_http': {\n        if (!session) return this.#needsSession(token)",
+    to: "case 'vault_http': {",
+    tests: ['test/security/mcp.test.js', 'test/security/bridge.test.js'],
+  },
+  {
     // The approval hash. Binding the placeholder's identity instead of its
     // capability made every held write un-resendable over MCP.
     what: 'an approval is bound to which placeholder carried the credential',

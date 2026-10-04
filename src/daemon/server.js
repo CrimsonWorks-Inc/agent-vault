@@ -584,9 +584,28 @@ export class Daemon {
     }
 
     const token = req.headers['av-session'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-    const session = this.vault.sessionByToken(token)
-    if (!session) return send(401, { code: 'AV_SESSION_REQUIRED', detail: 'send Authorization: Bearer <session token>' })
-    try { this.vault.assertSessionLive(session) } catch (e) { return send(401, e.toProblem()) }
+    // Authentication is per TOOL, not per connection. A session grants access
+    // to CREDENTIALS; it is not what makes the protocol work. This route used
+    // to refuse the whole endpoint without a live one — before parsing a single
+    // message — so `initialize` itself failed and the client reported the
+    // server as unreachable. The vault was fine; one session had expired.
+    //
+    // Worse, it put the cure behind the disease: `vault_request_session` exists
+    // precisely so an agent with no session can ask a human for one, and it was
+    // unreachable exactly when it was needed. So was `vault_status`, which is
+    // how you would find out why.
+    //
+    // This is what the HTTP API already does. `/v1/status` answers before any
+    // session check and `POST /v1/session-requests` has none, because asking is
+    // not getting. MCP now matches: the handshake and the two ungated tools
+    // work without a session, and every tool that spends capability checks for
+    // itself in #callTool. An expired token is treated as no token rather than
+    // as an error, so a client reconnecting after an expiry comes up and can
+    // say what is wrong.
+    let session = this.vault.sessionByToken(token)
+    if (session) {
+      try { this.vault.assertSessionLive(session) } catch { session = null }
+    }
     this.currentMcpSession = session
     // Not stored on the server object: it is passed with each message below.
 

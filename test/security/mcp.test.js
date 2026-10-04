@@ -70,19 +70,73 @@ test('initialize returns a protocol version, server info and a session id', asyn
   assert.match(res.body.result.instructions, /placeholders/i)
 })
 
-test('the endpoint refuses a request with no bearer token', async () => {
-  const res = await mcpPost({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { auth: false })
-  assert.equal(res.status, 401)
-  assert.equal(res.body.code, 'AV_SESSION_REQUIRED')
+// These two used to assert that `tools/list` answered 401 without a bearer.
+// That made the PROTOCOL depend on holding capability: a client whose session
+// expired could not complete `initialize`, so it reported the whole server as
+// unreachable, and `vault_request_session` - the tool for getting a session -
+// was unreachable precisely when it was needed. The property worth keeping is
+// not "the endpoint refuses"; it is "no tool spends capability without one",
+// which is now asserted where capability is actually spent.
+const callTool = (name, args = {}, opts = {}) =>
+  mcpPost({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name, arguments: args } }, opts)
+
+const CAPABILITY_TOOLS = [
+  ['vault_list_creds', {}],
+  ['vault_get_placeholder', { cred: 'gh', reason: 'x' }],
+  ['vault_http', { cred: 'gh', method: 'GET', path: '/user', reason: 'x' }],
+  ['vault_approval_status', { approval_id: 'ap_whatever' }],
+]
+
+test('no bearer token buys no capability, on any tool that spends it', async () => {
+  for (const [name, args] of CAPABILITY_TOOLS) {
+    const res = await callTool(name, args, { auth: false })
+    assert.equal(res.status, 200, `${name} should answer, not refuse the transport`)
+    assert.equal(res.body.result.isError, true, `${name} ran without a session`)
+    const said = res.body.result.content[0].text
+    assert.match(said, /needs a live session/, `${name}: ${said.slice(0, 120)}`)
+  }
 })
 
 test('the MCP session id alone never authenticates', async () => {
+  // A routing key is not a credential. It used to be refused at the door, which
+  // proved nothing about what it could reach once inside.
   const init = await mcpPost({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
   const sid = init.headers['mcp-session-id']
-  const res = await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, {
-    auth: false, headers: { 'mcp-session-id': sid },
-  })
-  assert.equal(res.status, 401, 'a routing key is not a credential')
+  assert.ok(sid, 'initialize should issue a routing id')
+
+  for (const [name, args] of CAPABILITY_TOOLS) {
+    const res = await callTool(name, args, { auth: false, headers: { 'mcp-session-id': sid } })
+    assert.equal(res.body.result.isError, true, `${name} accepted a routing key as authorization`)
+  }
+})
+
+test('the handshake works without a session, and says what is missing', async () => {
+  // The bug this file's 401s caused: an expired session made `initialize` fail,
+  // so the client reported the vault as unreachable and the one tool that
+  // recovers from it could not be called.
+  const init = await mcpPost({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }, { auth: false })
+  assert.equal(init.status, 200, 'the handshake must not require capability')
+  assert.equal(init.body.result.serverInfo.name, 'agent-vault')
+
+  const listed = await mcpPost({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { auth: false })
+  assert.ok(listed.body.result.tools.length, 'an agent with no session cannot see how to get one')
+
+  // And status says why, rather than leaving the agent to guess.
+  const status = await callTool('vault_status', {}, { auth: false })
+  const reported = JSON.parse(status.body.result.content[0].text)
+  assert.equal(reported.session, null)
+  assert.match(reported.session_problem, /no session token/i)
+  assert.equal(reported.locked, false, 'status should still describe the vault itself')
+})
+
+test('asking for a session needs no session, exactly as the HTTP route does not', async () => {
+  // `POST /v1/session-requests` is ungated by design: asking is not getting,
+  // and nothing exists until a human answers. The MCP tool is the same door.
+  const res = await callTool('vault_request_session', { cred: 'gh', reason: 'no session yet' }, { auth: false })
+  assert.notEqual(res.body.result.isError, true, `an agent with no session cannot ask for one: ${res.body.result.content[0].text}`)
+  const asked = JSON.parse(res.body.result.content[0].text)
+  assert.equal(asked.state, 'pending')
+  assert.ok(asked.request_id, 'the agent needs an id to poll')
 })
 
 test('an unknown MCP session id is rejected rather than silently accepted', async () => {
