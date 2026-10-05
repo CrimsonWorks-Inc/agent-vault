@@ -15,6 +15,7 @@ import { generateKeyPairSync, createHash, sign as cryptoSign, randomBytes } from
 import { Vault } from '../../src/store/vault.js'
 import { Daemon } from '../../src/daemon/server.js'
 import { UiServer } from '../../src/ui/server.js'
+import { operationFor } from '../../src/ui/webauthn.js'
 
 const PASSPHRASE = 'ui-test-passphrase'
 const SECRET = 'ghp_UITEST00112233445566778899aabbccddee'
@@ -191,6 +192,10 @@ test('before enrollment, every mutating call is refused', async () => {
     ['POST', 'credentials', { slug: 'x', kind: 'http', value: 'y' }],
     ['POST', 'sessions', { cred: 'demo' }],
     ['DELETE', 'credentials?slug=demo', null],
+    // Deciding several at once is a mutating call like any other. A bulk
+    // action that skipped the gate would be the cheapest way to approve
+    // everything in the queue without a human anywhere near it.
+    ['POST', 'pending/decide-many', { decisions: [{ id: 'sr_x', kind: 'session', granted: true }] }],
   ]) {
     const res = await api(method, path, body)
     assert.equal(res.status, 412, `${method} ${path} was not refused`)
@@ -289,4 +294,28 @@ test('the enrollment is recorded in the audit log', () => {
   vault.unlockWith({ passphrase: PASSPHRASE })
   const kinds = vault.audit.read({ limit: 100 }).map((r) => r.kind)
   assert.ok(kinds.includes('presence.factor_added'))
+})
+
+// The page must not be able to settle a batch by leaving the proof out.
+test('a batch with no signature is refused, like a single decision', async () => {
+  const res = await api('POST', 'pending/decide-many', {
+    decisions: [{ id: 'sr_whatever', kind: 'session', granted: true }],
+  })
+  assert.notEqual(res.status, 200, 'an unsigned batch was accepted')
+})
+
+// What the page signs and what this process verifies must be the same list.
+test('the operation bound for a batch is the list exactly as it was sent', async () => {
+  const decisions = [
+    { id: 'sr_b', kind: 'session', granted: true },
+    { id: 'sr_a', kind: 'request', granted: false },
+  ]
+  // Built through the server's own builder, over the body the page sends -
+  // the same call #requirePresence makes before it compares.
+  const op = operationFor('pending.decide_many', { decisions })
+  assert.equal(op.op, 'pending.decide_many')
+  // Verbatim: order kept, nothing normalised away. Normalising on one side
+  // only would let the signature and the execution describe different sets.
+  assert.deepEqual(op.decisions, decisions)
+  assert.equal(op.decisions[0].id, 'sr_b', 'the list was reordered on the way to being signed')
 })

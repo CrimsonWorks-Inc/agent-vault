@@ -21,6 +21,7 @@ import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN } from '../core/scrub.js'
 import { SessionRequests, proposalOf } from './session-requests.js'
+import { checkDecisions } from '../pending.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
 // of a version string are two chances to report one the code is not, and the
@@ -131,6 +132,57 @@ export class Daemon {
    * path. Every ceiling in here applies either way: approval supplies the
    * human, never permission.
    */
+  /**
+   * Settle one pending item, whatever kind it is.
+   *
+   * Only ever called after a gate. It exists so the bulk route and the single
+   * routes converge on identical code: the moment they diverge, one of them
+   * becomes the laxer path and that is the one an agent will find.
+   */
+  #settleOne(d) {
+    if (d.kind === 'session') {
+      const record = this.sessionRequests.get(d.id)
+      if (!record) throw deny('AV_NOT_FOUND', `no session request ${d.id}`)
+      if (record.state !== 'pending') {
+        throw deny('AV_POLICY_DENIED', `already ${record.state}`, { rule: 'session_requests' })
+      }
+      const final = proposalOf({ ...record.proposal, ...proposalOf(d.overrides || {}) })
+      return this.#settleSessionRequest(record, d.granted, final)
+    }
+    return this.pipeline.decideApproval(d.id, d.granted)
+  }
+
+  /** The decision itself, after the gate has let it through. */
+  #settleSessionRequest(record, granted, final) {
+    if (!granted) {
+      record.state = 'denied'
+      record.decided_at = new Date().toISOString()
+      this.sessionRequests.persist()
+      this.vault.audit?.write('session_request.denied', { request_id: record.id })
+      return SessionRequests.redact(record)
+    }
+    // Created through the same helper the human's own route uses, so an
+    // approved proposal cannot reach a second, laxer path.
+    const created = this.#createSession({
+      ...final,
+      budget: final.budget,
+      ttl_hours: final.ttl_minutes ? final.ttl_minutes / 60 : undefined,
+      label: `requested by an agent (${record.id})`,
+    })
+    record.state = 'approved'
+    record.decided_at = new Date().toISOString()
+    record.granted_proposal = final
+    record.result = created
+    this.sessionRequests.persist()
+    this.vault.audit?.write('session_request.approved', {
+      request_id: record.id,
+      session_id: created.session_id,
+      granted: final,
+      edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
+    })
+    return { ...SessionRequests.redact(record), granted: final }
+  }
+
   #createSession(input) {
           const cred = this.vault.findCredential(input.cred)
           if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
@@ -263,6 +315,9 @@ export class Daemon {
       case 'POST /v1/sessions': return of('session.create', input)
       case 'POST /v1/placeholders': return of('placeholder.issue', input)
       case 'POST /v1/approvals': return of('approval.approve', input)
+      // Bound to the list exactly as it was sent. Normalising here would mean
+      // the human signed one thing and the daemon executed another.
+      case 'POST /v1/pending/decide-many': return of('pending.decide_many', { decisions: input?.decisions })
       case 'POST /v1/listeners': return of('listener.add', input)
       // One route, two opposite actions. `action` is part of the bound
       // operation either way, but the op NAME is what the UI shows the human,
@@ -821,33 +876,45 @@ export class Daemon {
             }),
             input.presence,
           )
-          if (!input.granted) {
-            record.state = 'denied'
-            record.decided_at = new Date().toISOString()
-            this.sessionRequests.persist()
-            this.vault.audit?.write('session_request.denied', { request_id: record.id })
-            return json(200, SessionRequests.redact(record))
+          return json(200, this.#settleSessionRequest(record, input.granted, final))
+        }
+
+        // Several decisions, one act of presence.
+        //
+        // The signature binds the list VERBATIM, so the set is fixed at the
+        // moment it is signed. "Approve everything pending" would have let an
+        // agent queue one more request between the signature and the execution
+        // and have it approved by a human who never saw it — the same hole as
+        // headers outside the request hash, which this codebase has paid for
+        // twice. Every item is named and every verdict is explicit, and
+        // anything the list does not mention is not touched.
+        //
+        // Each item then goes through the SAME settle path as the single route,
+        // so a batch cannot reach a second, laxer one. An item that is no
+        // longer pending is reported rather than skipped in silence: someone
+        // who decided five things is owed an answer about five things.
+        case 'POST /v1/pending/decide-many': {
+          const problem = checkDecisions(input?.decisions)
+          if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'bulk_decision' })
+          this.#requireHumanForWidening(
+            'bulk decision',
+            webauthn.operationFor('pending.decide_many', { decisions: input.decisions }),
+            input.presence,
+          )
+          const decided = []
+          for (const d of input.decisions) {
+            try {
+              decided.push({ id: d.id, kind: d.kind, outcome: 'decided', result: this.#settleOne(d) })
+            } catch (e) {
+              decided.push({ id: d.id, kind: d.kind, outcome: 'skipped', reason: e.detail || e.message })
+            }
           }
-          // Created through the same helper the human's own route uses, so an
-          // approved proposal cannot reach a second, laxer path.
-          const created = this.#createSession({
-            ...final,
-            budget: final.budget,
-            ttl_hours: final.ttl_minutes ? final.ttl_minutes / 60 : undefined,
-            label: `requested by an agent (${record.id})`,
+          this.vault.audit?.write('pending.decided_many', {
+            granted: input.decisions.filter((d) => d.granted).map((d) => d.id),
+            denied: input.decisions.filter((d) => !d.granted).map((d) => d.id),
+            skipped: decided.filter((r) => r.outcome === 'skipped').map((r) => r.id),
           })
-          record.state = 'approved'
-          record.decided_at = new Date().toISOString()
-          record.granted_proposal = final
-          record.result = created
-          this.sessionRequests.persist()
-          this.vault.audit?.write('session_request.approved', {
-            request_id: record.id,
-            session_id: created.session_id,
-            granted: final,
-            edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
-          })
-          return json(200, { ...SessionRequests.redact(record), granted: final })
+          return json(200, { decided })
         }
 
         case 'GET /v1/sessions':

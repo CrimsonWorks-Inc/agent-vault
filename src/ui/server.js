@@ -172,7 +172,8 @@ export class UiServer {
    */
   static GATED = new Set([
     'POST credentials', 'DELETE credentials', 'POST sessions',
-    'DELETE sessions', 'POST approvals', 'POST session-requests/decide', 'POST lock',
+    'DELETE sessions', 'POST approvals', 'POST session-requests/decide',
+    'POST pending/decide-many', 'POST lock',
     'POST touchid/enroll', 'POST touchid/remove',
   ])
 
@@ -369,6 +370,36 @@ export class UiServer {
         // two behind one endpoint and having to guess which signature to make.
         // WHICH route applies to an id is the shared module's answer, carried
         // on the item the page was given.
+        // One act of presence, several decisions. The page sends the list it
+        // showed; the daemon binds that list verbatim and settles each item
+        // through the same path a single decision takes.
+        case 'POST pending/decide-many': {
+          const answered = await this.#control('POST', '/v1/pending/decide-many', {
+            decisions: body?.decisions,
+            presence: body?.presence,
+          })
+          // Collecting a session token is ONCE only, and this process can hold
+          // exactly one in the state file. Collecting several would consume
+          // every agent's one chance and then keep only the last, destroying
+          // capability a human had just granted. So this collects only when the
+          // batch granted a single session; otherwise each agent collects its
+          // own by polling, which is the normal path anyway.
+          const grantedSessions = (answered?.decided || []).filter(
+            (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
+          )
+          if (grantedSessions.length === 1) {
+            await collectApproved(
+              { id: grantedSessions[0].id, kind: 'session' },
+              { get: (p) => this.#control('GET', p), remember: (sn) => rememberSession(sn, this.statePath) },
+            ).catch(() => null)
+            answered.recorded = grantedSessions[0].id
+          } else if (grantedSessions.length > 1) {
+            answered.recorded = null
+            answered.note = 'several sessions were approved, so each agent collects its own; this page records one at a time'
+          }
+          return this.#send(res, 200, answered)
+        }
+
         case 'POST session-requests/decide': {
           const answered = await this.#control('POST', '/v1/session-requests/decide', {
             id: body?.id,
@@ -478,6 +509,10 @@ export class UiServer {
       case 'POST sessions': return of('session.create', body)
       case 'DELETE sessions': return of('session.revoke', { sid: url.searchParams.get('sid') })
       case 'POST approvals': return of(body?.granted === false ? 'approval.deny' : 'approval.approve', body)
+      // Bound to the list exactly as the page sent it, which is the same thing
+      // the daemon binds. Normalising on either side would let the signature
+      // and the execution describe different sets.
+      case 'POST pending/decide-many': return of('pending.decide_many', { decisions: body?.decisions })
       case 'POST session-requests/decide':
         // The same fields the daemon binds its own check to: the id, the
         // verdict and any narrowing. A signature for "approve, narrowed to GET

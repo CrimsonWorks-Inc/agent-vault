@@ -654,3 +654,119 @@ test('a requested lifetime cannot exceed the hard ceiling', () => {
     rmSync(own, { recursive: true, force: true })
   }
 })
+
+// Bulk decisions: an agent must not be able to settle a batch, the shapes that
+// hide an approval must be refused, and the batch path must not be a laxer one.
+//
+// On their own daemon, because a test above deliberately fills the pending
+// store to its cap - every request on the shared one is refused after it, and
+// these would pass by never reaching the code they are about.
+async function withOwnDaemon(fn) {
+  const own = mkdtempSync(join(tmpdir(), 'av-bulk-'))
+  const v = Vault.create(own, { factor: 'none' })
+  v.addCredential({
+    slug: 'gh', kind: 'github', connector: { host: 'api.github.com' },
+    fields: { token: 'ghp_BULK00112233445566778899aabbcc' },
+    sites: { token: ['header:authorization:Bearer'] },
+  })
+  v.setPassphrase(PASS)
+  const sock = join(own, 'c.sock')
+  const d = await new Daemon(v, { port: 0, socketPath: sock }).start()
+  const call = (method, path, body) => new Promise((resolve) => {
+    const req = unixRequest({ socketPath: sock, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+      const c = []
+      res.on('data', (x) => c.push(x))
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+    })
+    req.on('error', () => resolve({ status: 0, body: {} }))
+    req.end(body ? JSON.stringify(body) : undefined)
+  })
+  const here = async () => { assert.equal((await call('POST', '/v1/presence/window', { passphrase: PASS })).status, 200) }
+  const away = () => { d.presenceGraceUntil = 0 }
+  const ask = async (paths) => (await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths })).body.id
+  try { await fn({ call, here, away, ask, vault: v }) } finally {
+    await d.stop()
+    rmSync(own, { recursive: true, force: true })
+  }
+}
+
+test('an agent cannot settle a batch any more than it can settle one', async () => {
+  await withOwnDaemon(async ({ call, away, ask }) => {
+    away()
+    const id = await ask(['/user'])
+    assert.ok(id, 'the fixture produced no request')
+    const res = await call('POST', '/v1/pending/decide-many', {
+      decisions: [{ id, kind: 'session', granted: true }],
+    })
+    assert.equal(res.status, 401, `an agent approved a batch: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED')
+
+    const still = await call('GET', `/v1/session-requests/collect?id=${id}`)
+    assert.equal(still.body.state, 'pending', 'a refused batch settled something anyway')
+  })
+})
+
+test('a batch refuses the shapes that would hide an approval', async () => {
+  await withOwnDaemon(async ({ call, here, ask }) => {
+    await here()
+    const id = await ask(['/user'])
+    const bad = [
+      [[], 'nothing was selected'],
+      ['not-a-list', 'must be a list'],
+      // `granted: "false"` is a non-empty string. Under a truthiness check this
+      // APPROVES, which is the worst direction for a typo to fail in.
+      [[{ id, kind: 'session', granted: 'false' }], 'must be true or false'],
+      [[{ id, kind: 'session', granted: true }, { id, kind: 'session', granted: false }], 'appears twice'],
+      [[{ id, kind: 'elsewhere', granted: true }], 'unknown kind'],
+      [[{ id, kind: 'session', granted: true, presence: 'smuggled' }], 'cannot carry'],
+      [Array.from({ length: 26 }, () => ({ id, kind: 'session', granted: true })), 'too many at once'],
+    ]
+    for (const [decisions, expected] of bad) {
+      const res = await call('POST', '/v1/pending/decide-many', { decisions })
+      assert.equal(res.status, 403, `accepted ${JSON.stringify(decisions).slice(0, 60)}`)
+      assert.match(res.body.detail, new RegExp(expected), res.body.detail)
+    }
+    const still = await call('GET', `/v1/session-requests/collect?id=${id}`)
+    assert.equal(still.body.state, 'pending')
+  })
+})
+
+test('a batch settles through the same path as a single decision', async () => {
+  await withOwnDaemon(async ({ call, here, vault: v }) => {
+    await here()
+    const id = (await call('POST', '/v1/session-requests', {
+      cred: 'gh', methods: ['GET', 'POST'], paths: ['/user'],
+    })).body.id
+    const before = Object.keys(v.db.sessions).length
+    const res = await call('POST', '/v1/pending/decide-many', {
+      decisions: [{ id, kind: 'session', granted: true, overrides: { methods: ['GET'] } }],
+    })
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    // The narrowing applied, which means it went through proposalOf and
+    // #createSession rather than some second, looser path.
+    assert.deepEqual(res.body.decided[0].result.granted.methods, ['GET'])
+    assert.equal(Object.keys(v.db.sessions).length, before + 1, 'no session was created')
+  })
+})
+
+test('an item that stopped being pending is reported, not skipped in silence', async () => {
+  await withOwnDaemon(async ({ call, here, ask }) => {
+    await here()
+    const gone = await ask(['/user'])
+    const live = await ask(['/user2'])
+    await call('POST', '/v1/session-requests/decide', { id: gone, granted: false })
+
+    await here()
+    const res = await call('POST', '/v1/pending/decide-many', {
+      decisions: [
+        { id: gone, kind: 'session', granted: true },
+        { id: live, kind: 'session', granted: true },
+      ],
+    })
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    const byId = Object.fromEntries(res.body.decided.map((r) => [r.id, r]))
+    assert.equal(byId[gone].outcome, 'skipped', 'a denied request was re-decided by a batch')
+    assert.match(byId[gone].reason, /already denied/)
+    assert.equal(byId[live].outcome, 'decided', 'one dead item stopped the rest of the batch')
+  })
+})

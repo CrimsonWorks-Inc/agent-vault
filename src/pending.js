@@ -134,3 +134,54 @@ export function describeGranted(g = {}) {
   if (g.uses) bits.push(`${g.uses}-use placeholder`)
   return bits.join(' · ')
 }
+
+/**
+ * A batch of decisions a human is about to make in one act of presence.
+ *
+ * Bulk approval is where consent quietly becomes a formality, so the shape is
+ * deliberately narrow. The signature binds this list VERBATIM, which means the
+ * set is fixed at the moment it is signed: "approve everything pending" would
+ * have let an agent queue one more request between the signature and the
+ * execution and have it approved by a human who never saw it. That is the same
+ * hole as headers outside the request hash, and this codebase has paid for it
+ * twice already.
+ *
+ * So every item is named, every verdict is explicit, and anything the list does
+ * not mention is not touched.
+ */
+export const MAX_BULK_DECISIONS = 25
+
+const DECISION_KEYS = new Set(['id', 'kind', 'granted', 'overrides'])
+const KINDS = new Set(SOURCES.map((s) => s.kind))
+
+/**
+ * @returns {string|null} why the list is not usable, or null if it is.
+ *
+ * Validation is separate from binding on purpose. The signature covers exactly
+ * the bytes that were sent; this decides whether to act on them. Normalising
+ * first would mean the human signed one thing and the daemon executed another.
+ */
+export function checkDecisions(raw) {
+  if (!Array.isArray(raw)) return 'decisions must be a list'
+  if (!raw.length) return 'nothing was selected'
+  if (raw.length > MAX_BULK_DECISIONS) {
+    return `too many at once (${raw.length}); ${MAX_BULK_DECISIONS} is the most a person can actually read`
+  }
+  const seen = new Set()
+  for (const d of raw) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return 'each decision must be an object'
+    for (const k of Object.keys(d)) {
+      if (!DECISION_KEYS.has(k)) return `a decision cannot carry ${JSON.stringify(k)}`
+    }
+    if (typeof d.id !== 'string' || !d.id) return 'each decision needs an id'
+    if (!KINDS.has(d.kind)) return `unknown kind ${JSON.stringify(d.kind)}`
+    // Not truthiness. `granted: "false"` is a string and would have approved.
+    if (typeof d.granted !== 'boolean') return `the verdict for ${d.id} must be true or false`
+    if (d.overrides !== undefined && (typeof d.overrides !== 'object' || d.overrides === null || Array.isArray(d.overrides))) {
+      return `the narrowing for ${d.id} must be an object`
+    }
+    if (seen.has(d.id)) return `${d.id} appears twice, with no way to say which verdict wins`
+    seen.add(d.id)
+  }
+  return null
+}

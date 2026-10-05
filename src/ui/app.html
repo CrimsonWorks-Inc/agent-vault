@@ -116,6 +116,16 @@
     border: 1px solid var(--line); background: var(--bg); color: var(--ink);
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  /* The rule above is for form FIELDS, which are full width by design. A
+     checkbox inheriting width:100% stretched across the whole card with its
+     label shoved to the far edge - every test passed and the page was visibly
+     broken, which is what looking at it is for. */
+  input[type="checkbox"] {
+    width: auto; flex: none; margin: 0; padding: 0;
+    accent-color: var(--accent); cursor: pointer;
+  }
+  .pick { display: flex; gap: 8px; align-items: center; cursor: pointer; width: fit-content; }
+  .pick span { color: var(--muted); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 12px; }
 
   .notice { border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent);
@@ -940,8 +950,20 @@ ${c.cli} ui                         open this page`)}`,
         <header class="page"><h1>Approvals</h1><span class="pill warn">${pending.length} waiting</span></header>
         <p class="sub">The summary is written by the daemon from what it actually received.
           The reason is whatever the agent claimed, and is not verified.</p>
+        <div class="card" id="bulkBar" hidden><div class="body">
+          <div class="meta" style="margin-bottom:8px"><strong><span id="bulkCount">0</span> selected</strong>
+            &middot; one signature covers exactly these, and nothing that arrives after.</div>
+          <div class="actions">
+            <button class="action primary" data-act="decide-many" data-granted="1">Approve selected</button>
+            <button class="action danger" data-act="decide-many" data-granted="">Deny selected</button>
+            <button class="action" data-act="select-none">Clear</button>
+          </div>
+        </div></div>
         ${pending.map((item) => `
           <div class="card"><div class="body">
+            <label class="meta pick" style="margin-bottom:8px">
+              <input type="checkbox" class="bulk-pick" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}">
+              <span>select</span></label>
             <div class="meta" style="color:var(--muted);margin-bottom:6px">
               ${item.kind === 'session' ? 'session requested' : 'held request'}
               &middot; <span class="mono">${esc(item.id)}</span>
@@ -1124,6 +1146,46 @@ ${c.cli} ui                         open this page`)}`,
      * given. The signature covers the verdict AND any narrowing, so an approval
      * of "GET /user only" cannot be replayed to grant the wide original.
      */
+    /**
+     * Several decisions, one signature.
+     *
+     * The list is built from what is TICKED, never from "everything pending" —
+     * the signature binds this exact set, so a request that arrives between
+     * signing and executing is not covered by it and is not touched.
+     *
+     * Per-item narrowing is deliberately not carried here: a narrowing is a
+     * considered edit to one proposal, and a screen where you tick twelve boxes
+     * is not where that attention exists. Narrow one at a time, in its own card.
+     */
+    async 'decide-many'(btn) {
+      const granted = btn.dataset.granted === '1'
+      const decisions = [...document.querySelectorAll('.bulk-pick:checked')]
+        .map((box) => ({ id: box.dataset.id, kind: box.dataset.kind, granted }))
+      if (!decisions.length) return toast('Nothing selected')
+
+      const op = await operationFor('pending.decide_many', { decisions })
+      const answered = await gated(op, (proof) => api('POST', 'pending/decide-many', { decisions, presence: proof }))
+
+      // Say what actually happened to each one. An item can stop being pending
+      // between the page rendering and the signature landing, and a human who
+      // decided five things is owed an answer about five things.
+      const skipped = (answered?.decided || []).filter((r) => r.outcome === 'skipped')
+      if (skipped.length) {
+        toast(`${decisions.length - skipped.length} ${granted ? 'approved' : 'denied'}, ${skipped.length} no longer pending`)
+      } else {
+        toast(`${decisions.length} ${granted ? 'approved' : 'denied'}`)
+      }
+      if (answered?.note) toast(answered.note)
+      selected.clear()
+      render()
+    },
+
+    'select-none'() {
+      selected.clear()
+      for (const box of document.querySelectorAll('.bulk-pick:checked')) box.checked = false
+      syncBulkBar()
+    },
+
     async decide(btn) {
       const id = btn.dataset.id
       const granted = btn.dataset.granted === '1'
@@ -1146,6 +1208,24 @@ ${c.cli} ui                         open this page`)}`,
       render()
     },
   }
+
+  /** The bar appears only when something is ticked, and counts what is. */
+  function syncBulkBar() {
+    const bar = document.getElementById('bulkBar')
+    if (!bar) return
+    const n = document.querySelectorAll('.bulk-pick:checked').length
+    bar.hidden = n === 0
+    const count = document.getElementById('bulkCount')
+    if (count) count.textContent = String(n)
+  }
+
+  document.addEventListener('change', (e) => {
+    const box = e.target
+    if (!box.classList?.contains('bulk-pick')) return
+    if (box.checked) selected.add(box.dataset.id)
+    else selected.delete(box.dataset.id)
+    syncBulkBar()
+  })
 
   document.addEventListener('click', async (e) => {
     const navBtn = e.target.closest('nav button[data-view]')
@@ -1188,9 +1268,32 @@ ${c.cli} ui                         open this page`)}`,
     }
   })
 
+  /**
+   * Which cards are ticked, kept outside the DOM.
+   *
+   * The approvals view re-renders every five seconds so new requests appear.
+   * That wiped the selection: tick six, pause to read one, and they are all
+   * clear again before you look up. Nobody would have noticed from the tests -
+   * every one of them passed - and nobody would have trusted the feature after
+   * using it twice.
+   */
+  const selected = new Set()
+
+  function restoreSelection() {
+    const boxes = [...document.querySelectorAll('.bulk-pick')]
+    if (!boxes.length) return
+    // An item that is no longer pending drops out of the selection with it, so
+    // a tick cannot outlive the thing it was about.
+    const present = new Set(boxes.map((b) => b.dataset.id))
+    for (const id of [...selected]) if (!present.has(id)) selected.delete(id)
+    for (const box of boxes) box.checked = selected.has(box.dataset.id)
+    syncBulkBar()
+  }
+
   async function render() {
     try {
       el.innerHTML = await views[current]()
+      restoreSelection()
     } catch (err) {
       el.innerHTML = `<header class="page"><h1>Cannot reach the daemon</h1></header>
         <p class="sub">${esc(err.message)}</p>

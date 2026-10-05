@@ -27,6 +27,22 @@ const node = process.execPath
  */
 const MUTATIONS = [
   {
+    // Bulk approval without a gate is an agent approving its own work.
+    what: 'a batch of decisions is settled with no human present',
+    file: 'src/daemon/server.js',
+    from: "            'bulk decision',",
+    to: "            'bulk decision', null) || (0 &&",
+    tests: ['test/security/session-requests.test.js', 'test/security/widening.test.js'],
+  },
+  {
+    // `granted: "false"` is a non-empty string: under truthiness it APPROVES.
+    what: 'a batch verdict is read by truthiness rather than as a boolean',
+    file: 'src/pending.js',
+    from: "if (typeof d.granted !== 'boolean')",
+    to: 'if (false)',
+    tests: ['test/security/session-requests.test.js'],
+  },
+  {
     // Binding the PROTOCOL to capability, which is what broke reconnects.
     what: 'the MCP endpoint refuses the handshake without a live session',
     file: 'src/daemon/server.js',
@@ -304,8 +320,13 @@ const MUTATIONS = [
   {
     what: 'a session request is created from what was asked, not what was approved',
     file: 'src/daemon/server.js',
-    from: '          const created = this.#createSession({\n            ...final,',
-    to: '          const created = this.#createSession({\n            ...record.proposal,',
+    // Re-anchored when the settle path moved out of the route into
+    // #settleSessionRequest, so the single and bulk routes could share it. The
+    // indentation changed with it and the old anchor stopped matching - the
+    // drift report is the only reason that was noticed rather than quietly
+    // leaving this protection unchecked.
+    from: '    const created = this.#createSession({\n      ...final,',
+    to: '    const created = this.#createSession({\n      ...record.proposal,',
     tests: ['test/security/session-requests.test.js'],
   },
   {

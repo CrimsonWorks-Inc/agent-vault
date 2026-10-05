@@ -307,3 +307,77 @@ test('the value stored under a cred.add signature is bound to it', async () => {
   assert.equal(res.status, 401, 'a different value must not ride on that signature')
   assert.ok(!vault.findCredential('bound'), 'and nothing should have been stored')
 })
+
+// Bulk approval is where consent quietly becomes a formality, so the signature
+// has to bind the exact set — not "whatever is pending when this lands".
+test('a batch signature covers exactly the items it named', async () => {
+  const a = await control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/a'] })
+  const b = await control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/b'] })
+  assert.equal(a.status, 200, JSON.stringify(a.body))
+
+  const signed = [{ id: a.body.id, kind: 'session', granted: true }]
+  const ch = await (await api('POST', 'presence/challenge', {
+    operation: operationFor('pending.decide_many', { decisions: signed }),
+  })).json()
+  const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  // The attack: one more item slipped in after the human touched the sensor.
+  // Without this check an agent could queue a request in that window and have
+  // it approved by someone who never saw it.
+  const smuggled = await control('POST', '/v1/pending/decide-many', {
+    decisions: [...signed, { id: b.body.id, kind: 'session', granted: true }],
+    presence,
+  })
+  assert.equal(smuggled.status, 401, 'an unsigned item rode in on a batch signature')
+  assert.equal(smuggled.body.code, 'AV_PRESENCE_REQUIRED')
+
+  // And neither of them was decided on the way to refusing.
+  for (const id of [a.body.id, b.body.id]) {
+    const still = await control('GET', `/v1/session-requests/collect?id=${id}`)
+    assert.equal(still.body.state, 'pending', `${id} was settled by a refused batch`)
+  }
+})
+
+test('a batch signature is spent by the batch it named', async () => {
+  const a = await control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/ok'] })
+  const decisions = [{ id: a.body.id, kind: 'session', granted: true }]
+  const ch = await (await api('POST', 'presence/challenge', {
+    operation: operationFor('pending.decide_many', { decisions }),
+  })).json()
+  const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  const res = await control('POST', '/v1/pending/decide-many', { decisions, presence })
+  assert.equal(res.status, 200, JSON.stringify(res.body))
+  assert.equal(res.body.decided[0].outcome, 'decided')
+  assert.equal(res.body.decided[0].result.state, 'approved')
+
+  // The token is not in the answer. A batch is still not a way to get one.
+  assert.equal(JSON.stringify(res.body).includes('avs1.'), false, 'a token came back in a batch result')
+})
+
+test('reordering a signed batch does not change what it authorises', async () => {
+  // canonicalOperation sorts object keys but preserves array order, so a list
+  // signed in one order and submitted in another is a different operation.
+  // That is the safe direction - it refuses rather than accepts - but it must
+  // refuse rather than silently approving the reordered set.
+  const a = await control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/r1'] })
+  const b = await control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/r2'] })
+  const signed = [
+    { id: a.body.id, kind: 'session', granted: true },
+    { id: b.body.id, kind: 'session', granted: false },
+  ]
+  const ch = await (await api('POST', 'presence/challenge', {
+    operation: operationFor('pending.decide_many', { decisions: signed }),
+  })).json()
+  const presence = { challengeId: ch.challengeId, ...auth.assert(ch.challenge) }
+
+  // Same ids, verdicts swapped between them. This must never pass.
+  const swapped = await control('POST', '/v1/pending/decide-many', {
+    decisions: [
+      { id: a.body.id, kind: 'session', granted: false },
+      { id: b.body.id, kind: 'session', granted: true },
+    ],
+    presence,
+  })
+  assert.equal(swapped.status, 401, 'the verdicts were swapped under a valid signature')
+})
