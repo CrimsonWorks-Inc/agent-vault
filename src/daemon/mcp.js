@@ -380,7 +380,12 @@ export class McpServer {
         }
         headers.push(['av-session', this.#tokenFor(session)])
         if (args.reason) headers.push(['av-reason', args.reason])
-        if (args.body) headers.push(['content-type', args.headers?.['content-type'] || 'application/json'])
+        // The caller's own content-type was already forwarded above, in
+        // whatever case they wrote it. Adding a default alongside a
+        // `Content-Type` sent two, and a form-encoded body went upstream
+        // labelled as JSON as well.
+        const callerSetType = Object.keys(args.headers || {}).some((k) => k.toLowerCase() === 'content-type')
+        if (args.body && !callerSetType) headers.push(['content-type', 'application/json'])
 
         const res = await this.pipeline.handle({
           method: args.method, path: `/p/${cred.slug}${args.path}`, query: args.query || '',

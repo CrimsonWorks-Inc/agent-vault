@@ -34,7 +34,10 @@ before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'av-mcpt-'))
   received = []
   upstream = createServer((req, res) => {
-    received.push({ url: req.url, headers: req.headers })
+    // rawHeaders, because Node keeps only the first of a repeated
+    // content-type in `headers` and would hide a duplicate.
+    received.push({ url: req.url, headers: req.headers, rawHeaders: req.rawHeaders })
+    req.resume()
     res.end('{}')
   })
   await new Promise((r) => upstream.listen(0, '127.0.0.1', r))
@@ -134,6 +137,37 @@ test('the agent cannot set the daemon’s own headers through a tool argument', 
   assert.ok(!Object.keys(received[0].headers).some((h) => h.toLowerCase().startsWith('av-')),
     'no av-* header may reach the upstream')
   assert.ok(!String(received[0].headers.host).includes('evil'), 'the host must be the credential’s')
+})
+
+test('a body goes upstream with exactly one content-type', async () => {
+  // A caller's `Content-Type` was forwarded as written, and then a default
+  // `content-type: application/json` was added beside it, because the lookup
+  // only checked the lowercase key. A form-encoded Graph API batch went out
+  // with both and was parsed as JSON.
+  const contentTypes = (r) => {
+    const out = []
+    for (let i = 0; i < r.rawHeaders.length; i += 2) {
+      if (r.rawHeaders[i].toLowerCase() === 'content-type') out.push(r.rawHeaders[i + 1])
+    }
+    return out
+  }
+
+  received.length = 0
+  const form = result(await call('vault_http', {
+    cred: 'allowed', method: 'POST', path: '/safe/x', body: 'batch=%5B%5D',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  }))
+  assert.equal(form.status, 200)
+  assert.equal(received.length, 1)
+  assert.deepEqual(contentTypes(received[0]), ['application/x-www-form-urlencoded'])
+
+  received.length = 0
+  const json = result(await call('vault_http', {
+    cred: 'allowed', method: 'POST', path: '/safe/x', body: '{"a":1}',
+  }))
+  assert.equal(json.status, 200)
+  assert.equal(received.length, 1)
+  assert.deepEqual(contentTypes(received[0]), ['application/json'])
 })
 
 test('vault_get_placeholder is bound to the session’s own grants', async () => {
