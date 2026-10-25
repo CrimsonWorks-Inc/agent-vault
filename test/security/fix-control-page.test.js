@@ -93,38 +93,43 @@ test('the docs name every MCP tool, and only injection sites that exist', () => 
   assert.ok(!/is this one still valid/.test(PAGE), 'ph check is an offline grammar check')
 })
 
-// Round 2. The page refused to start Touch ID unlock on a vault with no
-// passphrase, whatever the daemon allowed, and hid the button there too.
-test('the page offers Touch ID unlock without a passphrase, after saying what that costs', async () => {
+// Round 3, review finding 5, option C. Without a passphrase the page does not
+// offer Touch ID unlock and does not ask for a tap: it says what the daemon
+// says, in the daemon's words, and names the command that fixes it.
+test('without a passphrase the page gives the daemon\'s guidance instead of a tap', async () => {
+  const guidance = PAGE.match(/const TOUCHID_NEEDS_PASSPHRASE = '([^']+)'/)?.[1]
+  assert.ok(guidance, 'the page names its guidance once')
+  const STORE = readFileSync(new URL('../../src/store/vault.js', import.meta.url), 'utf8')
+  assert.ok(STORE.includes(`hint: '${guidance}'`), 'the page and the daemon say the same thing')
+  assert.match(guidance, /agent-vault passphrase set/)
+
   const enable = pageFunction('enableTouchId')
-  const saved = { api: globalThis.api, confirm: globalThis.confirm, navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator') }
-  const asked = []
+  const saved = { api: globalThis.api, navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator') }
   try {
-    globalThis.api = async () => ({ has_passphrase: false, rp_id: 'localhost', prf_salt: 'AAAA' })
+    globalThis.TOUCHID_NEEDS_PASSPHRASE = guidance
     globalThis.b64ToBuf = () => new Uint8Array(4)
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true, value: { credentials: { create: async () => { throw new Error('reached the authenticator') } } },
     })
-    // Declined: nothing happens, and nothing is thrown at the owner.
-    globalThis.confirm = (text) => { asked.push(text); return false }
-    assert.equal(await enable(), false)
-    assert.match(asked[0], /no passphrase/i)
-    assert.match(asked[0], /lose the authenticator/i)
-    // Accepted: it goes on to the authenticator.
-    globalThis.confirm = () => true
-    await assert.rejects(enable(), /reached the authenticator/)
-    // With a passphrase, nobody is asked.
-    asked.length = 0
-    globalThis.confirm = (text) => { asked.push(text); return true }
+    globalThis.api = async () => ({ has_passphrase: false, rp_id: 'localhost', prf_salt: 'AAAA' })
+    await assert.rejects(enable(), (e) => e.message === guidance)
+    // With a passphrase, it goes on to the authenticator.
     globalThis.api = async () => ({ has_passphrase: true, rp_id: 'localhost', prf_salt: 'AAAA' })
     await assert.rejects(enable(), /reached the authenticator/)
-    assert.equal(asked.length, 0)
   } finally {
     globalThis.api = saved.api
-    globalThis.confirm = saved.confirm
     delete globalThis.b64ToBuf
+    delete globalThis.TOUCHID_NEEDS_PASSPHRASE
     if (saved.navigator) Object.defineProperty(globalThis, 'navigator', saved.navigator)
     else delete globalThis.navigator
   }
-  assert.match(PAGE, /\(ls\.has_passphrase \|\| presenceState\.enrolled\) && prfSupported\(\)/, 'the Enable row shows on an authenticator-only vault')
+
+  // The Unlocking card shows the guidance, with no Enable button, on a vault
+  // with no passphrase.
+  const row = PAGE.match(/if \(!ls\.has_passphrase && prfSupported\(\)\) \{([\s\S]*?)\} else if/)?.[1]
+  assert.ok(row, 'a vault with no passphrase gets a Touch ID row')
+  assert.match(row, /esc\(TOUCHID_NEEDS_PASSPHRASE\)/)
+  assert.ok(!/touchid-enable/.test(row), 'no Enable button without a passphrase')
+  // Option A's warning and its no-recovery text are gone.
+  assert.ok(!/Turn on Touch ID unlock anyway|nothing else opens the vault|recovery: false/.test(PAGE + README))
 })

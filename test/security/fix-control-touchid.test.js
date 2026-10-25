@@ -53,12 +53,16 @@ test('removing Touch ID unlock from the UI works with one tap', async () => {
   assert.ok(!d.vault.hasWebauthnUnlock, 'the unlock factor should be gone')
 })
 
-// Round 2. A vault whose only human factor is the confirmation authenticator
-// — a passphrase was set to enrol it, then removed — could rotate that
-// authenticator by assertion, but enrolling the Touch ID UNLOCK factor was
-// refused after the assertion had been verified: "set a passphrase first".
-// The owner's requirement is that such a vault can enrol and remove factors
-// with a signature from its authenticator. End to end, through the web UI.
+// Round 3, review finding 5, resolved per the owner's decision (option C).
+// A vault whose only human factor is the confirmation authenticator — a
+// passphrase was set to enrol it, then removed — is still refused the Touch ID
+// UNLOCK factor, because the passphrase is the recovery factor and a vault
+// must never be left without one. The refusal is now the one an owner can act
+// on: factor_order, naming `agent-vault passphrase set`, given before the tap.
+// The owner's Touch ID-only vault is served by the presence key instead, which
+// rotates by an assertion from the key being replaced.
+
+const NEXT = 'agent-vault passphrase set'
 
 /** A daemon and UI whose vault has an authenticator and no passphrase. */
 async function authenticatorOnly() {
@@ -72,87 +76,119 @@ async function authenticatorOnly() {
   return { d, u, a, stop: async () => { await u.stop(); await d.stop() } }
 }
 
-test('an authenticator-only vault enrols Touch ID unlock with one tap, and it unlocks the vault', async () => {
+/** The refusal, wherever it comes from: the daemon's problem, or the UI's copy of it. */
+function assertPassphraseFirst(status, problem) {
+  assert.equal(status, 403, JSON.stringify(problem))
+  assert.equal(problem.code, 'AV_POLICY_DENIED')
+  assert.equal(problem.rule, 'factor_order')
+  assert.match(problem.hint, /agent-vault passphrase set/)
+  assert.match(problem.hint, /recovery|fall back/)
+  assert.equal(problem.next, NEXT)
+}
+
+test('without a passphrase, Touch ID unlock is refused before the tap, and says what to do', async () => {
   const t = await authenticatorOnly()
   try {
+    const body = enrolBody()
+    // No proof at all: the answer is the way forward, not a request for a tap.
+    const bare = await t.d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...body })
+    assertPassphraseFirst(bare.status, bare.body)
+    // An open window and a passphrase proof change nothing.
+    t.d.daemon.presenceGraceUntil = Date.now() + 60_000
+    const windowed = await t.d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...body, presence: { passphrase: PASSPHRASE } })
+    t.d.daemon.presenceGraceUntil = 0
+    assertPassphraseFirst(windowed.status, windowed.body)
+    // A real tap from the enrolled authenticator, through the web UI, is
+    // refused the same way: the owner is not the problem, the missing
+    // recovery factor is.
+    const presence = await t.u.presence(t.a, operationFor('touchid.enroll', body))
+    const res = await t.u.api('POST', 'touchid/enroll', { ...body, presence })
+    const out = await res.json()
+    assertPassphraseFirst(res.status, out.detail)
+
+    // The store refuses too, if anything calls it directly.
+    assert.throws(() => t.d.vault.addWebauthnUnlock(body.credential_id, body.prf_secret),
+      (e) => e.rule === 'factor_order' && e.next === NEXT)
+    assert.ok(!t.d.vault.hasWebauthnUnlock)
+    assert.deepEqual(t.d.vault.db.kv.vmk_wraps.map((w) => w.class), ['none'])
+    assert.ok(!t.d.vault.audit.read({ limit: 50 }).some((r) => r.kind === 'presence.factor_added' && r.class === 'webauthn-prf'))
+  } finally { await t.stop() }
+})
+
+test('once a passphrase is set, the same vault enrols Touch ID unlock with one tap, and both open it', async () => {
+  const t = await authenticatorOnly()
+  try {
+    t.d.vault.setPassphrase(PASSPHRASE)
     const body = enrolBody()
     const presence = await t.u.presence(t.a, operationFor('touchid.enroll', body))
     const res = await t.u.api('POST', 'touchid/enroll', { ...body, presence })
     const out = await res.json()
     assert.equal(res.status, 200, JSON.stringify(out))
-    assert.equal(out.recovery, false, 'the answer says there is no recovery factor')
-    assert.ok(t.d.vault.hasWebauthnUnlock)
-    assert.ok(t.d.vault.audit.read({ limit: 20 }).some((r) => r.kind === 'presence.factor_added' && r.class === 'webauthn-prf' && r.recovery === false))
+    assert.deepEqual(out, { ok: true, enrolled: true }, 'the answer is what it was before option A')
+    assert.deepEqual(t.d.vault.db.kv.vmk_wraps.map((w) => w.class).sort(), ['passphrase', 'webauthn-prf'])
 
-    // It is a real lock now: nothing opens it but the PRF secret.
-    assert.equal((await t.d.control('POST', '/v1/lock', {})).status, 200)
-    const bare = await t.d.control('POST', '/v1/unlock', {})
-    assert.notEqual(bare.status, 200, 'the vault opened with no factor')
-    const wrong = await t.d.control('POST', '/v1/unlock', { prf_secret: randomBytes(32).toString('base64') })
-    assert.notEqual(wrong.status, 200)
-    const right = await t.d.control('POST', '/v1/unlock', { prf_secret: body.prf_secret })
-    assert.equal(right.status, 200, JSON.stringify(right.body))
-    assert.equal(t.d.vault.locked, false)
-
-    // And removed the same way, leaving a vault that still opens.
-    const off = await t.u.presence(t.a, operationFor('touchid.remove', {}))
-    const removed = await t.u.api('POST', 'touchid/remove', { presence: off })
-    assert.equal(removed.status, 200, JSON.stringify(await removed.json()))
-    assert.ok(!t.d.vault.hasWebauthnUnlock)
-    assert.deepEqual(t.d.vault.db.kv.vmk_wraps.map((w) => w.class), ['none'], 'removing the only key-bearing factor must not strand the vault')
+    // The fingerprint opens it, and so does the passphrase it fell back on.
+    for (const unlock of [{ prf_secret: body.prf_secret }, { passphrase: PASSPHRASE }]) {
+      assert.equal((await t.d.control('POST', '/v1/lock', {})).status, 200)
+      const opened = await t.d.control('POST', '/v1/unlock', unlock)
+      assert.equal(opened.status, 200, JSON.stringify(opened.body))
+      assert.equal(t.d.vault.locked, false)
+    }
+    // And the passphrase cannot now be removed out from under it.
+    assert.throws(() => t.d.vault.removePassphrase(PASSPHRASE), /remove Touch ID unlock first/)
   } finally { await t.stop() }
 })
 
-test('an authenticator-only vault still refuses an unlock enrolment without the authenticator', async () => {
-  const t = await authenticatorOnly()
-  try {
-    const body = enrolBody()
-    const none = await t.d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...body })
-    assert.equal(none.status, 401, JSON.stringify(none.body))
-    // There is no passphrase to check, so a passphrase proof proves nothing.
-    const phrase = await t.d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...body, presence: { passphrase: PASSPHRASE } })
-    assert.notEqual(phrase.status, 200, JSON.stringify(phrase.body))
-    // An open window does not count for a factor change either.
-    t.d.daemon.presenceGraceUntil = Date.now() + 60_000
-    const windowed = await t.d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...body })
-    t.d.daemon.presenceGraceUntil = 0
-    assert.notEqual(windowed.status, 200, JSON.stringify(windowed.body))
-    // A tap over a different PRF secret does not enrol this one.
-    const presence = await t.u.presence(t.a, operationFor('touchid.enroll', enrolBody()))
-    const swapped = await t.u.api('POST', 'touchid/enroll', { ...body, presence })
-    assert.notEqual(swapped.status, 200)
-    assert.ok(!t.d.vault.hasWebauthnUnlock)
-  } finally { await t.stop() }
-})
-
-test('a vault with no factor at all still cannot enrol Touch ID unlock', async () => {
+test('a vault with no factor at all is refused Touch ID unlock with the same way forward', async () => {
   const d = await startDaemon()
   try {
     const res = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', ...enrolBody() })
-    assert.notEqual(res.status, 200, JSON.stringify(res.body))
-    assert.equal(res.body.rule, 'factor_required')
+    assertPassphraseFirst(res.status, res.body)
     assert.ok(!d.vault.hasWebauthnUnlock)
   } finally { await d.stop() }
 })
 
-test('the store still wants a passphrase unless the caller says there is to be no recovery', async () => {
+test('without a passphrase, the presence authenticator rotates by a tap from itself, through the UI', async () => {
   const t = await authenticatorOnly()
   try {
-    const body = enrolBody()
-    assert.throws(() => t.d.vault.addWebauthnUnlock(body.credential_id, body.prf_secret), /set a passphrase first/)
-    assert.ok(!t.d.vault.hasWebauthnUnlock)
+    const next = makeAuthenticator(t.u.ui.origin)
+    // Unproved, or by window, it does not move.
+    const unsigned = await t.d.control('POST', '/v1/presence', next.record)
+    assert.equal(unsigned.status, 401, JSON.stringify(unsigned.body))
+    t.d.daemon.presenceGraceUntil = Date.now() + 60_000
+    const windowed = await t.d.control('POST', '/v1/presence', next.record)
+    t.d.daemon.presenceGraceUntil = 0
+    assert.equal(windowed.status, 401, JSON.stringify(windowed.body))
+    assert.equal(t.d.vault.db.kv.webauthn.credentialId, t.a.record.credentialId)
+
+    // Signed by the current key, over a challenge minted through the web UI.
+    const presence = await t.u.presence(t.a, operationFor('presence.enroll', next.record))
+    const rotated = await t.d.control('POST', '/v1/presence', { ...next.record, presence })
+    assert.equal(rotated.status, 200, JSON.stringify(rotated.body))
+    assert.equal(rotated.body.replaced, true)
+    assert.equal(t.d.vault.db.kv.webauthn.credentialId, next.record.credentialId)
+
+    // The old key no longer signs anything; the new one does.
+    const third = makeAuthenticator(t.u.ui.origin)
+    const byOld = await t.u.presence(t.a, operationFor('presence.enroll', third.record))
+    const refused = await t.d.control('POST', '/v1/presence', { ...third.record, presence: byOld })
+    assert.notEqual(refused.status, 200, JSON.stringify(refused.body))
+    const byNew = await t.u.presence(next, operationFor('presence.enroll', third.record))
+    const again = await t.d.control('POST', '/v1/presence', { ...third.record, presence: byNew })
+    assert.equal(again.status, 200, JSON.stringify(again.body))
+    assert.equal(t.d.vault.db.kv.webauthn.credentialId, third.record.credentialId)
+    assert.equal(t.d.vault.hasPassphrase, false, 'rotating never needed a passphrase')
   } finally { await t.stop() }
 })
 
-test('with a passphrase, enrolling reports the passphrase as the recovery factor', async () => {
-  // The shared vault has a passphrase; enrol and remove again there.
-  const body = enrolBody()
-  const presence = await u.presence(auth, operationFor('touchid.enroll', body))
-  const res = await u.api('POST', 'touchid/enroll', { ...body, presence })
-  const out = await res.json()
-  assert.equal(res.status, 200, JSON.stringify(out))
-  assert.equal(out.recovery, true)
-  assert.deepEqual(d.vault.db.kv.vmk_wraps.map((w) => w.class).sort(), ['passphrase', 'webauthn-prf'])
-  const off = await u.presence(auth, operationFor('touchid.remove', {}))
-  assert.equal((await u.api('POST', 'touchid/remove', { presence: off })).status, 200)
+test('a first presence enrolment without a passphrase is refused with the same way forward', async () => {
+  const d = await startDaemon()
+  try {
+    const res = await d.control('POST', '/v1/presence', makeAuthenticator().record)
+    assert.equal(res.status, 403, JSON.stringify(res.body))
+    assert.equal(res.body.rule, 'factor_order')
+    assert.match(res.body.hint, /agent-vault passphrase set/)
+    assert.equal(res.body.next, NEXT)
+    assert.equal(d.vault.db.kv.webauthn ?? null, null)
+  } finally { await d.stop() }
 })

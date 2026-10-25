@@ -243,20 +243,29 @@ export class Vault {
   }
 
   /**
-   * Add Touch ID (or any WebAuthn PRF authenticator) as an unlock factor.
-   * With a passphrase set, that is the recovery path if the authenticator is
-   * lost. Without one, the caller must say so with `withoutRecovery`: the
-   * daemon does, for a vault whose owner chose an authenticator and no
-   * passphrase and proved it with that authenticator for this change. The
-   * vault then opens with the fingerprint and nothing else, so losing the
-   * authenticator loses the vault, and the record says there is no recovery.
+   * Refuse, unless a passphrase is set, anything that would make Touch ID an
+   * unlock factor. The passphrase is the recovery factor: without it, losing
+   * the authenticator would lose every credential in the vault. The daemon
+   * calls this before asking for a tap, so the owner is told what to do
+   * instead of tapping for a refusal; addWebauthnUnlock calls it again.
    */
-  addWebauthnUnlock(credentialId, prfSecret, { withoutRecovery = false } = {}) {
+  requireRecoveryFactor() {
+    if (this.hasPassphrase) return
+    throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost', {
+      rule: 'factor_order',
+      hint: 'Touch ID unlock needs a passphrase to fall back on if the authenticator is lost. Set one, then enable Touch ID unlock again: agent-vault passphrase set',
+      next: 'agent-vault passphrase set',
+    })
+  }
+
+  /**
+   * Add Touch ID (or any WebAuthn PRF authenticator) as an unlock factor. A
+   * passphrase must already be set, so losing the authenticator can never lock
+   * you out: the passphrase is always the recovery path.
+   */
+  addWebauthnUnlock(credentialId, prfSecret) {
     this.#requireUnlocked()
-    const recovery = this.hasPassphrase
-    if (!recovery && !withoutRecovery) {
-      throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost')
-    }
+    this.requireRecoveryFactor()
     const deviceKey = readFileSync(this.deviceKeyPath)
     this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf' && w.class !== 'none')
     const wrap = this.#wrapVmk(deviceKey, this.vmk, 'webauthn-prf', prfSecret)
@@ -264,9 +273,8 @@ export class Vault {
     this.db.kv.vmk_wraps.push(wrap)
     this.#syncFactors()
     this.#persist()
-    this.audit.write('presence.factor_added', { class: 'webauthn-prf', credential_id: credentialId, recovery })
+    this.audit.write('presence.factor_added', { class: 'webauthn-prf', credential_id: credentialId })
     crypt.wipe(deviceKey)
-    return { recovery }
   }
 
   removeWebauthnUnlock() {
@@ -276,11 +284,9 @@ export class Vault {
     // Every wrap is a way back to the master key. Remove the last one and the
     // vault is not locked, it is destroyed: no factor opens it, and no factor
     // can be added, because adding one needs the key that is now unreachable.
-    // On a vault with no passphrase this is the ordinary case, not a corner:
-    // Touch ID was its only key-bearing factor. Even where a passphrase
-    // exists, "should be impossible" is how a one-way door gets left
-    // unguarded, and the cost of being wrong here is every credential in the
-    // vault, permanently.
+    // Enrolling requires a passphrase, so this should be impossible — but
+    // "should be" is how a one-way door gets left unguarded, and the cost of
+    // being wrong here is every credential in the vault, permanently.
     // removePassphrase has had this guard since the beginning; this is the
     // same guard, for the same reason.
     if (!this.db.kv.vmk_wraps.length) {

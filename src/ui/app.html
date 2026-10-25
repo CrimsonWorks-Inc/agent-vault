@@ -277,12 +277,14 @@
     return api('POST', 'unlock/touchid', { prf_secret: bufToB64(prf) })
   }
 
+  // The daemon refuses Touch ID unlock on a vault with no passphrase (rule
+  // factor_order), because the passphrase is the recovery factor. The page
+  // says the same thing, in the daemon's words, before anyone taps.
+  const TOUCHID_NEEDS_PASSPHRASE = 'Touch ID unlock needs a passphrase to fall back on if the authenticator is lost. Set one, then enable Touch ID unlock again: agent-vault passphrase set'
+
   async function enableTouchId() {
     const params = await api('GET', 'touchid/enroll-params')
-    // Allowed without a passphrase (the daemon takes your authenticator's
-    // signature for it), but then nothing else opens the vault. Said plainly
-    // before the tap, not after.
-    if (!params.has_passphrase && !confirm('This vault has no passphrase. With Touch ID unlock on, only this fingerprint opens it: lose the authenticator and every credential in the vault is gone. Set a passphrase first to keep a way back.\n\nTurn on Touch ID unlock anyway?')) return false
+    if (!params.has_passphrase) throw new Error(TOUCHID_NEEDS_PASSPHRASE)
     const salt = b64ToBuf(params.prf_salt)
     const cred = await navigator.credentials.create({
       publicKey: {
@@ -314,7 +316,6 @@
     const body = { credential_id: bufToB64u(cred.rawId), prf_secret: bufToB64(prf) }
     await gated(await operationFor('touchid.enroll', body), (proof) =>
       api('POST', 'touchid/enroll', { ...body, presence: proof }))
-    return true
   }
 
   /**
@@ -858,32 +859,31 @@ ${c.cli} ui                         open this page`)}`,
         const hint = !ls.has_touchid && ls.has_passphrase && prfSupported()
           ? `<div class="meta" style="margin-top:8px">Want to unlock with a fingerprint next time? Unlock once with your passphrase, then turn on <strong>Touch ID unlock</strong> on this page.</div>`
           : ''
-        // With Touch ID and no passphrase, the fingerprint is the only key.
         const passBtn = ls.has_passphrase
           ? `<button class="action ${touchBtn ? '' : 'primary'}" data-act="unlock">Use passphrase</button>`
-          : ls.has_touchid ? '' : `<button class="action primary" data-act="unlock">Unlock</button>`
+          : `<button class="action primary" data-act="unlock">Unlock</button>`
         lockBanner = `<div class="notice"><strong>The vault is locked.</strong>
              Every proxied request is refused until it is unlocked, and it stays locked across restarts.
              <div style="margin-top:10px;display:flex;gap:8px">${touchBtn}${passBtn}</div>${hint}
            </div>`
       }
-      // When unlocked, offer to add or remove Touch ID unlock. A vault whose
-      // only factor is the confirmation authenticator gets the offer too; it
-      // was hidden there, so that owner had no way to turn it on.
+      // When unlocked with a passphrase, offer to add or remove Touch ID unlock.
+      // Without one, say what to do first rather than hiding the row: an
+      // owner whose only factor is the authenticator otherwise never learns
+      // why Touch ID unlock is not offered.
       let touchIdRow = ''
       if (!status.locked) {
         const ls = await api('GET', 'unlock/state').catch(() => ({}))
-        if ((ls.has_passphrase || presenceState.enrolled) && prfSupported()) {
+        if (!ls.has_passphrase && prfSupported()) {
+          touchIdRow = `<div class="row"><div class="main"><div class="name">Touch ID unlock <span class="pill warn">needs a passphrase</span></div>
+                 <div class="meta">${esc(TOUCHID_NEEDS_PASSPHRASE)}</div></div></div>`
+        } else if (ls.has_passphrase && prfSupported()) {
           touchIdRow = ls.has_touchid
             ? `<div class="row"><div class="main"><div class="name">Touch ID unlock <span class="pill ok">on</span></div>
-                 <div class="meta">${ls.has_passphrase
-                   ? 'Unlock with a fingerprint; your passphrase still works as recovery.'
-                   : 'Unlock with a fingerprint. There is no passphrase, so nothing else opens the vault.'}</div></div>
+                 <div class="meta">Unlock with a fingerprint; your passphrase still works as recovery.</div></div>
                  <div class="actions"><button class="action" data-act="touchid-disable">Turn off</button></div></div>`
             : `<div class="row"><div class="main"><div class="name">Touch ID unlock</div>
-                 <div class="meta">${ls.has_passphrase
-                   ? 'Unlock the vault with a fingerprint instead of typing the passphrase. Your passphrase stays as a backup.'
-                   : 'Lock the vault to a fingerprint. With no passphrase set there would be no backup, so set one first if you can.'}</div></div>
+                 <div class="meta">Unlock the vault with a fingerprint instead of typing the passphrase. Your passphrase stays as a backup.</div></div>
                  <div class="actions"><button class="action primary" data-act="touchid-enable">Enable</button></div></div>`
         }
       }
@@ -1106,7 +1106,7 @@ ${c.cli} ui                         open this page`)}`,
       render()
     },
     async 'touchid-enable'() {
-      if (!await enableTouchId()) return
+      await enableTouchId()
       toast('Touch ID unlock enabled')
       render()
     },

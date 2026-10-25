@@ -680,25 +680,33 @@ const MUTATIONS = [
     tests: ['test/security/fix-control-store.test.js'],
   },
   {
-    // Fix-control round 2: the owner's authenticator-only vault.
-    what: 'an authenticator-only vault is refused the Touch ID unlock factor after its proof',
-    file: 'src/daemon/server.js',
-    from: '            withoutRecovery: !this.vault.hasPassphrase,',
-    to: '            withoutRecovery: false,',
-    tests: ['test/security/fix-control-touchid.test.js'],
-  },
-  {
-    what: 'the store wraps the vault key to Touch ID alone without being told there is no recovery',
+    // Fix-control round 3: review finding 5, option C. Without a passphrase
+    // Touch ID unlock is refused, because nothing would recover the vault.
+    what: 'Touch ID unlock is enrolled on a vault with no passphrase to recover it',
     file: 'src/store/vault.js',
-    from: '    if (!recovery && !withoutRecovery) {',
-    to: '    if (false) {',
+    from: '    if (this.hasPassphrase) return\n',
+    to: '    return\n',
     tests: ['test/security/fix-control-touchid.test.js'],
   },
   {
-    what: 'the page turns on passphrase-less Touch ID unlock without saying what it costs',
+    what: 'the store wraps the vault key to Touch ID without checking for a recovery factor',
+    file: 'src/store/vault.js',
+    from: '    this.requireRecoveryFactor()\n    const deviceKey',
+    to: '    const deviceKey',
+    tests: ['test/security/fix-control-touchid.test.js'],
+  },
+  {
+    what: 'the daemon asks for a tap before refusing Touch ID unlock without a passphrase',
+    file: 'src/daemon/server.js',
+    from: "          if (input.action !== 'remove') this.vault.requireRecoveryFactor()",
+    to: "          if (false) this.vault.requireRecoveryFactor()",
+    tests: ['test/security/fix-control-touchid.test.js'],
+  },
+  {
+    what: 'the page asks for a tap on a vault with no passphrase instead of saying what to do',
     file: 'src/ui/app.html',
-    from: "    if (!params.has_passphrase && !confirm(",
-    to: "    if (false && !confirm(",
+    from: '    if (!params.has_passphrase) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
+    to: '    if (false) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
     tests: ['test/security/fix-control-page.test.js'],
   },
 ]

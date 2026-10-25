@@ -1338,6 +1338,7 @@ export class Daemon {
             throw deny('AV_POLICY_DENIED', 'set a passphrase before enrolling an authenticator', {
               rule: 'factor_order',
               hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',
+              next: 'agent-vault passphrase set',
             })
           }
           // The operation and the assertion are passed through, so a human
@@ -1458,6 +1459,13 @@ export class Daemon {
           // This comment used to say the route required a presence window. It
           // did not; nothing here called the gate. Now it does.
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
+          // Without a passphrase, enrolling is refused whoever asks: the
+          // passphrase is the recovery factor, and a vault must never be left
+          // with the authenticator as its only way in. Said before the gate,
+          // so the owner learns what to do instead of tapping for a refusal.
+          // The refusal widens nothing, and enroll-params already says
+          // whether a passphrase exists.
+          if (input.action !== 'remove') this.vault.requireRecoveryFactor()
           this.#requireFreshPresence(
             input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',
             this.#wideningOperation(route, url, input), input.presence,
@@ -1465,17 +1473,8 @@ export class Daemon {
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
           }
-          // A vault with no passphrase can enrol too. Its owner chose an
-          // authenticator and no passphrase, and the fresh proof above can only
-          // have been an assertion from that authenticator — there is no
-          // passphrase to send — so this is the owner, not the socket. It was
-          // refused outright, which left such a vault with no way to turn on
-          // the unlock factor at all. There is then no recovery factor, and
-          // the answer says so.
-          const { recovery } = this.vault.addWebauthnUnlock(input.credential_id, input.prf_secret, {
-            withoutRecovery: !this.vault.hasPassphrase,
-          })
-          return json(200, { ok: true, enrolled: true, recovery })
+          this.vault.addWebauthnUnlock(input.credential_id, input.prf_secret)
+          return json(200, { ok: true, enrolled: true })
         }
         case 'GET /v1/factors/webauthn-enroll-params':
           return json(200, {
