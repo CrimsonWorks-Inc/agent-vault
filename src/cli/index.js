@@ -1240,7 +1240,7 @@ const COMMANDS = {
     if (!state.has_passphrase) return out(`${C.green('ok')} no passphrase is set`, { removed: false })
     const current = await readSecret('current passphrase: ')
     await control('POST', '/v1/passphrase', { action: 'remove', current })
-    console.log(`${C.yellow('passphrase removed')} ${C.dim('the vault is back to UID-boundary-only protection')}`)
+    console.log(`${C.yellow('passphrase removed')} ${C.dim('unlocking needs no secret now; your authenticator still confirms changes')}`)
   },
 
   async lock() {

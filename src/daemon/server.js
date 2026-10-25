@@ -1353,13 +1353,11 @@ export class Daemon {
           // Re-enrolling replaces the only thing standing between an agent and
           // the approve button, so it is audited loudly either way. The proof
           // that came with the request is not part of the key, and a
-          // passphrase must never be written into the vault in clear.
-          this.vault.db.kv.webauthn = withoutProof(input)
-          this.vault.save()
-          this.vault.audit.write('presence.factor_added', {
-            class: 'webauthn-platform', credential_id: input.credentialId, replaced_existing: existed,
-          })
-          return json(200, { ok: true, replaced: existed })
+          // passphrase must never be written into the vault in clear. The
+          // store decides what may be stored: a replacement the daemon could
+          // not verify a signature from is refused, and the old key stays.
+          const { replaced } = this.vault.setPresenceKey(withoutProof(input))
+          return json(200, { ok: true, replaced })
         }
         case 'PATCH /v1/presence': {
           // Gone, deliberately, and kept as an explicit refusal so an older UI

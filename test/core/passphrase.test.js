@@ -4,6 +4,14 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
+import { randomBytes, generateKeyPairSync } from 'node:crypto'
+
+/** A presence authenticator record, as the web UI hands the daemon one. */
+const presenceKey = () => ({
+  credentialId: randomBytes(16).toString('base64url'),
+  publicKeySpki: generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
+  signCount: 0,
+})
 
 let dir
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'av-pp-')) })
@@ -45,6 +53,9 @@ test('changing a passphrase requires the current one', () => {
 test('removing a passphrase requires the current one, then unlock needs no secret', () => {
   const v = Vault.create(dir, { factor: 'none' })
   v.setPassphrase('the-passphrase')
+  // Removing it needs another human factor to take over: here a presence
+  // authenticator, which keeps the control socket gated.
+  v.setPresenceKey(presenceKey())
   assert.throws(() => v.removePassphrase('wrong'), /current passphrase is required/)
   v.removePassphrase('the-passphrase')
   assert.equal(v.hasPassphrase, false)
@@ -52,12 +63,22 @@ test('removing a passphrase requires the current one, then unlock needs no secre
   assert.equal(Vault.open(dir).unlock(null), true)
 })
 
+test('the passphrase cannot be removed while it is the last human factor', () => {
+  const v = Vault.create(dir, { factor: 'none' })
+  v.setPassphrase('the-passphrase')
+  const before = readFileSync(join(dir, 'vault.json'), 'utf8')
+  assert.throws(() => v.removePassphrase('the-passphrase'), (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'last_factor' && /agent-vault ui/.test(e.hint))
+  assert.equal(v.hasPassphrase, true)
+  assert.equal(readFileSync(join(dir, 'vault.json'), 'utf8'), before, 'a refusal must not write anything')
+  v.lock()
+  assert.throws(() => Vault.open(dir).unlock(null), /AV_LOCKED/)
+})
+
 test('a passphrase under 8 characters is refused', () => {
   const v = Vault.create(dir, { factor: 'none' })
   assert.throws(() => v.setPassphrase('short'), /at least 8/)
 })
 
-import { randomBytes } from 'node:crypto'
 
 test('Touch ID (a PRF secret) unlocks the vault, alongside the passphrase', () => {
   const v = Vault.create(dir, { factor: 'none' })
@@ -87,9 +108,12 @@ test('the passphrase cannot be removed while Touch ID is the other factor', () =
   const v = Vault.create(dir, { factor: 'none' })
   v.setPassphrase('recovery-passphrase')
   v.addWebauthnUnlock('cred-1', randomBytes(32).toString('base64'))
-  assert.throws(() => v.removePassphrase('recovery-passphrase'), /remove Touch ID unlock first/)
-  // Removing Touch ID first, then the passphrase, is allowed.
+  assert.throws(() => v.removePassphrase('recovery-passphrase'), (e) => e.rule === 'last_factor' && /remove Touch ID unlock first/.test(e.message))
+  // Removing Touch ID first is allowed. The passphrase then goes only if a
+  // presence authenticator is left to gate the socket.
   v.removeWebauthnUnlock()
+  assert.throws(() => v.removePassphrase('recovery-passphrase'), (e) => e.rule === 'last_factor')
+  v.setPresenceKey(presenceKey())
   assert.equal(v.removePassphrase('recovery-passphrase'), true)
 })
 

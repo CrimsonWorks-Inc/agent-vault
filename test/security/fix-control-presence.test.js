@@ -49,7 +49,7 @@ test('with the passphrase in the request, the same changes go through', async ()
     const first = await d.control('POST', '/v1/presence', { ...human.record, presence: { passphrase: PASSPHRASE } })
     assert.equal(first.status, 200, JSON.stringify(first.body))
     assert.equal(d.vault.db.kv.webauthn.presence, undefined, 'the passphrase was stored with the key')
-    assert.deepEqual(Object.keys(d.vault.db.kv.webauthn).sort(), Object.keys(human.record).sort())
+    assert.deepEqual(Object.keys(d.vault.db.kv.webauthn).sort(), ['credentialId', 'enrolledAt', 'publicKeySpki', 'signCount'])
 
     const wrong = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'c', prf_secret: prf(), presence: { passphrase: 'nope nope nope' } })
     assert.equal(wrong.status, 403, JSON.stringify(wrong.body))

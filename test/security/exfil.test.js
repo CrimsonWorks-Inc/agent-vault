@@ -80,6 +80,15 @@ test('the real credential value never reaches a caller-controlled destination', 
   assert.ok(!captured.some((a) => a && a.includes(SECRET)))
 })
 
+// Before the passphrase is set: once it exists it is this vault's only human
+// factor, and it cannot be removed to return here.
+test('without a passphrase, widening is open but audited, not silently trusted', async () => {
+  const res = await control('POST', '/v1/sessions', { cred: 'test', methods: ['GET'], paths: ['/**'] })
+  assert.equal(res.status, 200) // open mode
+  const kinds = vault.audit.read({ limit: 50 }).map((r) => r.kind)
+  assert.ok(kinds.includes('control.widening_ungated'), 'ungated widening must leave a trace')
+})
+
 test('with a passphrase set, the socket cannot unlock without it', async () => {
   // The DoS/unlock hole: before, anything reaching the socket could unlock.
   // A passphrase makes the lock cryptographic.
@@ -96,12 +105,16 @@ test('with a passphrase set, the socket cannot unlock without it', async () => {
   assert.equal(right.status, 200)
   assert.equal(right.body.locked, false)
 
-  // leave it without a passphrase for any later teardown assumptions
-  await control('POST', '/v1/passphrase', { action: 'remove', current: 'a-real-passphrase' })
+  // The passphrase is this vault's only human factor now, so it cannot be
+  // removed to tidy up: that would reopen the socket.
+  const removed = await control('POST', '/v1/passphrase', { action: 'remove', current: 'a-real-passphrase' })
+  assert.equal(removed.status, 403)
+  assert.equal(removed.body.rule, 'last_factor')
 })
 
 test('with a passphrase set, an agent cannot mint capability without it', async () => {
-  await control('POST', '/v1/passphrase', { action: 'set', passphrase: 'gate-passphrase-1' })
+  const changed = await control('POST', '/v1/passphrase', { action: 'set', passphrase: 'gate-passphrase-1', current: 'a-real-passphrase' })
+  assert.equal(changed.status, 200, JSON.stringify(changed.body))
 
   // The agent, reaching the socket directly, is refused.
   const denied = await control('POST', '/v1/credentials', { slug: 'y', kind: 'http', host: 'h', value: 'v' })
@@ -122,15 +135,6 @@ test('with a passphrase set, an agent cannot mint capability without it', async 
   assert.equal(opened.status, 200)
   const ok = await control('POST', '/v1/sessions', { cred: 'test', methods: ['GET'], paths: ['/**'] })
   assert.equal(ok.status, 200)
-
-  await control('POST', '/v1/passphrase', { action: 'remove', current: 'gate-passphrase-1' })
-})
-
-test('without a passphrase, widening is open but audited, not silently trusted', async () => {
-  const res = await control('POST', '/v1/sessions', { cred: 'test', methods: ['GET'], paths: ['/**'] })
-  assert.equal(res.status, 200) // open mode
-  const kinds = vault.audit.read({ limit: 50 }).map((r) => r.kind)
-  assert.ok(kinds.includes('control.widening_ungated'), 'ungated widening must leave a trace')
 })
 
 // ---------------------------------------------------------- the borrowed grant

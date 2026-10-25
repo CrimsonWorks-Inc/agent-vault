@@ -201,8 +201,10 @@ const MUTATIONS = [
   {
     what: 'removing the last wrap leaves the vault unopenable',
     file: 'src/store/vault.js',
-    from: '    if (!this.db.kv.vmk_wraps.length) {\n      const deviceKey = readFileSync(this.deviceKeyPath)',
-    to: '    if (false) {\n      const deviceKey = readFileSync(this.deviceKeyPath)',
+    // Re-anchored in fix-control round 4, when removal went through the
+    // factor commit.
+    from: '    const downgraded = !wraps.length\n',
+    to: '    const downgraded = false\n',
     tests: ['test/core/passphrase.test.js'],
   },
   {
@@ -689,11 +691,13 @@ const MUTATIONS = [
     tests: ['test/security/fix-control-touchid.test.js'],
   },
   {
+    // Round 4: the store's own enforcement of decision C is the factor
+    // invariant, which addWebauthnUnlock and Vault.create both go through.
     what: 'the store wraps the vault key to Touch ID without checking for a recovery factor',
     file: 'src/store/vault.js',
-    from: '    this.requireRecoveryFactor()\n    const deviceKey',
-    to: '    const deviceKey',
-    tests: ['test/security/fix-control-touchid.test.js'],
+    from: '    if (!hasPassphrase(prev)) throw recoveryRefusal()\n',
+    to: '    if (!hasPassphrase(prev)) return\n',
+    tests: ['test/security/fix-control-touchid.test.js', 'test/security/fix-control-factors.test.js'],
   },
   {
     what: 'the daemon asks for a tap before refusing Touch ID unlock without a passphrase',
@@ -708,6 +712,35 @@ const MUTATIONS = [
     from: '    if (!params.has_passphrase) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
     to: '    if (false) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
     tests: ['test/security/fix-control-page.test.js'],
+  },
+  {
+    // Fix-control round 4: the factor invariant, checked in one place.
+    what: 'factor changes commit without the factor invariant',
+    file: 'src/store/vault.js',
+    from: 'export function assertFactorInvariant(prev, next) {\n',
+    to: 'export function assertFactorInvariant(prev, next) {\n  return\n',
+    tests: ['test/security/fix-control-factors.test.js', 'test/core/passphrase.test.js'],
+  },
+  {
+    what: "the vault's last human factor can be removed",
+    file: 'src/store/vault.js',
+    from: '  if (had.length && !humanFactors(next).length) {',
+    to: '  if (false) {',
+    tests: ['test/security/fix-control-factors.test.js'],
+  },
+  {
+    what: 'a presence key that ES256 cannot verify is stored',
+    file: 'src/store/vault.js',
+    from: "  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {",
+    to: '  if (false) {',
+    tests: ['test/security/fix-control-factors.test.js'],
+  },
+  {
+    what: 'the presence route stores whatever record it is sent',
+    file: 'src/daemon/server.js',
+    from: '          const { replaced } = this.vault.setPresenceKey(withoutProof(input))',
+    to: '          this.vault.db.kv.webauthn = withoutProof(input); this.vault.save(); const replaced = existed',
+    tests: ['test/security/fix-control-factors.test.js'],
   },
 ]
 
