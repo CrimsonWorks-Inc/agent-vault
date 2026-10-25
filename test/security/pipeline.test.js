@@ -507,8 +507,10 @@ test('an approval does not carry over to a request with different headers', asyn
   // `X-HTTP-Method-Override: DELETE` is the sharp version: plenty of
   // frameworks honour it, so the approved write reaches the upstream as a
   // delete. The human is shown a method, a host and a path, and a header can
-  // change what all three mean.
-  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' } })
+  // change what all three mean. (An override naming a method the grant does
+  // not allow is refused outright; DELETE is allowed here so the header is
+  // what differs.)
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST', 'DELETE'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' } })
   const base = {
     method: 'POST', path: '/p/gh-frozencrow/repos/frozencrow/x/issues',
     headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${placeholder}`]],

@@ -99,7 +99,11 @@ export class Pipeline {
   async handle(req) {
     const requestId = id.request()
     const started = Date.now()
-    let consumed = null
+    // Every placeholder row this request spent. It was one variable that each
+    // consume overwrote, so a request carrying two placeholders that failed
+    // before connecting refunded only the last and kept charging for the
+    // first, while the error told the agent its use had been refunded.
+    const consumed = []
     let upstreamOpened = false
     let spentApproval = null
     // Declared out here so a DENIAL can say who was denied. Both were `const`
@@ -118,7 +122,7 @@ export class Pipeline {
       route = this.#route(req, session)
       const result = await this.#proxy({
         req, session, route, requestId,
-        onConsume: (r) => { consumed = r },
+        onConsume: (r) => { consumed.push(r) },
         onApprovalSpent: (a) => { spentApproval = a },
         markUpstream: () => { upstreamOpened = true },
       })
@@ -160,7 +164,7 @@ export class Pipeline {
       if (err.hint) err.hint = this.#safeMessage({ message: err.hint }, scrubber)
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
-      if (consumed && !upstreamOpened) this.vault.refundPlaceholder(consumed.id)
+      if (!upstreamOpened) for (const row of consumed) this.vault.refundPlaceholder(row.id)
       // And give the human's approval back, for the same reason. It moves to
       // `consumed` before the upstream call — which is what makes a resend
       // execute exactly once — so a failure in between left it consumed with
@@ -173,6 +177,12 @@ export class Pipeline {
         this.vault.audit?.write('approval.returned', {
           approval_id: spentApproval.id, request_id: requestId, reason: 'the request never reached the upstream',
         })
+      }
+      // The other side of the same line: once the upstream may have acted, the
+      // approval is spent even though there is no response to replay, and a
+      // resend must ask a human again rather than wait on it forever.
+      if (spentApproval && upstreamOpened && spentApproval.state === 'consumed' && !spentApproval.result) {
+        spentApproval.executed_at = new Date().toISOString()
       }
       err.requestId = requestId
       if (this.vault.audit) {
@@ -255,8 +265,26 @@ export class Pipeline {
           hint: 'Send the session token in Authorization: Bearer as well as the placeholder.',
         })
       }
+      // Checked before the session it names is touched. The sid is the first
+      // group of every placeholder, and the keyed checksum was only verified
+      // later, in #proxy — so anything on loopback that knew a session id
+      // could keep that session alive past its idle timeout with requests
+      // that were then refused as malformed. The same checks, the same codes,
+      // just early enough to matter.
       const session = this.vault.db.sessions[carrier.parsed.sid]
       if (!session) throw deny('AV_PH_CROSS_SESSION', 'the placeholder names a session that does not exist')
+      if (!ph.verify(this.vault.kPh, carrier.parsed)) {
+        throw deny('AV_PH_MALFORMED', `that placeholder was not minted by this vault (${sub.describeLocation(carrier.location)})`, {
+          rule: 'checksum',
+          hint: 'Ask for a placeholder with vault_get_placeholder, or agent-vault ph next.',
+        })
+      }
+      if (!this.vault.resolvePlaceholder(carrier.parsed)) {
+        throw deny('AV_PH_REPLAY', `unknown placeholder at ${sub.describeLocation(carrier.location)}`, {
+          rule: 'placeholder_unknown',
+          hint: 'This placeholder was never issued by this vault, or it was garbage-collected.',
+        })
+      }
       this.vault.assertSessionLive(session)
       this.vault.touchSession(session)
       return session
@@ -393,7 +421,12 @@ export class Pipeline {
               hint: `Use /t/https/${host}/... or the credential's own route, /p/${cred.slug}/...`,
             })
           }
-          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme: credScheme, profile }
+          // The other direction: an agent that asked for /t/https/ gets TLS,
+          // even for a credential that declares http. It was silently sent in
+          // the clear, because the credential's scheme won whatever the URL
+          // said. The stronger of the two is used.
+          const useScheme = scheme === 'https' ? 'https' : credScheme
+          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme: useScheme, profile }
         }
       }
       throw deny('AV_NO_GRANT', `no grant in this session allows host ${policyMod.hostOnly(rawHost)}`)
@@ -519,17 +552,40 @@ export class Pipeline {
       })
     }
 
+    // --- method override --------------------------------------------------
+    // Plenty of frameworks run a POST carrying X-HTTP-Method-Override: DELETE
+    // as a DELETE. Only the request-line method was checked, so a grant of
+    // GET and POST reached DELETE behaviour, and under on-write a GET that the
+    // upstream runs as a DELETE was never held. Every method the upstream
+    // might act on is held to the same allowlist and the same approval rule.
+    const overrides = methodOverrides(req.headers)
+    for (const m of overrides) {
+      if (effective.methods && !effective.methods.includes(m)) {
+        throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
+          rule: 'methods',
+          hint: `Allowed methods: ${effective.methods.join(', ') || 'none'}.`,
+        })
+      }
+    }
+
     // --- approval ----------------------------------------------------------
     // The placeholder's TEXT is in the headers and may be in the body, so
     // swapping the id out of the hash is not enough on its own — the value
     // churns wherever it appears. Each occurrence is replaced by what it
     // stands for, exactly as substitution finds it, leaving a hash over what
     // the human was actually shown.
+    //
+    // A `<` already in the request is doubled first, so the marker cannot be
+    // forged. Without that, a request carrying the marker's text literally
+    // hashed the same as one carrying the placeholder there: the placeholder
+    // in a header and the marker in the body collided with the two swapped,
+    // and the second ran under the first one's approval with the secret in
+    // the body. Placeholders never contain `<`, so this is a one-to-one map.
     const canonical = new Map(
       substitutions.map((s) => [s.occ.text, `<av:${s.row.grant_id}:${s.row.field}>`]),
     )
     const stable = (value) => {
-      let out = String(value)
+      let out = String(value).split('<').join('<<')
       for (const [text, marker] of canonical) out = out.split(text).join(marker)
       return out
     }
@@ -547,8 +603,9 @@ export class Pipeline {
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
       }).map(([n, v]) => [n, stable(v)]),
     })
-    if (policyMod.needsApproval(effective, { method: decision.method, firstUse: grant.counters.requests === 0 })) {
-      const verdict = this.#approval(requestHash, { grant, decision, requestId, reason: sub.getHeader(req, 'av-reason') })
+    const firstUse = grant.counters.requests === 0
+    if ([decision.method, ...overrides].some((method) => policyMod.needsApproval(effective, { method, firstUse }))) {
+      const verdict = this.#approval(requestHash, { grant, decision, overrides, requestId, reason: sub.getHeader(req, 'av-reason') })
       if (verdict.status === 'pending') {
         return {
           status: 202,
@@ -794,7 +851,10 @@ export class Pipeline {
     // replays it rather than hitting the upstream a second time.
     if (approvedRequestHash) {
       const approval = this.approvals.get(approvedRequestHash)
-      if (approval) approval.result = result
+      if (approval) {
+        approval.result = result
+        approval.executed_at = new Date().toISOString()
+      }
     }
     return result
   }
@@ -823,7 +883,7 @@ export class Pipeline {
   }
 
   /** Approval state machine, keyed by the request hash so retries are safe. */
-  #approval(requestHash, { grant, decision, requestId, reason }) {
+  #approval(requestHash, { grant, decision, overrides = [], requestId, reason }) {
     const existing = this.approvals.get(requestHash)
     if (existing) {
       if (existing.state === 'granted') {
@@ -833,12 +893,23 @@ export class Pipeline {
       if (existing.state === 'consumed') {
         // Already executed. Replay the stored response so a retrying SDK gets a
         // coherent answer without a second upstream side effect.
-        return existing.result
-          ? { status: 'replay', approval: existing }
-          : { status: 'pending', approval: existing }
+        if (existing.result) return { status: 'replay', approval: existing }
+        // Still in flight: the resend waits on the same approval.
+        if (!existing.executed_at) return { status: 'pending', approval: existing }
+        // It ran and there is nothing to replay: the response was streamed, the
+        // replay window closed, or the request failed after reaching the
+        // upstream. This answered 202 under the spent approval, which is not
+        // pending, so no human could approve it again and the resend waited
+        // until the entry expired an hour later. The spent one is kept, under
+        // a key no request hashes to, so its status can still be read; the
+        // resend is a new request and asks a human again.
+        this.approvals.delete(requestHash)
+        this.approvals.set(`${requestHash}:${existing.id}`, existing)
+      } else if (existing.state === 'denied') {
+        return { status: 'denied', approval: existing }
+      } else {
+        return { status: 'pending', approval: existing }
       }
-      if (existing.state === 'denied') return { status: 'denied', approval: existing }
-      return { status: 'pending', approval: existing }
     }
 
     this.#sweepApprovals()
@@ -856,7 +927,11 @@ export class Pipeline {
       id: id.approval(),
       request_hash: requestHash,
       grant_id: grant.id,
-      summary: `${decision.method} ${decision.host}${decision.path}`,
+      // A method-override header is shown, because it is what the upstream
+      // may actually run. The summary is all the human sees.
+      summary: overrides.length
+        ? `${decision.method} (overridden to ${overrides.join(', ')}) ${decision.host}${decision.path}`
+        : `${decision.method} ${decision.host}${decision.path}`,
       reason: reason || null,
       state: 'pending',
       created_at: new Date().toISOString(),
@@ -898,9 +973,24 @@ export class Pipeline {
     return null
   }
 
+  /**
+   * A human's answer to a pending approval.
+   *
+   * Only a PENDING one. This used to set the state whatever it was, so
+   * granting an approval that had already run armed it again and the next
+   * resend executed the write a second time, and denying one handed back the
+   * whole approval — its cached response included, with the successor
+   * placeholder in `av-placeholder-next` — to anything on the control socket,
+   * where deny is ungated. The session-request path already refused anything
+   * no longer pending; this is the same rule, and a pending approval has no
+   * response stored on it to hand back.
+   */
   decideApproval(approvalId, granted) {
     for (const approval of this.approvals.values()) {
       if (approval.id !== approvalId) continue
+      if (approval.state !== 'pending') {
+        throw deny('AV_POLICY_DENIED', `already ${approval.state}`, { rule: 'approval' })
+      }
       approval.state = granted ? 'granted' : 'denied'
       approval.decided_at = new Date().toISOString()
       this.vault.audit.write(granted ? 'approval.granted' : 'approval.denied', { approval_id: approvalId })
@@ -912,6 +1002,24 @@ export class Pipeline {
   pendingApprovals() {
     return [...this.approvals.values()].filter((a) => a.state === 'pending')
   }
+}
+
+/** Headers a framework may honour in place of the request-line method. */
+const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override'])
+
+/** Every method a method-override header asks for, uppercased, in order. */
+function methodOverrides(headers) {
+  const out = []
+  for (const [n, v] of headers) {
+    if (!METHOD_OVERRIDE_HEADERS.has(String(n).toLowerCase())) continue
+    for (const one of [v].flat()) {
+      for (const m of String(one).split(',')) {
+        const method = m.trim().toUpperCase()
+        if (method && !out.includes(method)) out.push(method)
+      }
+    }
+  }
+  return out
 }
 
 /**
