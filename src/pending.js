@@ -90,8 +90,13 @@ export function decision(item, { granted, overrides = null }) {
 /** Narrowing flags, parsed the same way wherever they are typed. */
 export function parseOverrides(args = {}) {
   const out = {}
-  if (args.methods) out.methods = String(args.methods).split(',').map((m) => m.trim()).filter(Boolean)
-  if (args.paths) out.paths = Array.isArray(args.paths) ? args.paths : [String(args.paths)]
+  // Split on commas and upper-cased, the way `session create`, the wizard and
+  // the UI's new-session form all read them. A narrowing of "/a/**,/b/**" was
+  // one glob with a comma in it, and "get" a method nothing sends: both
+  // approved a session that matched nothing, with nothing saying why.
+  const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
+  if (args.methods) out.methods = list(args.methods).map((m) => m.toUpperCase())
+  if (args.paths) out.paths = list(args.paths)
   if (args.budget !== undefined && args.budget !== null && args.budget !== '') out.budget = Number(args.budget)
   if (args.uses !== undefined && args.uses !== null && args.uses !== '') out.uses = Number(args.uses)
   // The generated hint spells this `--ttl_minutes`, because it is generated

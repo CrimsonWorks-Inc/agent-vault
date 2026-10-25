@@ -94,7 +94,7 @@ Three ways in, in the order to try them.
 agent-vault mcp install --agent claude-code
 ```
 
-`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains six tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial` and `vault_request_session` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
+`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains seven tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial`, `vault_request_session` and `vault_approval_status` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
 
 **MCP over HTTP**, for an agent somewhere else:
 
@@ -107,7 +107,7 @@ agent-vault mcp install --agent cursor --transport http
 
 ```bash
 agent-vault tls setup
-agent-vault listen add mcp-tls --address 127.0.0.1:7449 --surfaces mcp --tls managed
+agent-vault listen add mcp-tls --address 127.0.0.1:7443 --surfaces mcp --tls managed
 agent-vault mcp install --agent claude-code --transport http --tls
 ```
 
@@ -351,7 +351,7 @@ This build is the mechanism, not the hardened deployment. Each gap below is real
 
 **Presence on the CLI is a passphrase; in the UI it is hardware.** Either satisfies the gate. Run `agent-vault passphrase set` and every capability-widening action on the control socket — adding or removing a credential, creating a session, issuing a placeholder, approving a held request, binding a listener — requires it, opening a five-minute window so you are not asked on every call. An enrolled authenticator counts too: the daemon mints the challenge and verifies the assertion itself, so a signature collected by the web UI satisfies the socket without the UI being trusted to vouch for it.
 
-Attempts are charged for: five free, then each further failure doubles the wait, up to a minute, and the throttle is audited. That bounds online guessing, and it bounds something else — the check is `scryptSync`, which runs *on* the event loop, so every attempt is ~190ms during which the daemon answers nothing at all. A loop of wrong passphrases on the control socket used to be a stall of the whole vault, gateway included, at no cost to the caller. The Rust port moves the derivation off the loop; the throttle is what makes that a performance change rather than a security one.
+Attempts are charged for: five free, then each further failure doubles the wait, up to thirty seconds, and the throttle is audited. That bounds online guessing, and it bounds something else — the check is `scryptSync`, which runs *on* the event loop, so every attempt is ~190ms during which the daemon answers nothing at all. A loop of wrong passphrases on the control socket used to be a stall of the whole vault, gateway included, at no cost to the caller. The Rust port moves the derivation off the loop; the throttle is what makes that a performance change rather than a security one.
 
 The throttle counts attempts per daemon, not per caller, because on a Unix socket there is nobody to count separately. So an agent can deliberately fail five times and make you wait. Two things bound that: an attempt refused *during* a backoff does not extend it, so an agent cannot hold the window open by retrying, and the backoff caps at thirty seconds. Your worst case is half a minute and a race for the next attempt, not a lockout, and it is in the audit log.
 

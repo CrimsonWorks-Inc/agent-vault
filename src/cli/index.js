@@ -7,7 +7,7 @@
 
 import { request } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, constants as osConstants } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { createInterface } from 'node:readline'
 import { createHash } from 'node:crypto'
@@ -649,7 +649,11 @@ const COMMANDS = {
     console.log()
     console.log(C.dim('  try:'))
     console.log(C.dim(`    curl "${s.base_url}${s.probe_path || '/'}" \\`))
-    console.log(C.dim(`      -H "Authorization: Bearer ${s.token}" \\`))
+    // The token rides in AV-Session, not Authorization. For every Bearer-site
+    // credential the placeholder goes in Authorization too, and a server keeps
+    // only the first of two — so this example dropped the placeholder and
+    // failed for the most common credential there is.
+    console.log(C.dim(`      -H "AV-Session: ${s.token}" \\`))
     if (asHeader) console.log(C.dim(`      -H "${asHeader}"`))
     else console.log(C.dim(`      # then put the placeholder at: ${site}`))
   },
@@ -700,13 +704,20 @@ const COMMANDS = {
   async env() {
     const st = loadState()
     if (!st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
-    const lines = [
-      `export AGENT_VAULT=1`,
-      `export AGENT_VAULT_URL=http://127.0.0.1:${st.gateway_port || 7411}`,
-      `export AGENT_VAULT_SESSION=${st.token}`,
-      `export AGENT_VAULT_PLACEHOLDER=${st.placeholder}`,
-      `export AGENT_VAULT_HINT="Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>"`,
+    // Every value single-quoted. This output is meant for `eval`, and the state
+    // file it reads is writable by anything running as the human — an agent
+    // included — so an unquoted `token` of `x; <command> #` ran that command
+    // in the human's shell every time they evaluated it. loadState also
+    // refuses values that are not shaped like a token or a placeholder.
+    const vars = [
+      ['AGENT_VAULT', '1'],
+      ['AGENT_VAULT_URL', `http://127.0.0.1:${gatewayPortOf(st)}`],
+      ['AGENT_VAULT_SESSION', st.token],
+      // Absent rather than the word "undefined".
+      ...(st.placeholder ? [['AGENT_VAULT_PLACEHOLDER', st.placeholder]] : []),
+      ['AGENT_VAULT_HINT', 'Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>'],
     ]
+    const lines = vars.map(([k, v]) => `export ${k}=${shellQuote(v)}`)
     out(lines.join('\n'), { env: lines })
   },
 
@@ -716,20 +727,28 @@ const COMMANDS = {
     const { spawn } = await import('node:child_process')
     const argv = args._
     if (!argv.length) return fail('usage: agent-vault exec -- <command>', EXIT.USAGE)
-    // The child gets a scrubbed environment: known credential variables are
-    // dropped so a stale real token cannot shadow the vault.
-    const env = { ...process.env }
-    for (const k of Object.keys(env)) {
-      if (/_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)$/.test(k)) delete env[k]
+    // The child gets a scrubbed environment: credential variables are dropped
+    // so a stale real token cannot shadow the vault. The list used to be five
+    // exact uppercase suffixes, which kept AWS_SECRET_ACCESS_KEY, STRIPE_KEY,
+    // any lowercase name and every DATABASE_URL with a password in it — the
+    // AWS SDK then used the real key directly, past the vault.
+    const env = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!looksLikeCredential(k, v)) env[k] = v
     }
     Object.assign(env, {
       AGENT_VAULT: '1',
-      AGENT_VAULT_URL: `http://127.0.0.1:${st.gateway_port || 7411}`,
+      AGENT_VAULT_URL: `http://127.0.0.1:${gatewayPortOf(st)}`,
       AGENT_VAULT_SESSION: st.token,
-      AGENT_VAULT_PLACEHOLDER: st.placeholder,
+      ...(st.placeholder ? { AGENT_VAULT_PLACEHOLDER: st.placeholder } : {}),
     })
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env })
-    child.on('exit', (code) => process.exit(code ?? 0))
+    // A missing binary is an 'error' event, and with no listener it crashed
+    // the CLI with a stack trace instead of saying what was not found.
+    child.on('error', (e) => fail(`could not run ${argv[0]}: ${e.message}`, EXIT.FAILURE))
+    // A child killed by a signal has no exit code, and `code ?? 0` reported
+    // that as success. The shell convention is 128 + the signal number.
+    child.on('exit', (code, signal) => process.exit(code ?? 128 + (osConstants.signals[signal] || 0)))
   },
 
   async approvals() {
@@ -815,8 +834,12 @@ const COMMANDS = {
       entry.tls = { cert: resolvePath(args['tls-cert']), key: resolvePath(args['tls-key']) }
     }
     if (!entry.id || !entry.address) return fail('usage: agent-vault listen add <id> --address <iface:port|ip:port>', EXIT.USAGE)
-    const r = await control('POST', '/v1/listeners', entry)
+    // Gated like every other widening, so it asks for the passphrase the way
+    // they do. Plain control() could only fail, and the daemon's hint told
+    // the reader to run it again when running it again failed the same way.
+    const r = await controlWithPresence('POST', '/v1/listeners', entry)
     out(`${C.green('listener')} ${r.id} ${r.address} ${C.dim(`surfaces: ${r.surfaces.join(',')}`)}`, r)
+    if (!JSON_OUT) console.log(C.dim('  it binds when the daemon next starts; listen rm stops it at once'))
   },
 
   /**
@@ -938,7 +961,7 @@ const COMMANDS = {
       // TLS listener instead of the plain gateway.
       url: args.tls
         ? `https://localhost:${port}/mcp`
-        : `http://127.0.0.1:${loadState().gateway_port || 7411}/mcp`,
+        : `http://127.0.0.1:${gatewayPortOf(loadState())}/mcp`,
     })
 
     const result = install({
@@ -983,7 +1006,7 @@ const COMMANDS = {
 
   async 'mcp:url'() {
     const st = loadState()
-    const url = `http://127.0.0.1:${st.gateway_port || 7411}/mcp`
+    const url = `http://127.0.0.1:${gatewayPortOf(st)}/mcp`
     if (JSON_OUT) return out(null, { url, header: `Authorization: Bearer ${st.token}` })
     console.log(url)
     console.error(C.dim(`header: Authorization: Bearer ${st.token || '<session token>'}`))
@@ -1067,15 +1090,26 @@ const COMMANDS = {
             body: line,
           })
           let res = await send(currentToken())
-          if (res.status === 401) {
-            // The session ended mid-flight. If a human has since created a new
-            // one, pick it up and retry rather than making them restart the
-            // client to collect a token that is already sitting on disk.
+          // The session ended mid-flight. If a human has since created a new
+          // one, pick it up rather than making them restart the client to
+          // collect a token that is already sitting on disk.
+          //
+          // The daemon stopped answering 401 for a dead token (the handshake
+          // has to work without a session), so it says so in a header instead;
+          // waiting for a 401 left an agent launched with AGENT_VAULT_SESSION
+          // on the dead session for good.
+          if (res.status === 401 || res.headers.get('av-session-invalid')) {
             const fresh = (loadState().token || null)
             if (fresh && fresh !== currentToken()) {
               delete process.env.AGENT_VAULT_SESSION
-              mcpSessionId = null
-              res = await send(fresh)
+              // Resent only when the call was refused for want of a session.
+              // A tool that runs without one — asking for a session — has
+              // already happened, and sending it twice would ask twice.
+              const text = res.status === 401 ? '' : await res.clone().text().catch(() => '')
+              if (res.status === 401 || text.includes('needs a live session')) {
+                mcpSessionId = null
+                res = await send(fresh)
+              }
             }
           }
           if (res.status === 404 && mcpSessionId) {
@@ -1390,6 +1424,35 @@ async function decide(args, granted) {
   return collected ? { ...rest, collected } : rest
 }
 
+/**
+ * The gateway port for printed and exported URLs. `gateway_port` is written
+ * only by the dev daemon; a system install's service never records it, so
+ * the session's own base_url — which has the right port — comes next, and the
+ * default only after that.
+ */
+function gatewayPortOf(st) {
+  if (st.gateway_port) return st.gateway_port
+  const m = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(st.base_url || '')
+  return m ? Number(m[1]) : 7411
+}
+
+/** A value as one single-quoted shell word. */
+function shellQuote(v) {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Whether an environment variable carries a credential the vault should
+ * stand in for. Name-based (case-insensitive), plus any URL with a password
+ * in it, whatever it is called.
+ */
+function looksLikeCredential(name, value) {
+  if (/^AGENT_VAULT/i.test(name)) return false
+  if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET_?KEY|CLIENT_?SECRET|CREDENTIALS?)(_|$)/i.test(name)) return true
+  if (/(^|_)(KEY|DSN)$/i.test(name)) return true
+  return /:\/\/[^/\s:@]+:[^/\s@]+@/.test(String(value))
+}
+
 function printHelp() {
   console.log(`${C.bold('agent-vault')} - a local credential proxy for agents
 
@@ -1423,7 +1486,7 @@ ${C.bold('approvals, audit, listeners')}
   listen add <id> --address <iface:port> [--surfaces gateway,mcp]
                  [--tls managed | --tls-cert F --tls-key F]
   listen list | listen rm <id>
-  tls setup [--port 7449]              certificate for the loopback MCP listener
+  tls setup [--port 7443]              certificate for the loopback MCP listener
   tls status                           fingerprint and expiry
 
 ${C.bold('ui')}

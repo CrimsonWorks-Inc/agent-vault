@@ -828,8 +828,9 @@ export class Daemon {
 
   /** Streamable HTTP MCP. Same handler as stdio; only the framing differs. */
   async #onMcpHttp(req, res, body, url) {
+    let sessionHeader = {}
     const send = (status, obj, headers = {}) => {
-      res.writeHead(status, { 'content-type': 'application/json', ...headers })
+      res.writeHead(status, { 'content-type': 'application/json', ...sessionHeader, ...headers })
       res.end(obj === null ? '' : JSON.stringify(obj))
     }
 
@@ -863,6 +864,10 @@ export class Daemon {
       try { this.vault.assertSessionLive(session) } catch { session = null }
     }
     this.currentMcpSession = session
+    // A token that was sent and is dead says so, on every answer. The
+    // handshake no longer fails with 401 for it, and 401 was the only signal
+    // the stdio bridge had to switch to a session a human has since made.
+    sessionHeader = token && !session ? { 'av-session-invalid': '1' } : {}
     // Not stored on the server object: it is passed with each message below.
 
     if (req.method === 'DELETE') {

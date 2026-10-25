@@ -15,7 +15,7 @@ export const PASSPHRASE = 'correct horse battery staple'
 export const SECRET = 'ghp_FIXCONTROL00112233445566778899aa'
 
 /** A vault with one credential, and a daemon on a temp control socket. */
-export async function startDaemon({ passphrase = null, sites = ['header:authorization:Bearer'], host = 'api.example.com', scheme = 'https', listeners = [] } = {}) {
+export async function startDaemon({ passphrase = null, sites = ['header:authorization:Bearer'], host = 'api.example.com', scheme = 'https', listeners = [], socketName = 'c.sock' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'av-fc-'))
   const vault = Vault.create(dir, { factor: 'none' })
   vault.addCredential({
@@ -25,7 +25,8 @@ export async function startDaemon({ passphrase = null, sites = ['header:authoriz
   if (passphrase) vault.setPassphrase(passphrase)
   // Configured before start, which is when listeners bind.
   for (const l of listeners) vault.addListener(l)
-  const sock = join(dir, 'c.sock')
+  // `control.sock` is where the CLI looks under AGENT_VAULT_DIR.
+  const sock = join(dir, socketName)
   const daemon = await new Daemon(vault, { port: 0, socketPath: sock }).start()
   const control = (method, path, body) => controlAt(sock, method, path, body)
   const stop = async () => {
@@ -142,3 +143,31 @@ export async function startUi(d) {
   }
   return { ui, api, presence, cookie, stop: () => ui.stop() }
 }
+
+const BIN = new URL('../../bin/agent-vault.js', import.meta.url).pathname
+
+/**
+ * Run the real CLI against `dir`. Resolves with { code, stdout, stderr }
+ * whatever the exit code; `input` goes to stdin; `env` is merged in.
+ */
+export function cli(dir, args, { input, env = {}, timeout = 15_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    import('node:child_process').then(({ spawn }) => {
+      const child = spawn(process.execPath, [BIN, ...args], {
+        env: { ...process.env, AGENT_VAULT_DIR: dir, NO_COLOR: '1', ...env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (d) => { stdout += d })
+      child.stderr.on('data', (d) => { stderr += d })
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`timeout: ${args.join(' ')}\n${stdout}\n${stderr}`)) }, timeout)
+      child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr }) })
+      child.on('error', (e) => { clearTimeout(timer); reject(e) })
+      if (input !== undefined) child.stdin.write(input)
+      child.stdin.end()
+    })
+  })
+}
+
+export { BIN }

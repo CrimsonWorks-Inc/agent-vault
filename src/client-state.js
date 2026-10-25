@@ -61,7 +61,24 @@ export function loadState(path = statePath()) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) delete raw.gateway_port
     else raw.gateway_port = port
   }
+  // The same reasoning, for the fields next to it. `agent-vault env` is meant
+  // for `eval`, and a token of `x; <command> #` or a placeholder of
+  // `$(<command>)` ran in the human's shell each time. Each field is dropped
+  // unless it has the only shape it can legitimately have.
+  for (const [field, shape] of Object.entries(SHAPES)) {
+    if (raw[field] !== undefined && !(typeof raw[field] === 'string' && shape.test(raw[field]))) delete raw[field]
+  }
   return raw
+}
+
+// What each field written by rememberSession can look like. A session token
+// is `avs1.<sid>.<base64url>`; a placeholder is `av1.` and URL-safe characters;
+// base_url is the loopback gateway.
+const SHAPES = {
+  token: /^avs1\.[A-Za-z0-9]+\.[A-Za-z0-9_-]+$/,
+  placeholder: /^av1\.[A-Za-z0-9._-]+$/,
+  session_id: /^[A-Za-z0-9_-]+$/,
+  base_url: /^http:\/\/127\.0\.0\.1:\d{1,5}\/p\/[A-Za-z0-9._-]+$/,
 }
 
 export function saveState(patch, path = statePath()) {

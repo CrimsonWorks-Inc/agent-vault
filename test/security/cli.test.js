@@ -235,7 +235,8 @@ test('a tampered gateway port in the CLI state file cannot redirect the URL', as
       writeFileSync(statePath, JSON.stringify({ ...original, gateway_port: evil }))
       const { stdout } = await av(['env', '--json'])
       const envText = JSON.parse(stdout).data.env.join('\n')
-      const url = /AGENT_VAULT_URL=(\S+)/.exec(envText)?.[1]
+      // Values are single-quoted now, because this output is meant for eval.
+      const url = /AGENT_VAULT_URL='?([^'\s]+)/.exec(envText)?.[1]
       assert.ok(url, 'env should still produce a URL')
       assert.equal(new URL(url).hostname, '127.0.0.1',
         `a tampered port pointed the gateway at ${new URL(url).hostname}`)

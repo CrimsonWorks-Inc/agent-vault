@@ -542,13 +542,15 @@
         ${code(`${c.cli} mcp install --agent claude-code`, 'Also: cursor, gemini, codex.')}
         ${code(`${c.cli} mcp install --agent codex --print`, 'Show the block without writing anything.')}
         <div class="prose">
-        <p>Restart the agent afterwards. It gains five tools:</p>
+        <p>Restart the agent afterwards. It gains seven tools:</p>
         <ul>
           <li><code>vault_status</code> — is the vault reachable and unlocked</li>
           <li><code>vault_list_creds</code> — what this session may use, and where each placeholder goes</li>
           <li><code>vault_get_placeholder</code> — request one, with a reason you will see</li>
           <li><code>vault_http</code> — make the request; the vault injects the credential</li>
           <li><code>vault_explain_denial</code> — why that was refused, and what is allowed instead</li>
+          <li><code>vault_request_session</code> — ask you for a session; nothing exists until you approve it here or with <span class="mono">agent-vault approve</span></li>
+          <li><code>vault_approval_status</code> — whether you have answered a write that was held for you</li>
         </ul>
         <p>No token is written to the config file: the bridge finds your current session
         from the state file, which is written whether you create the session here or with
@@ -574,7 +576,7 @@
         get back is the public certificate, which is also its own CA — so pointing the client
         at that file is what makes the listener trusted.</p></div>
         ${code(`${c.cli} tls setup`, 'Generates the certificate and writes the trust anchor where you can read it.')}
-        ${code(`${c.cli} listen add mcp-tls --address 127.0.0.1:7449 --surfaces mcp --tls managed`,
+        ${code(`${c.cli} listen add mcp-tls --address 127.0.0.1:7443 --surfaces mcp --tls managed`,
           'Only the mcp surface. A connector cannot reach the credential proxy through it.')}
         ${code(`${c.cli} mcp install --agent claude-code --transport http --tls`)}
         <div class="prose">
@@ -585,7 +587,7 @@
         ${code(`export NODE_EXTRA_CA_CERTS="$HOME/.agent-vault/agent-vault-ca.pem"`)}
         <div class="prose">
         <p>Without it you get a bare TLS handshake failure that says nothing about
-        certificates. With it, <code>https://localhost:7449/mcp</code> works.</p>
+        certificates. With it, <code>https://localhost:7443/mcp</code> works.</p>
         <p>Note that this is for a client running <em>on this machine</em>. A connector added
         on claude.ai is opened from Anthropic's servers, not your browser, so a loopback
         address is unreachable — that would mean exposing the vault to the internet, which is
@@ -599,11 +601,12 @@
           'Same thing, but scoped to one child process, with stale real tokens stripped from its environment.')}
         <div class="prose"><p>The agent then makes requests through one of two routes:</p></div>
         ${code(`curl "$AGENT_VAULT_URL/p/${c.cred}/user" \\
-  -H "Authorization: Bearer $AGENT_VAULT_SESSION" \\
-  -H "X-Agent-Vault-Cred: $AGENT_VAULT_PLACEHOLDER"`,
-          `/p/<credential>/<path> — the vault knows the host from the credential.`)}
+  -H "AV-Session: $AGENT_VAULT_SESSION" \\
+  -H "Authorization: Bearer $AGENT_VAULT_PLACEHOLDER"`,
+          `/p/<credential>/<path> — the vault knows the host from the credential. The placeholder goes wherever the credential's usage says; Authorization: Bearer is the usual one.`)}
         ${code(`curl "$AGENT_VAULT_URL/t/https/api.github.com/user" \\
-  -H "Authorization: Bearer $AGENT_VAULT_SESSION"`,
+  -H "AV-Session: $AGENT_VAULT_SESSION" \\
+  -H "Authorization: Bearer $AGENT_VAULT_PLACEHOLDER"`,
           '/t/<scheme>/<host>/<path> — for a host you granted explicitly.')}`,
     },
     {
@@ -622,12 +625,19 @@ export ANTHROPIC_BASE_URL="$AGENT_VAULT_URL/p/anthropic-key"
 export ANTHROPIC_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
         <div class="prose"><h3>OpenAI</h3></div>
         ${code(`${c.cli} cred add openai-key --kind openai
+${c.cli} session create --cred openai-key --methods GET,POST --budget 5000
+eval "$(${c.cli} env)"
 export OPENAI_BASE_URL="$AGENT_VAULT_URL/p/openai-key"
 export OPENAI_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
         <div class="prose"><h3>Google Gemini</h3></div>
         ${code(`${c.cli} cred add gemini-key --kind google-genai
+${c.cli} session create --cred gemini-key --methods GET,POST --budget 5000
+eval "$(${c.cli} env)"
 export GOOGLE_GEMINI_BASE_URL="$AGENT_VAULT_URL/p/gemini-key"
 export GEMINI_API_KEY="$AGENT_VAULT_PLACEHOLDER"`)}
+        <div class="prose"><p>Each block makes its own session: a placeholder belongs to one
+        credential, and one from the Anthropic session is refused by the OpenAI connector
+        (AV_PH_WRONG_CONNECTOR).</p></div>
         <div class="prose">
         <p>Each of these profiles already refuses the admin and organization paths that would
         let a key mint more keys, even under a grant of <code>/**</code>. You get a request
@@ -692,7 +702,7 @@ ${c.cli} audit verify`, 'The log is hash-chained; verify proves nothing was edit
             ['AV_LOCKED', 'The vault is locked.', `<code>${esc(c.cli)} unlock</code>, or unlock from the Overview page.`],
             ['AV_PRESENCE_REQUIRED', 'Something tried to widen capability without confirmation.', 'Do it from this page with your fingerprint, or from the CLI after proving your passphrase.'],
             ['AV_PRESENCE_DENIED', 'The passphrase or signature did not verify.', 'Try again. Repeated failures are in the audit log.'],
-            ['AV_RATE_LIMITED', 'Too many passphrase attempts in a row.', 'Wait for the backoff named in the message. Each further failure doubles it, up to a minute.'],
+            ['AV_RATE_LIMITED', 'Too many passphrase attempts in a row.', 'Wait for the backoff named in the message. Each further failure doubles it, up to thirty seconds.'],
             ['AV_SESSION_REQUIRED', 'No session token was presented.', 'Send it as <code>Authorization: Bearer</code>, or use a placeholder at a declared header site.'],
             ['AV_SESSION_EXPIRED', 'The session ran out of time or budget.', 'Create a new one.'],
             ['AV_SESSION_REVOKED', 'You revoked it.', 'Create a new one if that was not what you meant.'],
@@ -724,7 +734,7 @@ ${c.cli} profiles                   the built-in connector kinds and their ceili
 ${c.cli} session create [--cred S] [--methods M] [--paths P] [--budget N]
 ${c.cli} session list | session revoke [SID]
 ${c.cli} ph next CRED [--uses N]    issue a placeholder
-${c.cli} ph check PLACEHOLDER       is this one still valid
+${c.cli} ph check PLACEHOLDER       is it well formed (offline; not whether it is still live)
 ${c.cli} ph pattern                 the regex that recognises one
 
 ${c.cli} env                        shell exports for an agent
@@ -755,10 +765,30 @@ ${c.cli} ui                         open this page`)}`,
    * goes. Anywhere else and the daemon refuses with AV_BAD_LOCATION, so a
    * generic example would be an example of the error.
    */
+  /**
+   * Narrowing typed into the approvals page, read exactly as the CLI flags
+   * are (parseOverrides in src/pending.js): lists split on commas, methods
+   * upper-cased, numbers as numbers. The server rebuilds the signed operation
+   * from that parse, so the page has to sign the same thing.
+   */
+  function parseNarrowing(raw) {
+    const out = {}
+    const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
+    if (raw.methods) out.methods = list(raw.methods).map((m) => m.toUpperCase())
+    if (raw.paths) out.paths = list(raw.paths)
+    for (const k of ['budget', 'uses', 'ttl_minutes']) {
+      if (raw[k] !== undefined && raw[k] !== null && raw[k] !== '') out[k] = Number(raw[k])
+    }
+    return out
+  }
+
   function exampleCall(s) {
     const site = (s.sites || [])[0] || ''
     const [kind, name, scheme] = site.split(':')
-    const auth = `  -H "Authorization: Bearer ${s.token}"`
+    // The token goes in AV-Session. For a Bearer-site credential the
+    // placeholder goes in Authorization, and of two Authorization headers a
+    // server keeps the first — so the example dropped the placeholder.
+    const auth = `  -H "AV-Session: ${s.token}"`
     if (kind === 'header') {
       const header = `${name}: ${scheme ? `${scheme} ` : ''}${s.placeholder}`
       return `curl "${s.base_url}${s.probe || '/'}" \\\n${auth} \\\n  -H "${header}"`
@@ -1196,12 +1226,16 @@ ${c.cli} ui                         open this page`)}`,
     async decide(btn) {
       const id = btn.dataset.id
       const granted = btn.dataset.granted === '1'
-      const overrides = {}
+      const typed = {}
       if (granted) {
         for (const input of document.querySelectorAll(`.narrow[data-for="${id}"] .narrow-input`)) {
-          if (input.value.trim()) overrides[input.dataset.field] = input.value.trim()
+          if (input.value.trim()) typed[input.dataset.field] = input.value.trim()
         }
       }
+      // Parsed before it is signed. The raw text ("GET", "100") was signed and
+      // the server rebuilt the operation from parsed values (["GET"], 100), so
+      // every narrowing typed here failed as a different operation.
+      const overrides = parseNarrowing(typed)
       if (btn.dataset.kind === 'session') {
         const op = await operationFor('session_request.decide', { id, granted, ...overrides })
         await gated(op, (proof) => api('POST', 'session-requests/decide', {
