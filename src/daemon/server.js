@@ -230,6 +230,19 @@ export class Daemon {
     return { ...SessionRequests.redact(record), granted: final }
   }
 
+  /**
+   * Hand an approved request's session over, once: whoever gets it here is
+   * the only one who ever will.
+   */
+  #handOver(record, via) {
+    const result = record.result
+    record.result = null
+    record.state = 'collected'
+    this.sessionRequests.persist()
+    this.vault.audit?.write('session_request.collected', { request_id: record.id, via })
+    return result
+  }
+
   #createSession(input) {
           const cred = this.vault.findCredential(input.cred)
           if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
@@ -814,7 +827,11 @@ export class Daemon {
     let mcpSessionId = req.headers['mcp-session-id']
     const extra = {}
     if (isInitialize) {
-      mcpSessionId = this.mcp.openSession()
+      // Recorded only for a caller with a live session. The handshake needs
+      // no session — on purpose — so a record per anonymous initialize let any
+      // local process, or any peer of an mcp listener, write the audit log as
+      // fast as it could send.
+      mcpSessionId = this.mcp.openSession({ record: !!session })
       extra['mcp-session-id'] = mcpSessionId
       extra['mcp-protocol-version'] = LATEST_PROTOCOL
     } else if (mcpSessionId && !this.mcp.hasSession(mcpSessionId)) {
@@ -917,11 +934,13 @@ export class Daemon {
             throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
           }
           try {
-            const record = this.sessionRequests.propose({ proposal, reason: input.reason })
+            const { record, collectSecret } = this.sessionRequests.propose({ proposal, reason: input.reason })
             return json(200, {
               ...SessionRequests.redact(record),
+              // Shown once, here, to the asker. Only its hash is kept.
+              collect_secret: collectSecret,
               next: {
-                agent: 'poll GET /v1/session-requests/collect?id=<id> until a human answers',
+                agent: 'poll GET /v1/session-requests/collect?id=<id>&secret=<collect_secret> until a human answers',
                 human: [`agent-vault approvals`, `agent-vault approve ${record.id}`],
               },
             })
@@ -939,18 +958,25 @@ export class Daemon {
         // The agent collects its own token, exactly once. Reading is not
         // widening: the token was authorised by the human who approved it, and
         // handing it over twice would leave a second live copy in memory.
+        //
+        // "Its own" is now something this route checks. It handed the token to
+        // whoever presented the id first, and every pending id is listed on
+        // this socket, so another agent could poll the request and take the
+        // session a human granted to someone else. The asker was given a
+        // secret when it asked; nobody else has it.
         case 'GET /v1/session-requests/collect': {
           const record = this.sessionRequests.get(url.searchParams.get('id'))
           if (!record) throw deny('AV_NOT_FOUND', 'no such session request')
+          if (!SessionRequests.mayCollect(record, url.searchParams.get('secret'))) {
+            throw deny('AV_POLICY_DENIED', 'that is not the secret this request was opened with', {
+              rule: 'collect_secret',
+              hint: 'Only the agent that asked can collect: pass the collect_secret it was given as &secret=.',
+            })
+          }
           if (record.state === 'pending') return json(200, { state: 'pending' })
           if (record.state === 'denied') return json(200, { state: 'denied' })
           if (!record.result) return json(200, { state: record.state, detail: 'the answer is no longer available; ask again' })
-          const result = record.result
-          record.result = null
-          record.state = 'collected'
-          this.sessionRequests.persist()
-          this.vault.audit?.write('session_request.collected', { request_id: record.id })
-          return json(200, { state: 'approved', ...result })
+          return json(200, { state: 'approved', ...this.#handOver(record, 'collect') })
         }
 
         case 'POST /v1/session-requests/decide': {
@@ -978,7 +1004,13 @@ export class Daemon {
             }),
             input.presence,
           )
-          return json(200, this.#settleSessionRequest(record, input.granted, final))
+          const settled = this.#settleSessionRequest(record, input.granted, final)
+          // The approving human's client records the session where local
+          // clients look; the daemon cannot, it runs as its own uid. It gets it
+          // here, from the decision it just proved presence for, which counts
+          // as the one collection.
+          if (input.granted && record.result) settled.session = this.#handOver(record, 'decide')
+          return json(200, settled)
         }
 
         // Several decisions, one act of presence.
@@ -1011,6 +1043,18 @@ export class Daemon {
               decided.push({ id: d.id, kind: d.kind, outcome: 'skipped', reason: e.detail || e.message })
             }
           }
+          // A client can record one session, so the approving client gets the
+          // session only when the batch granted exactly one. With several,
+          // each asker collects its own with its secret; handing them all to
+          // one client would spend every agent's single collection on a store
+          // that keeps the last.
+          const grantedSessions = decided.filter(
+            (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
+          )
+          if (grantedSessions.length === 1) {
+            const record = this.sessionRequests.get(grantedSessions[0].id)
+            if (record?.result) grantedSessions[0].result.session = this.#handOver(record, 'decide')
+          }
           this.vault.audit?.write('pending.decided_many', {
             granted: input.decisions.filter((d) => d.granted).map((d) => d.id),
             denied: input.decisions.filter((d) => !d.granted).map((d) => d.id),
@@ -1041,7 +1085,11 @@ export class Daemon {
           if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
           // Never silently borrow. Defaulting to whichever session happened to
           // be active is how one agent's request spends another's grant.
-          const active = Object.values(this.vault.db.sessions).filter((s) => s.state === 'active')
+          // Live, not merely marked active: expiry is noticed lazily, so a
+          // session nobody has touched since it ran out still says 'active'.
+          const now = Date.now()
+          const active = Object.values(this.vault.db.sessions)
+            .filter((s) => s.state === 'active' && Date.parse(s.expires_at) > now)
           if (!input.sid && active.length > 1) {
             throw deny('AV_SESSION_REQUIRED', `${active.length} sessions are active; name the one to issue for`, {
               rule: 'explicit_session',
@@ -1049,6 +1097,15 @@ export class Daemon {
             })
           }
           const session = input.sid ? this.vault.db.sessions[input.sid] : active[0]
+          // Both of these used to fall through to `session.id` and answer with
+          // a TypeError.
+          if (input.sid && !session) throw deny('AV_NOT_FOUND', `no session ${input.sid}`)
+          if (!session) {
+            throw deny('AV_SESSION_REQUIRED', 'no session is active to issue a placeholder for', {
+              next: { cli: [`agent-vault session create --cred ${cred.slug}`] },
+            })
+          }
+          this.vault.assertSessionLive(session)
           const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
           if (!grant) throw deny('AV_NO_GRANT', `no grant for ${input.cred} in session ${session.id}`)
           const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses: input.uses ?? null })

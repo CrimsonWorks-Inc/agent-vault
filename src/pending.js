@@ -103,24 +103,28 @@ export function parseOverrides(args = {}) {
 }
 
 /**
- * Collecting an approved session, and recording it where local clients look.
+ * Recording an approved session where local clients look.
  *
  * The daemon cannot do this. It runs as its own uid and the state file belongs
  * to the human — that is the boundary the whole design rests on. So whichever
- * client the human approved with collects the token and records it: the CLI and
- * the web UI both run as them.
+ * client the human approved with records it: the CLI and the web UI both run
+ * as them.
  *
  * That is better than the agent collecting it anyway. The MCP bridge re-reads
  * the state file on every request, so a session recorded here reaches a RUNNING
  * agent on its next call, with no restart and nothing copied by hand.
  *
- * The token is handed out once, so this is the one collection. `remember` is the
+ * The session comes from the gated decision itself (`answered.session`), which
+ * the daemon counts as the one collection. It used to be fetched from the
+ * collect route by request id, which is what let any agent that read the id
+ * off the pending list take a session meant for another; that route now wants
+ * the asker's secret, which the human's client never had. `remember` is the
  * caller's writer, already bound to the right path.
  */
-export async function collectApproved(item, { get, remember }) {
+export function collectApproved(item, { answered, remember }) {
   if (item.kind !== 'session') return null
-  const got = await get(`/v1/session-requests/collect?id=${encodeURIComponent(item.id)}`).catch(() => null)
-  if (!got || got.state !== 'approved' || !got.token) return null
+  const got = answered?.session
+  if (!got?.token) return null
   remember(got)
   return got
 }

@@ -11,12 +11,16 @@ import { randomUUID } from 'node:crypto'
 import { getProfile } from '../connectors/profiles.js'
 import * as sitesMod from '../core/sites.js'
 import { VaultError } from '../core/errors.js'
-import { proposalOf as srProposal } from './session-requests.js'
+import { proposalOf as srProposal, SessionRequests } from './session-requests.js'
 
 export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26']
 export const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
 
 const SERVER_INFO = { name: 'agent-vault', version: '0.1.0' }
+
+// Transport sessions held at once. Each is a few bytes; the bound is what
+// matters, not the number.
+const MAX_MCP_SESSIONS = 256
 
 const INSTRUCTIONS = [
   'Credentials are placeholders, never real secrets. Never ask the user for a real secret.',
@@ -42,11 +46,23 @@ export class McpServer {
     this.sessions = new Map() // Mcp-Session-Id -> { created, lastEventId, events: [] }
   }
 
-  /** Create an MCP transport session. It is a routing key, never a credential. */
-  openSession() {
+  /**
+   * Create an MCP transport session. It is a routing key, never a credential.
+   *
+   * Bounded, oldest first: `initialize` needs no session token, so nothing
+   * else limits how many of these a caller can open, and the map had no size
+   * limit and no expiry. An evicted client gets AV_MCP_SESSION_UNKNOWN and
+   * initializes again, which is what the protocol expects.
+   */
+  openSession({ record = true } = {}) {
+    while (this.sessions.size >= MAX_MCP_SESSIONS) {
+      const oldest = this.sessions.keys().next().value
+      if (oldest === undefined) break
+      this.sessions.delete(oldest)
+    }
     const sid = randomUUID()
     this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1 })
-    this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
+    if (record) this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
     return sid
   }
 
@@ -97,6 +113,7 @@ export class McpServer {
             // the human was shown no lifetime at all to narrow.
             ttl_minutes: { type: 'number', description: 'how long you need it for; ask for the least you need' },
             poll_id: { type: 'string', description: 'an id from an earlier call: check whether it has been answered' },
+            poll_secret: { type: 'string', description: 'the poll_secret that earlier call returned; only the asker can poll' },
           },
           required: ['reason'],
         },
@@ -277,6 +294,12 @@ export class McpServer {
         if (args.poll_id) {
           const record = this.daemon?.sessionRequests?.get(args.poll_id)
           if (!record) return text({ error: `no session request ${args.poll_id}` })
+          // The id is listed to anyone on the control socket; the secret went
+          // only to whoever asked. Without this check another agent could poll
+          // the request and collect the session meant for the asker.
+          if (!SessionRequests.mayCollect(record, args.poll_secret)) {
+            return text({ error: 'poll_secret does not match this request; only the agent that asked can poll it' })
+          }
           if (record.state === 'pending') {
             return text({ state: 'pending', detail: 'a human has not answered yet; poll again or carry on without it' })
           }
@@ -309,7 +332,7 @@ export class McpServer {
         if (!this.daemon?.sessionRequests) return text({ error: 'session requests are not available on this daemon' })
         if (!args.cred) return text({ error: 'name the credential you need', known: this.vault.listCredentials().map((c) => c.slug) })
         try {
-          const record = this.daemon.sessionRequests.propose({
+          const { record, collectSecret } = this.daemon.sessionRequests.propose({
             // Every field the schema offers. ttl_minutes and uses were dropped
             // here, so an agent asking for fifteen minutes got eight hours and
             // the human was shown a lifetime nobody had asked for.
@@ -322,8 +345,9 @@ export class McpServer {
           return text({
             state: 'pending',
             request_id: record.id,
+            poll_secret: collectSecret,
             asked_for: record.summary,
-            detail: 'a human must approve this. Poll with vault_request_session { poll_id }. They may narrow it.',
+            detail: 'a human must approve this. Poll with vault_request_session { poll_id: request_id, poll_secret }. They may narrow it.',
           })
         } catch (e) {
           return text({ error: e.message })

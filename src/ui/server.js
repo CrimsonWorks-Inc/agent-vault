@@ -392,13 +392,20 @@ export class UiServer {
           const grantedSessions = (answered?.decided || []).filter(
             (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
           )
-          if (grantedSessions.length === 1) {
-            await collectApproved(
-              { id: grantedSessions[0].id, kind: 'session' },
-              { get: (p) => this.#control('GET', p), remember: (sn) => rememberSession(sn, this.statePath) },
-            ).catch(() => null)
-            answered.recorded = grantedSessions[0].id
-          } else if (grantedSessions.length > 1) {
+          // The daemon hands the session to the approving client only when the
+          // batch granted exactly one. It never goes on to the page.
+          for (const r of answered?.decided || []) {
+            const session = r.result?.session
+            if (!session) continue
+            delete r.result.session
+            try {
+              collectApproved({ id: r.id, kind: 'session' }, {
+                answered: { session }, remember: (sn) => rememberSession(sn, this.statePath),
+              })
+              answered.recorded = r.id
+            } catch (e) { this.lastStateError = String(e?.message ?? e) }
+          }
+          if (grantedSessions.length > 1) {
             answered.recorded = null
             answered.note = 'several sessions were approved, so each agent collects its own; this page records one at a time'
           }
@@ -412,24 +419,24 @@ export class UiServer {
             overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
             presence: body?.presence,
           })
-          if (!body?.granted) return this.#send(res, 200, answered)
+          const { session, ...decision } = answered || {}
+          if (!body?.granted) return this.#send(res, 200, decision)
           // Recorded here for the same reason the CLI does it: the daemon runs
           // as its own uid and cannot write the human's state file. This process
           // can, and the MCP bridge re-reads that file per request — so a
           // session approved in this page reaches a running agent on its next
           // call without anyone copying a token.
-          const collected = await collectApproved(
-            { id: body.id, kind: 'session' },
-            {
-              get: (p) => this.#control('GET', p),
-              remember: (s) => rememberSession(s, this.statePath),
-            },
-          ).catch(() => null)
+          let collected = null
+          try {
+            collected = collectApproved({ id: body.id, kind: 'session' }, {
+              answered: { session }, remember: (s) => rememberSession(s, this.statePath),
+            })
+          } catch (e) { this.lastStateError = String(e?.message ?? e) }
           // The token itself never goes to the page. It went to the state file,
           // which is where local clients look; showing it here would put a live
           // capability in a browser for no reason.
           return this.#send(res, 200, {
-            ...answered,
+            ...decision,
             recorded: collected ? { session_id: collected.session_id, expires_at: collected.expires_at } : null,
           })
         }

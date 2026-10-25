@@ -1331,11 +1331,12 @@ async function decide(args, granted) {
   // state file belongs to you. The MCP bridge re-reads that file per request,
   // so a session recorded now reaches a RUNNING agent on its next call — no
   // restart, nothing pasted by hand.
-  const collected = await collectApproved(item, {
-    get: (p) => control('GET', p),
+  const collected = collectApproved(item, {
+    answered,
     remember: (s) => rememberSession(s, STATE),
   })
-  return collected ? { ...answered, collected } : answered
+  const { session, ...rest } = answered
+  return collected ? { ...rest, collected } : rest
 }
 
 function printHelp() {

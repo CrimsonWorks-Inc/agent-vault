@@ -221,7 +221,7 @@ test('the one capability-shaped tool cannot create capability', async () => {
   // Polling before a human answers hands out nothing either.
   const polled = await mcp.handle({
     jsonrpc: '2.0', id: 2, method: 'tools/call',
-    params: { name: 'vault_request_session', arguments: { poll_id: payload.request_id, reason: 'checking' } },
+    params: { name: 'vault_request_session', arguments: { poll_id: payload.request_id, poll_secret: payload.poll_secret, reason: 'checking' } },
   })
   const poll = JSON.parse(polled.result.content[0].text)
   assert.equal(poll.state, 'pending')

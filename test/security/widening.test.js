@@ -332,9 +332,9 @@ test('a batch signature covers exactly the items it named', async () => {
   assert.equal(smuggled.body.code, 'AV_PRESENCE_REQUIRED')
 
   // And neither of them was decided on the way to refusing.
-  for (const id of [a.body.id, b.body.id]) {
-    const still = await control('GET', `/v1/session-requests/collect?id=${id}`)
-    assert.equal(still.body.state, 'pending', `${id} was settled by a refused batch`)
+  for (const r of [a.body, b.body]) {
+    const still = await control('GET', `/v1/session-requests/collect?id=${r.id}&secret=${r.collect_secret}`)
+    assert.equal(still.body.state, 'pending', `${r.id} was settled by a refused batch`)
   }
 })
 
@@ -351,8 +351,15 @@ test('a batch signature is spent by the batch it named', async () => {
   assert.equal(res.body.decided[0].outcome, 'decided')
   assert.equal(res.body.decided[0].result.state, 'approved')
 
-  // The token is not in the answer. A batch is still not a way to get one.
-  assert.equal(JSON.stringify(res.body).includes('avs1.'), false, 'a token came back in a batch result')
+  // One session granted, so the approving client gets it — that is the one
+  // collection, and it is the only place in the answer a token appears. The
+  // asker's own poll is then told, not handed a second copy.
+  const { session, ...rest } = res.body.decided[0].result
+  assert.match(session.token, /^avs1\./)
+  assert.equal(JSON.stringify(rest).includes('avs1.'), false, 'a token came back outside the handover')
+  const polled = await control('GET', `/v1/session-requests/collect?id=${a.body.id}&secret=${a.body.collect_secret}`)
+  assert.equal(polled.body.state, 'collected')
+  assert.equal(polled.body.token, undefined)
 })
 
 test('reordering a signed batch does not change what it authorises', async () => {
