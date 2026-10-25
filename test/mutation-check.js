@@ -665,7 +665,7 @@ const MUTATIONS = [
     what: 'an event-stream value is gathered by all of its indexes at once, so a decoy index splits the run',
     file: 'src/daemon/pipeline.js',
     from: 'choices = choices.flatMap((c) => [c, ...values.map((v) => [...c, [depth, key, v]])])',
-    to: 'choices = choices.flatMap((c) => (c.length ? [c] : [c, ...values.map((v) => [...c, [depth, key, v]])]))',
+    to: 'choices = choices.flatMap((c) => values.map((v) => [...c, [depth, key, v]]))',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
