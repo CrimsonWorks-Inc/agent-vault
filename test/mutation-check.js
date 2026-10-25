@@ -601,8 +601,8 @@ const MUTATIONS = [
   {
     what: 'an event stream past the key-path limit forgets the oldest path and carries on',
     file: 'src/daemon/pipeline.js',
-    from: "if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'",
-    to: "if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) byPath.delete(byPath.keys().next().value)",
+    from: "const room = (key) => (runs.has(key) || runs.size < MAX_SSE_PATHS ? null : 'too_many_paths')",
+    to: 'const room = (key) => { if (!runs.has(key) && runs.size >= MAX_SSE_PATHS) runs.delete(runs.keys().next().value); return null }',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -629,8 +629,8 @@ const MUTATIONS = [
   {
     what: 'an event-stream key path is the keys joined with a dot, so a dotted key names another path',
     file: 'src/daemon/pipeline.js',
-    from: 'const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])',
-    to: "const key = JSON.stringify([path.join('.'), indexes.filter((_, i) => mask & (1 << i))])",
+    from: 'yield { gathering: JSON.stringify(path), indexes, appended }',
+    to: "yield { gathering: path.join('.'), indexes, appended }",
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -657,15 +657,15 @@ const MUTATIONS = [
   {
     what: 'an event-stream value is gathered by key path only, not by the indexes a client groups it by',
     file: 'src/daemon/pipeline.js',
-    from: 'for (let mask = 0; mask < 2 ** indexes.length; mask++) {',
-    to: 'for (let mask = 0; mask < 1; mask++) {',
+    from: 'choices = choices.flatMap((c) => [c, ...values.map((v) => [...c, [depth, key, v]])])',
+    to: 'choices = choices.flatMap((c) => [c])',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
     what: 'an event-stream value is gathered by all of its indexes at once, so a decoy index splits the run',
     file: 'src/daemon/pipeline.js',
-    from: 'const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])',
-    to: 'const key = JSON.stringify([path, mask ? indexes : []])',
+    from: 'choices = choices.flatMap((c) => [c, ...values.map((v) => [...c, [depth, key, v]])])',
+    to: 'choices = choices.flatMap((c) => (c.length ? [c] : [c, ...values.map((v) => [...c, [depth, key, v]])]))',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -678,9 +678,66 @@ const MUTATIONS = [
   {
     what: 'an event-stream value under more index fields than are combined is passed instead of cut',
     file: 'src/daemon/pipeline.js',
-    from: 'if (indexes.length > MAX_SSE_INDEXES) return null',
-    to: 'if (false) return null',
+    from: "if (slots.length > MAX_SSE_INDEXES) return 'too_many_indexes'",
+    to: "if (false) return 'too_many_indexes'",
     tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event-stream array element is gathered by its position only, not wherever its index puts it',
+    file: 'src/daemon/pipeline.js',
+    from: '    yield { gathering: JSON.stringify(path.map((s) => (typeof s === \'number\' ? null : s))), indexes, appended }\n',
+    to: '',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'a content block\'s starting text is not gathered with the deltas that continue it',
+    file: 'src/daemon/pipeline.js',
+    from: '    yield { gathering: `#${continued}`, indexes: [...own, ...positions], appended: true }',
+    to: '',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'a Responses item\'s content position is not read as its content_index',
+    file: 'src/daemon/pipeline.js',
+    from: 'indexes: [...own, ...positions], appended: true }',
+    to: 'indexes, appended: true }',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'an index field missing from one event is not read as zero or as a group of its own',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (!indexes.some(([d, k]) => d === depth && k === key)) slots.push([depth, key, MISSING])',
+    to: 'if (false) slots.push([depth, key, MISSING])',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'a missing index that came before the field was first seen is not filed with it',
+    file: 'src/daemon/pipeline.js',
+    from: 'runs.set(to, runs.get(from))',
+    to: "runs.set(to, '')",
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'a missing index field is read as zero only, never as a group of its own',
+    file: 'src/daemon/pipeline.js',
+    from: 'const MISSING = [0, null]',
+    to: 'const MISSING = [0]',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'an index written as a string is not also read as its number',
+    file: 'src/daemon/pipeline.js',
+    from: "const valuesOf = (v) => (typeof v === 'string' && /^(?:0|[1-9][0-9]{0,15})$/.test(v) ? [v, Number(v)] : [v])",
+    to: 'const valuesOf = (v) => [v]',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    // A false positive: an ordinary Responses url_citation event was cut.
+    what: 'an annotation\'s character offsets are counted as index fields',
+    file: 'src/daemon/pipeline.js',
+    from: 'const INDEX_FIELD = /^(?:index|(?!start_|end_).+_index)$/',
+    to: 'const INDEX_FIELD = /^(?:index|.+_index)$/',
+    tests: ['test/security/gateway-hardening.test.js'],
   },
 ]
 

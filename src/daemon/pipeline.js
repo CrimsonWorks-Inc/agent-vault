@@ -1177,12 +1177,14 @@ function decompress(buf, encoding) {
  * A secret split across *application* fields, as in `{"delta":"ghp_REAL"}`
  * then `{"delta":"SECRET"}`, is caught by reading each JSON payload and
  * concatenating the values found at the same key path — `delta.text`,
- * `choices.0.delta.content` — and at the same path and indexes, which is how
- * a client puts the text back together. When any of these finds a secret the
- * stream is cut rather than continued — the agent may have received a
- * fragment, and it will not receive the rest. It requires a hostile upstream, which already holds the
- * credential; what it buys is teaching the agent a secret it was never given,
- * and that is worth failing closed over.
+ * `choices.0.delta.content` — at the same path and indexes, wherever in an
+ * array the element sits, and where an SDK continues one path at another
+ * (eventRuns), which is how a client puts the text back together. When any of
+ * these finds a secret the stream is cut rather than continued — the agent may
+ * have received a fragment, and it will not receive the rest. It requires a
+ * hostile upstream, which already holds the credential; what it buys is
+ * teaching the agent a secret it was never given, and that is worth failing
+ * closed over.
  *
  * The stream is also cut, never left hanging or thrown, when the upstream
  * fails part way, when one event grows past MAX_EVENT_BYTES without ending,
@@ -1195,8 +1197,8 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
   let carry = ''
   let assembled = ''
   let total = 0
-  const byPath = new Map()
   const keep = scrubber.overlap * 4
+  const runs = eventRuns(scrubber, keep)
 
   const cut = (reason, detail) => {
     onCut?.(reason)
@@ -1262,34 +1264,10 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     return scrubber.scrub(bare).redactions > 0
   }
 
-  /**
-   * Append each string in one JSON payload to the run kept for its key path.
-   * The reason to cut, or null.
-   *
-   * The run is searched with ALL of the new value on it and only then
-   * trimmed. Trimming first threw away the start of a long value, so the
-   * second half of a secret followed by 2,000 ordinary characters was never
-   * searched next to its first half.
-   *
-   * A path is never forgotten to make room for another. This used to evict
-   * the least recently used one, and an event with 65 metadata keys between
-   * the two halves of a secret evicted `delta.text`: its next value started a
-   * fresh run, and the client put the secret back together.
-   */
+  /** Append each string in one JSON payload to its runs; the reason to cut, or null. */
   const leakedByPath = (payload) => {
     const parsed = parseEventJson(payload)
-    if (parsed === undefined) return null
-    for (const string of jsonStringsByPath(parsed)) {
-      const runs = runKeys(string)
-      if (!runs) return 'too_many_indexes'
-      for (const path of runs) {
-        if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'
-        const run = (byPath.get(path) ?? '') + string.value
-        if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
-        byPath.set(path, run.length > keep ? run.slice(-keep) : run)
-      }
-    }
-    return null
+    return parsed === undefined ? null : runs.add(parsed)
   }
 
   /** Every complete event now in `pending`, taken out of it. */
@@ -1394,7 +1372,12 @@ function parseEventJson(payload) {
 }
 
 // A field a client may gather a stream by: `index`, `output_index`, ...
-const INDEX_FIELD = /^(?:index|.+_index)$/
+//
+// Not `start_index` or `end_index`. Those are character offsets into the
+// text, which no client groups by, and the Responses API puts both inside an
+// annotation that already sits under three index fields: every ordinary
+// `url_citation` event was cut for having more than MAX_SSE_INDEXES.
+const INDEX_FIELD = /^(?:index|(?!start_|end_).+_index)$/
 
 /**
  * Every string in a parsed JSON value, with its key path (`["delta","text"]`)
@@ -1419,24 +1402,175 @@ function* jsonStringsByPath(value, path = [], indexes = []) {
   }
 }
 
+// The fields a client appends from one event to the next.
+const APPENDED = new Set(['text', 'content', 'delta', 'arguments', 'partial_json', 'thinking', 'refusal', 'reasoning', 'reasoning_content'])
+
+// What a missing index field is read as: zero, as a typed client's zero value
+// does (Go, Rust, C#), and a group of its own, as a client that keys a map by
+// it does.
+const MISSING = [0, null]
+
 /**
- * The runs one string is appended to, or null when there are too many.
+ * Values an SDK continues at another key path: a block or a part starts with
+ * its text, and each delta appends to it. [event type, path, what is being
+ * continued]. `{ at }` is an array position the SDK reads as that index field.
  *
- * A client gathers text by key path and, usually, by an index: the Anthropic
- * SDK by the event's `index`, OpenAI's by `choices[].index`, the Responses
- * API by `output_index` and `content_index`. Keyed by path alone, an event
- * at another index between the halves of a secret landed in the same run and
- * hid it. Keyed by every index, an upstream varies one the client ignores. So
- * there is a run for the path with each combination of its indexes.
- *
- * A long key is hashed, so a hostile key costs a digest, not its length.
+ * A secret that began in a `content_block_start` and ended in the deltas
+ * after it was in two runs that never met: `content_block.text` and
+ * `delta.text`. The Anthropic SDK puts them in one block.
  */
-function runKeys({ path, indexes }) {
-  if (indexes.length > MAX_SSE_INDEXES) return null
-  const keys = []
-  for (let mask = 0; mask < 2 ** indexes.length; mask++) {
-    const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])
-    keys.push(key.length > 256 ? `#${canon.sha256(key)}` : key)
+const CONTINUES = [
+  ['content_block_start', ['content_block', 'text'], 'text'],
+  ['content_block_start', ['content_block', 'thinking'], 'thinking'],
+  ['content_block_delta', ['delta', 'text'], 'text'],
+  ['content_block_delta', ['delta', 'thinking'], 'thinking'],
+  ['response.output_item.added', ['item', 'content', { at: 'content_index' }, 'text'], 'output_text'],
+  ['response.content_part.added', ['part', 'text'], 'output_text'],
+  ['response.output_text.delta', ['delta'], 'output_text'],
+  ['response.output_item.added', ['item', 'content', { at: 'content_index' }, 'refusal'], 'refusal'],
+  ['response.content_part.added', ['part', 'refusal'], 'refusal'],
+  ['response.refusal.delta', ['delta'], 'refusal'],
+  ['response.output_item.added', ['item', 'arguments'], 'arguments'],
+  ['response.function_call_arguments.delta', ['delta'], 'arguments'],
+  ['response.output_item.added', ['item', 'summary', { at: 'summary_index' }, 'text'], 'summary'],
+  ['response.reasoning_summary_part.added', ['part', 'text'], 'summary'],
+  ['response.reasoning_summary_text.delta', ['delta'], 'summary'],
+]
+
+/**
+ * The ways a client may gather one string: { gathering, indexes, appended }.
+ *
+ * By its key path as written. By the same path with array positions left
+ * out, because OpenAI's SDKs gather `choices[]` and `tool_calls[]` by their
+ * `index` and not by where the element sits: a choice that moved to another
+ * position between events started a new run, and the SDK still joined it to
+ * the old one. And as the value an SDK continues, from CONTINUES.
+ */
+function* gatheringsOf({ path, indexes }, type) {
+  const appended = APPENDED.has(path[path.length - 1])
+  yield { gathering: JSON.stringify(path), indexes, appended }
+  if (path.some((s) => typeof s === 'number')) {
+    yield { gathering: JSON.stringify(path.map((s) => (typeof s === 'number' ? null : s))), indexes, appended }
   }
-  return keys
+  for (const [eventType, pattern, continued] of CONTINUES) {
+    if (eventType !== type || pattern.length !== path.length) continue
+    const positions = []
+    const matches = pattern.every((p, i) => {
+      if (typeof p === 'string') return p === path[i]
+      if (typeof path[i] !== 'number') return false
+      positions.push([0, p.at, path[i]])
+      return true
+    })
+    if (!matches) continue
+    const own = indexes.filter(([depth, key]) => !positions.some((p) => depth === 0 && p[1] === key))
+    yield { gathering: `#${continued}`, indexes: [...own, ...positions], appended: true }
+  }
+}
+
+/**
+ * The runs an event stream's strings are gathered into. `add(payload)`
+ * appends every string in one parsed payload and returns the reason to cut,
+ * or null.
+ *
+ * A run is a gathering and a choice of the index fields above the string:
+ * each one either left out or given one of its values. A client gathers text
+ * by key path and, usually, by an index: the Anthropic SDK by the event's
+ * `index`, OpenAI's by `choices[].index` and `tool_calls[].index`, the
+ * Responses API by `output_index` and `content_index`. Keyed by path alone,
+ * an event at another index between the halves of a secret landed in the
+ * same run and hid it. Keyed by every index, an upstream varies one the
+ * client ignores. So every combination is a run.
+ *
+ * An index written as a string is also its number, because a JavaScript SDK
+ * that indexes an array with "0" reads the element at 0. And on an appended
+ * field, an index field seen anywhere at that gathering but missing from this
+ * object is read as each of MISSING. A missing index that came before the
+ * field was first seen cannot be filed then, so when it is first seen, every
+ * run there is copied into its MISSING runs: until now, everything gathered
+ * there lacked it.
+ *
+ * Each run is searched with ALL of the new value on it and only then
+ * trimmed. Trimming first threw away the start of a long value, so the second
+ * half of a secret followed by 2,000 ordinary characters was never searched
+ * next to its first half.
+ *
+ * A run is never forgotten to make room for another. This used to evict the
+ * least recently used one, and an event with 65 metadata keys between the two
+ * halves of a secret evicted `delta.text`: its next value started a fresh
+ * run, and the client put the secret back together. Past MAX_SSE_PATHS the
+ * stream is cut. A long key is hashed, so a hostile key costs a digest, not
+ * its length.
+ */
+function eventRuns(scrubber, keep) {
+  const runs = new Map()
+  // For each appended gathering: the index fields seen there, and its runs
+  // with the choice each one is.
+  const seen = new Map()
+
+  const keyOf = (gathering, chosen) => {
+    const key = JSON.stringify([gathering, chosen])
+    return key.length > 256 ? `#${canon.sha256(key)}` : key
+  }
+  const bySlot = (a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+  const valuesOf = (v) => (typeof v === 'string' && /^(?:0|[1-9][0-9]{0,15})$/.test(v) ? [v, Number(v)] : [v])
+
+  /** The new run's key, or the reason to cut. */
+  const room = (key) => (runs.has(key) || runs.size < MAX_SSE_PATHS ? null : 'too_many_paths')
+
+  function gather({ gathering, indexes, appended }, value) {
+    let here = null
+    if (appended) {
+      if (!seen.has(gathering)) seen.set(gathering, { fields: new Map(), runs: new Map() })
+      here = seen.get(gathering)
+      for (const [depth, key] of indexes) {
+        const id = JSON.stringify([depth, key])
+        if (here.fields.has(id)) continue
+        for (const [from, chosen] of [...here.runs]) {
+          for (const missing of MISSING) {
+            const choice = [...chosen, [depth, key, missing]].sort(bySlot)
+            const to = keyOf(gathering, choice)
+            if (runs.has(to)) continue
+            const full = room(to)
+            if (full) return full
+            runs.set(to, runs.get(from))
+            here.runs.set(to, choice)
+          }
+        }
+        here.fields.set(id, [depth, key])
+      }
+    }
+    const slots = indexes.map(([depth, key, v]) => [depth, key, valuesOf(v)])
+    for (const [depth, key] of here?.fields.values() ?? []) {
+      if (!indexes.some(([d, k]) => d === depth && k === key)) slots.push([depth, key, MISSING])
+    }
+    if (slots.length > MAX_SSE_INDEXES) return 'too_many_indexes'
+    slots.sort(bySlot)
+    let choices = [[]]
+    for (const [depth, key, values] of slots) {
+      choices = choices.flatMap((c) => [c, ...values.map((v) => [...c, [depth, key, v]])])
+    }
+    for (const chosen of choices) {
+      const key = keyOf(gathering, chosen)
+      const full = room(key)
+      if (full) return full
+      const run = (runs.get(key) ?? '') + value
+      if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
+      runs.set(key, run.length > keep ? run.slice(-keep) : run)
+      here?.runs.set(key, chosen)
+    }
+    return null
+  }
+
+  return {
+    add(payload) {
+      const type = payload && typeof payload === 'object' && typeof payload.type === 'string' ? payload.type : null
+      for (const string of jsonStringsByPath(payload)) {
+        for (const way of gatheringsOf(string, type)) {
+          const reason = gather(way, string.value)
+          if (reason) return reason
+        }
+      }
+      return null
+    },
+  }
 }
