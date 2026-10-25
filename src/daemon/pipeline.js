@@ -64,11 +64,17 @@ const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 // never sends a blank line would otherwise be held whole, forever.
 const MAX_EVENT_BYTES = 16 * 1024 * 1024
 
-// How many JSON key paths an event stream's reassembly tracks at once. A
-// model stream uses a handful; this bounds what a hostile one can make us keep.
-// A stream that uses more is cut: forgetting a path forgets the first half of
-// whatever secret its next value finishes.
-const MAX_SSE_PATHS = 64
+// How many runs an event stream's reassembly tracks at once: one per JSON key
+// path, and one per path and combination of the indexes above it. A model
+// stream uses a few per content block; this bounds what a hostile one can make
+// us keep, at most `keep` characters and a short key each. A stream that uses
+// more is cut: forgetting a run forgets the first half of whatever secret its
+// next value finishes.
+const MAX_SSE_PATHS = 1024
+
+// The most index fields above one JSON string whose combinations are each
+// tracked. Every combination is a run, so this is 2^4 runs at most per string.
+const MAX_SSE_INDEXES = 4
 
 // Failures that happen before any byte could have reached the server, so the
 // placeholder use is refunded. A timeout or a reset is deliberately not here:
@@ -1171,10 +1177,10 @@ function decompress(buf, encoding) {
  * A secret split across *application* fields, as in `{"delta":"ghp_REAL"}`
  * then `{"delta":"SECRET"}`, is caught by reading each JSON payload and
  * concatenating the values found at the same key path — `delta.text`,
- * `choices.0.delta.content` — which is how a client puts the text back
- * together. When any of these finds a secret the stream is cut rather than
- * continued — the agent may have received a fragment, and it will not receive
- * the rest. It requires a hostile upstream, which already holds the
+ * `choices.0.delta.content` — and at the same path and indexes, which is how
+ * a client puts the text back together. When any of these finds a secret the
+ * stream is cut rather than continued — the agent may have received a
+ * fragment, and it will not receive the rest. It requires a hostile upstream, which already holds the
  * credential; what it buys is teaching the agent a secret it was never given,
  * and that is worth failing closed over.
  *
@@ -1271,13 +1277,17 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
    * fresh run, and the client put the secret back together.
    */
   const leakedByPath = (payload) => {
-    let parsed
-    try { parsed = JSON.parse(payload) } catch { return null }
-    for (const [path, value] of jsonStringsByPath(parsed)) {
-      if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'
-      const run = (byPath.get(path) ?? '') + value
-      if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
-      byPath.set(path, run.length > keep ? run.slice(-keep) : run)
+    const parsed = parseEventJson(payload)
+    if (parsed === undefined) return null
+    for (const string of jsonStringsByPath(parsed)) {
+      const runs = runKeys(string)
+      if (!runs) return 'too_many_indexes'
+      for (const path of runs) {
+        if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'
+        const run = (byPath.get(path) ?? '') + string.value
+        if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
+        byPath.set(path, run.length > keep ? run.slice(-keep) : run)
+      }
     }
     return null
   }
@@ -1312,6 +1322,7 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
   const WHY = {
     credential_split_across_events: 'the upstream split a credential across events; the stream was cut',
     too_many_paths: `the upstream stream used more than ${MAX_SSE_PATHS} JSON key paths, more than can be tracked for a credential split across events; the stream was cut`,
+    too_many_indexes: `the upstream stream put more than ${MAX_SSE_INDEXES} index fields over one value, more than can be tracked for a credential split across events; the stream was cut`,
   }
 
   try {
@@ -1350,7 +1361,44 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
 }
 
 /**
- * Every string in a parsed JSON value, with its key path (`["delta","text"]`).
+ * An event's `data:` as JSON, or undefined if it is not JSON.
+ *
+ * Python's json.loads also takes NaN, Infinity and -Infinity, and the Python
+ * SDKs read events with it. JSON.parse refused such a payload, so it was never
+ * reassembled by path, and an upstream that put `"p":NaN` in every event had
+ * only the joined view to beat.
+ */
+function parseEventJson(payload) {
+  try { return JSON.parse(payload) } catch { /* try it as Python would */ }
+  // A scan rather than a regex: a regex over a string literal of several
+  // megabytes overflows the stack.
+  let swapped = ''
+  let from = 0
+  let inString = false
+  for (let i = 0; i < payload.length; i++) {
+    const c = payload[i]
+    if (inString) {
+      if (c === '\\') i++
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') { inString = true; continue }
+    const word = payload.startsWith('NaN', i) ? 3 : payload.startsWith('Infinity', i) ? 8 : 0
+    if (!word) continue
+    swapped += payload.slice(from, payload[i - 1] === '-' ? i - 1 : i) + 'null'
+    i += word - 1
+    from = i + 1
+  }
+  if (from === 0) return undefined
+  try { return JSON.parse(swapped + payload.slice(from)) } catch { return undefined }
+}
+
+// A field a client may gather a stream by: `index`, `output_index`, ...
+const INDEX_FIELD = /^(?:index|.+_index)$/
+
+/**
+ * Every string in a parsed JSON value, with its key path (`["delta","text"]`)
+ * and the index fields of every object above it.
  *
  * The path is the list of segments as JSON, an array index as a number and a
  * key as a string, so no two places share one. It was the keys joined with
@@ -1358,11 +1406,37 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
  * `a.b`, so a value at one was appended between the halves of a secret at the
  * other and no run ever held it whole.
  */
-function* jsonStringsByPath(value, path = []) {
-  if (typeof value === 'string') { yield [JSON.stringify(path), value]; return }
+function* jsonStringsByPath(value, path = [], indexes = []) {
+  if (typeof value === 'string') { yield { path, indexes, value }; return }
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) yield* jsonStringsByPath(value[i], [...path, i])
+    for (let i = 0; i < value.length; i++) yield* jsonStringsByPath(value[i], [...path, i], indexes)
   } else if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, [...path, k])
+    const here = Object.entries(value)
+      .filter(([k, v]) => INDEX_FIELD.test(k) && (typeof v === 'number' || typeof v === 'string'))
+      .map(([k, v]) => [path.length, k, v])
+    const inner = here.length ? [...indexes, ...here] : indexes
+    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, [...path, k], inner)
   }
+}
+
+/**
+ * The runs one string is appended to, or null when there are too many.
+ *
+ * A client gathers text by key path and, usually, by an index: the Anthropic
+ * SDK by the event's `index`, OpenAI's by `choices[].index`, the Responses
+ * API by `output_index` and `content_index`. Keyed by path alone, an event
+ * at another index between the halves of a secret landed in the same run and
+ * hid it. Keyed by every index, an upstream varies one the client ignores. So
+ * there is a run for the path with each combination of its indexes.
+ *
+ * A long key is hashed, so a hostile key costs a digest, not its length.
+ */
+function runKeys({ path, indexes }) {
+  if (indexes.length > MAX_SSE_INDEXES) return null
+  const keys = []
+  for (let mask = 0; mask < 2 ** indexes.length; mask++) {
+    const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])
+    keys.push(key.length > 256 ? `#${canon.sha256(key)}` : key)
+  }
+  return keys
 }

@@ -629,15 +629,15 @@ const MUTATIONS = [
   {
     what: 'an event-stream key path is the keys joined with a dot, so a dotted key names another path',
     file: 'src/daemon/pipeline.js',
-    from: "if (typeof value === 'string') { yield [JSON.stringify(path), value]; return }",
-    to: "if (typeof value === 'string') { yield [path.join('.'), value]; return }",
+    from: 'const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])',
+    to: "const key = JSON.stringify([path.join('.'), indexes.filter((_, i) => mask & (1 << i))])",
     tests: ['test/security/gateway-response.test.js'],
   },
   {
     what: 'an event-stream array index is the same path segment as a key spelled like it',
     file: 'src/daemon/pipeline.js',
-    from: 'yield* jsonStringsByPath(value[i], [...path, i])',
-    to: 'yield* jsonStringsByPath(value[i], [...path, String(i)])',
+    from: 'yield* jsonStringsByPath(value[i], [...path, i], indexes)',
+    to: 'yield* jsonStringsByPath(value[i], [...path, String(i)], indexes)',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -653,6 +653,34 @@ const MUTATIONS = [
     from: '/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i',
     to: '/%(?:[0-9a-f]{2})/i',
     tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'an event-stream value is gathered by key path only, not by the indexes a client groups it by',
+    file: 'src/daemon/pipeline.js',
+    from: 'for (let mask = 0; mask < 2 ** indexes.length; mask++) {',
+    to: 'for (let mask = 0; mask < 1; mask++) {',
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event-stream value is gathered by all of its indexes at once, so a decoy index splits the run',
+    file: 'src/daemon/pipeline.js',
+    from: 'const key = JSON.stringify([path, indexes.filter((_, i) => mask & (1 << i))])',
+    to: 'const key = JSON.stringify([path, mask ? indexes : []])',
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event payload with NaN or Infinity, which Python reads, is not reassembled by path',
+    file: 'src/daemon/pipeline.js',
+    from: "try { return JSON.parse(swapped + payload.slice(from)) } catch { return undefined }",
+    to: 'return undefined',
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event-stream value under more index fields than are combined is passed instead of cut',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (indexes.length > MAX_SSE_INDEXES) return null',
+    to: 'if (false) return null',
+    tests: ['test/security/gateway-response.test.js'],
   },
 ]
 

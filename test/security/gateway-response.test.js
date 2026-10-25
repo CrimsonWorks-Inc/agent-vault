@@ -223,7 +223,7 @@ test('an ordinary stream of long events passes through untouched, compressed or 
 })
 
 test('a stream with more key paths than are tracked is cut, not forgotten', async () => {
-  const many = `data: ${JSON.stringify(Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, 'metadata'])))}\n\n`
+  const many = `data: ${JSON.stringify(Object.fromEntries(Array.from({ length: 1025 }, (_, i) => [`k${i}`, 'metadata'])))}\n\n`
   const s = setup({ fetchImpl: streaming(Readable.from([anthropic(SECRET.slice(0, 14)), many, anthropic(SECRET.slice(14))].map((c) => Buffer.from(c)))) })
   const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
   const body = await drain(res.stream)
@@ -281,6 +281,73 @@ test('an ordinary stream with dotted, empty and numeric keys passes through unto
     const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
     const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
     assert.equal(await drain(res.stream), events.join(''))
+  }
+})
+
+// A client does not put text back together by key path alone. The Anthropic
+// SDK gathers `delta.text` by the event's `index`, OpenAI's by
+// `choices[].index` and `tool_calls[].index`, the Responses API by
+// `output_index` and `content_index`. An event at another index between the
+// halves landed in the same run here, and the client never saw it there.
+const ant = (i, t) => `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: i, delta: { type: 'text_delta', text: t } })}\n\n`
+const oai = (i, t) => ev({ id: 'c1', choices: [{ index: i, delta: { content: t } }] })
+const tool = (i, t) => ev({ id: 'c1', choices: [{ index: 0, delta: { tool_calls: [{ index: i, function: { arguments: t } }] } }] })
+const resp = (o, c, t, extra = {}) => ev({ type: 'response.output_text.delta', output_index: o, content_index: c, delta: t, ...extra })
+const regrouped = [
+  { name: 'Anthropic blocks', group: (o) => [o.index, o.delta?.text], events: [ant(0, half[0]), ant(1, 'x'), ant(0, half[1])] },
+  { name: 'OpenAI choices', group: (o) => [o.choices[0].index, o.choices[0].delta.content], events: [oai(0, half[0]), oai(1, 'x'), oai(0, half[1])] },
+  { name: 'OpenAI tool calls', group: (o) => { const c = o.choices[0].delta.tool_calls[0]; return [c.index, c.function.arguments] }, events: [tool(0, half[0]), tool(1, 'x'), tool(0, half[1])] },
+  { name: 'Responses content parts', group: (o) => [`${o.output_index}/${o.content_index}`, o.delta], events: [resp(0, 0, half[0]), resp(0, 1, 'x'), resp(0, 0, half[1])] },
+  // The client ignores `retry_index`; the upstream varies it so that a run kept by every index never joins the halves.
+  { name: 'a decoy index the client ignores', group: (o) => [o.output_index, o.delta], events: [resp(0, 0, half[0], { retry_index: 1 }), resp(1, 0, 'x', { retry_index: 2 }), resp(0, 0, half[1], { retry_index: 3 })] },
+  // Python's json.loads takes NaN and Infinity, and the Python SDKs read events with it. JSON.parse refused the payload and the per-path view skipped it.
+  { name: 'NaN beside the text', group: (o) => [0, o.delta?.text], parse: (t) => JSON.parse(t.replace(/-?\b(?:NaN|Infinity)\b/g, 'null')), events: [`data: {"index":0,"delta":{"type":"text_delta","text":"${half[0]}"},"p":NaN}\n\n`, `data: {"index":0,"delta":{"type":"x","text":"${half[1]}"},"p":-Infinity}\n\n`] },
+]
+
+test('a secret split across events is caught however the client regroups them, compressed or not', async () => {
+  for (const { name, group, events, parse = JSON.parse } of regrouped) {
+    for (const compressed of [false, true]) {
+      const bytes = Buffer.from(events.join(''))
+      const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+      const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+      const body = await drain(res.stream)
+      const groups = {}
+      for (const m of body.matchAll(/^data: (.*)$/gm)) {
+        try { const [k, t] = group(parse(m[1])); if (typeof t === 'string') groups[k] = (groups[k] ?? '') + t } catch { /* not an event the client reads */ }
+      }
+      assert.ok(!Object.values(groups).some((t) => t.includes(SECRET)), `${name}: the client reassembled the secret (gzip: ${compressed})`)
+      assert.match(body, /AV_UNSCANNABLE/, `${name} (gzip: ${compressed})`)
+    }
+  }
+})
+
+test('a stream with more index fields over one value than can be combined is cut', async () => {
+  const wide = ev({ a_index: 1, b_index: 2, c_index: 3, d_index: 4, e_index: 5, delta: 'hello' })
+  const s = setup({ fetchImpl: streaming(Readable.from([Buffer.from(wide)])) })
+  const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  const body = await drain(res.stream)
+  assert.match(body, /AV_UNSCANNABLE/)
+  assert.match(body, /index fields/)
+})
+
+test('ordinary multi-block, multi-choice and NaN-bearing streams pass through untouched, compressed or not', async () => {
+  const blocks = Array.from({ length: 60 }, (_, i) => [
+    `event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: i, content_block: i % 2 ? { type: 'tool_use', id: `toolu_${i}`, name: 'Read', input: {} } : { type: 'text', text: '' } })}\n\n`,
+    i % 2
+      ? `event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: i, delta: { type: 'input_json_delta', partial_json: `{"path":"/tmp/f${i}"}` } })}\n\n`
+      : ant(i, `Paragraph ${i}. `),
+    `event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: i })}\n\n`,
+  ]).flat()
+  const choices = Array.from({ length: 40 }, (_, i) => [oai(0, `alpha ${i} `), oai(1, `beta ${i} `), tool(i % 3, `{"n":${i}}`)]).flat()
+  const responses = Array.from({ length: 40 }, (_, i) => resp(i % 4, i % 2, `part ${i} `, { item_id: `msg_${i % 4}`, sequence_number: i }))
+  const nan = ['data: {"index":0,"delta":{"text":"Hello"},"score":NaN}\n\n', 'data: {"index":0,"delta":{"text":" world"},"score":Infinity}\n\n']
+  for (const events of [blocks, choices, responses, nan]) {
+    for (const compressed of [false, true]) {
+      const bytes = Buffer.from(events.join(''))
+      const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+      const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+      assert.equal(await drain(res.stream), events.join(''))
+    }
   }
 })
 
