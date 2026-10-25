@@ -1,0 +1,212 @@
+// The pure core under the gateway: the scrubber, path normalisation, policy
+// intersection and substitution, plus how a placeholder authenticates. Each
+// test is an input that two readers used to read differently, or a protection
+// a comment claimed and the code did not have.
+
+import { test, afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { Scrubber } from '../../src/core/scrub.js'
+import * as policy from '../../src/core/policy.js'
+import * as sub from '../../src/core/substitute.js'
+import { setup, cleanup, SECRET } from './gateway-helpers.js'
+
+afterEach(cleanup)
+
+// ------------------------------------------------------------ the scrubber
+
+const S = 'rSECRETVALUE-0123456789abcdef'
+const scrubber = () => new Scrubber([{ secret: S, label: 'a', replacement: '[x]', always: true }])
+const pct = (s, hex = (b) => b.toString(16).toUpperCase()) => [...Buffer.from(s)].map((b) => `%${hex(b).padStart(2, '0')}`).join('')
+
+test('the scrubber catches the encodings it used to miss', () => {
+  const b64 = Buffer.from(S).toString('base64')
+  const cases = {
+    partialJsonEscape: `{"t":"\\u0072${S.slice(1)}"}`,
+    mixedJsonEscape: `{"t":"${[...S].map((c, i) => (i % 2 ? `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}` : c)).join('')}"}`,
+    fullPercentUpper: pct(S),
+    fullPercentLower: pct(S, (b) => b.toString(16)),
+    upperHex: Buffer.from(S).toString('hex').toUpperCase(),
+    wrappedB64: `-----BEGIN-----\n${b64.replace(/(.{16})/g, '$1\n')}\n-----END-----`,
+    wrappedB64Crlf: b64.replace(/(.{16})/g, '$1\r\n'),
+    wrappedB64JsonEscaped: `{"blob":"${b64.replace(/(.{16})/g, '$1\\n')}"}`,
+  }
+  for (const [name, text] of Object.entries(cases)) {
+    const { text: out, redactions } = scrubber().scrub(text)
+    assert.ok(redactions > 0, `${name}: not redacted`)
+    assert.ok(out.includes('[x]'), `${name}: ${out}`)
+    // Whatever is left must not decode back to the secret.
+    const decoded = decodeURIComponent(out.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/%(?![0-9a-fA-F]{2})/g, '%25'))
+    assert.ok(!decoded.includes(S), `${name}: ${out}`)
+    assert.ok(!Buffer.from(out.replace(/\\n|\s/g, ''), 'base64').toString('latin1').includes(S), `${name}: base64 survives`)
+  }
+})
+
+test('the scrubber leaves ordinary escaped and wrapped text alone', () => {
+  const texts = [
+    '{"html":"\\u003cb\\u003ebold\\u003c/b\\u003e","path":"/a%20b/c%2Fd"}',
+    'line one\nline two\r\nline three\n',
+    Buffer.from('a perfectly ordinary blob of bytes that is not a secret at all').toString('base64').replace(/(.{16})/g, '$1\n'),
+    `${S.slice(0, 10)}\n${S.slice(10, 20)}`, // part of a secret is not the secret
+  ]
+  for (const t of texts) assert.deepEqual(scrubber().scrub(t), { text: t, redactions: 0 })
+})
+
+test('a percent-encoded secret split across stream chunks is still caught', () => {
+  const s = scrubber().stream()
+  const enc = pct(S)
+  const hold = scrubber().overlap
+  // The second push brings the total to exactly the hold-back plus 47, so the
+  // cut lands 40 characters into the encoded secret.
+  let out = s.push(`before ${enc.slice(0, 40)}`)
+  const second = `${enc.slice(40)} after `
+  out += s.push(second + '.'.repeat(hold + 47 - 47 - second.length))
+  out += s.push('.'.repeat(400))
+  out += s.flush()
+  assert.ok(!decodeURIComponent(out).includes(S), out)
+  assert.match(out, /before \[x\] after/)
+})
+
+test('a derived token straddling the stream hold-back is not emitted in halves', () => {
+  const token = `ghp_${'A1b2C3d4E5'.repeat(4)}`
+  const s = new Scrubber([]).stream()
+  // The hold-back is 63 characters. The second push makes 75, so the cut
+  // lands ten characters into the token: too few for the pattern to match in
+  // the head, and the tail alone no longer starts with ghp_.
+  let out = s.push(`: ${token.slice(0, 10)}`)
+  out += s.push(token.slice(10) + ' '.repeat(29))
+  out += s.push(` and then the stream goes on ${'.'.repeat(200)}`)
+  out += s.flush()
+  assert.ok(!(out.includes(token.slice(0, 10)) && out.includes(token.slice(10))), `the token reached the agent in halves: ${out}`)
+  assert.ok(!out.includes(token))
+  assert.match(out, /\[\[av:derived\]\]/)
+})
+
+test('the stream scrubber still emits ordinary text unchanged', () => {
+  const s = new Scrubber([]).stream()
+  const text = `the sk- prefix and gh tokens, ghp_ alone, a disk-usage_by_repository_over_time report ${'.'.repeat(300)}`
+  let out = ''
+  for (let i = 0; i < text.length; i += 37) out += s.push(text.slice(i, i + 37))
+  out += s.flush()
+  assert.equal(out, text)
+})
+
+// ----------------------------------------------------------- path decoding
+
+test('a backslash encoded more than once is still refused', () => {
+  for (const p of ['/allowed/x%255c..%255c..%255cadmin', '/a/%255cb', '/a/%25255cb']) {
+    assert.throws(() => policy.normalizePath(p), (e) => e.rule === 'path_ambiguous_separator', p)
+  }
+})
+
+test('ordinary encoded paths still normalise', () => {
+  assert.equal(policy.normalizePath('/a/b%2520c'), '/a/b c')
+  assert.equal(policy.normalizePath('/v1beta/models/gemini-pro:generateContent'), '/v1beta/models/gemini-pro:generateContent')
+  assert.equal(policy.normalizePath('/repos/o/r/%2e%2e/x'), '/repos/o/x')
+})
+
+test('a literal percent sign can be sent, and still cannot hide an escape', () => {
+  assert.equal(policy.normalizePath('/files/100%25'), '/files/100%')
+  assert.equal(policy.encodePathForWire(policy.normalizePath('/files/100%25')), '/files/100%25')
+  assert.equal(policy.normalizePath('/q/50%25%20off'), '/q/50% off')
+  // A literal % must not stop decoding early with %61 still live beside it.
+  for (const p of ['/%2561dmin%25', '/caf%25C3%25A9%25', `/user/${'%25'.repeat(12)}6beys`]) {
+    assert.throws(() => policy.normalizePath(p), /invalid percent-escape/, p)
+  }
+  // The raw request is still held to a well-formed URL.
+  assert.throws(() => policy.normalizePath('/a%zz'), /invalid percent-escape/)
+})
+
+// --------------------------------------------------------- policy intersect
+
+test('intersecting two rates never allows more than either', () => {
+  const MINUTE = 60_000
+  const HOUR = 60 * MINUTE
+  const allows = (r, windowMs) => {
+    const per = { minute: MINUTE, hour: HOUR }[r.per] ?? r.per
+    return r.count * Math.ceil(windowMs / per)
+  }
+  const a = { count: 10, per: 'minute' }
+  const b = { count: 100, per: 'hour' }
+  for (const [x, y] of [[a, b], [b, a]]) {
+    const { rate } = policy.intersect([{ rate: x }, { rate: y }])
+    assert.ok(allows(rate, HOUR) <= 100, `${JSON.stringify(rate)} allows ${allows(rate, HOUR)} an hour`)
+    assert.ok(allows(rate, MINUTE) <= 10, `${JSON.stringify(rate)} allows ${allows(rate, MINUTE)} a minute`)
+  }
+})
+
+test('intersecting rates in the same unit is the smaller count', () => {
+  assert.deepEqual(policy.intersect([{ rate: { count: 10, per: 'minute' } }, { rate: { count: 5, per: 'minute' } }]).rate, { count: 5, per: 'minute' })
+  assert.deepEqual(policy.intersect([{ rate: { count: 10, per: 'minute' } }, {}]).rate, { count: 10, per: 'minute' })
+})
+
+test('lint says which limits are carried but not enforced', () => {
+  const base = { hosts: ['h'], budget: { unit: 'requests', limit: 5 } }
+  assert.ok(policy.lint({ ...base, max_concurrent: 2 }).some((p) => p.rule === 'max_concurrent'))
+  assert.ok(policy.lint({ ...base, rate: { count: 1, per: 'minute' } }).some((p) => p.rule === 'rate'))
+  assert.ok(!policy.lint(base).some((p) => p.rule === 'max_concurrent' || p.rule === 'rate'))
+})
+
+// ------------------------------------------------------------- substitution
+
+test('JSON substitution changes the one string and nothing else in the body', async () => {
+  const s = setup({ sites: { key: ['json:/auth/token'] } })
+  const ph = s.ph()
+  const raw = `{ "id": 12345678901234567891, "ratio": 1.0, "auth": {"token": "${ph}", "n": [1e3, -0.50]}, "z": "\\u00e9" }`
+  await s.pipeline.handle(s.request({ method: 'POST', headers: [...s.request().headers, ['content-type', 'application/json']], body: Buffer.from(raw) }))
+  assert.equal(s.sent.length, 1)
+  assert.equal(s.sent[0].body, raw.replace(ph, SECRET))
+})
+
+test('JSON substitution follows the same duplicate key and pointer escaping as the parser', () => {
+  const ph = 'av1.PLACEHOLDER'
+  const body = `{"a/b":{"t":"x"},"k":"first","k":"${ph}","arr":["${ph}"]}`
+  const req = { method: 'POST', path: '/', query: '', headers: [['content-type', 'application/json']], body: Buffer.from(body) }
+  const out1 = sub.apply(req, { region: 'json', pointer: '/k', encoding: 'raw' }, ph, 'S"1')
+  assert.equal(out1.body.toString(), body.replace(`"k":"${ph}"`, '"k":"S\\"1"'))
+  const out2 = sub.apply(req, { region: 'json', pointer: '/arr/0', encoding: 'raw' }, ph, 'S2')
+  assert.equal(out2.body.toString(), body.replace(`["${ph}"]`, '["S2"]'))
+})
+
+test('form substitution leaves the rest of the field and the body as written', async () => {
+  const s = setup({ sites: { key: ['form:token'] } })
+  const ph = s.ph()
+  const raw = `token=Bearer+${ph}+x%C3%A9&text=a+b%21&flag=&bare`
+  await s.pipeline.handle(s.request({ method: 'POST', headers: [...s.request().headers, ['content-type', 'application/x-www-form-urlencoded']], body: Buffer.from(raw) }))
+  assert.equal(s.sent[0].body, raw.replace(ph, encodeURIComponent(SECRET)))
+})
+
+test('Basic substitution writes the Authorization header the placeholder was found in', () => {
+  const ph = 'av1.PLACEHOLDER'
+  const basic = `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`
+  const req = { method: 'GET', path: '/', query: '', headers: [['Authorization', 'Bearer x'], ['authorization', basic]], body: null }
+  const out = sub.apply(req, { region: 'basic', part: 'pass', index: 1, encoding: 'raw' }, ph, 'SECRET')
+  assert.equal(out.headers[0][1], 'Bearer x')
+  assert.equal(out.headers[1][1], `Basic ${Buffer.from('user:SECRET').toString('base64')}`)
+})
+
+test('Basic substitution through the pipeline, with a second Authorization header present', async () => {
+  const s = setup({ sites: { key: ['basic:pass'] } })
+  const ph = s.ph()
+  await s.pipeline.handle(s.request({
+    headers: [...s.request().headers, ['Authorization', 'Bearer x'], ['authorization', `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`]],
+  }))
+  assert.equal(s.sent.length, 1)
+  const values = Object.entries(s.sent[0].headers).filter(([n]) => n.toLowerCase() === 'authorization').map(([, v]) => v)
+  assert.ok(values.includes(`Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`), JSON.stringify(values))
+  assert.ok(!JSON.stringify(s.sent[0].headers).includes('av1.'), 'a placeholder went upstream')
+})
+
+test('an ordinary single Basic header is substituted as before', async () => {
+  const s = setup({ sites: { key: ['basic:pass'] } })
+  const ph = s.ph()
+  await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['authorization', `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`]] }))
+  assert.equal(s.sent[0].headers.authorization, `Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`)
+})
+
+test('rate windows are compared in real units, and an unknown one is refused', () => {
+  const r = (x, y) => policy.intersect([{ rate: x }, { rate: y }]).rate
+  assert.deepEqual(r({ count: 5, per: '15m' }, { count: 9, per: '2 hours' }), { count: 5, per: '2 hours' })
+  assert.deepEqual(r({ count: 5, per: 500 }, { count: 9, per: '1s' }), { count: 5, per: '1s' })
+  assert.deepEqual(r({ count: 5, per: '90 ms' }, { count: 9, per: 'second' }), { count: 5, per: 'second' })
+  assert.throws(() => r({ count: 5, per: 'minute' }, { count: 9, per: 'fortnight' }), (e) => e.rule === 'rate')
+})

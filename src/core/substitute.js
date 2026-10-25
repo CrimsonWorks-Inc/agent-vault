@@ -61,12 +61,49 @@ function* jsonStrings(value, pointer = '') {
   }
 }
 
-function setJsonPointer(root, pointer, newValue) {
-  const parts = pointer.split('/').slice(1).map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'))
-  let node = root
-  for (let i = 0; i < parts.length - 1; i++) node = node[Array.isArray(node) ? Number(parts[i]) : parts[i]]
-  const last = parts[parts.length - 1]
-  node[Array.isArray(node) ? Number(last) : last] = newValue
+/**
+ * Where each string value sits in JSON text: RFC 6901 pointer -> [start, end)
+ * of its literal, quotes included. Only ever run on text JSON.parse accepted,
+ * so it can assume the text is valid. A repeated key keeps the LAST value, as
+ * JSON.parse does, so a pointer names here the string it named in locate().
+ */
+function jsonStringSpans(text) {
+  const spans = new Map()
+  let i = 0
+  const space = () => { while (i < text.length && ' \t\n\r'.includes(text[i])) i++ }
+  const string = () => {
+    const start = i++
+    while (i < text.length && text[i] !== '"') i += text[i] === '\\' ? 2 : 1
+    i++
+    return [start, i]
+  }
+  const value = (pointer) => {
+    space()
+    if (text[i] === '"') { spans.set(pointer, string()); return }
+    if (text[i] === '{' || text[i] === '[') {
+      const object = text[i++] === '{'
+      const close = object ? '}' : ']'
+      space()
+      if (text[i] === close) { i++; return }
+      for (let n = 0; ; n++) {
+        let key = String(n)
+        if (object) {
+          space()
+          const [s, e] = string()
+          key = JSON.parse(text.slice(s, e)).replace(/~/g, '~0').replace(/\//g, '~1')
+          space()
+          i++ // the colon
+        }
+        value(`${pointer}/${key}`)
+        space()
+        if (i >= text.length || text[i++] === close) return
+      }
+    }
+    // A number, true, false or null: skip to whatever ends it.
+    while (i < text.length && !',]} \t\n\r'.includes(text[i])) i++
+  }
+  value('')
+  return spans
 }
 
 /**
@@ -85,13 +122,16 @@ function parseQuery(q) {
   for (const pair of q.split('&')) {
     if (!pair) continue
     const eq = pair.indexOf('=')
-    out.push(eq === -1 ? [pair, ''] : [pair.slice(0, eq), pair.slice(eq + 1)])
+    // The third element remembers whether there was an `=` at all, so `flag=`
+    // goes back out as `flag=` and not `flag`: rebuilding a body to substitute
+    // one field must not rewrite the others.
+    out.push(eq === -1 ? [pair, '', false] : [pair.slice(0, eq), pair.slice(eq + 1), true])
   }
   return out
 }
 
 function buildQuery(pairs) {
-  return pairs.map(([k, v]) => (v === '' ? k : `${k}=${v}`)).join('&')
+  return pairs.map(([k, v, eq]) => (v === '' && !eq ? k : `${k}=${v}`)).join('&')
 }
 
 /**
@@ -145,8 +185,10 @@ export function locate(req) {
         const colon = decoded.indexOf(':')
         const user = colon === -1 ? decoded : decoded.slice(0, colon)
         const pass = colon === -1 ? '' : decoded.slice(colon + 1)
-        for (const hit of ph.findAll(user)) add(hit, { region: 'basic', part: 'user', encoding: 'raw' })
-        for (const hit of ph.findAll(pass)) add(hit, { region: 'basic', part: 'pass', encoding: 'raw' })
+        // By index, as for any header, so the Authorization entry that gets
+        // the secret is the one the placeholder was found in.
+        for (const hit of ph.findAll(user)) add(hit, { region: 'basic', part: 'user', index, encoding: 'raw' })
+        for (const hit of ph.findAll(pass)) add(hit, { region: 'basic', part: 'pass', index, encoding: 'raw' })
         handledAsBasic = true
       }
     }
@@ -327,7 +369,14 @@ export function apply(req, location, placeholderText, secret) {
       break
     }
     case 'basic': {
-      const current = getHeader(out, 'authorization') || ''
+      // By index, for the reason given under 'header'. Read and written by
+      // name, a second Authorization header — two keys that differ only in
+      // case, which vault_http passes through as two — had the first one
+      // decoded and overwritten while the placeholder went upstream in the
+      // second.
+      const at = location.index
+      const indexed = Number.isInteger(at) && out.headers[at] && out.headers[at][0].toLowerCase() === 'authorization'
+      const current = (indexed ? out.headers[at][1] : getHeader(out, 'authorization')) || ''
       const b64 = current.replace(/^basic\s+/i, '').trim()
       const decoded = Buffer.from(b64, 'base64').toString('utf8')
       const colon = decoded.indexOf(':')
@@ -336,7 +385,8 @@ export function apply(req, location, placeholderText, secret) {
       if (location.part === 'user') user = user.split(placeholderText).join(secret)
       else pass = pass.split(placeholderText).join(secret)
       const rebuilt = Buffer.from(`${user}:${pass}`, 'utf8').toString('base64')
-      setHeader(out, 'authorization', `Basic ${rebuilt}`)
+      if (indexed) out.headers[at][1] = `Basic ${rebuilt}`
+      else setHeader(out, 'authorization', `Basic ${rebuilt}`)
       break
     }
     case 'query': {
@@ -346,24 +396,34 @@ export function apply(req, location, placeholderText, secret) {
       break
     }
     case 'form': {
-      const pairs = parseQuery(out.body.toString('utf8')).map(([k, v]) => {
-        if (safeDecode(k) !== location.key) return [k, v]
+      const pairs = parseQuery(out.body.toString('utf8')).map(([k, v, eq]) => {
+        if (safeDecode(k) !== location.key) return [k, v, eq]
+        // Replaced where it stands in the value as written. A placeholder is
+        // unreserved ASCII, so it reads the same encoded or not. Decoding the
+        // whole value and encoding it again turned `+` (a space) into `%2B`
+        // and UTF-8 such as `%C3%A9` into mojibake, because the decoder is
+        // byte-wise and does not know about `+`. Only a placeholder that was
+        // itself percent-encoded still takes the long way round.
+        if (v.includes(placeholderText)) return [k, v.split(placeholderText).join(encodeURIComponent(secret)), eq]
         const decoded = detect.percentDecode(v)
-        return [k, encodeURIComponent(decoded.split(placeholderText).join(secret))]
+        return [k, encodeURIComponent(decoded.split(placeholderText).join(secret)), eq]
       })
       out.body = Buffer.from(buildQuery(pairs), 'utf8')
       setHeader(out, 'content-length', String(out.body.length))
       break
     }
     case 'json': {
-      const parsed = JSON.parse(out.body.toString('utf8'))
-      const parts = location.pointer.split('/').slice(1).map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'))
-      let node = parsed
-      for (let i = 0; i < parts.length - 1; i++) node = node[Array.isArray(node) ? Number(parts[i]) : parts[i]]
-      const last = parts[parts.length - 1]
-      const key = Array.isArray(node) ? Number(last) : last
-      setJsonPointer(parsed, location.pointer, String(node[key]).split(placeholderText).join(secret))
-      out.body = Buffer.from(JSON.stringify(parsed), 'utf8')
+      // Spliced into the raw text: the one string literal is rewritten and
+      // every other byte is left as the agent wrote it. Parsing the body and
+      // serialising it again rounded every integer past 2^53 (an ID, a
+      // snowflake) to a different number, turned 1.0 into 1 and dropped the
+      // formatting, on every request to a credential with a json: site.
+      const text = out.body.toString('utf8')
+      const span = jsonStringSpans(text).get(location.pointer)
+      if (!span) throw new Error(`no JSON string at ${location.pointer}`)
+      const value = JSON.parse(text.slice(span[0], span[1]))
+      const replaced = JSON.stringify(value.split(placeholderText).join(secret))
+      out.body = Buffer.from(text.slice(0, span[0]) + replaced + text.slice(span[1]), 'utf8')
       setHeader(out, 'content-length', String(out.body.length))
       break
     }

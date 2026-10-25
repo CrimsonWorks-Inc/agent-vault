@@ -367,6 +367,62 @@ const MUTATIONS = [
     to: '// disabled',
     tests: ['test/security/installer.test.js'],
   },
+  {
+    what: 'the scrubber reads only the fixed needles, not decoded or unwrapped text',
+    file: 'src/core/scrub.js',
+    from: 'const spans = this.viewSpans(out)',
+    to: 'const spans = []',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'uppercase hex of a secret is not a needle',
+    file: 'src/core/scrub.js',
+    from: 'out.add(hex.toUpperCase())',
+    to: '',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'a derived token straddling the stream cut is emitted in halves',
+    file: 'src/core/scrub.js',
+    from: 'if (end >= cut) { cut = m.index; break }',
+    to: 'if (false) break',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'an escaped secret straddling the stream cut is scrubbed in halves',
+    file: 'src/core/scrub.js',
+    from: 'if (start < cut && end > cut) cut = end',
+    to: '',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'a backslash encoded twice passes the separator check',
+    file: 'src/core/policy.js',
+    from: "|| decoded.includes('\\\\')) {",
+    to: ') {',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'a literal percent sign stops decoding with an escape still live',
+    file: 'src/core/policy.js',
+    from: 'if (i === 0 || /%[0-9a-fA-F]{2}/.test(decoded)) {',
+    to: 'if (i === 0) {',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'intersecting two rates keeps the first window whatever the units',
+    file: 'src/core/policy.js',
+    from: 'return { count, per: pa >= pb ? a.per : b.per }',
+    to: 'return { count, per: a.per }',
+    tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'Basic substitution writes the first Authorization header by name',
+    file: 'src/core/substitute.js',
+    from: "const indexed = Number.isInteger(at) && out.headers[at] && out.headers[at][0].toLowerCase() === 'authorization'",
+    to: 'const indexed = false',
+    tests: ['test/security/gateway-core.test.js'],
+  },
 ]
 
 let survived = 0

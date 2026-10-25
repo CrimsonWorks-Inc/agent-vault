@@ -159,10 +159,42 @@ function hostAllows(outer, inner) {
   return false
 }
 
+/**
+ * Two rate limits as one that allows no more than either.
+ *
+ * This kept the smaller count and `a.per` whatever the units, so 10 a minute
+ * against 100 an hour came out as 10 a minute: 600 an hour, six times what the
+ * inner layer allowed. Exactly "both at once" is not one count over one window,
+ * so this takes the smaller count over the LONGER window, which is inside both.
+ * Narrower than strictly necessary, which is the safe direction. A window this
+ * cannot compare is refused rather than guessed at.
+ */
 function intersectRate(a, b) {
   if (!a) return b
   if (!b) return a
-  return { count: Math.min(a.count, b.count), per: a.per }
+  const count = Math.min(a.count, b.count)
+  if (a.per === b.per) return { count, per: a.per }
+  const pa = windowMs(a.per)
+  const pb = windowMs(b.per)
+  if (pa === null || pb === null) {
+    throw deny('AV_POLICY_DENIED', `cannot compare rate windows ${a.per} and ${b.per}`, { rule: 'rate' })
+  }
+  return { count, per: pa >= pb ? a.per : b.per }
+}
+
+const WINDOW_UNITS = {
+  ms: 1, s: 1000, sec: 1000, second: 1000, m: 60_000, min: 60_000, minute: 60_000,
+  h: 3_600_000, hr: 3_600_000, hour: 3_600_000, d: 86_400_000, day: 86_400_000,
+}
+
+/** A rate window — milliseconds, or `minute`, `15m`, `2 hours` — in milliseconds, or null. */
+function windowMs(per) {
+  if (typeof per === 'number') return Number.isFinite(per) && per > 0 ? per : null
+  const m = /^\s*(\d+(?:\.\d+)?)?\s*([a-z]+)\s*$/i.exec(String(per ?? ''))
+  if (!m) return null
+  const word = m[2].toLowerCase()
+  const unit = WINDOW_UNITS[word] ?? (word.endsWith('s') ? WINDOW_UNITS[word.slice(0, -1)] : undefined)
+  return unit ? unit * (m[1] ? Number(m[1]) : 1) : null
 }
 
 function intersectBudget(a, b) {
@@ -259,11 +291,21 @@ export function normalizePath(path) {
   // live escape in the output at three levels of encoding, and the forwarded
   // path was the un-normalized original, so the upstream resolved something
   // the policy never saw.
+  //
+  // The request itself must be well-formed. After the first round, though, a
+  // `%` that no longer starts an escape is one the agent sent as `%25` — a
+  // literal percent sign — and refusing it made `/files/100%25` unsendable.
+  // If nothing is left to decode, that is the fixed point. If an escape is
+  // still live beside it, as in `/%2561dmin%25`, stopping there would leave
+  // `%61` for an upstream to decode, so that is still refused.
   let decoded = p
   for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
     let next
     try { next = decodeURIComponent(decoded) } catch {
-      throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
+      if (i === 0 || /%[0-9a-fA-F]{2}/.test(decoded)) {
+        throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
+      }
+      next = decoded
     }
     if (next === decoded) break
     decoded = next
@@ -287,7 +329,13 @@ export function normalizePath(path) {
   //   readings means two different resources, so it is refused rather than
   //   guessed. The same goes for a backslash, which several servers fold to
   //   a separator.
-  if (/%2f|%5c|\\/i.test(String(path || ''))) {
+  //
+  //   The backslash is looked for in the DECODED path as well. Only the raw
+  //   one was tested, so `%255c` passed, decoded to `\`, was matched as part
+  //   of one segment and went out as `%5C` — which an upstream that decodes
+  //   and folds reads as a separator. (A slash encoded twice is a real
+  //   separator here and on the wire alike, so it is not ambiguous.)
+  if (/%2f|%5c|\\/i.test(String(path || '')) || decoded.includes('\\')) {
     throw deny('AV_POLICY_DENIED', 'path contains an encoded slash or a backslash', {
       rule: 'path_ambiguous_separator',
       hint: 'Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.',
@@ -545,6 +593,15 @@ export function lint(policy, { kind } = {}) {
   }
   if ((policy.methods || []).some((m) => !SAFE_METHODS.has(m)) && (policy.approval || 'auto') === 'auto') {
     problems.push({ level: 'warn', rule: 'approval', message: 'write methods with approval: auto; on-write is the default for a reason' })
+  }
+  // Both are intersected like every other limit, and nothing counts against
+  // either: the gateway has no in-flight counter and no rate limiter. Saying so
+  // is better than a field that looks like a control and is not.
+  if (policy.max_concurrent != null) {
+    problems.push({ level: 'warn', rule: 'max_concurrent', message: 'max_concurrent is not enforced by the gateway; use budget to bound use' })
+  }
+  if (policy.rate != null) {
+    problems.push({ level: 'warn', rule: 'rate', message: 'rate is not enforced by the gateway; use budget to bound use' })
   }
   return problems
 }
