@@ -739,6 +739,20 @@ const MUTATIONS = [
     to: 'const INDEX_FIELD = /^(?:index|.+_index)$/',
     tests: ['test/security/gateway-hardening.test.js'],
   },
+  {
+    what: 'the decoded view leaves JSON\'s two-character escapes such as \\/ as they are',
+    file: 'src/core/scrub.js',
+    from: '|%([0-9a-fA-F]{2})|\\\\(["\\\\/bfnrt])/g',
+    to: '|%([0-9a-fA-F]{2})/g',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    what: 'the decoded view is searched for the secret only, not its base64, so percent-encoded base64 passes',
+    file: 'src/core/scrub.js',
+    from: 'this.decoded = [...this.plain, ...this.blobs]',
+    to: 'this.decoded = [...this.plain]',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
 ]
 
 let survived = 0

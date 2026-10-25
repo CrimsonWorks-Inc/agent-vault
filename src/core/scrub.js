@@ -9,8 +9,9 @@
 // stored, such as an installation token in a response body.
 //
 // Beyond the fixed needles, three views of the text are searched: one with
-// every `\uXXXX` and `%XX` escape decoded, which catches a secret escaped one
-// character at a time or only in part, one with line breaks taken out of hex
+// every `\uXXXX`, `%XX` and two-character JSON escape decoded, which catches a
+// secret, or its base64, escaped one character at a time, only in part, or
+// in more than one way at once, one with line breaks taken out of hex
 // and base64 runs, which catches a blob wrapped at any width, and one with hex
 // runs folded to lowercase, which catches hex in mixed case.
 //
@@ -58,9 +59,16 @@ const TOKEN_CHAR = /[A-Za-z0-9_.-]/
 const MAX_DERIVED_HOLD = 512
 
 // One character escaped for JSON or for a URL.
-const ESCAPE = /\\u([0-9a-fA-F]{4})|%([0-9a-fA-F]{2})/g
-const unescapeOne = (_, u, pct) => String.fromCharCode(parseInt(u ?? pct, 16))
-const HAS_ESCAPE = /\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}/
+//
+// JSON's two-character escapes as well as `\uXXXX`. A base64-style secret
+// with `/` in it, written with every `/` as `\/` and one other character as
+// `\u0041`, matched neither the `\/` needle nor this view, which decoded the
+// `\u` and left `\/` as it was: the agent's JSON parser read the secret.
+// `\\` is matched as one escape, so `\\u0041` stays a backslash and `u0041`.
+const ESCAPE = /\\u([0-9a-fA-F]{4})|%([0-9a-fA-F]{2})|\\(["\\/bfnrt])/g
+const JSON_ESCAPE = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+const unescapeOne = (_, u, pct, c) => (c ? JSON_ESCAPE[c] : String.fromCharCode(parseInt(u ?? pct, 16)))
+const HAS_ESCAPE = /\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}|\\["\\/bfnrt]/
 // A hex or base64 run broken over lines, by real line breaks or JSON-escaped
 // ones, with any indentation either side of the break.
 const LINE_BREAK = '[ \\t]*(?:\\r\\n|\\r|\\n|\\\\r\\\\n|\\\\n|\\\\r)[ \\t]*'
@@ -174,7 +182,8 @@ export class Scrubber {
   constructor(entries = []) {
     this.patterns = []
     // What the decoded view and the unwrapped view are searched for: the
-    // secret itself, and its hex and base64 forms.
+    // secret itself, and its hex and base64 forms. The decoded view is
+    // searched for both (`decoded`, below), the unwrapped one for the forms.
     this.plain = []
     this.blobs = []
     // Lowercase hex of each secret, for the case-folded view.
@@ -202,6 +211,7 @@ export class Scrubber {
     }
     // Longest first, so an encoding that contains another is replaced whole.
     for (const list of [this.patterns, this.plain, this.blobs, this.hex]) list.sort((a, b) => b.needle.length - a.needle.length)
+    this.decoded = [...this.plain, ...this.blobs]
     // A joined-up run shorter than every needle cannot hold one.
     this.minBlob = Math.min(...this.blobs.map((b) => b.needle.length))
     this.minHex = Math.min(...this.hex.map((b) => b.needle.length))
@@ -260,8 +270,11 @@ export class Scrubber {
    */
   viewSpans(text) {
     const spans = []
-    if (this.plain.length && HAS_ESCAPE.test(text)) {
-      find(view(text, ESCAPE, unescapeOne), this.plain, spans)
+    // The secret and its base64 forms. A token base64-encoded into a URL or a
+    // form value is percent-encoded after: `+` and `/` became `%2B` and `%2F`,
+    // and this view decoded them and then looked for the secret alone.
+    if (this.decoded.length && HAS_ESCAPE.test(text)) {
+      find(view(text, ESCAPE, unescapeOne), this.decoded, spans)
     }
     // Hex in mixed case, on one line or wrapped. All in one case is a needle
     // already. Lowercasing keeps every position, so a hit maps straight back.
@@ -407,7 +420,7 @@ function find(v, needles, spans, base = 0) {
     ri = m.index
     // A decoded character stands for the whole escape. A removed line break
     // stands for nothing, so no position can land in it.
-    const width = v.decode(m[0], m[1], m[2]).length
+    const width = v.decode(...m).length
     for (; k < points.length && points[k].p < vi + width; k++) {
       resolve(points[k], points[k].end ? ri + m[0].length : ri)
     }

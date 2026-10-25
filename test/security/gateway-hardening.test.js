@@ -1,8 +1,8 @@
-// Event-stream forms that no other suite sent. Each test is an upstream that
-// splits a stored secret across events in a way the agent's client puts back
-// together — a content block's starting text and its deltas, an index that
-// does not match its array position or is missing — and asserts the agent
-// never gets it. The controls at the end are the ordinary streams each of
+// Response forms that no other suite sent. Each test is an upstream that
+// writes a stored secret in a form the agent's client can read back — JSON
+// escapes, a content block's starting text, an index that does not match its
+// array position or is missing, base64 inside a URL — and asserts the agent
+// never gets it. The controls at the end are the ordinary traffic each of
 // those checks must leave alone.
 
 import { test, afterEach } from 'node:test'
@@ -20,6 +20,51 @@ const SLASHED = 'Zq7/Bv3+Kd9/Wm2?>Hx5~Lp8sTe'
 const SECRETS = [SECRET, SLASHED]
 
 const withKey = (s) => s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] })
+
+/** A pipeline whose upstream answers with `respond`, holding `secret`. */
+const buffered = (secret, respond) => setup({ fields: { key: secret }, respond })
+
+/** Every string anywhere in a parsed JSON value. */
+const stringsIn = (v) => (typeof v === 'string' ? [v] : v && typeof v === 'object' ? Object.values(v).flatMap(stringsIn) : [])
+
+// ------------------------------------------------------------ JSON escapes
+
+/** `secret` with every `/` written `\/` and every `step`-th other character as `\uXXXX`. */
+function escaped(secret, step, upper = false) {
+  return [...secret].map((c, i) => {
+    if (c === '/') return '\\/'
+    if (i % step !== 0) return c === '"' || c === '\\' ? `\\${c}` : c
+    const hex = c.charCodeAt(0).toString(16).padStart(4, '0')
+    return `\\u${upper ? hex.toUpperCase() : hex}`
+  }).join('')
+}
+
+test('a secret in a JSON body with `\\/` and `\\uXXXX` escapes does not reach the agent', async () => {
+  for (const secret of SECRETS) {
+    const forms = [
+      // Only the slashes escaped, as PHP's json_encode and Go's encoder write them.
+      secret.replace(/\//g, '\\/'),
+      // Slashes and one character in three, in either case of hex.
+      escaped(secret, 3),
+      escaped(secret, 3, true),
+      // Slashes and a single character.
+      escaped(secret, 1000),
+      // Slashes as \u002f and everything else plain.
+      secret.replace(/\//g, '\\u002f'),
+    ]
+    for (const form of forms) {
+      const body = `{"error":{"message":"bad key ${form}","echo":"${form}"}}`
+      // The fixture checks itself: a JSON reader gets the secret back out of it.
+      assert.ok(stringsIn(JSON.parse(body)).some((t) => t.includes(secret)), `fixture ${form} does not decode to the secret`)
+      const s = buffered(secret, () => ({ status: 401, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+      const res = await s.pipeline.handle(withKey(s))
+      const got = res.body.toString('latin1')
+      const decoded = stringsIn(JSON.parse(got))
+      assert.ok(!decoded.some((t) => t.includes(secret)), `${form}: the agent decoded the secret out of ${got}`)
+      assert.ok(!got.includes(secret))
+    }
+  }
+})
 
 // --------------------------------------------- event streams, and a client
 
@@ -186,7 +231,86 @@ test('a secret split across events where the index is missing from some of them 
   }
 })
 
+// --------------------------------------------- base64, then percent-encoded
+
+/** base64 of `secret` behind `pad` other bytes, percent-encoded as a URL or form value would be. */
+const urlBase64 = (secret, pad) => encodeURIComponent(Buffer.concat([Buffer.from('abc'.slice(0, pad)), Buffer.from(secret)]).toString('base64'))
+
+/** True when anything percent-decoded and base64-decoded out of `text` holds `secret`. */
+function recovers(text, secret) {
+  let plain = text
+  try { plain = decodeURIComponent(text) } catch { /* a stray % */ }
+  for (const run of plain.match(/[A-Za-z0-9+/]{8,}={0,2}/g) ?? []) {
+    for (let skip = 0; skip < 4; skip++) {
+      if (Buffer.from(run.slice(skip), 'base64').toString('latin1').includes(secret)) return true
+    }
+  }
+  return plain.includes(secret)
+}
+
+test('a secret base64-encoded and then percent-encoded does not reach the agent in a body, a header or a redirect', async () => {
+  for (const secret of SECRETS) {
+    for (let pad = 0; pad < 3; pad++) {
+      const enc = urlBase64(secret, pad)
+      assert.ok(recovers(enc, secret), 'the fixture does not decode to the secret')
+      const s = buffered(secret, () => ({
+        status: 302,
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          location: `https://up.test/callback?state=xyz&token=${enc}&next=%2Fhome`,
+          'x-debug-token': `t=${enc}`,
+        },
+        body: Buffer.from(`grant=ok&token=${enc}&scope=read%20write`),
+      }))
+      const res = await s.pipeline.handle(withKey(s))
+      assert.equal(res.status, 302)
+      const label = `${secret} behind ${pad} bytes, as ${enc}`
+      assert.ok(!recovers(res.body.toString('latin1'), secret), `body: ${label}`)
+      assert.ok(!recovers(res.headers.location ?? '', secret), `location: ${label} -> ${res.headers.location}`)
+      assert.ok(!recovers(res.headers['x-debug-token'] ?? '', secret), `header: ${label}`)
+    }
+  }
+})
+
+test('a secret base64-encoded and percent-encoded in a stream is cut', async () => {
+  for (const secret of SECRETS) {
+    const enc = urlBase64(secret, 0)
+    const events = [data({ choices: [{ index: 0, delta: { content: `see https://up.test/x?t=${enc}` } }] })]
+    await throughGateway(events, (body) => assert.ok(!recovers(body.replace(/^data: /gm, ''), secret), body), secret)
+    // And split across two events.
+    const split = [data({ choices: [{ index: 0, delta: { content: `t=${enc.slice(0, 12)}` } }] }), data({ choices: [{ index: 0, delta: { content: enc.slice(12) } }] })]
+    await cutWhole(`percent-encoded base64 split (${secret})`, split, chatClient(0), secret, (t) => recovers(t, secret))
+  }
+})
+
 // ---------------------------------------------------------------- controls
+
+test('ordinary JSON with `\\/` in URLs and `\\u` escapes passes through unmodified', async () => {
+  const body = JSON.stringify({
+    html_url: 'https://github.com/o/r/pull/7', next: '/v1/items?page=2&q=%2Fdocs',
+    note: 'caf\u00e9 \u2014 "quoted" <b>&amp;</b>', path: 'C:\\Users\\a', b64: 'aGVsbG8vd29ybGQ=',
+  }).replace(/\//g, '\\/').replace(/é/g, '\\u00e9').replace(/—/g, '\\u2014').replace(/</g, '\\u003c')
+  const s = setup({ respond: () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }) })
+  const res = await s.pipeline.handle(withKey(s))
+  assert.equal(res.body.toString('latin1'), body)
+  assert.equal(res.headers['av-redacted'], undefined)
+})
+
+test('ordinary percent-encoded query strings pass through unmodified in a body, a header and a redirect', async () => {
+  const query = 'q=hello%20world&tag=%2Fdocs%2F&b64=aGVsbG8vd29ybGQ%3D&sig=dGhpcyBpcyBub3Qgc2VjcmV0%2B%2F&redirect_uri=https%3A%2F%2Fapp.test%2Fcb'
+  const s = setup({
+    respond: () => ({
+      status: 302,
+      headers: { 'content-type': 'application/x-www-form-urlencoded', location: `https://up.test/next?${query}`, 'x-next': query },
+      body: Buffer.from(query),
+    }),
+  })
+  const res = await s.pipeline.handle(withKey(s))
+  assert.equal(res.body.toString('latin1'), query)
+  assert.equal(res.headers.location, `https://up.test/next?${query}`)
+  assert.equal(res.headers['x-next'], query)
+  assert.equal(res.headers['av-redacted'], undefined)
+})
 
 const anthropicStream = [
   sse('message_start', { message: { id: 'msg_01', type: 'message', role: 'assistant', model: 'claude-x', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 25, output_tokens: 1 } } }),
