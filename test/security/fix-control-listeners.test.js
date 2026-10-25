@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { connect } from 'node:net'
+import { connect as tlsConnect } from 'node:tls'
 import { startDaemon, PASSPHRASE } from './fix-control-helpers.js'
 
 /** Whether a TCP peer on loopback gets an HTTP answer from this port at all. */
@@ -100,4 +101,71 @@ test('an allow-cidr that cannot be parsed is refused, not stored and ignored', a
     })
     assert.equal(ok.status, 200, JSON.stringify(ok.body))
   } finally { await d.stop() }
+})
+
+// TLS has a stage HTTP never sees. A peer that connected and sent no
+// ClientHello was invisible to closeAllConnections(): `listen rm` took the
+// listener out of the list, then waited on that peer, which could finish its
+// handshake on the removed listener and be served there.
+
+/** Speak TLS over `socket` (or a new connection), then ask for /v1/status. */
+function tlsAnswers(port, socket) {
+  return new Promise((resolve) => {
+    const s = tlsConnect(socket ? { socket, rejectUnauthorized: false } : { port, host: '127.0.0.1', rejectUnauthorized: false })
+    let got = ''
+    s.on('secureConnect', () => s.write('GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'))
+    s.on('data', (c) => { got += c })
+    s.on('close', () => resolve(/^HTTP\/1\.1 \d{3}/.test(got)))
+    s.on('error', () => resolve(false))
+    s.setTimeout(2000, () => { s.destroy(); resolve(false) })
+  })
+}
+
+const within = (ms, p) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve('timed out'), ms))])
+
+test('a TLS peer connected before listen rm is not served after it', async () => {
+  const d = await startDaemon({
+    listeners: [
+      { id: 'tls', address: '127.0.0.1:0', surfaces: ['gateway'], tls: { managed: true } },
+      { id: 'kept', address: '127.0.0.1:0', surfaces: ['gateway'], tls: { managed: true } },
+    ],
+  })
+  const raw = connect(d.daemon.listeners.find((l) => l.id === 'tls').port, '127.0.0.1')
+  try {
+    await new Promise((resolve) => raw.once('connect', resolve))
+    // The peer says nothing yet: no ClientHello, so HTTP has no idea it exists.
+    const res = await within(3000, d.control('DELETE', '/v1/listeners?id=tls'))
+    assert.notEqual(res, 'timed out', 'a silent peer must not hold the removal open')
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    assert.equal(await tlsAnswers(0, raw), false, 'the removed listener served a request')
+
+    const kept = d.daemon.listeners.find((l) => l.id === 'kept')
+    assert.ok(await tlsAnswers(kept.port), 'removing one TLS listener must not stop another')
+  } finally {
+    raw.destroy()
+    await d.stop()
+  }
+})
+
+test('an established TLS connection is dropped by listen rm, and a fresh one is served before it', async () => {
+  const d = await startDaemon({
+    listeners: [{ id: 'tls', address: '127.0.0.1:0', surfaces: ['gateway'], tls: { managed: true } }],
+  })
+  let s
+  try {
+    const port = d.daemon.listeners.find((l) => l.id === 'tls').port
+    assert.ok(await tlsAnswers(port), 'an ordinary TLS client is served')
+
+    // Handshake done, connection kept open, nothing in flight.
+    s = tlsConnect({ port, host: '127.0.0.1', rejectUnauthorized: false })
+    await new Promise((resolve, reject) => { s.once('secureConnect', resolve); s.once('error', reject) })
+    const closed = new Promise((resolve) => s.once('close', () => resolve(true)))
+    const res = await within(3000, d.control('DELETE', '/v1/listeners?id=tls'))
+    assert.notEqual(res, 'timed out')
+    assert.equal(await within(2000, closed), true, 'the open connection must be dropped')
+  } finally {
+    // Ours to close if the daemon did not, or a failure here hangs the run.
+    s?.destroy()
+    await d.stop()
+  }
 })

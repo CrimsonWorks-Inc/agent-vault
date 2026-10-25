@@ -586,6 +586,14 @@ const MUTATIONS = [
     to: "        if (row && typeof row === 'object') return row",
     tests: ['test/security/fix-control-audit.test.js'],
   },
+  {
+    // Fix-control round 2: closeAllConnections() cannot see a TLS handshake.
+    what: 'listen rm leaves pre-handshake TLS sockets connected',
+    file: 'src/daemon/server.js',
+    from: '      for (const socket of sockets) socket.destroy()',
+    to: '      for (const socket of []) socket.destroy()',
+    tests: ['test/security/fix-control-listeners.test.js'],
+  },
 ]
 
 let survived = 0

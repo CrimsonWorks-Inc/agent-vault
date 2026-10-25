@@ -576,7 +576,12 @@ export class Daemon {
     // listener rather than leaving it open to everyone.
     const allow = parseAllowCidr(entry.allow_cidr)
 
-    const handler = (req, res) => this.#guard(req, res, async () => {
+    // Set when the listener is removed. A connection accepted before that can
+    // still deliver a request after it — a TLS peer that held its handshake
+    // open across `listen rm` was served by the removed listener — so the
+    // handler itself refuses once revoked, whatever the socket's history.
+    let revoked = false
+    const handler = (req, res) => revoked ? req.socket.destroy() : this.#guard(req, res, async () => {
       // What the pipeline uses to decide whether this request came from the
       // machine or from the network.
       req.listener = {
@@ -617,6 +622,21 @@ export class Daemon {
       server = createServer(handler)
     }
 
+    // Every raw connection, so revoking can drop them all. closeAllConnections()
+    // only knows the sockets HTTP has seen; a TLS peer still mid-handshake is
+    // invisible to it, finished the handshake after removal, and kept the
+    // removal itself waiting for as long as it liked.
+    const sockets = new Set()
+    server.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+    })
+    const revoke = () => {
+      revoked = true
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
+    }
+
     // `--allow-cidr` was stored and never read, so a listener its operator
     // believed was limited to the tailnet answered anyone who could reach the
     // port. Checked on the raw connection, before TLS or HTTP see a byte, so a
@@ -638,7 +658,7 @@ export class Daemon {
     this.vault.audit?.write('listen.bound', {
       listener_id: entry.id, address: `${host}:${bound.port}`, tls: !!entry.tls, surfaces: [...surfaces],
     })
-    return { id: entry.id, host, port: bound.port, tls: !!entry.tls, surfaces: [...surfaces], server }
+    return { id: entry.id, host, port: bound.port, tls: !!entry.tls, surfaces: [...surfaces], server, revoke }
   }
 
   /**
@@ -666,7 +686,7 @@ export class Daemon {
     this.listeners = this.listeners.filter((l) => l !== bound)
     this.servers = this.servers.filter((sv) => sv !== bound.server)
     const closed = new Promise((resolve) => bound.server.close(resolve))
-    bound.server.closeAllConnections?.()
+    bound.revoke()
     await closed
     this.vault.audit?.write('listen.unbound', { listener_id: lid })
     return true
