@@ -8,6 +8,7 @@
 //     that keeps a remote peer from growing its own grants.
 
 import { createServer } from 'node:http'
+import { BlockList, isIP } from 'node:net'
 import { unlinkSync, existsSync, chmodSync, chownSync, statSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { Pipeline } from './pipeline.js'
@@ -54,6 +55,50 @@ const PASSPHRASE_FREE_ATTEMPTS = 5
 // the person who owns the vault.
 const PASSPHRASE_MAX_BACKOFF_MS = 30_000
 
+// Daemons running in this process, for the process-level guard below.
+const RUNNING = new Set()
+
+/**
+ * The last line of defence against a fault nothing else caught.
+ *
+ * #guard covers a request handler's own promise, and nothing else. An error
+ * emitted on a stream with no listener — an upstream connection reset under a
+ * compressed SSE response did it — is an uncaught EXCEPTION, thrown out of an
+ * event emit, and with no handler in the process Node ends it: every agent's
+ * session, every held approval, gone, because of one bad upstream.
+ *
+ * So while a daemon runs it keeps a handler. It does not swallow anything: the
+ * fault goes to the audit log, where the owner looks for what happened, and to
+ * stderr, where the service manager keeps it.
+ */
+function onProcessFault(kind) {
+  return (err) => {
+    const detail = String(err?.stack ?? err?.message ?? err).slice(0, 400)
+    try { console.error(`agent-vault: ${kind}: ${detail}`) } catch { /* nothing better to do */ }
+    for (const daemon of RUNNING) {
+      // Never throw from here: an exception inside this handler is the one
+      // thing that still ends the process.
+      try {
+        daemon.vault.audit?.write('daemon.uncaught', { fault: kind, detail: String(err?.message ?? err).slice(0, 200) })
+      } catch { /* the stderr line above is the record */ }
+    }
+  }
+}
+const PROCESS_GUARDS = {
+  uncaughtException: onProcessFault('uncaught exception'),
+  unhandledRejection: onProcessFault('unhandled rejection'),
+}
+
+function guardProcess(daemon) {
+  if (!RUNNING.size) for (const [event, fn] of Object.entries(PROCESS_GUARDS)) process.on(event, fn)
+  RUNNING.add(daemon)
+}
+
+function unguardProcess(daemon) {
+  if (!RUNNING.delete(daemon) || RUNNING.size) return
+  for (const [event, fn] of Object.entries(PROCESS_GUARDS)) process.removeListener(event, fn)
+}
+
 export class Daemon {
   constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
     this.vault = vault
@@ -92,6 +137,8 @@ export class Daemon {
     // vault as well as free online guessing, since nothing counted attempts.
     this.passphraseFailures = 0
     this.passphraseLockedUntil = 0
+    // Refused listener peers already recorded, so a flood is one record.
+    this.refusedPeers = new Map()
   }
 
   /**
@@ -394,6 +441,7 @@ export class Daemon {
       }
     }
 
+    guardProcess(this)
     this.vault.audit?.write('daemon.start', {
       port: this.gatewayPort, socket: this.socketPath, listeners: this.listeners.map((l) => l.id),
     })
@@ -415,6 +463,9 @@ export class Daemon {
     const { host, port } = parseAddress(entry.address)
     const surfaces = new Set(entry.surfaces || [])
     const remote = !isLoopbackHost(host)
+    // Parsed before anything binds, so a list that cannot be read stops the
+    // listener rather than leaving it open to everyone.
+    const allow = parseAllowCidr(entry.allow_cidr)
 
     const handler = (req, res) => this.#guard(req, res, async () => {
       // What the pipeline uses to decide whether this request came from the
@@ -457,6 +508,18 @@ export class Daemon {
       server = createServer(handler)
     }
 
+    // `--allow-cidr` was stored and never read, so a listener its operator
+    // believed was limited to the tailnet answered anyone who could reach the
+    // port. Checked on the raw connection, before TLS or HTTP see a byte, so a
+    // peer outside the list gets nothing to talk to at all.
+    if (allow) {
+      server.on('connection', (socket) => {
+        if (peerAllowed(allow, socket.remoteAddress)) return
+        this.#peerRefused(entry.id, socket.remoteAddress)
+        socket.destroy()
+      })
+    }
+
     await new Promise((resolve, reject) => {
       server.once('error', reject)
       server.listen(port, host, () => { server.removeListener('error', reject); resolve() })
@@ -467,6 +530,37 @@ export class Daemon {
       listener_id: entry.id, address: `${host}:${bound.port}`, tls: !!entry.tls, surfaces: [...surfaces],
     })
     return { id: entry.id, host, port: bound.port, tls: !!entry.tls, surfaces: [...surfaces], server }
+  }
+
+  /**
+   * Record a refused peer. Once per listener and address per minute: anyone
+   * who can reach the port can connect as often as they like, and a record
+   * per attempt would let them bury the audit log in refusals.
+   */
+  #peerRefused(listenerId, address) {
+    const key = `${listenerId}|${address}`
+    const now = Date.now()
+    if (now - (this.refusedPeers.get(key) || 0) < 60_000) return
+    if (this.refusedPeers.size >= 256) this.refusedPeers.clear()
+    this.refusedPeers.set(key, now)
+    this.vault.audit?.write('listen.peer_refused', { listener_id: listenerId, peer: String(address || 'unknown') })
+  }
+
+  /**
+   * Stop serving a listener that has been removed. Deleting the record alone
+   * left the bound server answering the network until the next restart, while
+   * `listen list` and the CLI both said it was gone.
+   */
+  async #unbindListener(lid) {
+    const bound = (this.listeners || []).find((l) => l.id === lid)
+    if (!bound) return false
+    this.listeners = this.listeners.filter((l) => l !== bound)
+    this.servers = this.servers.filter((sv) => sv !== bound.server)
+    const closed = new Promise((resolve) => bound.server.close(resolve))
+    bound.server.closeAllConnections?.()
+    await closed
+    this.vault.audit?.write('listen.unbound', { listener_id: lid })
+    return true
   }
 
   /**
@@ -532,6 +626,7 @@ export class Daemon {
   }
 
   async stop() {
+    unguardProcess(this)
     for (const s of this.servers) await new Promise((r) => s.close(r))
     if (this.socketPath && existsSync(this.socketPath)) unlinkSync(this.socketPath)
     this.vault.audit?.write('daemon.stop', {})
@@ -1010,6 +1105,16 @@ export class Daemon {
               hint: 'An address is <host>:<port>, for example 127.0.0.1:7443.',
             })
           }
+          // Never accepted and ignored: a list that cannot be read is refused
+          // here, where the person who typed it is still looking.
+          try {
+            parseAllowCidr(input.allow_cidr)
+          } catch (e) {
+            throw deny('AV_POLICY_DENIED', e.message, {
+              rule: 'listener_allow_cidr',
+              hint: 'Each entry is <address>/<prefix>, for example 100.64.0.0/10 or fd7a:115c:a1e0::/48.',
+            })
+          }
           if (!isLoopbackHost(host) && !input.tls) {
             throw deny('AV_REMOTE_FORBIDDEN', `listener ${input.id} is on a network address and has no TLS`, {
               rule: 'listener_tls',
@@ -1018,9 +1123,12 @@ export class Daemon {
           }
           return json(200, this.vault.addListener(input))
         }
-        case 'DELETE /v1/listeners':
-          this.vault.removeListener(url.searchParams.get('id'))
-          return json(200, { ok: true })
+        case 'DELETE /v1/listeners': {
+          const lid = url.searchParams.get('id')
+          this.vault.removeListener(lid)
+          const unbound = await this.#unbindListener(lid)
+          return json(200, { ok: true, unbound })
+        }
 
         case 'GET /v1/presence':
           return json(200, this.vault.db.kv.webauthn || null)
@@ -1319,6 +1427,38 @@ function approvalView(approval) {
   if (!approval || typeof approval !== 'object') return approval
   const { result, ...rest } = approval
   return rest
+}
+
+/**
+ * A listener's `allow_cidr`, as something that can answer "may this peer
+ * connect". Null means no restriction. Anything that is not a list of
+ * <address>/<prefix> blocks throws: a restriction that cannot be read must not
+ * quietly become no restriction.
+ */
+export function parseAllowCidr(list) {
+  if (list == null) return null
+  if (!Array.isArray(list)) throw new Error('allow_cidr must be a list of CIDR blocks')
+  if (!list.length) return null
+  const allow = new BlockList()
+  for (const raw of list) {
+    const m = /^([^/\s]+)\/(\d{1,3})$/.exec(String(raw).trim())
+    const family = m ? isIP(m[1]) : 0
+    const prefix = m ? Number(m[2]) : NaN
+    if (!family || prefix > (family === 4 ? 32 : 128)) {
+      throw new Error(`${JSON.stringify(raw)} is not a CIDR block`)
+    }
+    allow.addSubnet(m[1], prefix, family === 4 ? 'ipv4' : 'ipv6')
+  }
+  return allow
+}
+
+/** Whether a peer address falls inside an allow list. An unreadable one does not. */
+function peerAllowed(allow, address) {
+  // An IPv4 peer on a dual-stack socket arrives as ::ffff:a.b.c.d.
+  const a = String(address || '').replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, '')
+  const family = isIP(a)
+  if (!family) return false
+  return allow.check(a, family === 4 ? 'ipv4' : 'ipv6')
 }
 
 /** `iface:port`, where iface may be a name, an IPv4 literal, or [v6]. */

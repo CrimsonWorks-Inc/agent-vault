@@ -15,7 +15,7 @@ export const PASSPHRASE = 'correct horse battery staple'
 export const SECRET = 'ghp_FIXCONTROL00112233445566778899aa'
 
 /** A vault with one credential, and a daemon on a temp control socket. */
-export async function startDaemon({ passphrase = null, sites = ['header:authorization:Bearer'], host = 'api.example.com', scheme = 'https' } = {}) {
+export async function startDaemon({ passphrase = null, sites = ['header:authorization:Bearer'], host = 'api.example.com', scheme = 'https', listeners = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'av-fc-'))
   const vault = Vault.create(dir, { factor: 'none' })
   vault.addCredential({
@@ -23,6 +23,8 @@ export async function startDaemon({ passphrase = null, sites = ['header:authoriz
     fields: { token: SECRET }, sites: { token: sites },
   })
   if (passphrase) vault.setPassphrase(passphrase)
+  // Configured before start, which is when listeners bind.
+  for (const l of listeners) vault.addListener(l)
   const sock = join(dir, 'c.sock')
   const daemon = await new Daemon(vault, { port: 0, socketPath: sock }).start()
   const control = (method, path, body) => controlAt(sock, method, path, body)
