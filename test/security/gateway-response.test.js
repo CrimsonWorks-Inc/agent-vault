@@ -243,6 +243,47 @@ test('an ordinary stream over many key paths, below the limit, passes through', 
   assert.equal(await drain(res.stream), events.join(''))
 })
 
+// A key path built by joining keys with `.` named two places as one: `a.b` is
+// both {"a":{"b":…}} and {"a.b":…}. A value at the other one was appended to
+// the run between the halves of a secret, and no run held the secret whole.
+const ev = (o) => `data: ${JSON.stringify(o)}\n\n`
+const half = [SECRET.slice(0, 14), SECRET.slice(14)]
+const collisions = [
+  { name: 'a dotted key beside the nested path', read: (o) => o.a?.b, events: [ev({ a: { b: half[0] }, 'a.b': 'x' }), ev({ a: { b: half[1] } })] },
+  { name: 'keys that are literally "."', read: (o) => o['.']?.['.'], events: [ev({ '.': { '.': half[0] }, '...': 'x' }), ev({ '.': { '.': half[1] } })] },
+  { name: 'an empty key above a nested one', read: (o) => o['']?.x, events: [ev({ '': { x: half[0] }, x: 'y' }), ev({ '': { x: half[1] } })] },
+  { name: 'a key ending in a dot', read: (o) => o.a?.[''], events: [ev({ a: { '': half[0] }, 'a.': 'x' }), ev({ a: { '': half[1] } })] },
+  { name: 'an array index beside a "0" key', read: (o) => (Array.isArray(o.c) ? o.c[0] : undefined), events: [ev({ c: [half[0]] }), ev({ c: { 0: 'x' } }), ev({ c: [half[1]] })] },
+]
+
+test('a secret split across events is caught however the keys are spelled, compressed or not', async () => {
+  for (const { name, read, events } of collisions) {
+    for (const compressed of [false, true]) {
+      const bytes = Buffer.from(events.join(''))
+      const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+      const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+      const body = await drain(res.stream)
+      const text = [...body.matchAll(/^data: (.*)$/gm)].map((m) => { try { return read(JSON.parse(m[1])) ?? '' } catch { return '' } }).join('')
+      assert.ok(!text.includes(SECRET), `${name}: the client reassembled the secret (gzip: ${compressed})`)
+      assert.match(body, /AV_UNSCANNABLE/, `${name} (gzip: ${compressed})`)
+    }
+  }
+})
+
+test('an ordinary stream with dotted, empty and numeric keys passes through untouched, compressed or not', async () => {
+  const events = [
+    ev({ choices: [{ index: 0, delta: { content: 'Hello' } }], 'x.request.id': 'req_1', '.': 'dot', '': 'empty' }),
+    ev({ choices: [{ index: 0, delta: { content: ' world' } }], meta: { 0: 'zero', 'a.b': 'c' } }),
+    ev({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+  ]
+  for (const compressed of [false, true]) {
+    const bytes = Buffer.from(events.join(''))
+    const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+    const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+    assert.equal(await drain(res.stream), events.join(''))
+  }
+})
+
 /** A real upstream that sends `body`, and resets the socket part way if `reset`. */
 async function bufferedUpstream(reset, fn) {
   const up = createServer((req, res) => {

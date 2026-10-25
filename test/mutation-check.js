@@ -627,6 +627,20 @@ const MUTATIONS = [
     tests: ['test/security/gateway-approvals.test.js'],
   },
   {
+    what: 'an event-stream key path is the keys joined with a dot, so a dotted key names another path',
+    file: 'src/daemon/pipeline.js',
+    from: "if (typeof value === 'string') { yield [JSON.stringify(path), value]; return }",
+    to: "if (typeof value === 'string') { yield [path.join('.'), value]; return }",
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event-stream array index is the same path segment as a key spelled like it',
+    file: 'src/daemon/pipeline.js',
+    from: 'yield* jsonStringsByPath(value[i], [...path, i])',
+    to: 'yield* jsonStringsByPath(value[i], [...path, String(i)])',
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
     what: 'a path whose escape was itself encoded is sent instead of refused',
     file: 'src/core/policy.js',
     from: 'if (/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i.test(p)) {',

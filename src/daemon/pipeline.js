@@ -1349,10 +1349,20 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
   }
 }
 
-/** Every string in a parsed JSON value, with its key path (`delta.text`). */
-function* jsonStringsByPath(value, path = '') {
-  if (typeof value === 'string') { yield [path, value]; return }
-  if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, path ? `${path}.${k}` : k)
+/**
+ * Every string in a parsed JSON value, with its key path (`["delta","text"]`).
+ *
+ * The path is the list of segments as JSON, an array index as a number and a
+ * key as a string, so no two places share one. It was the keys joined with
+ * `.`, and a key may contain a dot: {"a":{"b":…}} and {"a.b":…} were both
+ * `a.b`, so a value at one was appended between the halves of a secret at the
+ * other and no run ever held it whole.
+ */
+function* jsonStringsByPath(value, path = []) {
+  if (typeof value === 'string') { yield [JSON.stringify(path), value]; return }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) yield* jsonStringsByPath(value[i], [...path, i])
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, [...path, k])
   }
 }
