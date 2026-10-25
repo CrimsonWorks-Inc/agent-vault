@@ -623,6 +623,14 @@ const MUTATIONS = [
     to: '',
     tests: ['test/security/fix-control-cli.test.js'],
   },
+  {
+    // Fix-control round 2: a batch is not one call.
+    what: 'the bridge resends a whole batch when one call in it was refused',
+    file: 'src/cli/index.js',
+    from: "  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))\n  if (!redo.length) return null\n  return {\n    line: JSON.stringify(redo),",
+    to: "  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))\n  if (!redo.length) return null\n  return {\n    line,",
+    tests: ['test/security/fix-control-cli.test.js'],
+  },
 ]
 
 let survived = 0

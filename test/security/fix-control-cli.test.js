@@ -274,3 +274,107 @@ test('exec and env still deliver the current placeholder when there is one', asy
     assert.ok(!env.stdout.includes('unset'), env.stdout)
   } finally { await d.stop() }
 })
+
+// Round 2. The bridge resent the WHOLE line whenever the answer contained the
+// phrase "needs a live session". A batch of a session request and a refused
+// call asked the human twice, and the first request's poll secret was lost.
+
+/** Start the stdio bridge on `token`, and a way to send it one line and read one line back. */
+function bridge(d, token) {
+  const child = spawn(process.execPath, [BIN, 'mcp'], {
+    env: { ...process.env, AGENT_VAULT_DIR: d.dir, AGENT_VAULT_SESSION: token, NO_COLOR: '1' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let out = ''
+  child.stdout.on('data', (c) => { out += c })
+  const ask = (message) => new Promise((resolve, reject) => {
+    const from = out.length
+    const t = setTimeout(() => reject(new Error(`no reply: ${out}`)), 10_000)
+    const check = () => {
+      const nl = out.indexOf('\n', from)
+      if (nl === -1) return
+      clearTimeout(t)
+      child.stdout.off('data', check)
+      resolve(JSON.parse(out.slice(from, nl)))
+    }
+    child.stdout.on('data', check)
+    child.stdin.write(`${JSON.stringify(message)}\n`)
+  })
+  return { ask, stop: () => child.kill() }
+}
+
+const call = (id, name, args = {}) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+const toolText = (r) => JSON.parse(r.result.content[0].text)
+
+test('the bridge resends only the refused calls of a mixed batch', async () => {
+  const d = await withCliDaemon()
+  let b
+  try {
+    const old = JSON.parse((await cli(d.dir, ['session', 'create', '--cred', 'demo', '--json'])).stdout).data
+    await cli(d.dir, ['session', 'revoke', old.session_id])
+    await cli(d.dir, ['session', 'create', '--cred', 'demo'])
+    b = bridge(d, old.token)
+    const answers = await b.ask([
+      call(1, 'vault_request_session', { cred: 'demo', reason: 'reading issues' }),
+      call(2, 'vault_list_creds'),
+    ])
+    assert.ok(Array.isArray(answers) && answers.length === 2, JSON.stringify(answers).slice(0, 300))
+    const pending = await d.control('GET', '/v1/session-requests')
+    assert.equal(pending.body.length, 1, `one proposal became ${pending.body.length} requests`)
+
+    const asked = toolText(answers.find((a) => a.id === 1))
+    assert.equal(asked.request_id, pending.body[0].id, 'the answer the agent got is for the request that exists')
+    const listed = answers.find((a) => a.id === 2)
+    assert.ok(!listed.result.isError, `the refused call was not retried: ${JSON.stringify(listed).slice(0, 300)}`)
+    assert.match(listed.result.content[0].text, /"slug": "demo"/)
+  } finally {
+    b?.stop()
+    await d.stop()
+  }
+})
+
+test('the bridge leaves a batch alone when nothing in it was refused for want of a session', async () => {
+  const d = await withCliDaemon()
+  let b
+  try {
+    const old = JSON.parse((await cli(d.dir, ['session', 'create', '--cred', 'demo', '--json'])).stdout).data
+    await cli(d.dir, ['session', 'revoke', old.session_id])
+    await cli(d.dir, ['session', 'create', '--cred', 'demo'])
+    b = bridge(d, old.token)
+    // A reason that is the very phrase the bridge used to search for.
+    const answers = await b.ask([
+      call(7, 'vault_request_session', { cred: 'demo', reason: 'this tool needs a live session' }),
+      call(8, 'vault_status'),
+    ])
+    assert.equal(answers.length, 2)
+    const pending = await d.control('GET', '/v1/session-requests')
+    assert.equal(pending.body.length, 1, 'a call that did not need a session was sent twice')
+  } finally {
+    b?.stop()
+    await d.stop()
+  }
+})
+
+test('what the bridge resends is read from the answers, not searched for in their text', async () => {
+  const { sessionRetry } = await import('../../src/cli/index.js')
+  const refusal = (id) => ({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'this tool needs a live session' }) }] } })
+  const ok = (id, text) => ({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } })
+
+  // A success that merely mentions the phrase is not a refusal.
+  assert.equal(sessionRetry(JSON.stringify(call(1, 'x')), JSON.stringify(ok(1, 'this tool needs a live session'))), null)
+  assert.equal(sessionRetry(JSON.stringify([call(1, 'x')]), JSON.stringify([ok(1, '{"error":"this tool needs a live session"}')])), null)
+
+  // A single refused call goes again whole, and its new answer replaces it.
+  const single = sessionRetry(JSON.stringify(call(1, 'x')), JSON.stringify(refusal(1)))
+  assert.equal(single.line, JSON.stringify(call(1, 'x')))
+  assert.equal(single.merge('again'), 'again')
+
+  // In a batch, only the refused ids, and every other answer kept as it came.
+  const batch = [call('a', 'ask'), call('b', 'list'), call('c', 'status')]
+  const plan = sessionRetry(JSON.stringify(batch), JSON.stringify([ok('a', 'asked'), refusal('b'), ok('c', 'fine')]))
+  assert.deepEqual(JSON.parse(plan.line), [batch[1]])
+  const merged = JSON.parse(plan.merge(JSON.stringify([ok('b', 'listed')])))
+  assert.deepEqual(merged.map((m) => m.result.content[0].text), ['asked', 'listed', 'fine'])
+  // A retry that comes back as something else leaves the original answers.
+  assert.deepEqual(JSON.parse(plan.merge('not json')).map((m) => m.id), ['a', 'b', 'c'])
+})

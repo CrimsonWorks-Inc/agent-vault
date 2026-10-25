@@ -1065,7 +1065,7 @@ const COMMANDS = {
         buffer = buffer.slice(nl + 1)
         if (!line) continue
         try {
-          const send = (tok) => fetch(endpoint, {
+          const send = (tok, body = line) => fetch(endpoint, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
@@ -1073,9 +1073,11 @@ const COMMANDS = {
               authorization: `Bearer ${tok}`,
               ...(mcpSessionId ? { 'mcp-session-id': mcpSessionId } : {}),
             },
-            body: line,
+            body,
           })
           let res = await send(currentToken())
+          // The body, once something has had to read it before it is written.
+          let answer = null
           // The session ended mid-flight. If a human has since created a new
           // one, pick it up rather than making them restart the client to
           // collect a token that is already sitting on disk.
@@ -1088,13 +1090,23 @@ const COMMANDS = {
             const fresh = (loadState().token || null)
             if (fresh && fresh !== currentToken()) {
               delete process.env.AGENT_VAULT_SESSION
-              // Resent only when the call was refused for want of a session.
-              // A tool that runs without one — asking for a session — has
-              // already happened, and sending it twice would ask twice.
-              const text = res.status === 401 ? '' : await res.clone().text().catch(() => '')
-              if (res.status === 401 || text.includes('needs a live session')) {
+              if (res.status === 401) {
+                // Refused before anything ran.
                 mcpSessionId = null
                 res = await send(fresh)
+              } else {
+                // Resent only what was refused for want of a session. A tool
+                // that runs without one — asking for a session — has already
+                // happened, and the whole line used to go again whenever the
+                // answer CONTAINED that phrase: a batch of a request and a
+                // refusal asked the human twice, and lost the first answer.
+                answer = await res.text()
+                const redo = sessionRetry(line, answer)
+                if (redo) {
+                  mcpSessionId = null
+                  res = await send(fresh, redo.line)
+                  answer = redo.merge(await res.text())
+                }
               }
             }
           }
@@ -1107,15 +1119,16 @@ const COMMANDS = {
             // the same papercut the per-request token lookup exists to avoid,
             // one layer up. Drop the id and let the next request open a new
             // one.
-            const body = await res.clone().text().catch(() => '')
+            const body = answer ?? await res.clone().text().catch(() => '')
             if (body.includes('AV_MCP_SESSION_UNKNOWN')) {
               mcpSessionId = null
               res = await send(currentToken())
+              answer = null
             }
           }
           const sid = res.headers.get('mcp-session-id')
           if (sid) mcpSessionId = sid
-          const text = await res.text()
+          const text = answer ?? await res.text()
           if (text) process.stdout.write(`${asRpc(text, line, res.status)}\n`)
         } catch (e) {
           const parsed = (() => { try { return JSON.parse(line) } catch { return {} } })()
@@ -1421,6 +1434,48 @@ function gatewayPortOf(st) {
   const m = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(st.base_url || '')
   return m ? Number(m[1]) : 7411
 }
+
+/**
+ * What to resend once a dead session has been replaced: only the requests
+ * whose answers are refusals for want of a session, found by id in the
+ * parsed answers — never by searching the text, which a successful result
+ * can contain. Returns null when there is nothing to resend, or
+ * `{ line, merge }`, where merge(text) puts the new answers in place of the
+ * refusals and keeps every other answer as it came.
+ */
+export function sessionRetry(line, text) {
+  let request
+  let answers
+  try {
+    request = JSON.parse(line)
+    answers = JSON.parse(text)
+  } catch { return null }
+  const refused = (a) => {
+    if (!a || typeof a !== 'object' || a.result?.isError !== true) return false
+    try { return JSON.parse(a.result.content?.[0]?.text).error === NEEDS_SESSION } catch { return false }
+  }
+  if (!Array.isArray(request)) {
+    return !Array.isArray(answers) && refused(answers) ? { line, merge: (again) => again } : null
+  }
+  if (!Array.isArray(answers)) return null
+  const key = (id) => JSON.stringify(id)
+  const ids = new Set(answers.filter((a) => refused(a) && a.id !== undefined && a.id !== null).map((a) => key(a.id)))
+  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))
+  if (!redo.length) return null
+  return {
+    line: JSON.stringify(redo),
+    merge(again) {
+      let fresh
+      try { fresh = JSON.parse(again) } catch { return text }
+      if (!Array.isArray(fresh)) return text
+      const byId = new Map(fresh.filter((a) => a && a.id !== undefined).map((a) => [key(a.id), a]))
+      return JSON.stringify(answers.map((a) => (refused(a) && byId.has(key(a.id)) ? byId.get(key(a.id)) : a)))
+    },
+  }
+}
+
+/** The tool error the daemon gives for a call that needs a live session. */
+const NEEDS_SESSION = 'this tool needs a live session'
 
 /** A value as one single-quoted shell word. */
 function shellQuote(v) {
