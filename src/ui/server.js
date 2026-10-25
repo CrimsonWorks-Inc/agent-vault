@@ -289,12 +289,13 @@ export class UiServer {
           expectedOrigins: [this.origin],
           rpId: this.rpId,
         })
-        // The passphrase goes with the enrolment itself. The daemon no longer
-        // accepts a passphrase window for this, because a window admits every
-        // caller on the socket while it is open, not only this page.
+        // The passphrase goes with the enrolment itself, as fresh presence.
+        // The daemon no longer accepts a passphrase window for this, because a
+        // window admits every caller on the socket while it is open, not only
+        // this page.
         await this.#control('POST', '/v1/presence', {
           ...credential,
-          ...(typeof body?.passphrase === 'string' ? { passphrase: body.passphrase } : {}),
+          ...(typeof body?.passphrase === 'string' ? { presence: { passphrase: body.passphrase } } : {}),
         })
         return this.#send(res, 200, { ok: true, credentialId: credential.credentialId })
       }

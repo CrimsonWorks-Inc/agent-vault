@@ -343,43 +343,53 @@ export class Daemon {
   }
 
   /**
-   * The proof for the operations that change who can prove presence at all:
-   * enrolling or replacing the presence authenticator, wrapping the master key
-   * to a Touch ID secret or removing that wrap, and trusting another UI origin.
+   * The `fresh` presence level: proof that a human is here for THIS operation.
    *
-   * The shared passphrase window is NOT accepted here. It admits every caller
-   * on the socket while it is open, so five minutes of a human's presence for
-   * an ordinary command let an agent wrap the master key to a PRF secret of its
-   * own, or install its own authenticator — and keep that after the window
-   * closed. The proof has to arrive with the request: the passphrase (checked
-   * and throttled like every other attempt), or an assertion from the
-   * currently enrolled authenticator over this exact operation.
+   * Used by the operations that change who can prove presence at all —
+   * enrolling or replacing the presence authenticator, wrapping the master key
+   * to a Touch ID secret or removing that wrap, trusting another UI origin —
+   * and by anything else that must not ride on someone else's window.
+   *
+   * The shared passphrase window is never consulted. It admits every caller on
+   * the socket while it is open, so five minutes of a human's presence for an
+   * ordinary command let an agent wrap the master key to a PRF secret of its
+   * own, or install its own authenticator, and keep that after the window
+   * closed. The proof travels with the request: an assertion from the enrolled
+   * authenticator over this exact operation, or `presence.passphrase`, checked
+   * and throttled like every other attempt. A successful proof opens no window.
+   * `operationFor` drops `presence`, so the passphrase is never bound into a
+   * signed operation.
    */
-  #requireFactorProof(op, operation, input) {
-    if (input?.passphrase != null && this.vault.hasPassphrase) {
-      this.#throttlePassphrase()
-      const ok = this.vault.verifyPassphrase(String(input.passphrase))
-      this.#recordPassphraseAttempt(ok)
-      if (!ok) throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify')
-      this.vault.audit?.write('presence.verified', { op, factor: 'passphrase' })
+  #requireFreshPresence(op, operation, presence) {
+    if (presence?.challengeId && this.#verifyOpAssertion(operation, presence)) {
+      this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform', fresh: true })
       return
     }
-    if (input?.presence && this.#verifyOpAssertion(operation, input.presence)) {
-      this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform' })
+    if (typeof presence?.passphrase === 'string' && this.vault.hasPassphrase) {
+      this.#throttlePassphrase()
+      const ok = this.vault.verifyPassphrase(presence.passphrase)
+      this.#recordPassphraseAttempt(ok)
+      if (!ok) throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify', { rule: 'fresh_presence' })
+      this.vault.audit?.write('presence.verified', { op, factor: 'passphrase', fresh: true })
       return
     }
     const factors = []
     if (this.vault.hasPassphrase) factors.push('passphrase')
     if (this.vault.db?.kv?.webauthn) factors.push('authenticator')
+    // Unlike the widening gate, no factor is not a pass: there is nothing a
+    // human could have proved, so nothing that needs a fresh proof can happen.
     if (!factors.length) {
-      this.vault.audit?.write('control.widening_ungated', { op })
-      return
+      throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human factor, and none is enrolled`, {
+        rule: 'factor_required',
+        factors: [],
+        hint: 'This change needs a human factor and none is enrolled. Set one first: agent-vault passphrase set',
+      })
     }
-    throw deny('AV_PRESENCE_REQUIRED', `${op} needs your ${factors.join(' or ')} with the request itself`, {
-      rule: 'factor_proof',
+    throw deny('AV_PRESENCE_REQUIRED', `${op} needs your ${factors.join(' or ')} for this one operation`, {
+      rule: 'fresh_presence',
       factors,
       hint: factors.includes('passphrase')
-        ? 'A passphrase window does not cover this. Send the passphrase with the request.'
+        ? 'This change needs your passphrase for this one operation, even inside a confirmation window. Run the command again; agent-vault will ask.'
         : 'Confirm it in the web UI with your authenticator: agent-vault ui',
     })
   }
@@ -472,13 +482,13 @@ export class Daemon {
       // states, and repeating it made the daemon's operation differ from the
       // one the page signs, so no enrol or removal from the UI ever verified.
       case 'POST /v1/factors/webauthn': {
-        const { action, ...rest } = withoutProof(input)
+        const { action, ...rest } = input || {}
         return of(action === 'remove' ? 'touchid.remove' : 'touchid.enroll', action === 'remove' ? {} : rest)
       }
-      // A passphrase sent as proof is a proof, like `presence`, not part of
-      // what is being changed.
-      case 'POST /v1/presence': return of('presence.enroll', withoutProof(input))
-      case 'POST /v1/ui/origins': return of('ui.origin_add', withoutProof(input))
+      // A fresh passphrase travels inside `presence`, which operationFor
+      // drops, so it is never bound into the signed operation.
+      case 'POST /v1/presence': return of('presence.enroll', input)
+      case 'POST /v1/ui/origins': return of('ui.origin_add', input)
       default: return null
     }
   }
@@ -1318,7 +1328,7 @@ export class Daemon {
           // from the key being replaced is the strongest proof there is that
           // the human holds it. Without this, a vault whose passphrase had
           // since been removed could never rotate its authenticator at all.
-          this.#requireFactorProof('presence enroll', this.#wideningOperation(route, url, input), input)
+          this.#requireFreshPresence('presence enroll', this.#wideningOperation(route, url, input), input.presence)
           // Re-enrolling replaces the only thing standing between an agent and
           // the approve button, so it is audited loudly either way. The proof
           // that came with the request is not part of the key, and a
@@ -1373,9 +1383,9 @@ export class Daemon {
             })
           }
           // Trusting an origin is trusting every page served there to ask for
-          // your fingerprint, so it is owner-proved like a factor change: a
-          // shared window is not enough.
-          this.#requireFactorProof('ui origin add', this.#wideningOperation(route, url, input), input)
+          // your fingerprint, so it needs fresh presence like a factor
+          // change: a shared window is not enough.
+          this.#requireFreshPresence('ui origin add', this.#wideningOperation(route, url, input), input.presence)
           const list = new Set(this.vault.db.kv.ui_origins || [])
           list.add(origin)
           this.vault.db.kv.ui_origins = [...list]
@@ -1428,9 +1438,9 @@ export class Daemon {
           // This comment used to say the route required a presence window. It
           // did not; nothing here called the gate. Now it does.
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
-          this.#requireFactorProof(
+          this.#requireFreshPresence(
             input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',
-            this.#wideningOperation(route, url, input), input,
+            this.#wideningOperation(route, url, input), input.presence,
           )
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
@@ -1603,7 +1613,11 @@ function uiOriginOk(origin) {
   return !!m && Number(m[1]) > 0 && Number(m[1]) <= 65535
 }
 
-/** A request body without the proofs that ride along with it. */
+/**
+ * A request body without the proof that rode along with it, for storing. A
+ * stray top-level `passphrase` is dropped too: whatever else happens, one is
+ * never written into the vault in clear.
+ */
 function withoutProof(input) {
   const { presence, passphrase, ...rest } = input || {}
   return rest

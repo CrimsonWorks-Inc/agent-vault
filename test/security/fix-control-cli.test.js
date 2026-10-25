@@ -51,6 +51,9 @@ test('env quotes what it exports, and refuses what a token or placeholder cannot
       placeholder: `$(touch ${pwned}-ph)`,
     }))
     const r = await cli(dir, ['env'])
+    // A value that is not shaped like a token is not a token: nothing to export.
+    assert.notEqual(r.code, 0, `exported a planted token: ${r.stdout}`)
+    assert.ok(!r.stdout.includes('touch'), r.stdout)
     spawnSync('sh', ['-c', `eval "$1"`, 'sh', r.stdout], { encoding: 'utf8' })
     assert.ok(!existsSync(`${pwned}-token`), 'a planted token ran a command')
     assert.ok(!existsSync(`${pwned}-ph`), 'a planted placeholder ran a command')
@@ -64,8 +67,9 @@ test('env exports a real session faithfully', async () => {
     const s = JSON.parse(created.stdout).data
     const r = await cli(d.dir, ['env'])
     assert.equal(r.code, 0, r.stderr)
-    const shown = spawnSync('sh', ['-c', 'eval "$1"; printf "%s\\n%s\\n%s" "$AGENT_VAULT_SESSION" "$AGENT_VAULT_PLACEHOLDER" "$AGENT_VAULT_URL"', 'sh', r.stdout], { encoding: 'utf8' })
-    const [token, placeholder, url] = shown.stdout.split('\n')
+    const shown = spawnSync('sh', ['-c', 'eval "$1"; printf "%s\\n%s\\n%s\\n%s" "$AGENT_VAULT_SESSION" "$AGENT_VAULT_PLACEHOLDER" "$AGENT_VAULT_URL" "$AGENT_VAULT_HINT"', 'sh', r.stdout], { encoding: 'utf8' })
+    const [token, placeholder, url, hint] = shown.stdout.split('\n')
+    assert.match(hint, /^Credentials are placeholders\. .*agent-vault ph next <cred>$/, 'a value with spaces survives eval whole')
     assert.equal(token, s.token)
     assert.equal(placeholder, s.placeholder)
     assert.equal(url, `http://127.0.0.1:${d.daemon.gatewayPort}`, 'the URL names the port the session was made on')
@@ -168,5 +172,14 @@ test('agent-vault ui warns when its page is on an origin the daemon does not tru
     await new Promise((r) => setTimeout(r, 200))
     child.kill()
     assert.match(out, /not a trusted UI origin/, out)
+  } finally { await d.stop() }
+})
+
+test('a fresh-presence change on a vault with no factor says to set one, and exits 5', async () => {
+  const d = await withCliDaemon()
+  try {
+    const r = await cli(d.dir, ['ui', '--no-open', '--port', '0', '--allow-origin'])
+    assert.equal(r.code, 5, `${r.stdout}\n${r.stderr}`)
+    assert.match(r.stderr, /agent-vault passphrase set/)
   } finally { await d.stop() }
 })

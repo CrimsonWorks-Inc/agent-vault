@@ -32,6 +32,7 @@ test('the shared window cannot enrol an unlock factor or replace the authenticat
     d.daemon.presenceGraceUntil = Date.now() + 60_000 // the human's window, for some other command
     const unlock = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'agent', prf_secret: prf() })
     assert.equal(unlock.status, 401, JSON.stringify(unlock.body))
+    assert.equal(unlock.body.rule, 'fresh_presence')
     assert.equal(d.vault.hasWebauthnUnlock, false)
 
     const agent = makeAuthenticator()
@@ -45,16 +46,17 @@ test('with the passphrase in the request, the same changes go through', async ()
   const d = await startDaemon({ passphrase: PASSPHRASE })
   try {
     const human = makeAuthenticator()
-    const first = await d.control('POST', '/v1/presence', { ...human.record, passphrase: PASSPHRASE })
+    const first = await d.control('POST', '/v1/presence', { ...human.record, presence: { passphrase: PASSPHRASE } })
     assert.equal(first.status, 200, JSON.stringify(first.body))
-    assert.equal(d.vault.db.kv.webauthn.passphrase, undefined, 'the passphrase was stored with the key')
+    assert.equal(d.vault.db.kv.webauthn.presence, undefined, 'the passphrase was stored with the key')
     assert.deepEqual(Object.keys(d.vault.db.kv.webauthn).sort(), Object.keys(human.record).sort())
 
-    const wrong = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'c', prf_secret: prf(), passphrase: 'nope nope nope' })
+    const wrong = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'c', prf_secret: prf(), presence: { passphrase: 'nope nope nope' } })
     assert.equal(wrong.status, 403, JSON.stringify(wrong.body))
     assert.equal(wrong.body.code, 'AV_PRESENCE_DENIED')
+    assert.equal(wrong.body.rule, 'fresh_presence')
 
-    const right = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'c', prf_secret: prf(), passphrase: PASSPHRASE })
+    const right = await d.control('POST', '/v1/factors/webauthn', { action: 'enroll', credential_id: 'c', prf_secret: prf(), presence: { passphrase: PASSPHRASE } })
     assert.equal(right.status, 200, JSON.stringify(right.body))
     assert.ok(d.vault.hasWebauthnUnlock)
   } finally { await d.stop() }
@@ -183,10 +185,10 @@ test('trusting another UI origin needs the owner, and then it works', async () =
     assert.equal(byWindow.status, 401, 'an origin was trusted on the strength of a shared window')
     d.daemon.presenceGraceUntil = 0
     for (const bad of ['http://evil.example:9123', 'https://localhost:9123', 'http://localhost', 'http://localhost:99999', 'http://localhost:9123/x']) {
-      const r = await d.control('POST', '/v1/ui/origins', { origin: bad, passphrase: PASSPHRASE })
+      const r = await d.control('POST', '/v1/ui/origins', { origin: bad, presence: { passphrase: PASSPHRASE } })
       assert.ok(r.status >= 400, `accepted ${bad}`)
     }
-    const added = await d.control('POST', '/v1/ui/origins', { origin, passphrase: PASSPHRASE })
+    const added = await d.control('POST', '/v1/ui/origins', { origin, presence: { passphrase: PASSPHRASE } })
     assert.equal(added.status, 200, JSON.stringify(added.body))
     assert.ok(kinds(d).includes('ui.origin_added'))
 
@@ -201,3 +203,23 @@ test('trusting another UI origin needs the owner, and then it works', async () =
 function registration(auth, challenge, origin) {
   return auth.register(challenge, origin)
 }
+
+test('with no factor enrolled, a fresh-presence change is refused, not waved through', async () => {
+  const d = await startDaemon()
+  try {
+    const res = await d.control('POST', '/v1/ui/origins', { origin: 'http://localhost:9124' })
+    assert.equal(res.status, 401, JSON.stringify(res.body))
+    assert.equal(res.body.rule, 'factor_required')
+    assert.deepEqual(res.body.factors, [])
+  } finally { await d.stop() }
+})
+
+test('a fresh proof opens no window', async () => {
+  const d = await startDaemon({ passphrase: PASSPHRASE })
+  try {
+    const ok = await d.control('POST', '/v1/ui/origins', { origin: 'http://localhost:9125', presence: { passphrase: PASSPHRASE } })
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    assert.equal(d.daemon.presenceGraceUntil, 0)
+    assert.ok(d.vault.audit.read({ limit: 20 }).some((r) => r.kind === 'presence.verified' && r.fresh === true && r.factor === 'passphrase'))
+  } finally { await d.stop() }
+})

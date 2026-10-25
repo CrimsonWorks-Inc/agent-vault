@@ -125,6 +125,12 @@ async function controlWithPresence(method, path, body) {
         exit: EXIT.LOCKED, next: 'agent-vault unlock',
       })
     }
+    // No factor at all, and the change needs a fresh one: nothing to ask for.
+    if (e.problem?.rule === 'factor_required') {
+      throw Object.assign(new Error(e.problem.detail || 'this change needs a human factor, and none is enrolled'), {
+        exit: EXIT.PRESENCE, next: 'agent-vault passphrase set',
+      })
+    }
     // Work out what would actually satisfy this before deciding how to ask.
     // Checking the terminal first meant a vault whose only factor is an
     // authenticator reported "needs your passphrase" — naming a secret that
@@ -141,39 +147,16 @@ async function controlWithPresence(method, path, body) {
         exit: EXIT.PRESENCE,
       })
     }
+    // Fresh presence: the passphrase goes with this one request and opens no
+    // window. The routes that need it do not accept a window at all.
+    if (e.problem?.rule === 'fresh_presence') {
+      const passphrase = await readSecret('passphrase (for this change only): ')
+      return control(method, path, { ...body, presence: { passphrase } })
+    }
     console.error(`${C.dim('This change needs a human.')}`)
     const passphrase = await readSecret('passphrase: ')
     await control('POST', '/v1/presence/window', { passphrase })
     return control(method, path, body)
-  }
-}
-
-/**
- * Run a control call whose proof must travel with the request: the routes
- * that change who can prove presence, which a passphrase window does not
- * cover. On AV_PRESENCE_REQUIRED, ask for the passphrase and send it with the
- * call itself.
- */
-async function controlWithFactor(method, path, body) {
-  try {
-    return await control(method, path, body)
-  } catch (e) {
-    if (e.problem?.code !== 'AV_PRESENCE_REQUIRED') throw e
-    const factors = e.problem?.factors || ['passphrase']
-    if (!factors.includes('passphrase')) {
-      throw Object.assign(new Error(`this change needs your ${factors.join(' or ')}`), {
-        exit: EXIT.PRESENCE,
-        next: 'agent-vault ui   (confirm it there with your authenticator)',
-      })
-    }
-    if (!process.stdin.isTTY) {
-      throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
-        exit: EXIT.PRESENCE,
-      })
-    }
-    console.error(`${C.dim('This change needs a human.')}`)
-    const passphrase = await readSecret('passphrase: ')
-    return control(method, path, { ...body, passphrase })
   }
 }
 
@@ -1174,7 +1157,7 @@ const COMMANDS = {
       if (args['allow-origin']) {
         // Owner-proved, with the passphrase in the request: trusting an
         // origin is trusting every page served there to ask for a fingerprint.
-        await controlWithFactor('POST', '/v1/ui/origins', { origin: ui.origin })
+        await controlWithPresence('POST', '/v1/ui/origins', { origin: ui.origin })
         if (!JSON_OUT) console.log(C.dim(`  trusted ${ui.origin} for Touch ID confirmations`))
       } else if (!JSON_OUT) {
         console.log(C.yellow(`  ${ui.origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page.`))

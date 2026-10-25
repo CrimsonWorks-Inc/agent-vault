@@ -50,7 +50,7 @@ test('what the page signs for a narrowing is what the server rebuilds', () => {
     assert.equal(signed, rebuilt, `${JSON.stringify(raw)} would be refused as a different operation`)
     assert.deepEqual(page, parseOverrides(raw), 'and it reads the inputs the way the CLI flags are read')
   }
-  assert.match(PAGE, /parseNarrowing\(/, 'the decide action must use it')
+  assert.match(PAGE, /const overrides = parseNarrowing\(typed\)/, 'the decide action must sign the parsed narrowing')
 })
 
 test('a narrowed approval made the way the page makes it goes through', async () => {
