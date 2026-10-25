@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
+import * as policyMod from '../../src/core/policy.js'
 
 const SECRET = 'ghp_STORETEST00112233445566778899aabb'
 
@@ -39,13 +40,68 @@ const WIDER = {
   hosts: ['evil.example'], budget: { unit: 'requests', limit: 1e9 },
 }
 
-function assertNoWider(policy) {
-  assert.ok(!(policy.methods || []).includes('DELETE'), `methods widened: ${policy.methods}`)
-  assert.ok(!(policy.paths || []).includes('/admin/**'), `paths widened: ${policy.paths}`)
-  assert.ok(!(policy.hosts || []).includes('evil.example'), `hosts widened: ${policy.hosts}`)
-  assert.notEqual(policy.approval, 'auto', 'approval loosened')
-  assert.ok(policy.budget.limit <= 100, `budget widened: ${policy.budget.limit}`)
+// Requests to probe a policy with: every method, hosts in and out of the
+// grant, paths in and out of it, and the spellings that normalise onto them.
+const PROBE_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
+const PROBE_HOSTS = ['api.example.com', 'API.Example.com', 'evil.example', 'sub.api.example.com', 'example.com']
+const PROBE_PATHS = ['/repos/a', '/repos/a/b/c', '/repos', '/admin/x', '/admin', '/', '/other/thing', '/repos/../admin/x']
+const APPROVAL_STRICTNESS = ['auto', 'first-use', 'on-write', 'each']
+
+/** Whether `policy` lets a request through. */
+function allows(policy, req) {
+  try { policyMod.evaluateHttp(policy, req); return true } catch { return false }
 }
+
+/**
+ * That `after` permits nothing `before` refused. By behaviour, not by looking
+ * for particular strings: an absent list is UNRESTRICTED to the policy engine,
+ * and the old version of this read `(policy.methods || [])` — so a result that
+ * dropped a constraint altogether looked emptier than the original, and passed.
+ */
+function assertNoWider(after, before = POLICY) {
+  // Shape first: where the original restricted a dimension, the result must
+  // still be a list. null or absent there is "anything".
+  for (const k of ['methods', 'paths', 'hosts']) {
+    if (Array.isArray(before[k])) assert.ok(Array.isArray(after[k]), `${k} is no longer restricted: ${JSON.stringify(after[k])}`)
+  }
+  for (const method of PROBE_METHODS) {
+    for (const host of PROBE_HOSTS) {
+      for (const path of PROBE_PATHS) {
+        const req = { method, host, path }
+        if (!allows(before, req)) assert.ok(!allows(after, req), `${method} ${host}${path} was refused before and is allowed now`)
+        // Approval can only get stricter, for every request still allowed.
+        if (allows(after, req)) {
+          for (const firstUse of [true, false]) {
+            if (policyMod.needsApproval(before, { method, firstUse })) {
+              assert.ok(policyMod.needsApproval(after, { method, firstUse }), `${method} no longer needs approval`)
+            }
+          }
+        }
+      }
+    }
+  }
+  // An absent approval is 'auto' to needsApproval; an unknown one is too.
+  assert.ok(APPROVAL_STRICTNESS.indexOf(after.approval ?? 'auto') >= APPROVAL_STRICTNESS.indexOf(before.approval ?? 'auto'),
+    `approval loosened from ${before.approval} to ${after.approval}`)
+  assert.ok(after.budget && Number.isFinite(after.budget.limit), `budget is no longer bounded: ${JSON.stringify(after.budget)}`)
+  assert.ok(after.budget.limit <= before.budget.limit, `budget widened: ${after.budget.limit}`)
+}
+
+test('the no-wider check itself refuses a result that dropped a constraint', () => {
+  // Every way a broken narrowing could pass the old check by deleting rather
+  // than adding: each must make the check fail.
+  for (const broken of [
+    { ...POLICY, methods: null }, { ...POLICY, paths: null }, { ...POLICY, hosts: null },
+    { ...POLICY, methods: undefined }, { ...POLICY, approval: undefined }, { ...POLICY, budget: null },
+    { ...POLICY, methods: ['GET', 'PUT'] }, { ...POLICY, paths: ['/**'] }, { ...POLICY, hosts: ['*.example.com'] },
+    { ...POLICY, approval: 'first-use' }, { ...POLICY, budget: { unit: 'requests', limit: NaN } },
+  ]) {
+    assert.throws(() => assertNoWider(broken), `passed: ${JSON.stringify(broken)}`)
+  }
+  // And it does not refuse the original, or an honest narrowing of it.
+  assert.doesNotThrow(() => assertNoWider(POLICY))
+  assert.doesNotThrow(() => assertNoWider({ ...POLICY, methods: ['GET'], paths: ['/repos/a/**'], approval: 'each', budget: { unit: 'requests', limit: 3 } }))
+})
 
 test('narrowGrant can only intersect, never widen', () => {
   const v = fresh()

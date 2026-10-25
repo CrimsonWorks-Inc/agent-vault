@@ -661,6 +661,24 @@ const MUTATIONS = [
     to: "    if (true) this.vault.audit?.write('mcp.session_closed'",
     tests: ['test/security/fix-control-session-requests.test.js'],
   },
+  {
+    // Fix-control round 2: a narrowing that DROPS constraints. The old
+    // regression helper read an absent list as empty and let this through.
+    what: 'narrowGrant drops the method, path and host lists it was asked to widen',
+    file: 'src/store/vault.js',
+    from: '    g.policy = policyMod.intersect([g.policy, narrow])',
+    // Only when the narrowing names a host, as an attempted widening here
+    // does and an ordinary narrowing does not, so the ordinary tests pass.
+    to: '    g.policy = { ...policyMod.intersect([g.policy, narrow]), ...(narrow.hosts ? { methods: null, paths: null, hosts: null } : {}) }',
+    tests: ['test/security/fix-control-store.test.js'],
+  },
+  {
+    what: 'a forked grant drops the constraints its narrowing tried to widen',
+    file: 'src/store/vault.js',
+    from: '      policy: narrow && Object.keys(narrow).length ? policyMod.intersect([policy, narrow]) : policy,',
+    to: '      policy: narrow && Object.keys(narrow).length ? { ...policyMod.intersect([policy, narrow]), ...(narrow.hosts ? { methods: undefined, paths: undefined, hosts: undefined } : {}) } : policy,',
+    tests: ['test/security/fix-control-store.test.js'],
+  },
 ]
 
 let survived = 0
