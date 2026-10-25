@@ -61,7 +61,14 @@ export class Vault {
     if (existsSync(v.dbPath)) throw new Error(`a vault already exists at ${dir}`)
 
     const deviceKey = crypt.randomKey()
-    writeFileSync(v.deviceKeyPath, deviceKey, { mode: 0o600 })
+    // Flushed before vault.json, which #persist flushes: every wrap in it is
+    // sealed under a key derived from this one, so vault.json surviving a
+    // power cut that this did not would leave a vault nothing can open.
+    const keyFd = openSync(v.deviceKeyPath, 'w', 0o600)
+    try {
+      writeFileSync(keyFd, deviceKey)
+      fsyncSync(keyFd)
+    } finally { closeSync(keyFd) }
 
     const vmk = crypt.randomKey()
     const db = structuredClone(EMPTY)
@@ -86,8 +93,11 @@ export class Vault {
    * deleting the anchor as well.
    */
   #anchorStamp() {
+    const vaultDb = () => this.db
     return {
-      anchored: !!this.db?.kv?.audit_anchored,
+      // Read live, not captured: a log opened before the stamp was set must
+      // still see it when the log goes missing later in the same run.
+      get anchored() { return !!vaultDb()?.kv?.audit_anchored },
       markAnchored: () => {
         if (this.db?.kv && !this.db.kv.audit_anchored) {
           this.db.kv.audit_anchored = true

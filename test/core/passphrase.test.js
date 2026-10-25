@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
@@ -194,12 +194,12 @@ test('a failed unlock leaves nothing half-open', () => {
     // The path that matters is the one where the passphrase is RIGHT and
     // something afterwards fails — opening the audit log. A wrong passphrase
     // fails before the key is ever assigned, so it never reached this state.
-    // A corrupt line in the MIDDLE of the log does: that is real corruption,
-    // not a torn tail, and it is not something to read past.
+    // A log that cannot be read at all does. (A corrupt line in the middle
+    // used to be the example, and was itself a bug: it locked the owner out
+    // for good. The chain reports that now, and the vault still opens.)
     const path = join(fresh, 'audit.jsonl')
-    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
-    lines[1] = '{"seq":2,"this is not'
-    writeFileSync(path, `${lines.join('\n')}\n`)
+    rmSync(path)
+    mkdirSync(path)
 
     const reopened = Vault.open(fresh)
     assert.throws(() => reopened.unlockWith({ passphrase: 'the-owners-passphrase' }),
