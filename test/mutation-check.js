@@ -631,6 +631,28 @@ const MUTATIONS = [
     to: "  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))\n  if (!redo.length) return null\n  return {\n    line,",
     tests: ['test/security/fix-control-cli.test.js'],
   },
+  {
+    // Fix-control round 2: a bound that skips used rows bounds nothing.
+    what: 'only unused placeholders count towards rotation at max_active',
+    file: 'src/store/vault.js',
+    from: '    for (const p of active.slice(0, Math.max(0, active.length - maxActive + 1))) {',
+    to: '    for (const p of active.filter((x) => x.uses === 0).slice(0, 1)) {',
+    tests: ['test/security/fix-control-ledger.test.js'],
+  },
+  {
+    what: 'a max_active that is not a number disables the live-row bound',
+    file: 'src/store/vault.js',
+    from: '    const maxActive = Number.isSafeInteger(phPolicy.max_active) && phPolicy.max_active >= 1 ? phPolicy.max_active : 8',
+    to: '    const maxActive = phPolicy.max_active ?? 8',
+    tests: ['test/security/fix-control-ledger.test.js'],
+  },
+  {
+    what: "an explicit placeholder ttl replaces the grant's ttl ceiling",
+    file: 'src/store/vault.js',
+    from: '    const ttl = Math.min(positive(Number(ttlMs ?? NaN)), positive(Number(phPolicy.ttl) * 1000))',
+    to: '    const ttl = ttlMs ?? positive(Number(phPolicy.ttl) * 1000)',
+    tests: ['test/security/fix-control-ledger.test.js'],
+  },
 ]
 
 let survived = 0

@@ -788,14 +788,26 @@ export class Vault {
     const stated = Number(grant.policy?.budget?.limit)
     const budgetLimit = Number.isFinite(stated) && stated > 0 ? stated : 1000
     const phPolicy = grant.policy?.placeholder_policy || {}
-    const maxActive = phPolicy.max_active ?? 8
+    // Validated, not `?? 8`: a string or NaN made `length >= max_active`
+    // false for good, which is no bound at all.
+    const maxActive = Number.isSafeInteger(phPolicy.max_active) && phPolicy.max_active >= 1 ? phPolicy.max_active : 8
     const active = Object.values(this.db.placeholders)
       .filter((p) => p.grant_id === grantId && p.field === fieldName && p.state === 'active')
-    if (active.length >= maxActive) {
-      // Evict the oldest unused rather than refusing: an agent that asks twice
-      // should get a working placeholder, not an error it cannot act on.
-      const oldest = active.filter((p) => p.uses === 0).sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-      if (oldest) { oldest.state = 'dead'; oldest.dead_reason = 'rotated' }
+    // Rotate rather than refuse: an agent that asks twice should get a working
+    // placeholder, not an error it cannot act on. Unused ones go first, oldest
+    // first; then the least recently used. Only unused ones used to be
+    // eligible, so once every live row had been used once the bound stopped
+    // applying — ask, use, ask again, and the live rows grew without limit.
+    // A rotated placeholder answers AV_PH_STALE, which says to ask again.
+    const order = (p) => [p.uses === 0 ? 0 : 1, p.last_used_at || p.created_at]
+    active.sort((a, b) => {
+      const [ua, ta] = order(a)
+      const [ub, tb] = order(b)
+      return ua - ub || String(ta).localeCompare(String(tb))
+    })
+    for (const p of active.slice(0, Math.max(0, active.length - maxActive + 1))) {
+      p.state = 'dead'
+      p.dead_reason = 'rotated'
     }
 
     // The grant's placeholder_policy is a ceiling, not a default. It used to
@@ -811,7 +823,11 @@ export class Vault {
     const maxUses = uses == null || !Number.isFinite(asked) || asked < 1
       ? ceiling
       : Math.min(asked, ceiling)
-    const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
+    // The grant's ttl is a ceiling too. An explicit ttlMs replaced it, so a
+    // caller asking for an hour got an hour on a grant that said one second.
+    // Either one that is not a positive number is no limit, not a zero.
+    const positive = (n) => (Number.isFinite(n) && n > 0 ? n : Infinity)
+    const ttl = Math.min(positive(Number(ttlMs ?? NaN)), positive(Number(phPolicy.ttl) * 1000))
     // Bounded by how long the session can possibly last, not by when it would
     // expire today. Idle activity moves `expires_at` out towards
     // `max_expires_at`, and a placeholder pinned to the first value died hours
@@ -819,7 +835,7 @@ export class Vault {
     // included. The session's own liveness is checked on every use anyway
     // (#authenticate asserts it for token and carrier alike).
     const expires = Math.min(
-      ttl ? Date.now() + ttl : Infinity,
+      Date.now() + ttl,
       Date.parse(session.max_expires_at ?? session.expires_at),
     )
     this.#collectDeadPlaceholders()
