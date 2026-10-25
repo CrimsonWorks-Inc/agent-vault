@@ -149,7 +149,7 @@ export class Daemon {
       const final = proposalOf({ ...record.proposal, ...proposalOf(d.overrides || {}) })
       return this.#settleSessionRequest(record, d.granted, final)
     }
-    return this.pipeline.decideApproval(d.id, d.granted)
+    return approvalView(this.pipeline.decideApproval(d.id, d.granted))
   }
 
   /** The decision itself, after the gate has let it through. */
@@ -314,17 +314,24 @@ export class Daemon {
       case 'DELETE /v1/credentials': return of('cred.remove', { slug: url.searchParams.get('slug') })
       case 'POST /v1/sessions': return of('session.create', input)
       case 'POST /v1/placeholders': return of('placeholder.issue', input)
-      case 'POST /v1/approvals': return of('approval.approve', input)
+      // The verdict picks the op name, the same way the UI's builder does, so
+      // the human is shown which answer they are giving.
+      case 'POST /v1/approvals': return of(input?.granted === false ? 'approval.deny' : 'approval.approve', input)
       // Bound to the list exactly as it was sent. Normalising here would mean
       // the human signed one thing and the daemon executed another.
       case 'POST /v1/pending/decide-many': return of('pending.decide_many', { decisions: input?.decisions })
       case 'POST /v1/listeners': return of('listener.add', input)
-      // One route, two opposite actions. `action` is part of the bound
-      // operation either way, but the op NAME is what the UI shows the human,
-      // and asking someone to confirm "touchid.enroll" for a removal is
-      // asking them to approve something they were not shown.
-      case 'POST /v1/factors/webauthn':
-        return of(input?.action === 'remove' ? 'touchid.remove' : 'touchid.enroll', input)
+      // One route, two opposite actions. The op NAME is what the UI shows the
+      // human, and asking someone to confirm "touchid.enroll" for a removal is
+      // asking them to approve something they were not shown. `action` is
+      // carried by that name rather than repeated as a field: the handler
+      // reads nothing from it but "remove or not", which the name already
+      // states, and repeating it made the daemon's operation differ from the
+      // one the page signs, so no enrol or removal from the UI ever verified.
+      case 'POST /v1/factors/webauthn': {
+        const { action, ...rest } = input || {}
+        return of(action === 'remove' ? 'touchid.remove' : 'touchid.enroll', action === 'remove' ? {} : rest)
+      }
       case 'POST /v1/presence': return of('presence.enroll', input)
       default: return null
     }
@@ -954,18 +961,25 @@ export class Daemon {
         }
 
         case 'GET /v1/approvals':
-          return json(200, this.pipeline.pendingApprovals())
+          return json(200, this.pipeline.pendingApprovals().map(approvalView))
         case 'POST /v1/approvals': {
           // Granting is the entire point of the approval: an agent that could
           // approve its own held request would have defeated the one control
-          // that exists to put a human in the loop. Denying is left open —
-          // it only ever narrows, and an agent abandoning its own request is
-          // a legitimate thing to want.
+          // that exists to put a human in the loop.
+          //
+          // Denying used to be left open on the theory that it only narrows.
+          // It did not: an approval that had already run kept the response
+          // the agent's request got, and denying it returned that response —
+          // `av-placeholder-next` included, a successor that works as a
+          // carrier on its own. Every answer is a human's answer now, bound to
+          // which answer it is, so a signature for "approve" cannot be spent on
+          // "deny" or the other way round.
           const granted = input.granted !== false
-          if (granted) {
-            this.#requireHumanForWidening('approval grant', this.#wideningOperation(route, url, input), input.presence)
-          }
-          return json(200, this.pipeline.decideApproval(input.id, granted))
+          this.#requireHumanForWidening(
+            granted ? 'approval grant' : 'approval deny',
+            this.#wideningOperation(route, url, input), input.presence,
+          )
+          return json(200, approvalView(this.pipeline.decideApproval(input.id, granted)))
         }
 
         // The audit log is keyed from the vault master key, so a locked vault
@@ -1293,6 +1307,18 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
+}
+
+/**
+ * An approval as the control API reports it: what it is and how it stands,
+ * never the response the agent's request got. That response is the agent's,
+ * and it carries headers — `av-placeholder-next` among them — that work as a
+ * capability on their own.
+ */
+function approvalView(approval) {
+  if (!approval || typeof approval !== 'object') return approval
+  const { result, ...rest } = approval
+  return rest
 }
 
 /** `iface:port`, where iface may be a name, an IPv4 literal, or [v6]. */
