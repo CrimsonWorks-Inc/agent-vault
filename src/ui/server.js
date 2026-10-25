@@ -110,7 +110,9 @@ export class UiServer {
   // ------------------------------------------------------------------ routing
 
   async #handle(req, res) {
-    this.lastSeen = Date.now()
+    // Not marked as activity here. Counting every request kept the server up
+    // on the strength of the page's own refused polls once its cookie had
+    // expired; only a caller holding the session counts (see #touch).
     const url = new URL(req.url, this.origin)
 
     // Arriving by IP would put the page on an origin whose domain cannot be a
@@ -145,13 +147,14 @@ export class UiServer {
     const cookie = this.#cookieFrom(req)
 
     if (cookie && this.sessionCookie && safeEqual(cookie, this.sessionCookie)) {
+      this.#touch(res)
       return this.#sendHtml(res, this.html)
     }
 
     if (offered && !this.sessionCookie && safeEqual(offered, this.launchToken)) {
       this.sessionCookie = randomBytes(32).toString('base64url')
       this.claimedAt = new Date().toISOString()
-      res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+      this.#touch(res)
       // Redirect so the token leaves the address bar, browser history and any
       // Referer header the page might later send.
       res.writeHead(302, { Location: '/' })
@@ -197,6 +200,7 @@ export class UiServer {
     }
     // Requiring a header a form post cannot set is the CSRF defence.
     if (req.headers['x-av-ui'] !== '1') return this.#send(res, 403, { error: 'missing X-AV-UI header' })
+    this.#touch(res)
 
     const body = await readBody(req)
     const route = url.pathname.slice('/api/'.length)
@@ -553,6 +557,17 @@ export class UiServer {
 
 
   // ------------------------------------------------------------------ helpers
+
+  /**
+   * Activity by the holder of the session: it keeps the server up, and it
+   * slides the cookie. The cookie was set once at claim with Max-Age equal to
+   * the IDLE timeout and never refreshed, so it expired thirty minutes into
+   * active use and the page could not get back in — the launch link was spent.
+   */
+  #touch(res) {
+    this.lastSeen = Date.now()
+    res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+  }
 
   #cookieFrom(req) {
     const raw = req.headers.cookie || ''
