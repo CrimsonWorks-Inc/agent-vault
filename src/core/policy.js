@@ -284,88 +284,69 @@ export function encodePathForWire(path) {
   return String(path).split('/').map(encodePathSegment).join('/')
 }
 
-export function normalizePath(path) {
-  return pathViews(path).path
-}
-
 /**
- * Both readings of a request path: `path`, what an upstream that decodes once
- * resolves — which is what goes on the wire — and `decoded`, what one that
- * keeps decoding resolves. Policy has to allow both.
+ * The path a request names, decoded once — which is what goes on the wire,
+ * re-encoded — or a refusal.
  *
- * They differ only when an escape was itself encoded. `/a/b%2520c` names a
- * segment that is literally `b%20c`; this sent `/a/b%20c`, which an upstream
- * reads as `b c` — a GET of another object, or a write to it. So the segment
- * goes out as written, and the fully decoded one is still checked against
- * every deny rule, for an upstream that decodes it again.
- *
- * A segment that decodes all the way to `.` or `..` is still a dot segment in
- * the wire reading: `/repos/%252e%252e/admin` is resolved to `/admin` and
- * checked and sent as that, as it always was.
+ * A path is decoded exactly once, and refused if decoding it again would
+ * change it. This used to decode to a fixed point and check two readings,
+ * once and fully decoded, but an upstream may decode any number of times in
+ * between: `/a/b%252520c` was allowed on both readings and an upstream that
+ * decodes twice served `/a/b%20c`, which neither reading was. No count of
+ * readings closes that, so an escape that is itself encoded is refused.
  */
-export function pathViews(path) {
-  let p = String(path || '/')
+export function normalizePath(path) {
+  const raw = String(path || '/')
 
-  // Decode to a fixed point, not a fixed number of rounds. Two rounds left a
-  // live escape in the output at three levels of encoding, and the forwarded
-  // path was the un-normalized original, so the upstream resolved something
-  // the policy never saw.
-  //
-  // The request itself must be well-formed. After the first round, though, a
-  // `%` that no longer starts an escape is one the agent sent as `%25` — a
-  // literal percent sign — and refusing it made `/files/100%25` unsendable.
-  // If nothing is left to decode, that is the fixed point. If an escape is
-  // still live beside it, as in `/%2561dmin%25`, stopping there would leave
-  // `%61` for an upstream to decode, so that is still refused.
-  let decoded = p
-  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
-    let next
-    try { next = decodeURIComponent(decoded) } catch {
-      if (i === 0 || /%[0-9a-fA-F]{2}/.test(decoded)) {
-        throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
-      }
-      next = decoded
-    }
-    if (next === decoded) break
-    decoded = next
-    if (i === MAX_DECODE_ROUNDS - 1) {
-      throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times to resolve')
-    }
+  // The request itself must be well-formed.
+  let p
+  try { p = decodeURIComponent(raw) } catch {
+    throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
   }
 
   // Everything below decides what resource this names. A URL parser answers
   // the same question differently, and where the two disagree the request
   // goes somewhere the policy did not authorise.
   //
-  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
-  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
-  //   "/user/keys".
-  const cut = decoded.search(/[?#]/)
-  if (cut !== -1) decoded = decoded.slice(0, cut)
-
   //   An encoded slash is genuinely ambiguous: to this function it is a
   //   separator, to some upstreams a literal character in one segment. Two
   //   readings means two different resources, so it is refused rather than
   //   guessed. The same goes for a backslash, which several servers fold to
   //   a separator.
   //
-  //   The backslash is looked for in the DECODED path as well. Only the raw
-  //   one was tested, so `%255c` passed, decoded to `\`, was matched as part
-  //   of one segment and went out as `%5C` — which an upstream that decodes
-  //   and folds reads as a separator. (A slash encoded twice is a real
-  //   separator here and on the wire alike, so it is not ambiguous.)
-  if (/%2f|%5c|\\/i.test(String(path || '')) || decoded.includes('\\')) {
+  //   Both are looked for in the decoded path as well, so a backslash encoded
+  //   twice (`%255c`) is named for what it is rather than only as the double
+  //   encoding below.
+  if (/%2f|%5c|\\/i.test(raw) || /%2f|%5c|\\/i.test(p)) {
     throw deny('AV_POLICY_DENIED', 'path contains an encoded slash or a backslash', {
       rule: 'path_ambiguous_separator',
       hint: 'Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.',
     })
   }
 
+  //   Decoded once, nothing may still decode. `%25` followed by hex is an
+  //   escape that was itself encoded, and an upstream that decodes again
+  //   serves another path. A `%` that starts no escape is a literal percent
+  //   sign, as in `/files/100%25`, and is sent as one. `%u` and four hex
+  //   digits counts as an escape too: IIS decodes it.
+  if (/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i.test(p)) {
+    throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times: decoding it again would change it', {
+      rule: 'path_ambiguous_encoding',
+      hint: 'An upstream that decodes the path twice would serve a different path from the one checked here. Encode the path once.',
+    })
+  }
+
+  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
+  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
+  //   "/user/keys".
+  const cut = p.search(/[?#]/)
+  if (cut !== -1) p = p.slice(0, cut)
+
   //   TAB, LF and CR are deleted outright by the WHATWG URL parser, so
   //   "/repos/o/r/hooks\t" matched no deny glob and arrived as
   //   "/repos/o/r/hooks". Every C0 control and DEL is refused: none of them
   //   belongs in a path, and each is a chance for two parsers to disagree.
-  const control = /[\u0000-\u001f\u007f]/.exec(decoded)
+  const control = /[\u0000-\u001f\u007f]/.exec(p)
   if (control) {
     const code = control[0].charCodeAt(0).toString(16).padStart(2, '0')
     throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {
@@ -374,44 +355,18 @@ export function pathViews(path) {
     })
   }
 
-  const resolve = (text, dot) => {
-    const segments = []
-    for (const seg of text.split('/')) {
-      const d = dot(seg)
-      if (d === '' || d === '.') continue
-      if (d === '..') {
-        if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
-        segments.pop()
-        continue
-      }
-      segments.push(seg)
+  const segments = []
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') {
+      if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
+      segments.pop()
+      continue
     }
-    return `/${segments.join('/')}`
+    segments.push(seg)
   }
-  const full = resolve(decoded, (seg) => seg)
-  // Decoded once. The first round cannot throw: the loop above refuses a
-  // path whose first round does.
-  let once = decodeURIComponent(p)
-  if (once === decoded) return { path: full, decoded: full }
-  const end = once.search(/[?#]/)
-  if (end !== -1) once = once.slice(0, end)
-  return { path: resolve(once, (seg) => decodeFully(seg)), decoded: full }
+  return `/${segments.join('/')}`
 }
-
-/** A segment decoded until nothing changes. Only for spotting a dot segment. */
-function decodeFully(seg) {
-  let out = seg
-  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
-    let next
-    try { next = decodeURIComponent(out) } catch { return out }
-    if (next === out) return out
-    out = next
-  }
-  return out
-}
-
-// Enough for any legitimate double-encoding, far short of a decode bomb.
-const MAX_DECODE_ROUNDS = 5
 
 /**
  * Glob matching, done segment by segment rather than by compiling to a regex.
@@ -556,10 +511,7 @@ export function isMultiTenantWildcard(pattern) {
 export function evaluateHttp(policy, { method, host, path }) {
   const m = String(method || 'GET').toUpperCase()
   const h = normalizeHost(host)
-  const { path: p, decoded } = pathViews(path)
-  // Both readings, when an escape was encoded twice: `p` is what the wire
-  // carries, `decoded` what an upstream that decodes again would serve.
-  const views = decoded === p ? [p] : [p, decoded]
+  const p = normalizePath(path)
 
   if (policy.hosts && !policy.hosts.some((pat) => matchHost(pat, h))) {
     throw deny('AV_NO_GRANT', `no grant allows host ${h}`, {
@@ -576,7 +528,7 @@ export function evaluateHttp(policy, { method, host, path }) {
     })
   }
   for (const dp of policy.deny_paths || []) {
-    if (views.some((v) => matchPath(dp, v))) {
+    if (matchPath(dp, p)) {
       throw deny('AV_POLICY_DENIED', `path ${p} is on a deny list`, {
         rule: `deny_paths:${dp}`,
         hint: 'This path is denied by the connector profile and cannot be granted.',
@@ -590,7 +542,7 @@ export function evaluateHttp(policy, { method, host, path }) {
   let matched = null
   if (policy.paths) {
     matched = policy.paths.find((pat) => matchPath(pat, p)) ?? null
-    if (matched === null || !views.every((v) => policy.paths.some((pat) => matchPath(pat, v)))) {
+    if (matched === null) {
       throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
         rule: 'paths',
         hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,

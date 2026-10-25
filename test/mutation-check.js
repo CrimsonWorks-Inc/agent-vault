@@ -524,15 +524,8 @@ const MUTATIONS = [
   {
     what: 'a backslash encoded twice passes the separator check',
     file: 'src/core/policy.js',
-    from: "|| decoded.includes('\\\\')) {",
+    from: '|| /%2f|%5c|\\\\/i.test(p)) {',
     to: ') {',
-    tests: ['test/security/gateway-core.test.js'],
-  },
-  {
-    what: 'a literal percent sign stops decoding with an escape still live',
-    file: 'src/core/policy.js',
-    from: 'if (i === 0 || /%[0-9a-fA-F]{2}/.test(decoded)) {',
-    to: 'if (i === 0) {',
     tests: ['test/security/gateway-core.test.js'],
   },
   {
@@ -592,27 +585,6 @@ const MUTATIONS = [
     tests: ['test/security/gateway-core.test.js'],
   },
   {
-    what: 'a path with a twice-encoded escape goes out decoded one time too many',
-    file: 'src/core/policy.js',
-    from: 'if (once === decoded) return { path: full, decoded: full }',
-    to: 'return { path: full, decoded: full }',
-    tests: ['test/security/gateway-core.test.js'],
-  },
-  {
-    what: 'a deny rule is checked against the wire reading of a path only',
-    file: 'src/core/policy.js',
-    from: 'if (views.some((v) => matchPath(dp, v))) {',
-    to: 'if (matchPath(dp, p)) {',
-    tests: ['test/security/gateway-core.test.js', 'test/security/path-parsing.test.js'],
-  },
-  {
-    what: 'an allow rule is checked against the wire reading of a path only',
-    file: 'src/core/policy.js',
-    from: 'if (matched === null || !views.every((v) => policy.paths.some((pat) => matchPath(pat, v)))) {',
-    to: 'if (matched === null) {',
-    tests: ['test/security/gateway-core.test.js'],
-  },
-  {
     what: 'an event-stream path run is trimmed before the new value is searched',
     file: 'src/daemon/pipeline.js',
     from: "if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'",
@@ -653,6 +625,20 @@ const MUTATIONS = [
     from: "if (Buffer.from(decoded, 'utf8').toString('base64') === basic[2]) {",
     to: 'if (true) {',
     tests: ['test/security/gateway-approvals.test.js'],
+  },
+  {
+    what: 'a path whose escape was itself encoded is sent instead of refused',
+    file: 'src/core/policy.js',
+    from: 'if (/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i.test(p)) {',
+    to: 'if (false) {',
+    tests: ['test/security/gateway-core.test.js', 'test/security/path-parsing.test.js'],
+  },
+  {
+    what: 'an encoded %u escape, which IIS decodes, is not treated as an escape',
+    file: 'src/core/policy.js',
+    from: '/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i',
+    to: '/%(?:[0-9a-f]{2})/i',
+    tests: ['test/security/gateway-core.test.js'],
   },
 ]
 

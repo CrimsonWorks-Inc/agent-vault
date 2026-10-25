@@ -93,9 +93,11 @@ test('the stream scrubber still emits ordinary text unchanged', () => {
 // ----------------------------------------------------------- path decoding
 
 test('a backslash encoded more than once is still refused', () => {
-  for (const p of ['/allowed/x%255c..%255c..%255cadmin', '/a/%255cb', '/a/%25255cb']) {
+  for (const p of ['/allowed/x%255c..%255c..%255cadmin', '/a/%255cb', '/a/%252fb']) {
     assert.throws(() => policy.normalizePath(p), (e) => e.rule === 'path_ambiguous_separator', p)
   }
+  // Three times, it is refused as an escape that was itself encoded.
+  assert.throws(() => policy.normalizePath('/a/%25255cb'), (e) => e.rule === 'path_ambiguous_encoding')
 })
 
 test('ordinary encoded paths still normalise', () => {
@@ -109,9 +111,9 @@ test('a literal percent sign can be sent, and still cannot hide an escape', () =
   assert.equal(policy.normalizePath('/files/100%25'), '/files/100%')
   assert.equal(policy.encodePathForWire(policy.normalizePath('/files/100%25')), '/files/100%25')
   assert.equal(policy.normalizePath('/q/50%25%20off'), '/q/50% off')
-  // A literal % must not stop decoding early with %61 still live beside it.
+  // A literal % beside it does not hide an escape that is still live.
   for (const p of ['/%2561dmin%25', '/caf%25C3%25A9%25', `/user/${'%25'.repeat(12)}6beys`]) {
-    assert.throws(() => policy.normalizePath(p), /invalid percent-escape/, p)
+    assert.throws(() => policy.normalizePath(p), (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'path_ambiguous_encoding', p)
   }
   // The raw request is still held to a well-formed URL.
   assert.throws(() => policy.normalizePath('/a%zz'), /invalid percent-escape/)
@@ -268,27 +270,52 @@ test('the wrapped and mixed-case views stay linear on large bodies', () => {
   }
 })
 
-test('a path with an escape encoded twice goes out as written, and both readings are checked', async () => {
-  // `/a/b%2520c` names a segment that is literally `b%20c`.
-  assert.equal(policy.normalizePath('/a/b%2520c'), '/a/b%20c')
-  assert.equal(policy.encodePathForWire(policy.normalizePath('/a/b%2520c')), '/a/b%2520c')
+test('a path whose escape was itself encoded is refused, however many times it was', async () => {
+  // Round 2 sent `/a/b%2520c` as written and checked two readings of it. An
+  // upstream that decodes twice reads `/a/b%252520c` as `/a/b%20c`, which
+  // neither reading was, and a deny on that resource did not hold.
+  const twice = { hosts: ['up.test'], methods: ['GET'], paths: ['/**'], deny_paths: ['/a/b%20c'] }
+  assert.throws(() => policy.evaluateHttp(twice, { method: 'GET', host: 'up.test', path: '/a/b%252520c' }),
+    (e) => e.code === 'AV_POLICY_DENIED', 'a triply encoded path reached what an upstream decoding twice serves')
+  const deny = { hosts: ['up.test'], methods: ['GET'], paths: ['/**'], deny_paths: ['/a/b%20c', '/a/b c', '/admin', '/user/keys'] }
+  const spellings = [
+    '/a/b%252520c', '/a/b%2520c', '/a/b%25252520c', '/%2561dmin', '/%252561dmin',
+    '/user/%2525256beys', '/repos/%252e%252e/admin', '/repos/%25252e%25252e/admin', '/%25u0061dmin',
+    '/a/b%25%32%30c',
+  ]
+  for (const p of spellings) {
+    assert.throws(() => policy.evaluateHttp(deny, { method: 'GET', host: 'up.test', path: p }),
+      (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'path_ambiguous_encoding', p)
+  }
+  // And through the pipeline: nothing reaches the upstream.
   const s = setup()
-  await s.pipeline.handle(s.request({ path: '/p/a/b%2520c', headers: [...s.request().headers, ['x-key', s.ph()]] }))
-  assert.equal(new URL(s.sent[0].url).pathname, '/b%2520c')
-  // An upstream that decodes it again reads `b c`, and a deny on that still holds.
-  const deny = { hosts: ['up.test'], methods: ['GET'], paths: ['/**'], deny_paths: ['/a/b c'] }
-  assert.throws(() => policy.evaluateHttp(deny, { method: 'GET', host: 'up.test', path: '/a/b%2520c' }), /deny list/)
-  const allow = { hosts: ['up.test'], methods: ['GET'], paths: ['/a/b%20c'] }
-  assert.throws(() => policy.evaluateHttp(allow, { method: 'GET', host: 'up.test', path: '/a/b%2520c' }), /outside the grant/)
+  for (const p of ['/p/a/b%252520c', '/p/a/b%2520c']) {
+    const res = await s.pipeline.handle(s.request({ path: p, headers: [...s.request().headers, ['x-key', s.ph()]] }))
+    assert.equal(res.status, 403, p)
+    assert.match(res.body.toString(), /path_ambiguous_encoding/, p)
+  }
+  assert.equal(s.sent.length, 0)
 })
 
 test('a path encoded once is sent and checked as before', async () => {
   const s = setup()
-  await s.pipeline.handle(s.request({ path: '/p/a/b%20c/100%25', headers: [...s.request().headers, ['x-key', s.ph()]] }))
-  assert.equal(new URL(s.sent[0].url).pathname, '/b%20c/100%25')
-  assert.equal(policy.normalizePath('/repos/%252e%252e/admin'), '/admin')
+  const cases = {
+    '/p/a/b%20c/100%25': '/b%20c/100%25',
+    '/p/a/caf%C3%A9/na%C3%AFve': '/caf%C3%A9/na%C3%AFve',
+    '/p/a/q/50%25off/%25': '/q/50%25off/%25',
+    '/p/a/x/%2e%2e/models/gemini-pro:generateContent': '/models/gemini-pro:generateContent',
+    '/p/a/%E2%9C%93/%7Euser': '/%E2%9C%93/~user',
+  }
+  for (const [path, wire] of Object.entries(cases)) {
+    await s.pipeline.handle(s.request({ path, headers: [...s.request().headers, ['x-key', s.ph()]] }))
+    assert.equal(new URL(s.sent.at(-1).url).pathname, wire, path)
+  }
+  assert.equal(s.sent.length, Object.keys(cases).length)
+  // An encoded slash is refused as it was, by its own rule.
+  assert.throws(() => policy.normalizePath('/a%2Fb'), (e) => e.rule === 'path_ambiguous_separator')
   const allow = { hosts: ['up.test'], methods: ['GET'], paths: ['/a/**'] }
   assert.equal(policy.evaluateHttp(allow, { method: 'GET', host: 'up.test', path: '/a/b%20c' }).path, '/a/b c')
+  assert.equal(policy.evaluateHttp(allow, { method: 'GET', host: 'up.test', path: '/a/caf%C3%A9' }).path, '/a/caf\u00e9')
 })
 
 test('a form placeholder with a percent-encoded character leaves the rest of the body as written', async () => {
