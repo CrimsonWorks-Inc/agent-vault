@@ -99,7 +99,8 @@ test('a backslash encoded more than once is still refused', () => {
 })
 
 test('ordinary encoded paths still normalise', () => {
-  assert.equal(policy.normalizePath('/a/b%2520c'), '/a/b c')
+  assert.equal(policy.normalizePath('/a/b%20c'), '/a/b c')
+  assert.equal(policy.encodePathForWire(policy.normalizePath('/a/b%20c')), '/a/b%20c')
   assert.equal(policy.normalizePath('/v1beta/models/gemini-pro:generateContent'), '/v1beta/models/gemini-pro:generateContent')
   assert.equal(policy.normalizePath('/repos/o/r/%2e%2e/x'), '/repos/o/x')
 })
@@ -210,3 +211,137 @@ test('rate windows are compared in real units, and an unknown one is refused', (
   assert.deepEqual(r({ count: 5, per: '90 ms' }, { count: 9, per: 'second' }), { count: 5, per: 'second' })
   assert.throws(() => r({ count: 5, per: 'minute' }, { count: 9, per: 'fortnight' }), (e) => e.rule === 'rate')
 })
+
+// ---------------------------------------------------------------- round 2
+
+test('base64 wrapped at any width, and hex in mixed case, are redacted', () => {
+  const b64 = Buffer.from(S).toString('base64')
+  const hex = Buffer.from(S).toString('hex')
+  // Every other letter upper case, so there is always one of each.
+  let n = 0
+  const mixed = hex.replace(/[a-f]/g, (c) => (n++ % 2 ? c.toUpperCase() : c))
+  assert.ok(/[a-f]/.test(mixed) && /[A-F]/.test(mixed))
+  const wrap = (t, w, br = '\n') => t.match(new RegExp(`.{1,${w}}`, 'g')).join(br)
+  const cases = {
+    b64At4: wrap(b64, 4), b64At8: wrap(b64, 8), b64At12: `body:\n${wrap(b64, 12)}\nend`,
+    b64At8Crlf: wrap(b64, 8, '\r\n'), b64Indented: `  ${wrap(b64, 8, '\n  ')}`,
+    b64TrailingSpace: wrap(b64, 8, ' \n'), b64At8JsonEscaped: `{"blob":"${wrap(b64, 8, '\\n')}"}`,
+    mixedHex: `id=${mixed};`, mixedHexWrapped: wrap(mixed, 10), mixedHexWrapped8Crlf: wrap(mixed, 8, '\r\n'),
+  }
+  for (const [name, text] of Object.entries(cases)) {
+    const { text: out, redactions } = scrubber().scrub(text)
+    assert.ok(redactions > 0 && out.includes('[x]'), `${name}: ${out}`)
+    const joined = out.replace(/\\n|\s/g, '')
+    assert.ok(!Buffer.from(joined, 'base64').toString('latin1').includes(S), `${name}: base64 survives`)
+    assert.ok(!Buffer.from(joined.replace(/[^0-9a-fA-F]/g, ''), 'hex').toString('latin1').includes(S), `${name}: hex survives`)
+  }
+})
+
+test('several wrapped blobs in one body are each searched, and the search ends', () => {
+  const wrap8 = (t) => Buffer.from(t).toString('base64').replace(/(.{8})/g, '$1\n')
+  const ordinary = wrap8('an ordinary blob that is long enough to search')
+  const text = `first:\n${ordinary}\n\nsecond:\n${wrap8(S)}\n\nthird:\n${ordinary}\n`
+  const { text: out, redactions } = scrubber().scrub(text)
+  assert.equal(redactions, 1)
+  assert.ok(out.startsWith(`first:\n${ordinary}\n\nsecond:\n`) && out.endsWith(`third:\n${ordinary}\n`), out)
+})
+
+test('wrapped prose, short lines, ordinary blobs and ordinary mixed-case hex are left alone', () => {
+  const texts = [
+    'The quick brown fox\njumps over the lazy dog.\nconfiguration\nmanagement\n',
+    'a\nb\nc\nde\nfg\n',
+    Buffer.from('a perfectly ordinary blob of bytes that is not a secret at all').toString('base64').replace(/(.{8})/g, '$1\n'),
+    'sha: 9F86d081884C7d659A2feaa0C55aD015a3BF4f1B2b0B822cd15D6c15B0F00A08',
+    'DeadBeef CafeBabe 0xDEADbeef\nFACEfeed\n',
+    Buffer.from(S.slice(0, 12)).toString('hex').toUpperCase().replace(/(.{4})/g, '$1\n'), // part of a secret is not the secret
+  ]
+  for (const t of texts) assert.deepEqual(scrubber().scrub(t), { text: t, redactions: 0 })
+})
+
+test('the wrapped and mixed-case views stay linear on large bodies', () => {
+  const sc = scrubber()
+  const bodies = ['ab\n'.repeat(1e6), 'aB'.repeat(2e6), 'The quick brown fox\n'.repeat(2e5), `ghp ${'x\n'.repeat(1e6)}`]
+  for (const body of bodies) {
+    const started = Date.now()
+    assert.equal(sc.scrub(body).redactions, 0)
+    assert.ok(Date.now() - started < 3000, `${body.slice(0, 8)}... took ${Date.now() - started} ms`)
+  }
+})
+
+test('a path with an escape encoded twice goes out as written, and both readings are checked', async () => {
+  // `/a/b%2520c` names a segment that is literally `b%20c`.
+  assert.equal(policy.normalizePath('/a/b%2520c'), '/a/b%20c')
+  assert.equal(policy.encodePathForWire(policy.normalizePath('/a/b%2520c')), '/a/b%2520c')
+  const s = setup()
+  await s.pipeline.handle(s.request({ path: '/p/a/b%2520c', headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  assert.equal(new URL(s.sent[0].url).pathname, '/b%2520c')
+  // An upstream that decodes it again reads `b c`, and a deny on that still holds.
+  const deny = { hosts: ['up.test'], methods: ['GET'], paths: ['/**'], deny_paths: ['/a/b c'] }
+  assert.throws(() => policy.evaluateHttp(deny, { method: 'GET', host: 'up.test', path: '/a/b%2520c' }), /deny list/)
+  const allow = { hosts: ['up.test'], methods: ['GET'], paths: ['/a/b%20c'] }
+  assert.throws(() => policy.evaluateHttp(allow, { method: 'GET', host: 'up.test', path: '/a/b%2520c' }), /outside the grant/)
+})
+
+test('a path encoded once is sent and checked as before', async () => {
+  const s = setup()
+  await s.pipeline.handle(s.request({ path: '/p/a/b%20c/100%25', headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  assert.equal(new URL(s.sent[0].url).pathname, '/b%20c/100%25')
+  assert.equal(policy.normalizePath('/repos/%252e%252e/admin'), '/admin')
+  const allow = { hosts: ['up.test'], methods: ['GET'], paths: ['/a/**'] }
+  assert.equal(policy.evaluateHttp(allow, { method: 'GET', host: 'up.test', path: '/a/b%20c' }).path, '/a/b c')
+})
+
+test('a form placeholder with a percent-encoded character leaves the rest of the body as written', async () => {
+  const s = setup({ sites: { key: ['form:token'] } })
+  const ph = s.ph()
+  const spelled = `%61${ph.slice(1)}`
+  const raw = `token=Bearer+${spelled}+x%C3%A9&text=a+b%21&flag=&bare`
+  const res = await s.pipeline.handle(s.request({ method: 'POST', headers: [...s.request().headers, ['content-type', 'application/x-www-form-urlencoded']], body: Buffer.from(raw) }))
+  assert.equal(res.status, 200)
+  assert.equal(s.sent[0].body, raw.replace(spelled, encodeURIComponent(SECRET)))
+  assert.equal(new URLSearchParams(s.sent[0].body).get('token'), `Bearer ${SECRET} xé`)
+})
+
+const jsonPost = (s, body) => s.pipeline.handle(s.request({ method: 'POST', headers: [...s.request().headers, ['content-type', 'application/json']], body: Buffer.from(body) }))
+
+test('a placeholder hidden by a duplicate JSON key is refused, however it is hidden', async () => {
+  for (const shape of [
+    (ph) => `{"token":"${ph}","token":"${ph}"}`,
+    (ph) => `{"token":"${ph}","\\u0074oken":"${ph}"}`,
+    (ph) => `{"auth":{"token":"${ph}"},"auth":{"token":"${ph}"}}`,
+    (ph) => `{"auth":{"token":"${ph}"},"auth":"x","auth":{"token":"${ph}"}}`,
+    (ph) => `{"${ph}":1,"token":"${ph}"}`,
+  ]) {
+    const s = setup({ sites: { key: ['json:/token', 'json:/auth/token'] } })
+    const body = shape(s.ph('key', 5))
+    const res = await jsonPost(s, body)
+    assert.equal(res.status, 403, body)
+    assert.equal(JSON.parse(res.body).code, 'AV_BAD_LOCATION', body)
+    assert.equal(s.sent.length, 0, body)
+  }
+})
+
+test('locate() reports a placeholder in a shadowed duplicate by position', () => {
+  const ph = 'av1.aaaaaaaaaaaa.a_key.aaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaa'
+  const req = { method: 'POST', path: '/', query: '', headers: [['content-type', 'application/json']], body: Buffer.from(`{"token":"${ph}","token":"${ph}"}`) }
+  const regions = sub.locate(req).occurrences.map((o) => o.location.region)
+  assert.deepEqual(regions.sort(), ['body', 'json'])
+})
+
+test('a substituted placeholder left anywhere in the outgoing request is found', () => {
+  const ph = 'av1.aaaaaaaaaaaa.a_key.aaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaa'
+  const nonce = 'aaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const req = (body) => ({ method: 'POST', path: '/', query: '', headers: [['content-type', 'application/json']], body: Buffer.from(body) })
+  assert.equal(sub.unsubstituted(req(`{"token":"${ph}","token":"SECRET"}`), [nonce])?.location.region, 'body')
+  assert.equal(sub.unsubstituted(req(`{"token":"SECRET","n":12345678901234567891}`), [nonce]), null)
+})
+
+test('ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before', async () => {
+  const s = setup({ sites: { key: ['json:/token'] } })
+  const ph = s.ph()
+  const raw = `{"token":"first","token":"${ph}","n":12345678901234567891,"keys":{"a":"${'x'.repeat(80)}","a":"y"}}`
+  const res = await jsonPost(s, raw)
+  assert.equal(res.status, 200)
+  assert.equal(s.sent[0].body, raw.replace(ph, SECRET))
+})
+

@@ -285,6 +285,25 @@ export function encodePathForWire(path) {
 }
 
 export function normalizePath(path) {
+  return pathViews(path).path
+}
+
+/**
+ * Both readings of a request path: `path`, what an upstream that decodes once
+ * resolves — which is what goes on the wire — and `decoded`, what one that
+ * keeps decoding resolves. Policy has to allow both.
+ *
+ * They differ only when an escape was itself encoded. `/a/b%2520c` names a
+ * segment that is literally `b%20c`; this sent `/a/b%20c`, which an upstream
+ * reads as `b c` — a GET of another object, or a write to it. So the segment
+ * goes out as written, and the fully decoded one is still checked against
+ * every deny rule, for an upstream that decodes it again.
+ *
+ * A segment that decodes all the way to `.` or `..` is still a dot segment in
+ * the wire reading: `/repos/%252e%252e/admin` is resolved to `/admin` and
+ * checked and sent as that, as it always was.
+ */
+export function pathViews(path) {
   let p = String(path || '/')
 
   // Decode to a fixed point, not a fixed number of rounds. Two rounds left a
@@ -355,17 +374,40 @@ export function normalizePath(path) {
     })
   }
 
-  const segments = []
-  for (const seg of decoded.split('/')) {
-    if (seg === '' || seg === '.') continue
-    if (seg === '..') {
-      if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
-      segments.pop()
-      continue
+  const resolve = (text, dot) => {
+    const segments = []
+    for (const seg of text.split('/')) {
+      const d = dot(seg)
+      if (d === '' || d === '.') continue
+      if (d === '..') {
+        if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
+        segments.pop()
+        continue
+      }
+      segments.push(seg)
     }
-    segments.push(seg)
+    return `/${segments.join('/')}`
   }
-  return `/${segments.join('/')}`
+  const full = resolve(decoded, (seg) => seg)
+  // Decoded once. The first round cannot throw: the loop above refuses a
+  // path whose first round does.
+  let once = decodeURIComponent(p)
+  if (once === decoded) return { path: full, decoded: full }
+  const end = once.search(/[?#]/)
+  if (end !== -1) once = once.slice(0, end)
+  return { path: resolve(once, (seg) => decodeFully(seg)), decoded: full }
+}
+
+/** A segment decoded until nothing changes. Only for spotting a dot segment. */
+function decodeFully(seg) {
+  let out = seg
+  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
+    let next
+    try { next = decodeURIComponent(out) } catch { return out }
+    if (next === out) return out
+    out = next
+  }
+  return out
 }
 
 // Enough for any legitimate double-encoding, far short of a decode bomb.
@@ -514,7 +556,10 @@ export function isMultiTenantWildcard(pattern) {
 export function evaluateHttp(policy, { method, host, path }) {
   const m = String(method || 'GET').toUpperCase()
   const h = normalizeHost(host)
-  const p = normalizePath(path)
+  const { path: p, decoded } = pathViews(path)
+  // Both readings, when an escape was encoded twice: `p` is what the wire
+  // carries, `decoded` what an upstream that decodes again would serve.
+  const views = decoded === p ? [p] : [p, decoded]
 
   if (policy.hosts && !policy.hosts.some((pat) => matchHost(pat, h))) {
     throw deny('AV_NO_GRANT', `no grant allows host ${h}`, {
@@ -531,7 +576,7 @@ export function evaluateHttp(policy, { method, host, path }) {
     })
   }
   for (const dp of policy.deny_paths || []) {
-    if (matchPath(dp, p)) {
+    if (views.some((v) => matchPath(dp, v))) {
       throw deny('AV_POLICY_DENIED', `path ${p} is on a deny list`, {
         rule: `deny_paths:${dp}`,
         hint: 'This path is denied by the connector profile and cannot be granted.',
@@ -545,7 +590,7 @@ export function evaluateHttp(policy, { method, host, path }) {
   let matched = null
   if (policy.paths) {
     matched = policy.paths.find((pat) => matchPath(pat, p)) ?? null
-    if (matched === null) {
+    if (matched === null || !views.every((v) => policy.paths.some((pat) => matchPath(pat, v)))) {
       throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
         rule: 'paths',
         hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,

@@ -8,10 +8,11 @@
 // replaced. Derived-token regexes catch minted credentials the vault never
 // stored, such as an installation token in a response body.
 //
-// Beyond the fixed needles, two views of the text are searched: one with
+// Beyond the fixed needles, three views of the text are searched: one with
 // every `\uXXXX` and `%XX` escape decoded, which catches a secret escaped one
-// character at a time or only in part, and one with line breaks taken out of
-// hex and base64 runs, which catches a blob wrapped at 64 or 76 columns.
+// character at a time or only in part, one with line breaks taken out of hex
+// and base64 runs, which catches a blob wrapped at any width, and one with hex
+// runs folded to lowercase, which catches hex in mixed case.
 //
 // Honest limit: this is byte-and-encoding based. A secret split across markup,
 // re-encoded in a scheme not listed, or transformed by the upstream is not
@@ -60,13 +61,52 @@ const MAX_DERIVED_HOLD = 512
 const ESCAPE = /\\u([0-9a-fA-F]{4})|%([0-9a-fA-F]{2})/g
 const unescapeOne = (_, u, pct) => String.fromCharCode(parseInt(u ?? pct, 16))
 const HAS_ESCAPE = /\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}/
-// A hex or base64 run broken over lines, by real line breaks or JSON-escaped ones.
-const BREAK = /\r\n|\r|\n|\\r\\n|\\n|\\r/g
+// A hex or base64 run broken over lines, by real line breaks or JSON-escaped
+// ones, with any indentation either side of the break.
+const LINE_BREAK = '[ \\t]*(?:\\r\\n|\\r|\\n|\\\\r\\\\n|\\\\n|\\\\r)[ \\t]*'
+const BREAK = new RegExp(LINE_BREAK, 'g')
 const HAS_BREAK = /[\r\n]|\\[rn]/
-// It starts with a full line of at least 16, which a wrapped blob has and the
-// end of an ordinary line of prose does not: matching every word either side
-// of every line break would search the whole of a large text body again.
-const WRAPPED = /(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{16,}(?:(?:\r\n|\r|\n|\\r\\n|\\n|\\r)[A-Za-z0-9+/=_-]+)+/g
+// Two tests, not one `[a-f][^]*[A-F]`: that backtracks from every lowercase
+// letter to the end of the run, which is quadratic in a long lowercase one.
+const mixedCase = (t) => /[a-f]/.test(t) && /[A-F]/.test(t)
+
+const charClass = (re) => {
+  const table = new Uint8Array(128)
+  for (let c = 0; c < 128; c++) table[c] = re.test(String.fromCharCode(c)) ? 1 : 0
+  return table
+}
+const BLOB_CHAR = charClass(/[A-Za-z0-9+/=_-]/)
+const HEX_CHAR = charClass(/[0-9A-Fa-f]/)
+const isHex = (c) => c < 128 && HEX_CHAR[c] === 1
+
+/**
+ * Every run of `table` characters that crosses a line break, as
+ * { index, text }. It starts from the breaks and walks out from each, rather
+ * than being one regex: a repeated group recurses once per line, and a body
+ * of a few million short lines overflowed the stack. Prose costs the last
+ * word of each line and the first of the next.
+ */
+function* wrappedRuns(text, table) {
+  const is = (i) => { const c = text.charCodeAt(i); return c < 128 && table[c] === 1 }
+  // Its own copy: the caller runs `view()` with BREAK between yields, and
+  // that resets the shared one's lastIndex under this loop.
+  const re = new RegExp(BREAK.source, 'g')
+  let start = -1
+  let end = -1
+  for (let m; (m = re.exec(text)) !== null;) {
+    const after = m.index + m[0].length
+    if (!is(m.index - 1) || !is(after)) continue
+    // A line made only of run characters chains this break to the last one.
+    if (end !== m.index) {
+      if (start !== -1) yield { index: start, text: text.slice(start, end) }
+      start = m.index
+      while (start > 0 && is(start - 1)) start--
+    }
+    end = after
+    while (end < text.length && is(end)) end++
+  }
+  if (start !== -1) yield { index: start, text: text.slice(start, end) }
+}
 
 /** Every encoding of `secret` a response might carry. */
 export function encodings(secret, minLen = MIN_SECRET_LEN) {
@@ -137,6 +177,8 @@ export class Scrubber {
     // secret itself, and its hex and base64 forms.
     this.plain = []
     this.blobs = []
+    // Lowercase hex of each secret, for the case-folded view.
+    this.hex = []
     this.maxLen = 0
     for (const e of entries) {
       if (!e.secret) continue
@@ -156,9 +198,13 @@ export class Scrubber {
       for (const needle of blobEncodings(e.secret)) {
         if (needle.length >= floor) this.blobs.push({ needle, replacement })
       }
+      this.hex.push({ needle: Buffer.from(e.secret, 'utf8').toString('hex'), replacement })
     }
     // Longest first, so an encoding that contains another is replaced whole.
-    for (const list of [this.patterns, this.plain, this.blobs]) list.sort((a, b) => b.needle.length - a.needle.length)
+    for (const list of [this.patterns, this.plain, this.blobs, this.hex]) list.sort((a, b) => b.needle.length - a.needle.length)
+    // A joined-up run shorter than every needle cannot hold one.
+    this.minBlob = Math.min(...this.blobs.map((b) => b.needle.length))
+    this.minHex = Math.min(...this.hex.map((b) => b.needle.length))
     this.derivedSeen = new Set()
   }
 
@@ -217,8 +263,38 @@ export class Scrubber {
     if (this.plain.length && HAS_ESCAPE.test(text)) {
       find(view(text, ESCAPE, unescapeOne), this.plain, spans)
     }
+    // Hex in mixed case, on one line or wrapped. All in one case is a needle
+    // already. Lowercasing keeps every position, so a hit maps straight back.
+    const folded = (run) => {
+      if (run.text.length >= this.minHex && mixedCase(run.text)) {
+        find(view(run.text.toLowerCase(), BREAK, () => ''), this.hex, spans, run.index)
+      }
+    }
+    // Any run of blob characters that crosses a line break, at any width.
+    // This used to want a first line of at least 16, so base64 wrapped at
+    // eight columns was never joined up at all. In prose such a run is the
+    // last word of one line and the first of the next, and one shorter than
+    // the shortest needle is not searched.
     if (this.blobs.length && HAS_BREAK.test(text)) {
-      for (const m of text.matchAll(WRAPPED)) find(view(m[0], BREAK, () => ''), this.blobs, spans, m.index)
+      for (const run of wrappedRuns(text, BLOB_CHAR)) {
+        if (run.text.length < this.minBlob) continue
+        const v = view(run.text, BREAK, () => '')
+        if (v.text.length >= this.minBlob) find(v, this.blobs, spans, run.index)
+        // Hex characters are blob characters, so wrapped hex is in here too.
+        folded(run)
+      }
+    }
+    if (this.hex.length) {
+      // Found by their first `minHex` characters and walked out by hand, not
+      // as `[0-9A-Fa-f]{n,}`: V8 keeps a backtrack entry per character of
+      // that and runs out of stack on a long run.
+      const long = new RegExp(`(?<![0-9A-Fa-f])[0-9A-Fa-f]{${this.minHex}}`, 'g')
+      for (let m; (m = long.exec(text)) !== null;) {
+        let end = long.lastIndex
+        while (end < text.length && isHex(text.charCodeAt(end))) end++
+        folded({ index: m.index, text: text.slice(m.index, end) })
+        long.lastIndex = end
+      }
     }
     return spans
   }
