@@ -37,6 +37,13 @@ const VERSION = (() => {
 
 const MAX_BODY = 16 * 1024 * 1024
 
+// Where `agent-vault ui` listens unless told otherwise, and so the one web UI
+// origin the daemon trusts without being told. WebAuthn's relying party is
+// `localhost`, which every port on the machine shares, so the ORIGIN is what
+// tells the real page from a look-alike an agent serves on another port.
+export const DEFAULT_UI_PORT = 7412
+const UI_ORIGIN_SHAPE = /^http:\/\/localhost:(\d{1,5})$/
+
 // Bounds on the pending-confirmation map. Both are reachable from the control
 // socket, which an agent running as the human can reach.
 const MAX_OPEN_CHALLENGES = 64
@@ -100,8 +107,14 @@ function unguardProcess(daemon) {
 }
 
 export class Daemon {
-  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
+  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null, uiPort = DEFAULT_UI_PORT, uiOrigins = [] } = {}) {
     this.vault = vault
+    // The web UI origins whose assertions count, decided here. They used to be
+    // whatever the caller minting a challenge named, so a page an agent served
+    // on any localhost port could collect a signature the daemon accepted.
+    this.uiPort = uiPort
+    this.configuredUiOrigins = new Set()
+    for (const o of uiOrigins) this.allowUiOrigin(o)
     this.port = port
     this.host = host
     this.socketPath = socketPath
@@ -294,7 +307,14 @@ export class Daemon {
    * documented state of a vault with no human secret.
    */
   #requireHumanForWidening(op, operation = null, presence = null) {
-    if (Date.now() < this.presenceGraceUntil) return
+    if (Date.now() < this.presenceGraceUntil) {
+      // The window is daemon-wide: it admits whoever calls while it is open,
+      // not only the command the human typed the passphrase for. So every
+      // operation it admits is named in the log, where it used to show only
+      // that a window had opened.
+      this.vault.audit?.write('presence.window_used', { op })
+      return
+    }
     if (presence && this.#verifyOpAssertion(operation, presence)) {
       this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform' })
       return
@@ -323,6 +343,68 @@ export class Daemon {
   }
 
   /**
+   * The proof for the operations that change who can prove presence at all:
+   * enrolling or replacing the presence authenticator, wrapping the master key
+   * to a Touch ID secret or removing that wrap, and trusting another UI origin.
+   *
+   * The shared passphrase window is NOT accepted here. It admits every caller
+   * on the socket while it is open, so five minutes of a human's presence for
+   * an ordinary command let an agent wrap the master key to a PRF secret of its
+   * own, or install its own authenticator — and keep that after the window
+   * closed. The proof has to arrive with the request: the passphrase (checked
+   * and throttled like every other attempt), or an assertion from the
+   * currently enrolled authenticator over this exact operation.
+   */
+  #requireFactorProof(op, operation, input) {
+    if (input?.passphrase != null && this.vault.hasPassphrase) {
+      this.#throttlePassphrase()
+      const ok = this.vault.verifyPassphrase(String(input.passphrase))
+      this.#recordPassphraseAttempt(ok)
+      if (!ok) throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify')
+      this.vault.audit?.write('presence.verified', { op, factor: 'passphrase' })
+      return
+    }
+    if (input?.presence && this.#verifyOpAssertion(operation, input.presence)) {
+      this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform' })
+      return
+    }
+    const factors = []
+    if (this.vault.hasPassphrase) factors.push('passphrase')
+    if (this.vault.db?.kv?.webauthn) factors.push('authenticator')
+    if (!factors.length) {
+      this.vault.audit?.write('control.widening_ungated', { op })
+      return
+    }
+    throw deny('AV_PRESENCE_REQUIRED', `${op} needs your ${factors.join(' or ')} with the request itself`, {
+      rule: 'factor_proof',
+      factors,
+      hint: factors.includes('passphrase')
+        ? 'A passphrase window does not cover this. Send the passphrase with the request.'
+        : 'Confirm it in the web UI with your authenticator: agent-vault ui',
+    })
+  }
+
+  /** The web UI origins whose assertions this daemon accepts. */
+  uiOrigins() {
+    return [...new Set([
+      `http://localhost:${this.uiPort}`,
+      ...this.configuredUiOrigins,
+      ...(this.vault.db?.kv?.ui_origins || []),
+    ])]
+  }
+
+  /**
+   * Trust another web UI origin, in process. This is configuration by whoever
+   * runs the daemon; nothing on the socket reaches it. Over the socket the
+   * same change is POST /v1/ui/origins, which needs the owner's proof.
+   */
+  allowUiOrigin(origin) {
+    const o = String(origin || '')
+    if (!uiOriginOk(o)) throw new Error(`not a web UI origin: ${JSON.stringify(origin)} (http://localhost:<port>)`)
+    this.configuredUiOrigins.add(o)
+  }
+
+  /**
    * Verify an assertion against the challenge this daemon minted, and against
    * the operation actually being performed. The comparison happens here, not
    * in the UI, so a hostile page cannot show one operation and submit another.
@@ -344,9 +426,10 @@ export class Daemon {
         clientDataJSON: presence.clientDataJSON,
         signature: presence.signature,
         expectedChallenge: pending.challenge,
-        // The page can only be served from loopback, and the relying party id
-        // pins the domain; the port is whichever one `agent-vault ui` got.
-        expectedOrigins: pending.origins,
+        // The relying party id pins the domain and nothing more: every port
+        // on localhost shares it. Which ports are the real UI is the daemon's
+        // list, never the one the challenge's minter supplied.
+        expectedOrigins: this.uiOrigins(),
         rpId: 'localhost',
         enrolled,
       })
@@ -389,10 +472,13 @@ export class Daemon {
       // states, and repeating it made the daemon's operation differ from the
       // one the page signs, so no enrol or removal from the UI ever verified.
       case 'POST /v1/factors/webauthn': {
-        const { action, ...rest } = input || {}
+        const { action, ...rest } = withoutProof(input)
         return of(action === 'remove' ? 'touchid.remove' : 'touchid.enroll', action === 'remove' ? {} : rest)
       }
-      case 'POST /v1/presence': return of('presence.enroll', input)
+      // A passphrase sent as proof is a proof, like `presence`, not part of
+      // what is being changed.
+      case 'POST /v1/presence': return of('presence.enroll', withoutProof(input))
+      case 'POST /v1/ui/origins': return of('ui.origin_add', withoutProof(input))
       default: return null
     }
   }
@@ -1208,7 +1294,12 @@ export class Daemon {
           // Requiring the passphrase first makes that impossible and matches
           // the unlock factor, which has always refused to enrol before one
           // exists for the same reason.
-          if (!this.vault.hasPassphrase) {
+          // A REPLACEMENT is proved by the authenticator being replaced (see
+          // below), so a vault whose passphrase was later removed can still
+          // rotate its key. Only a first enrolment needs the passphrase to
+          // exist.
+          const existed = !!this.vault.db.kv.webauthn
+          if (!existed && !this.vault.hasPassphrase) {
             throw deny('AV_POLICY_DENIED', 'set a passphrase before enrolling an authenticator', {
               rule: 'factor_order',
               hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',
@@ -1222,11 +1313,12 @@ export class Daemon {
           // from the key being replaced is the strongest proof there is that
           // the human holds it. Without this, a vault whose passphrase had
           // since been removed could never rotate its authenticator at all.
-          this.#requireHumanForWidening('presence enroll', this.#wideningOperation(route, url, input), input.presence)
+          this.#requireFactorProof('presence enroll', this.#wideningOperation(route, url, input), input)
           // Re-enrolling replaces the only thing standing between an agent and
-          // the approve button, so it is audited loudly either way.
-          const existed = !!this.vault.db.kv.webauthn
-          this.vault.db.kv.webauthn = input
+          // the approve button, so it is audited loudly either way. The proof
+          // that came with the request is not part of the key, and a
+          // passphrase must never be written into the vault in clear.
+          this.vault.db.kv.webauthn = withoutProof(input)
           this.vault.save()
           this.vault.audit.write('presence.factor_added', {
             class: 'webauthn-platform', credential_id: input.credentialId, replaced_existing: existed,
@@ -1259,7 +1351,33 @@ export class Daemon {
 
         case 'POST /v1/lock':
           this.vault.lock()
+          // A lock that leaves the passphrase window open is not one: the
+          // window survived lock and unlock, still admitting every caller.
+          this.presenceGraceUntil = 0
           return json(200, { ok: true, locked: true })
+
+        // Which web UI origins this daemon accepts assertions from.
+        case 'GET /v1/ui':
+          return json(200, { port: this.uiPort, origins: this.uiOrigins() })
+        case 'POST /v1/ui/origins': {
+          const origin = String(input.origin || '')
+          if (!uiOriginOk(origin)) {
+            throw deny('AV_POLICY_DENIED', `not a web UI origin: ${JSON.stringify(input.origin)}`, {
+              rule: 'ui_origin',
+              hint: 'The UI is served on loopback under the name the authenticator is bound to: http://localhost:<port>.',
+            })
+          }
+          // Trusting an origin is trusting every page served there to ask for
+          // your fingerprint, so it is owner-proved like a factor change: a
+          // shared window is not enough.
+          this.#requireFactorProof('ui origin add', this.#wideningOperation(route, url, input), input)
+          const list = new Set(this.vault.db.kv.ui_origins || [])
+          list.add(origin)
+          this.vault.db.kv.ui_origins = [...list]
+          this.vault.save()
+          this.vault.audit?.write('ui.origin_added', { origin })
+          return json(200, { ok: true, origins: this.uiOrigins() })
+        }
 
         case 'POST /v1/unlock': {
           if (!this.vault.locked) return json(200, { ok: true, locked: false, already: true })
@@ -1305,9 +1423,9 @@ export class Daemon {
           // This comment used to say the route required a presence window. It
           // did not; nothing here called the gate. Now it does.
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
-          this.#requireHumanForWidening(
+          this.#requireFactorProof(
             input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',
-            this.#wideningOperation(route, url, input), input.presence,
+            this.#wideningOperation(route, url, input), input,
           )
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
@@ -1357,9 +1475,9 @@ export class Daemon {
             if (oldest === undefined) break
             this.opChallenges.delete(oldest)
           }
-          this.opChallenges.set(id, {
-            challenge, operation, origins: input.origins || [], expires: Date.now() + 60_000,
-          })
+          // `input.origins` is not read. The caller used to name which origins
+          // the assertion could come from, so an agent named its own page.
+          this.opChallenges.set(id, { challenge, operation, expires: Date.now() + 60_000 })
           return json(200, {
             challengeId: id,
             challenge: webauthn.b64url(challenge),
@@ -1472,6 +1590,18 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
+}
+
+/** The shape of a web UI origin this daemon will consider trusting. */
+function uiOriginOk(origin) {
+  const m = UI_ORIGIN_SHAPE.exec(String(origin))
+  return !!m && Number(m[1]) > 0 && Number(m[1]) <= 65535
+}
+
+/** A request body without the proofs that ride along with it. */
+function withoutProof(input) {
+  const { presence, passphrase, ...rest } = input || {}
+  return rest
 }
 
 /**

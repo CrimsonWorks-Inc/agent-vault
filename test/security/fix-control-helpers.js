@@ -54,12 +54,41 @@ export function controlAt(sock, method, path, body) {
 
 // --- a synthetic platform authenticator ------------------------------------
 
-export function makeAuthenticator(origin = 'http://localhost:7777') {
-  const credentialId = randomBytes(16).toString('base64url')
+// The daemon's default web UI port. Written here rather than imported, so the
+// helpers load against a build that predates it.
+export const UI_ORIGIN = 'http://localhost:7412'
+
+function cborUint(major, n) {
+  if (n < 24) return Buffer.from([(major << 5) | n])
+  if (n < 256) return Buffer.from([(major << 5) | 24, n])
+  const b = Buffer.alloc(3); b[0] = (major << 5) | 25; b.writeUInt16BE(n, 1); return b
+}
+function cbor(v) {
+  if (typeof v === 'number') return v >= 0 ? cborUint(0, v) : cborUint(1, -1 - v)
+  if (typeof v === 'string') return Buffer.concat([cborUint(3, Buffer.byteLength(v)), Buffer.from(v)])
+  if (Buffer.isBuffer(v)) return Buffer.concat([cborUint(2, v.length), v])
+  if (v instanceof Map) return Buffer.concat([cborUint(5, v.size), ...[...v].map(([k, x]) => Buffer.concat([cbor(k), cbor(x)]))])
+  throw new Error('unsupported')
+}
+
+export function makeAuthenticator(origin = UI_ORIGIN) {
+  const rawId = randomBytes(16)
+  const credentialId = rawId.toString('base64url')
   const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
   const rpIdHash = createHash('sha256').update('localhost').digest()
   return {
     origin,
+    /** A `none` attestation, as the page sends to finish enrolment. */
+    register(challenge, at = origin) {
+      const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.create', challenge, origin: at }))
+      const raw = publicKey.export({ format: 'der', type: 'spki' })
+      const point = raw.subarray(raw.length - 65)
+      const cose = new Map([[1, 2], [3, -7], [-1, 1], [-2, point.subarray(1, 33)], [-3, point.subarray(33, 65)]])
+      const len = Buffer.alloc(2); len.writeUInt16BE(rawId.length)
+      const authData = Buffer.concat([rpIdHash, Buffer.from([0x45]), Buffer.alloc(4), Buffer.alloc(16), len, rawId, cbor(cose)])
+      const att = new Map([['fmt', 'none'], ['attStmt', new Map()], ['authData', authData]])
+      return { attestationObject: cbor(att).toString('base64url'), clientDataJSON: clientDataJSON.toString('base64url') }
+    },
     /** What the daemon stores for an enrolled presence authenticator. */
     record: {
       credentialId,
@@ -97,6 +126,9 @@ export async function signed(control, auth, operation) {
 export async function startUi(d) {
   const { UiServer } = await import('../../src/ui/server.js')
   const ui = await new UiServer(d.sock, { port: 0 }).start()
+  // A UI on a port of its own is trusted because the test configured the
+  // daemon to trust it — in process, the way the daemon's owner would.
+  d.daemon.allowUiOrigin?.(ui.origin)
   const cookie = (await fetch(ui.url, { redirect: 'manual' })).headers.get('set-cookie').split(';')[0]
   const api = (method, path, body) => fetch(`${ui.origin}/api/${path}`, {
     method,

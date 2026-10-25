@@ -149,6 +149,35 @@ async function controlWithPresence(method, path, body) {
 }
 
 /**
+ * Run a control call whose proof must travel with the request: the routes
+ * that change who can prove presence, which a passphrase window does not
+ * cover. On AV_PRESENCE_REQUIRED, ask for the passphrase and send it with the
+ * call itself.
+ */
+async function controlWithFactor(method, path, body) {
+  try {
+    return await control(method, path, body)
+  } catch (e) {
+    if (e.problem?.code !== 'AV_PRESENCE_REQUIRED') throw e
+    const factors = e.problem?.factors || ['passphrase']
+    if (!factors.includes('passphrase')) {
+      throw Object.assign(new Error(`this change needs your ${factors.join(' or ')}`), {
+        exit: EXIT.PRESENCE,
+        next: 'agent-vault ui   (confirm it there with your authenticator)',
+      })
+    }
+    if (!process.stdin.isTTY) {
+      throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
+        exit: EXIT.PRESENCE,
+      })
+    }
+    console.error(`${C.dim('This change needs a human.')}`)
+    const passphrase = await readSecret('passphrase: ')
+    return control(method, path, { ...body, passphrase })
+  }
+}
+
+/**
  * How the reader is invoking this CLI, so printed commands can be pasted.
  * If it came from a shim on PATH we echo that name; run straight from the
  * checkout there is no such name, so we print the interpreter and the script.
@@ -1087,15 +1116,37 @@ const COMMANDS = {
   async ui(args, { hash = '' } = {}) {
     const { UiServer } = await import('../ui/server.js')
     await control('GET', '/v1/status') // fail fast if the daemon is not up
+    // The daemon only accepts fingerprints from UI origins it trusts, and by
+    // default that is one port. Listen there unless told otherwise. An older
+    // daemon has no such list, and any port works with it.
+    const trusted = await control('GET', '/v1/ui').catch(() => null)
     const ui = new UiServer(SOCKET, {
       // Explicit: in a system install the socket is under run/ and the state
       // belongs beside the human, so the socket's directory is the wrong guess.
       statePath: STATE,
-      port: Number(args.port || 0),
+      port: Number(args.port || trusted?.port || 0),
       idleMs: (Number(args.idle) || 30) * 60_000,
       cli: cliInvocation(),
     })
-    await ui.start()
+    try {
+      await ui.start()
+    } catch (e) {
+      if (e.code !== 'EADDRINUSE') throw e
+      return fail(`port ${ui.port} is in use; is another agent-vault ui running?`, EXIT.FAILURE, {
+        next: 'agent-vault ui --port <free port> --allow-origin',
+      })
+    }
+    if (trusted && !trusted.origins.includes(ui.origin)) {
+      if (args['allow-origin']) {
+        // Owner-proved, with the passphrase in the request: trusting an
+        // origin is trusting every page served there to ask for a fingerprint.
+        await controlWithFactor('POST', '/v1/ui/origins', { origin: ui.origin })
+        if (!JSON_OUT) console.log(C.dim(`  trusted ${ui.origin} for Touch ID confirmations`))
+      } else if (!JSON_OUT) {
+        console.log(C.yellow(`  ${ui.origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page.`))
+        console.log(C.dim(`  Run without --port, or add --allow-origin to trust it (asks for your passphrase).`))
+      }
+    }
     // A fragment survives the redirect that burns the launch token, so it is
     // how we open the page on something other than Overview.
     const url = `${ui.url}${hash}`

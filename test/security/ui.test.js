@@ -93,6 +93,9 @@ before(async () => {
   daemon.presenceGraceUntil = Date.now() + 60_000
   ui = await new UiServer(join(dir, 'c.sock'), { port: 0 }).start()
   origin = ui.origin
+  // The daemon accepts assertions only from UI origins it was told to trust.
+  // This UI is on a port of its own, so the test configures that, in process.
+  daemon.allowUiOrigin(origin)
 
   // Claim the session the way a browser does.
   const res = await fetch(ui.url, { redirect: 'manual' })
@@ -213,7 +216,8 @@ test('a forged presence payload is refused', async () => {
 test('enrollment registers the authenticator', async () => {
   const auth = makeAuthenticator()
   const begin = await (await api('POST', 'presence/enroll/begin')).json()
-  const finish = await api('POST', 'presence/enroll/finish', auth.register(begin.challenge))
+  // The passphrase travels with the enrolment: a window does not cover it.
+  const finish = await api('POST', 'presence/enroll/finish', { ...auth.register(begin.challenge), passphrase: PASSPHRASE })
   assert.equal(finish.status, 200)
   const state = await (await api('GET', 'presence/state')).json()
   assert.equal(state.enrolled, true)

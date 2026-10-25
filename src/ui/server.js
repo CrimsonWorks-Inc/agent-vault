@@ -75,7 +75,12 @@ export class UiServer {
 
   async start() {
     this.server = createServer((req, res) => this.#handle(req, res))
-    await new Promise((resolve) => this.server.listen(this.port, '127.0.0.1', resolve))
+    // Rejected, not thrown from an event: the UI now has a fixed default port,
+    // so "already in use" is an ordinary answer the caller can explain.
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject)
+      this.server.listen(this.port, '127.0.0.1', () => { this.server.removeListener('error', reject); resolve() })
+    })
     this.boundPort = this.server.address().port
     this.origin = `http://localhost:${this.boundPort}`
 
@@ -280,7 +285,13 @@ export class UiServer {
           expectedOrigins: [this.origin],
           rpId: this.rpId,
         })
-        await this.#control('POST', '/v1/presence', credential)
+        // The passphrase goes with the enrolment itself. The daemon no longer
+        // accepts a passphrase window for this, because a window admits every
+        // caller on the socket while it is open, not only this page.
+        await this.#control('POST', '/v1/presence', {
+          ...credential,
+          ...(typeof body?.passphrase === 'string' ? { passphrase: body.passphrase } : {}),
+        })
         return this.#send(res, 200, { ok: true, credentialId: credential.credentialId })
       }
       if (key === 'POST presence/challenge') {

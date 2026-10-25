@@ -353,10 +353,13 @@
    */
   async function enroll() {
     const ls = await api('GET', 'lockstate').catch(() => ({}))
+    // Sent with the enrolment rather than used to open a window: a window
+    // would let anything else on the control socket enrol a key of its own
+    // while it was open.
+    let passphrase
     if (ls.has_passphrase) {
-      const passphrase = await askSecret('Vault passphrase, to enrol this device')
+      passphrase = await askSecret('Vault passphrase, to enrol this device')
       if (passphrase == null) throw new Error('Cancelled. Nothing was enrolled.')
-      await api('POST', 'presence/window', { passphrase })
     }
     const opts = await api('POST', 'presence/enroll/begin')
     const cred = await navigator.credentials.create({
@@ -377,6 +380,7 @@
     await api('POST', 'presence/enroll/finish', {
       attestationObject: bufToB64u(cred.response.attestationObject),
       clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+      passphrase,
     })
     await refreshPresence()
   }

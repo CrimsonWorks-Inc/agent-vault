@@ -101,13 +101,15 @@ before(async () => {
   daemon = await new Daemon(vault, { port: 0, socketPath: sock }).start()
   ui = await new UiServer(sock, { port: 0 }).start()
   origin = ui.origin
+  // The daemon accepts assertions only from UI origins it was told to trust.
+  daemon.allowUiOrigin(origin)
   cookie = (await fetch(ui.url, { redirect: 'manual' })).headers.get('set-cookie').split(';')[0]
 
   auth = makeAuthenticator()
-  // Enrolling is passphrase-gated, which is what the page now asks for once.
-  await api('POST', 'presence/window', { passphrase: PASSPHRASE })
+  // Enrolling is passphrase-gated, which is what the page now asks for once
+  // and sends with the enrolment itself.
   const begin = await (await api('POST', 'presence/enroll/begin')).json()
-  await api('POST', 'presence/enroll/finish', auth.register(begin.challenge))
+  await api('POST', 'presence/enroll/finish', { ...auth.register(begin.challenge), passphrase: PASSPHRASE })
   // Close the window again: every test below is about the fingerprint.
   daemon.presenceGraceUntil = 0
 })
