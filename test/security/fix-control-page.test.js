@@ -30,7 +30,8 @@ function pageFunction(name) {
     if (PAGE[i] === '{') depth++
     else if (PAGE[i] === '}' && --depth === 0) break
   }
-  return new Function(`${PAGE.slice(start, i + 1)}; return ${name}`)()
+  const async = PAGE.slice(start - 6, start) === 'async ' ? 'async ' : ''
+  return new Function(`${async}${PAGE.slice(start, i + 1)}; return ${name}`)()
 }
 
 const RAW = [
@@ -90,4 +91,40 @@ test('the docs name every MCP tool, and only injection sites that exist', () => 
   assert.ok(!/X-Agent-Vault-Cred/i.test(PAGE), 'no profile declares that header as a site')
   assert.ok(!/up to a minute/.test(PAGE + README), 'the backoff caps at thirty seconds')
   assert.ok(!/is this one still valid/.test(PAGE), 'ph check is an offline grammar check')
+})
+
+// Round 2. The page refused to start Touch ID unlock on a vault with no
+// passphrase, whatever the daemon allowed, and hid the button there too.
+test('the page offers Touch ID unlock without a passphrase, after saying what that costs', async () => {
+  const enable = pageFunction('enableTouchId')
+  const saved = { api: globalThis.api, confirm: globalThis.confirm, navigator: Object.getOwnPropertyDescriptor(globalThis, 'navigator') }
+  const asked = []
+  try {
+    globalThis.api = async () => ({ has_passphrase: false, rp_id: 'localhost', prf_salt: 'AAAA' })
+    globalThis.b64ToBuf = () => new Uint8Array(4)
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true, value: { credentials: { create: async () => { throw new Error('reached the authenticator') } } },
+    })
+    // Declined: nothing happens, and nothing is thrown at the owner.
+    globalThis.confirm = (text) => { asked.push(text); return false }
+    assert.equal(await enable(), false)
+    assert.match(asked[0], /no passphrase/i)
+    assert.match(asked[0], /lose the authenticator/i)
+    // Accepted: it goes on to the authenticator.
+    globalThis.confirm = () => true
+    await assert.rejects(enable(), /reached the authenticator/)
+    // With a passphrase, nobody is asked.
+    asked.length = 0
+    globalThis.confirm = (text) => { asked.push(text); return true }
+    globalThis.api = async () => ({ has_passphrase: true, rp_id: 'localhost', prf_salt: 'AAAA' })
+    await assert.rejects(enable(), /reached the authenticator/)
+    assert.equal(asked.length, 0)
+  } finally {
+    globalThis.api = saved.api
+    globalThis.confirm = saved.confirm
+    delete globalThis.b64ToBuf
+    if (saved.navigator) Object.defineProperty(globalThis, 'navigator', saved.navigator)
+    else delete globalThis.navigator
+  }
+  assert.match(PAGE, /\(ls\.has_passphrase \|\| presenceState\.enrolled\) && prfSupported\(\)/, 'the Enable row shows on an authenticator-only vault')
 })

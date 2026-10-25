@@ -679,6 +679,28 @@ const MUTATIONS = [
     to: '      policy: narrow && Object.keys(narrow).length ? { ...policyMod.intersect([policy, narrow]), ...(narrow.hosts ? { methods: undefined, paths: undefined, hosts: undefined } : {}) } : policy,',
     tests: ['test/security/fix-control-store.test.js'],
   },
+  {
+    // Fix-control round 2: the owner's authenticator-only vault.
+    what: 'an authenticator-only vault is refused the Touch ID unlock factor after its proof',
+    file: 'src/daemon/server.js',
+    from: '            withoutRecovery: !this.vault.hasPassphrase,',
+    to: '            withoutRecovery: false,',
+    tests: ['test/security/fix-control-touchid.test.js'],
+  },
+  {
+    what: 'the store wraps the vault key to Touch ID alone without being told there is no recovery',
+    file: 'src/store/vault.js',
+    from: '    if (!recovery && !withoutRecovery) {',
+    to: '    if (false) {',
+    tests: ['test/security/fix-control-touchid.test.js'],
+  },
+  {
+    what: 'the page turns on passphrase-less Touch ID unlock without saying what it costs',
+    file: 'src/ui/app.html',
+    from: "    if (!params.has_passphrase && !confirm(",
+    to: "    if (false && !confirm(",
+    tests: ['test/security/fix-control-page.test.js'],
+  },
 ]
 
 let survived = 0

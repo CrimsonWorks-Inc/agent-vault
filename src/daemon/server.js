@@ -1465,11 +1465,17 @@ export class Daemon {
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
           }
-          if (!this.vault.hasPassphrase) {
-            throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor')
-          }
-          this.vault.addWebauthnUnlock(input.credential_id, input.prf_secret)
-          return json(200, { ok: true, enrolled: true })
+          // A vault with no passphrase can enrol too. Its owner chose an
+          // authenticator and no passphrase, and the fresh proof above can only
+          // have been an assertion from that authenticator — there is no
+          // passphrase to send — so this is the owner, not the socket. It was
+          // refused outright, which left such a vault with no way to turn on
+          // the unlock factor at all. There is then no recovery factor, and
+          // the answer says so.
+          const { recovery } = this.vault.addWebauthnUnlock(input.credential_id, input.prf_secret, {
+            withoutRecovery: !this.vault.hasPassphrase,
+          })
+          return json(200, { ok: true, enrolled: true, recovery })
         }
         case 'GET /v1/factors/webauthn-enroll-params':
           return json(200, {
