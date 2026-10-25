@@ -310,7 +310,13 @@ export class McpServer {
         if (!args.cred) return text({ error: 'name the credential you need', known: this.vault.listCredentials().map((c) => c.slug) })
         try {
           const record = this.daemon.sessionRequests.propose({
-            proposal: srProposal({ cred: args.cred, methods: args.methods, paths: args.paths, budget: args.budget }),
+            // Every field the schema offers. ttl_minutes and uses were dropped
+            // here, so an agent asking for fifteen minutes got eight hours and
+            // the human was shown a lifetime nobody had asked for.
+            proposal: srProposal({
+              cred: args.cred, methods: args.methods, paths: args.paths, budget: args.budget,
+              uses: args.uses, ttl_minutes: args.ttl_minutes,
+            }),
             reason: args.reason,
           })
           return text({
@@ -361,11 +367,14 @@ export class McpServer {
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
         if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
         const field = cred.fields[0]
-        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
+        const site = sitesMod.parseSite(field.sites[0])
+        // Minted for this one call and burned after it. Each call used to
+        // leave its placeholder active, and a used one is never evicted, so
+        // the ledger grew by a live row per request.
+        const { placeholder, row } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
 
         // The MCP path runs the identical pipeline: same policy, same site
         // check, same scrubber, same audit. Only the framing differs.
-        const site = sitesMod.parseSite(field.sites[0])
         const headers = [['host', '127.0.0.1']]
         for (const [k, v] of Object.entries(args.headers || {})) {
           // The daemon sets its own av-* headers below. Letting the caller
@@ -375,10 +384,18 @@ export class McpServer {
           if (/^av-/i.test(k) || k.toLowerCase() === 'host') continue
           headers.push([k, v])
         }
+        let query = args.query || ''
         if (site.kind === 'header') {
           headers.push([site.name, site.scheme ? `${site.scheme} ${placeholder}` : placeholder])
+        } else if (site.kind === 'query') {
+          // The placeholder grammar is URL-safe, so it needs no encoding.
+          query = `${query ? `${query}&` : ''}${encodeURIComponent(site.key)}=${placeholder}`
         }
-        headers.push(['av-session', this.#tokenFor(session)])
+        // The token this call arrived with. `#tokenFor` was called without it,
+        // and nothing ever sets `session.__token`, so this header was always
+        // empty: every call authenticated by falling back on the placeholder
+        // as carrier, which only a header site allows.
+        headers.push(['av-session', this.#tokenFor(session, token)])
         if (args.reason) headers.push(['av-reason', args.reason])
         // The caller's own content-type was already forwarded above, in
         // whatever case they wrote it. Adding a default alongside a
@@ -387,16 +404,31 @@ export class McpServer {
         const callerSetType = Object.keys(args.headers || {}).some((k) => k.toLowerCase() === 'content-type')
         if (args.body && !callerSetType) headers.push(['content-type', 'application/json'])
 
-        const res = await this.pipeline.handle({
-          method: args.method, path: `/p/${cred.slug}${args.path}`, query: args.query || '',
-          headers, body: args.body ? Buffer.from(args.body) : null,
-        })
+        let res
+        let body
+        try {
+          res = await this.pipeline.handle({
+            method: args.method, path: `/p/${cred.slug}${args.path}`, query,
+            headers, body: args.body ? Buffer.from(args.body) : null,
+          })
+          // A streamed (text/event-stream) response has no `body`, only a
+          // `stream`, and reading `body` threw after the request had run and
+          // been charged — leaving the upstream connection open, and an agent
+          // retrying an "internal error" that had in fact succeeded.
+          body = res.stream ? await readBounded(res.stream, MAX_TOOL_BODY) : res.body.toString('utf8').slice(0, MAX_TOOL_BODY)
+        } finally {
+          // A vault locked mid-call cannot record the burn, and the lock
+          // already stops the row from being used; the call's own outcome is
+          // what the agent needs to see.
+          const live = this.vault.db.placeholders[row.id]
+          if (live?.state === 'active' && !this.vault.locked) this.vault.burnPlaceholder(row.id, 'spent')
+        }
         return text({
           status: res.status,
           request_id: res.requestId,
           decision: res.headers['av-decision'],
           headers: res.headers,
-          body: res.body.toString('utf8').slice(0, 256 * 1024),
+          body,
         })
       }
 
@@ -421,6 +453,22 @@ export class McpServer {
 
   /** The MCP process holds the session token it was started with. */
   #tokenFor(session, token) { return token || session?.__token || '' }
+}
+
+/** How much of a response body a tool result carries. */
+const MAX_TOOL_BODY = 256 * 1024
+
+/**
+ * Read a streamed response to its end, keeping at most `limit` characters.
+ * Read to the end, not to the limit: stopping early leaves the upstream
+ * connection open, and the events are already scrubbed one by one.
+ */
+async function readBounded(stream, limit) {
+  let out = ''
+  for await (const chunk of stream) {
+    if (out.length < limit) out += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+  }
+  return out.slice(0, limit)
 }
 
 /** Frame the MCP server onto stdio: newline-delimited JSON-RPC. */
