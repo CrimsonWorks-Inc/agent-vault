@@ -66,6 +66,8 @@ const MAX_EVENT_BYTES = 16 * 1024 * 1024
 
 // How many JSON key paths an event stream's reassembly tracks at once. A
 // model stream uses a handful; this bounds what a hostile one can make us keep.
+// A stream that uses more is cut: forgetting a path forgets the first half of
+// whatever secret its next value finishes.
 const MAX_SSE_PATHS = 64
 
 // Failures that happen before any byte could have reached the server, so the
@@ -589,6 +591,22 @@ export class Pipeline {
       for (const [text, marker] of canonical) out = out.split(text).join(marker)
       return out
     }
+    // A Basic header carries its placeholder inside base64, where the text
+    // above is never found: renewing the placeholder in `user:<ph>` changed
+    // the hash and held the same request for a second approval. The decoded
+    // pair is made stable and encoded again — only when the header decodes
+    // and encodes back to exactly itself, so two spellings the upstream may
+    // read differently can never share an approval.
+    const stableHeader = (name, value) => {
+      const basic = String(name).toLowerCase() === 'authorization' && /^(basic\s+)(\S+)(\s*)$/i.exec(String(value))
+      if (basic) {
+        const decoded = Buffer.from(basic[2], 'base64').toString('utf8')
+        if (Buffer.from(decoded, 'utf8').toString('base64') === basic[2]) {
+          return `${basic[1]}${Buffer.from(stable(decoded), 'utf8').toString('base64')}${basic[3]}`
+        }
+      }
+      return stable(value)
+    }
     // Read and rebuilt through latin1 so a binary body survives byte-for-byte.
     const bodySha = req.body ? canon.sha256(Buffer.from(stable(req.body.toString('latin1')), 'latin1')) : ''
     const requestHash = canon.requestHash({
@@ -601,7 +619,7 @@ export class Pipeline {
       headers: req.headers.filter(([n]) => {
         const lower = String(n).toLowerCase()
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
-      }).map(([n, v]) => [n, stable(v)]),
+      }).map(([n, v]) => [n, stableHeader(n, v)]),
     })
     const firstUse = grant.counters.requests === 0
     if ([decision.method, ...overrides].some((method) => policyMod.needsApproval(effective, { method, firstUse }))) {
@@ -656,6 +674,17 @@ export class Pipeline {
         request_id: requestId, placeholder_id: row.id, session_id: session.id,
         credential_slug: cred.slug, field: s.row.field, site: s.site.spec,
         uses: row.uses, max_uses: row.max_uses,
+      })
+    }
+    // Every placeholder the agent sent was replaced, wherever it was. Checked
+    // on what will actually be sent rather than trusted from the substitution
+    // above: a duplicate JSON key once left the first copy of a placeholder in
+    // the body while the second was replaced, and the upstream got both.
+    const left = sub.unsubstituted(outgoing, substitutions.map((s) => s.occ.parsed.nonce))
+    if (left) {
+      throw deny('AV_BAD_LOCATION', `a placeholder would have reached the upstream unsubstituted, in ${sub.describeLocation(left.location)}`, {
+        rule: 'injection_site',
+        hint: 'Put each placeholder once, at a declared injection site, and nowhere a parser could read it twice.',
       })
     }
 
@@ -804,7 +833,20 @@ export class Pipeline {
     }
 
     // Everything else is buffered, decompressed and scrubbed whole.
-    let raw = res.body ?? (await collect(res.res))
+    let raw
+    try {
+      raw = res.body ?? (await collect(res.res))
+    } catch (e) {
+      // A body too large to scan is refused as such. Anything else is the
+      // upstream failing part way — a reset mid-body came back as an
+      // internal daemon error. The request was delivered, so nothing is
+      // refunded.
+      if (e instanceof VaultError) throw e
+      throw deny('AV_UPSTREAM_UNREACHABLE', `${decision.host} failed while sending its response: ${e.message}`, {
+        rule: 'upstream',
+        refunded: false,
+      })
+    }
     const encoding = contentEncoding
     if (encoding && encoding !== 'identity') {
       try {
@@ -1214,19 +1256,30 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     return scrubber.scrub(bare).redactions > 0
   }
 
-  /** Append each string in one JSON payload to the run kept for its key path. */
+  /**
+   * Append each string in one JSON payload to the run kept for its key path.
+   * The reason to cut, or null.
+   *
+   * The run is searched with ALL of the new value on it and only then
+   * trimmed. Trimming first threw away the start of a long value, so the
+   * second half of a secret followed by 2,000 ordinary characters was never
+   * searched next to its first half.
+   *
+   * A path is never forgotten to make room for another. This used to evict
+   * the least recently used one, and an event with 65 metadata keys between
+   * the two halves of a secret evicted `delta.text`: its next value started a
+   * fresh run, and the client put the secret back together.
+   */
   const leakedByPath = (payload) => {
     let parsed
-    try { parsed = JSON.parse(payload) } catch { return false }
+    try { parsed = JSON.parse(payload) } catch { return null }
     for (const [path, value] of jsonStringsByPath(parsed)) {
-      const run = ((byPath.get(path) ?? '') + value).slice(-keep)
-      // Re-inserted so the map's order is least recently used first.
-      byPath.delete(path)
-      byPath.set(path, run)
-      if (byPath.size > MAX_SSE_PATHS) byPath.delete(byPath.keys().next().value)
-      if (scrubber.scrub(run).redactions > 0) return true
+      if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'
+      const run = (byPath.get(path) ?? '') + value
+      if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
+      byPath.set(path, run.length > keep ? run.slice(-keep) : run)
     }
-    return false
+    return null
   }
 
   /** Every complete event now in `pending`, taken out of it. */
@@ -1244,16 +1297,22 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     return out
   }
 
-  /** Add one event to every reassembly; true if any of them now holds a secret. */
+  /** Add one event to every reassembly; the reason to cut, or null. */
   const leaks = (event) => {
     const data = dataOf(event)
-    assembled += data.join('')
+    // Searched with all of this event on, then trimmed: the same order as
+    // the per-path runs, for the same reason.
+    const joined = assembled + data.join('')
     // Keep only enough to span a split; an LLM response is unbounded.
-    if (assembled.length > keep) assembled = assembled.slice(-keep)
-    return leaked(assembled) || (data.length > 0 && leakedByPath(data.join('\n')))
+    assembled = joined.length > keep ? joined.slice(-keep) : joined
+    if (leaked(joined)) return 'credential_split_across_events'
+    return data.length > 0 ? leakedByPath(data.join('\n')) : null
   }
 
-  const SPLIT = 'the upstream split a credential across events; the stream was cut'
+  const WHY = {
+    credential_split_across_events: 'the upstream split a credential across events; the stream was cut',
+    too_many_paths: `the upstream stream used more than ${MAX_SSE_PATHS} JSON key paths, more than can be tracked for a credential split across events; the stream was cut`,
+  }
 
   try {
     for await (const chunk of source) {
@@ -1264,7 +1323,8 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
       }
       pending += lf(frame.push(chunk.toString('latin1')))
       for (const event of events()) {
-        if (leaks(event)) { yield cut('credential_split_across_events', SPLIT); return }
+        const reason = leaks(event)
+        if (reason) { yield cut(reason, WHY[reason]); return }
         yield Buffer.from(event, 'latin1')
       }
       if (pending.length > MAX_EVENT_BYTES) {
@@ -1283,7 +1343,8 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
   // What the scrubber held back can be several events, not one.
   pending += lf(frame.flush()) + (carry ? '\n' : '')
   for (const event of [...events(), pending].filter(Boolean)) {
-    if (leaks(event)) { yield cut('credential_split_across_events', SPLIT); return }
+    const reason = leaks(event)
+    if (reason) { yield cut(reason, WHY[reason]); return }
     yield Buffer.from(event, 'latin1')
   }
 }

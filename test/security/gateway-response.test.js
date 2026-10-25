@@ -189,6 +189,95 @@ test('a compressed stream from a real upstream that resets mid-body ends instead
   }
 })
 
+// A secret's second half with a long tail after it, as the event that ends it.
+const split = [anthropic(SECRET.slice(0, 14)), anthropic(SECRET.slice(14) + 'x'.repeat(2000))]
+const textOf = (body) => [...body.matchAll(/^data: (.*)$/gm)].map((m) => { try { return JSON.parse(m[1]).delta?.text ?? '' } catch { return '' } }).join('')
+
+test('a split secret is caught when the event that finishes it is long', async () => {
+  for (const compressed of [false, true]) {
+    const bytes = Buffer.from(split.join(''))
+    const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+    const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+    const body = await drain(res.stream)
+    assert.ok(!textOf(body).includes(SECRET), `the client reassembled the secret (gzip: ${compressed})`)
+    assert.match(body, /AV_UNSCANNABLE/)
+  }
+})
+
+test('a split secret is caught in plain-text events when the event that finishes it is long', async () => {
+  const s = setup({ fetchImpl: streaming(Readable.from([`data: ${SECRET.slice(0, 14)}\n\n`, `data: ${SECRET.slice(14)}${'x'.repeat(2000)}\n\n`].map((c) => Buffer.from(c)))) })
+  const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  const body = await drain(res.stream)
+  assert.ok(!body.replace(/\n\ndata: |^data: /g, '').includes(SECRET), 'the client reassembled the secret')
+  assert.match(body, /AV_UNSCANNABLE/)
+})
+
+test('an ordinary stream of long events passes through untouched, compressed or not', async () => {
+  const events = Array.from({ length: 6 }, (_, i) => anthropic(`${'lorem ipsum dolor sit amet '.repeat(100)}${i}`))
+  for (const compressed of [false, true]) {
+    const bytes = Buffer.from(events.join(''))
+    const s = setup({ fetchImpl: streaming(Readable.from([compressed ? gzipSync(bytes) : bytes]), compressed ? { 'content-encoding': 'gzip' } : {}) })
+    const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+    assert.equal(await drain(res.stream), events.join(''))
+  }
+})
+
+test('a stream with more key paths than are tracked is cut, not forgotten', async () => {
+  const many = `data: ${JSON.stringify(Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, 'metadata'])))}\n\n`
+  const s = setup({ fetchImpl: streaming(Readable.from([anthropic(SECRET.slice(0, 14)), many, anthropic(SECRET.slice(14))].map((c) => Buffer.from(c)))) })
+  const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  const body = await drain(res.stream)
+  assert.ok(!textOf(body).includes(SECRET), 'the client reassembled the secret')
+  assert.match(body, /AV_UNSCANNABLE/)
+  assert.match(body, /JSON key paths/)
+})
+
+test('an ordinary stream over many key paths, below the limit, passes through', async () => {
+  const events = [
+    anthropic('Hello'),
+    ...Array.from({ length: 5 }, (_, n) => `data: ${JSON.stringify(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`m${n}_${i}`, 'value'])))}\n\n`),
+    anthropic(' world'),
+  ]
+  const s = setup({ fetchImpl: streaming(Readable.from(events.map((c) => Buffer.from(c)))) })
+  const res = await s.pipeline.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] }))
+  assert.equal(await drain(res.stream), events.join(''))
+})
+
+/** A real upstream that sends `body`, and resets the socket part way if `reset`. */
+async function bufferedUpstream(reset, fn) {
+  const up = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-length': reset ? '1000' : '7' })
+    res.write('partial')
+    if (reset) setTimeout(() => res.socket.destroy(), 30)
+    else res.end()
+  })
+  await new Promise((r) => up.listen(0, '127.0.0.1', r))
+  try {
+    const s = setup({ connector: { host: `127.0.0.1:${up.address().port}`, scheme: 'http' }, hosts: ['127.0.0.1'] })
+    const real = new Pipeline(s.vault, { allowedHosts: new Set(['127.0.0.1']) })
+    return await fn(s, await real.handle(s.request({ headers: [...s.request().headers, ['x-key', s.ph()]] })))
+  } finally {
+    up.closeAllConnections()
+    up.close()
+  }
+}
+
+test('a buffered upstream that resets mid-body is an upstream failure, and the use is not refunded', async () => {
+  await bufferedUpstream(true, (s, res) => {
+    assert.equal(res.status, 502)
+    assert.equal(JSON.parse(res.body).code, 'AV_UPSTREAM_UNREACHABLE')
+    assert.ok(!res.body.toString().includes('partial'))
+    assert.deepEqual(Object.values(s.vault.db.placeholders).map((r) => r.uses), [1])
+  })
+})
+
+test('a buffered upstream that completes its body is answered as before', async () => {
+  await bufferedUpstream(false, (s, res) => {
+    assert.equal(res.status, 200)
+    assert.equal(res.body.toString(), 'partial')
+  })
+})
+
 // --------------------------------------------------------- request framing
 
 test('a request body goes out with a Content-Length that matches it', async () => {

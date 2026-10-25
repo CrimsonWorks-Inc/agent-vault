@@ -262,3 +262,40 @@ test('a resend while the approved request is still in flight keeps waiting on it
   assert.equal((await running).status, 200)
   assert.equal((await s.pipeline.handle(req)).headers['av-replayed'], 'true')
 })
+
+// ------------------------------------------------- Basic and the request hash
+
+/** A Basic header for `user:<ph>`, with `=` padding when `padded`. */
+const basicFor = (ph, padded = true) => {
+  for (const user of ['user', 'users', 'userss']) {
+    const b64 = Buffer.from(`${user}:${ph}`).toString('base64')
+    if (b64.endsWith('=') === padded) return { user, header: `Basic ${b64}` }
+  }
+  throw new Error('no user gives that padding')
+}
+
+test('renewing the placeholder inside a Basic header keeps the approval', async () => {
+  const s = setup({ approval: 'each', sites: { key: ['basic:pass'] } })
+  const req = (ph) => s.request({ method: 'POST', headers: [...s.request().headers, ['authorization', `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`]] })
+  const id = held(await s.pipeline.handle(req(s.ph())))
+  s.pipeline.decideApproval(id, true)
+  const res = await s.pipeline.handle(req(s.ph()))
+  assert.equal(res.status, 200)
+  assert.equal(s.sent.length, 1)
+  assert.equal(s.sent[0].headers.authorization, `Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`)
+})
+
+test('a different Basic user, or another spelling of the same header, still needs its own approval', async () => {
+  const s = setup({ approval: 'each', sites: { key: ['basic:pass'] } })
+  const mk = (header) => s.request({ method: 'POST', headers: [...s.request().headers, ['authorization', header]] })
+  const first = basicFor(s.ph())
+  s.pipeline.decideApproval(held(await s.pipeline.handle(mk(first.header))), true)
+  // Another user.
+  assert.equal((await s.pipeline.handle(mk(`Basic ${Buffer.from(`admin:${s.ph()}`).toString('base64')}`))).status, 202)
+  // The same pair with its padding dropped: the same to a lenient decoder,
+  // not to a strict one.
+  const unpadded = `Basic ${Buffer.from(`${first.user}:${s.ph()}`).toString('base64').replace(/=+$/, '')}`
+  assert.equal((await s.pipeline.handle(mk(unpadded))).status, 202)
+  assert.equal(s.sent.length, 0)
+})
+

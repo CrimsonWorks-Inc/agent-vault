@@ -73,7 +73,7 @@ const MUTATIONS = [
     // The other half: the placeholder's TEXT is in the headers it rides in.
     what: 'the placeholder text is hashed raw, so a resend never matches',
     file: 'src/daemon/pipeline.js',
-    from: '}).map(([n, v]) => [n, stable(v)]),',
+    from: '}).map(([n, v]) => [n, stableHeader(n, v)]),',
     to: '}),',
     tests: ['test/security/pipeline.test.js'],
   },
@@ -433,8 +433,8 @@ const MUTATIONS = [
   {
     what: 'a secret split across one JSON field of two events is not reassembled',
     file: 'src/daemon/pipeline.js',
-    from: "|| (data.length > 0 && leakedByPath(data.join('\\n')))",
-    to: '',
+    from: "return data.length > 0 ? leakedByPath(data.join('\\n')) : null",
+    to: 'return null',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -611,6 +611,48 @@ const MUTATIONS = [
     from: 'if (matched === null || !views.every((v) => policy.paths.some((pat) => matchPath(pat, v)))) {',
     to: 'if (matched === null) {',
     tests: ['test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'an event-stream path run is trimmed before the new value is searched',
+    file: 'src/daemon/pipeline.js',
+    from: "if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'",
+    to: "if (scrubber.scrub(run.slice(-keep)).redactions > 0) return 'credential_split_across_events'",
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'the joined event-stream view is trimmed before the new event is searched',
+    file: 'src/daemon/pipeline.js',
+    from: "if (leaked(joined)) return 'credential_split_across_events'",
+    to: "if (leaked(assembled)) return 'credential_split_across_events'",
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'an event stream past the key-path limit forgets the oldest path and carries on',
+    file: 'src/daemon/pipeline.js',
+    from: "if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) return 'too_many_paths'",
+    to: "if (!byPath.has(path) && byPath.size >= MAX_SSE_PATHS) byPath.delete(byPath.keys().next().value)",
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'a buffered upstream reset mid-body escapes as an internal error',
+    file: 'src/daemon/pipeline.js',
+    from: "      if (e instanceof VaultError) throw e\n      throw deny('AV_UPSTREAM_UNREACHABLE', `${decision.host} failed while sending its response",
+    to: "      throw e\n      throw deny('AV_UPSTREAM_UNREACHABLE', `${decision.host} failed while sending its response",
+    tests: ['test/security/gateway-response.test.js'],
+  },
+  {
+    what: 'the placeholder in a Basic header is not made stable for the request hash',
+    file: 'src/daemon/pipeline.js',
+    from: "return `${basic[1]}${Buffer.from(stable(decoded), 'utf8').toString('base64')}${basic[3]}`",
+    to: 'return stable(value)',
+    tests: ['test/security/gateway-approvals.test.js'],
+  },
+  {
+    what: 'a Basic header that does not encode back to itself shares an approval with one that does',
+    file: 'src/daemon/pipeline.js',
+    from: "if (Buffer.from(decoded, 'utf8').toString('base64') === basic[2]) {",
+    to: 'if (true) {',
+    tests: ['test/security/gateway-approvals.test.js'],
   },
 ]
 
