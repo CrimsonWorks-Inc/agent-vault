@@ -110,8 +110,8 @@ const MUTATIONS = [
   {
     what: 'the human-presence gate never refuses',
     file: 'src/daemon/server.js',
-    from: "throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human",
-    to: "if (0) throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human",
+    from: "throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human: confirm",
+    to: "if (0) throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human: confirm",
     tests: ['test/security/control-gate.test.js'],
   },
   {
