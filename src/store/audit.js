@@ -24,6 +24,22 @@ import { createHmac } from 'node:crypto'
 import * as canon from '../core/canon.js'
 
 const CHECKPOINT_EVERY = 1000
+const HEX64 = /^[0-9a-f]{64}$/
+
+/**
+ * Whether a parsed line has the shape of a record. Parsing is not enough: a
+ * line of `{}` parses, recovery then resumed from `seq: undefined`, and the
+ * next write inside unlock threw — AV_LOCKED for the right factor, every
+ * time. A line without the chain fields is as unreadable as one that does
+ * not parse, and is reported the same way.
+ */
+function isRecord(row) {
+  return !!row && typeof row === 'object' && !Array.isArray(row)
+    && Number.isSafeInteger(row.seq) && row.seq >= 1
+    && typeof row.ts === 'string' && typeof row.kind === 'string'
+    && typeof row.hash === 'string' && HEX64.test(row.hash)
+    && typeof row.prev_hash === 'string' && HEX64.test(row.prev_hash)
+}
 
 export class AuditLog {
   /**
@@ -171,7 +187,7 @@ export class AuditLog {
     return lines.map((l, i) => {
       try {
         const row = JSON.parse(l)
-        if (row && typeof row === 'object' && !Array.isArray(row)) return row
+        if (isRecord(row)) return row
       } catch { /* reported below */ }
       return { unreadable: true, line: i + 1 }
     })

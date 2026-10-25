@@ -578,6 +578,14 @@ const MUTATIONS = [
     to: "    if (!factors.length) {\n      return\n      throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human factor",
     tests: ['test/security/fix-control-presence.test.js'],
   },
+  {
+    // Fix-control round 2: parsing is not the same as being a record.
+    what: 'a parseable line without the chain fields is taken as a record',
+    file: 'src/store/audit.js',
+    from: '        if (isRecord(row)) return row',
+    to: "        if (row && typeof row === 'object') return row",
+    tests: ['test/security/fix-control-audit.test.js'],
+  },
 ]
 
 let survived = 0

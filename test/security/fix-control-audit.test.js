@@ -169,3 +169,62 @@ test('a session request with a non-string reason is stored and recorded', async 
     assert.equal(last.agent_reason_untrusted, 'reading issues', 'a string reason is recorded verbatim')
   } finally { await d.stop() }
 })
+
+// A line can parse and still not be a record. `{}` as the last line made
+// recovery resume from `seq: undefined`, and the next write inside unlock
+// threw: AV_LOCKED for the right factor, with no way back in.
+for (const [name, bad] of [
+  ['an empty object', '{}'],
+  ['a record with a string seq', '{"seq":"6","ts":"x","kind":"k","hash":"00","prev_hash":"00"}'],
+  ['a record with no hashes', '{"seq":6,"ts":"x","kind":"k"}'],
+]) {
+  test(`${name} as the last line does not lock the owner out, and is reported`, () => {
+    const f = fresh()
+    try {
+      const before = readFileSync(f.log, 'utf8')
+      const at = before.split('\n').filter(Boolean).length + 1
+      writeFileSync(f.log, `${before}${bad}\n`)
+      let v
+      assert.doesNotThrow(() => { v = f.reopen() }, 'the right factor must still open the vault')
+      assert.equal(v.locked, false)
+      const r = v.audit.verify()
+      assert.equal(r.ok, false, `a malformed record verified as ${JSON.stringify(r)}`)
+      assert.equal(r.brokenAt, at, JSON.stringify(r))
+      // Appending resumed from the last real record, not from the bad one.
+      const rec = v.audit.write('test.after', {})
+      assert.ok(Number.isSafeInteger(rec.seq) && rec.seq >= at, JSON.stringify(rec))
+      assert.ok(v.audit.read({ limit: 100 }).some((x) => x.kind === 'audit.corruption_detected'))
+      v.lock()
+      assert.doesNotThrow(() => f.reopen(), 'and it opens again after that')
+    } finally { f.done() }
+  })
+}
+
+test('an empty object in the middle does not lock the owner out, and is reported', () => {
+  const f = fresh()
+  try {
+    const lines = readFileSync(f.log, 'utf8').split('\n')
+    lines[2] = '{}'
+    writeFileSync(f.log, lines.join('\n'))
+    let v
+    assert.doesNotThrow(() => { v = f.reopen() })
+    const r = v.audit.verify()
+    assert.equal(r.ok, false)
+    assert.equal(r.brokenAt, 3, JSON.stringify(r))
+  } finally { f.done() }
+})
+
+test('ordinary records, checkpoints included, are all recognised as records', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'av-fc-audit-'))
+  try {
+    const v = Vault.create(dir, { factor: 'none' })
+    // Past a checkpoint, so its different shape (a `mac`, no fields) is covered.
+    for (let i = 0; i < 1005; i++) v.audit.write('test.event', { n: i })
+    v.lock()
+    const again = Vault.open(dir)
+    again.unlockWith({})
+    assert.equal(again.audit.corruption, null)
+    assert.equal(again.audit.verify().ok, true, JSON.stringify(again.audit.verify()))
+    assert.ok(again.audit.read({ limit: 2000 }).some((x) => x.kind === 'checkpoint'))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
