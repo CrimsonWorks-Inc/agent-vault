@@ -15,6 +15,7 @@ import * as crypt from './crypto.js'
 import { id } from './ids.js'
 import { AuditLog } from './audit.js'
 import * as ph from '../core/placeholder.js'
+import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
 
@@ -141,7 +142,15 @@ export class Vault {
   }
 
   /** Unlock with whatever material a caller has: {passphrase} or {prfSecret}. */
-  unlockWith(material = {}) {
+  unlockWith(material = {}) { return this.#openWith(material, { unlock: true }) }
+
+  /**
+   * Open the master key with whatever material was supplied. With `unlock`,
+   * the vault is left unlocked and that is recorded; without it, the key is
+   * held only long enough for the caller to write to the audit log, and
+   * nothing about the lock changes — on disk or in the log.
+   */
+  #openWith(material, { unlock }) {
     const deviceKey = readFileSync(this.deviceKeyPath)
     for (const wrap of this.db.kv.vmk_wraps) {
       try {
@@ -159,8 +168,10 @@ export class Vault {
         const audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
         this.vmk = vmk
         this.audit = audit
-        if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
-        this.audit.write('vault.unlock', { factor: wrap.class })
+        if (unlock) {
+          if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
+          this.audit.write('vault.unlock', { factor: wrap.class })
+        }
         crypt.wipe(deviceKey)
         return wrap.class
       } catch {
@@ -350,20 +361,32 @@ export class Vault {
     // A vault whose only factors need a secret (passphrase, Touch ID) cannot
     // be auto-unlocked at boot: the secret is not on disk. Come up locked in
     // that case rather than crashing, and let the human unlock.
-    let unlocked = false
+    //
+    // A vault recorded as locked is opened WITHOUT unlocking it. It used to go
+    // through the full unlock, which cleared the flag on disk (a crash right
+    // there brought it up unlocked: a lock the restart forgot) and wrote a
+    // `vault.unlock` that nobody performed into the log on every boot.
+    let opened = false
     try {
-      this.unlockWith({ passphrase })
-      unlocked = true
-    } catch { unlocked = false }
+      this.#openWith({ passphrase }, { unlock: !wasLocked })
+      opened = true
+    } catch { opened = false }
 
-    if (!unlocked || wasLocked) {
+    if (!opened || wasLocked) {
       if (this.vmk) crypt.wipe(this.vmk)
       this.vmk = null
       // The audit log needs a key. Without one (a passphrase/Touch-ID vault we
       // could not open) it stays silent until the human unlocks; that is the
       // honest consequence of a cryptographic lock.
       if (this.db.kv.locked !== true) { this.db.kv.locked = true; this.#persist() }
-      if (this.audit) this.audit.write('vault.started_locked', {})
+      if (this.audit) {
+        this.audit.write('vault.started_locked', {})
+        // And then let go of the key, as lock() does. Keeping it meant a vault
+        // locked before a reboot answered audit reads that one locked
+        // explicitly refuses.
+        crypt.wipe(this.audit.key)
+        this.audit = null
+      }
       return false
     }
     return true
@@ -601,7 +624,16 @@ export class Vault {
     })
     if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
     if (Date.parse(session.expires_at) <= Date.now()) {
-      if (session.state !== 'expired') { session.state = 'expired'; this.#persist() }
+      if (session.state !== 'expired') {
+        session.state = 'expired'
+        // Its placeholders die with it, as they do on revocation. Left
+        // active, they were exempt from the ledger bound forever and counted
+        // as live in every status report.
+        for (const p of Object.values(this.db.placeholders)) {
+          if (p.sid === session.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'session_ended' }
+        }
+        this.#persist()
+      }
       throw deny('AV_SESSION_EXPIRED', `session ${session.id} expired at ${session.expires_at}`)
     }
     return session
@@ -673,7 +705,10 @@ export class Vault {
     const grant = {
       id: grantId, session_id: sessionId, credential_id: credentialId,
       fields: fields || cred.fields.map((f) => f.name),
-      policy: narrow && Object.keys(narrow).length ? { ...policy, ...narrow } : policy,
+      // Intersected, never spread. `{ ...policy, ...narrow }` let a
+      // "narrowing" replace any dimension outright — methods: ['DELETE'],
+      // approval: 'auto' — so a fork could widen the grant it came from.
+      policy: narrow && Object.keys(narrow).length ? policyMod.intersect([policy, narrow]) : policy,
       budget_used: 0, counters: { requests: 0, denials: 0 }, state: 'active',
       created_at: new Date().toISOString(),
     }
@@ -710,7 +745,11 @@ export class Vault {
     this.#requireUnlocked()
     const g = this.db.grants[grantId]
     if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
-    g.policy = { ...g.policy, ...narrow }
+    // The same intersection every request is checked against, so this can
+    // only ever remove capability. It was an object spread, which replaced
+    // whatever `narrow` named: a "narrowing" to DELETE on /admin/** with
+    // approval: 'auto' widened every one of them.
+    g.policy = policyMod.intersect([g.policy, narrow])
     this.#persist()
     this.audit.write('grant.narrowed', { grant_id: grantId, narrow })
     return g
@@ -763,9 +802,15 @@ export class Vault {
       ? ceiling
       : Math.min(asked, ceiling)
     const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
+    // Bounded by how long the session can possibly last, not by when it would
+    // expire today. Idle activity moves `expires_at` out towards
+    // `max_expires_at`, and a placeholder pinned to the first value died hours
+    // before the session it belongs to — the one `session create` hands out
+    // included. The session's own liveness is checked on every use anyway
+    // (#authenticate asserts it for token and carrier alike).
     const expires = Math.min(
       ttl ? Date.now() + ttl : Infinity,
-      Date.parse(session.expires_at),
+      Date.parse(session.max_expires_at ?? session.expires_at),
     )
     this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
@@ -931,8 +976,12 @@ export class Vault {
   #collectDeadPlaceholders() {
     const rows = Object.entries(this.db.placeholders)
     if (rows.length <= MAX_PLACEHOLDER_ROWS) return
+    // A row whose time has passed is dead whatever its state says. Rows of a
+    // session nobody touched again stay 'active' — expiry is noticed lazily —
+    // and they were exempt from this bound, so it bounded nothing.
+    const now = Date.now()
     const dead = rows
-      .filter(([, p]) => p.state !== 'active')
+      .filter(([, p]) => p.state !== 'active' || Date.parse(p.expires_at) <= now)
       .sort((a, b) => String(a[1].created_at).localeCompare(String(b[1].created_at)))
     const overBy = rows.length - MAX_PLACEHOLDER_ROWS
     for (const [id] of dead.slice(0, overBy)) delete this.db.placeholders[id]
