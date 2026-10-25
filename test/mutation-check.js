@@ -546,8 +546,8 @@ const MUTATIONS = [
   {
     what: 'exec passes real credentials to the child',
     file: 'src/cli/index.js',
-    from: "if (!looksLikeCredential(k, v)) env[k] = v",
-    to: "env[k] = v",
+    from: "if (!VAULT_GENERATED.includes(k) && !looksLikeCredential(k, v)) env[k] = v",
+    to: "if (!VAULT_GENERATED.includes(k)) env[k] = v",
     tests: ['test/security/fix-control-cli.test.js'],
   },
   {

@@ -279,8 +279,8 @@ export class Vault {
     // On a vault with no passphrase this is the ordinary case, not a corner:
     // Touch ID was its only key-bearing factor. Even where a passphrase
     // exists, "should be impossible" is how a one-way door gets left
-    // unguarded, and the cost of
-    // being wrong here is every credential in the vault, permanently.
+    // unguarded, and the cost of being wrong here is every credential in the
+    // vault, permanently.
     // removePassphrase has had this guard since the beginning; this is the
     // same guard, for the same reason.
     if (!this.db.kv.vmk_wraps.length) {
