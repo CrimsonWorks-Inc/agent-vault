@@ -12,6 +12,7 @@
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import * as zlib from 'node:zlib'
+import { pipeline as streamPipeline, PassThrough } from 'node:stream'
 import * as sub from '../core/substitute.js'
 import * as sitesMod from '../core/sites.js'
 import * as policyMod from '../core/policy.js'
@@ -57,6 +58,15 @@ const MAX_DECOMPRESSED = 64 * 1024 * 1024
 // The most of an upstream response the daemon will hold to scan it. Anything
 // larger cannot be scrubbed, and a body that cannot be scrubbed is refused.
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+// The most of one server-sent event the daemon will hold while waiting for it
+// to end. An event is held whole so it can be scanned whole, and a stream that
+// never sends a blank line would otherwise be held whole, forever.
+const MAX_EVENT_BYTES = 16 * 1024 * 1024
+
+// How many JSON key paths an event stream's reassembly tracks at once. A
+// model stream uses a handful; this bounds what a hostile one can make us keep.
+const MAX_SSE_PATHS = 64
 
 // Failures that happen before any byte could have reached the server, so the
 // placeholder use is refunded. A timeout or a reset is deliberately not here:
@@ -612,6 +622,12 @@ export class Pipeline {
     }
     headers.host = route.port ? `${decision.host}:${route.port}` : decision.host
     headers['accept-encoding'] = 'identity'
+    // Content-Length is hop-by-hop above, so the agent's never goes out —
+    // and nothing put one back, including the one substitution recomputes.
+    // Node then chunked a POST, which upstreams that need a length refuse,
+    // and sent a GET or DELETE body with no framing at all, so the upstream
+    // could not tell where the request ended on a kept-alive connection.
+    if (outgoing.body) headers['content-length'] = String(outgoing.body.length)
 
     const authority = route.port ? `${decision.host}:${route.port}` : decision.host
     // Re-encode each segment of the path policy actually approved. The
@@ -653,6 +669,7 @@ export class Pipeline {
     const auditPath = this.#redactPlaceholders(scrubber.scrub(String(decision.path ?? '').split('?')[0]).text)
 
     const outHeaders = {}
+    let headerRedactions = 0
     for (const [n, v] of Object.entries(res.headers)) {
       const lower = n.toLowerCase()
       if (lower.startsWith('av-')) continue // an upstream must not be able to fake our decisions
@@ -661,7 +678,19 @@ export class Pipeline {
       // leaves here is decompressed and re-lengthed; forwarding the originals
       // would describe bytes the agent never receives.
       if (HOP_BY_HOP.has(lower) || lower === 'content-encoding' || lower === 'content-length') continue
-      outHeaders[lower] = scrubber.scrub(String(v)).text
+      // The NAME is upstream text too. Only values were scrubbed, so an
+      // upstream that reflects input returned `x-leak-<hex of the secret>: 1`
+      // and the agent decoded the credential out of the header name. A name
+      // cannot be redacted in place, so a header whose name carries a secret
+      // is dropped. Names arrive lowercased, so the check ignores case: a
+      // secret with its case folded away is still most of a secret.
+      if (scrubber.scrub(lower).redactions || scrubber.containsIgnoringCase(lower)) {
+        headerRedactions += 1
+        continue
+      }
+      const scrubbed = scrubber.scrub(String(v))
+      headerRedactions += scrubbed.redactions
+      outHeaders[lower] = scrubbed.text
     }
 
     const contentType = String(res.headers['content-type'] || '')
@@ -679,25 +708,40 @@ export class Pipeline {
       // scrubbed zero times, audited as `response.streamed`, and trivially
       // readable with one gunzip. Any upstream that compresses a stream, and
       // any upstream that wants to, defeated the scrubber completely.
-      let source = res.res
-      if (contentEncoding && contentEncoding !== 'identity') {
-        const gunzip = decompressStream(contentEncoding)
-        if (!gunzip) {
-          throw deny('AV_UNSCANNABLE', `upstream sent a ${contentEncoding} event stream that could not be decoded, so it could not be scrubbed`, {
-            rule: 'content_encoding', hint: 'The response was discarded rather than passed through unread.',
-          })
-        }
-        source = res.res.pipe(gunzip)
+      const compressed = !!contentEncoding && contentEncoding !== 'identity'
+      const decoder = compressed ? decompressStream(contentEncoding) : new PassThrough()
+      if (!decoder) {
+        throw deny('AV_UNSCANNABLE', `upstream sent a ${contentEncoding} event stream that could not be decoded, so it could not be scrubbed`, {
+          rule: 'content_encoding', hint: 'The response was discarded rather than passed through unread.',
+        })
       }
+      // stream.pipeline, not .pipe(). `.pipe()` forwards neither errors nor a
+      // premature close: an upstream reset with no listener on the source was
+      // an uncaught exception that took the daemon down with everyone's
+      // sessions, and a reset that emitted no error left the decoder open, so
+      // the agent's response hung for good. pipeline() listens on every stage
+      // from the start — even before anyone reads — and ends the last one with
+      // the error, which scrubEventStream turns into a closing error event.
+      const source = streamPipeline(res.res, decoder, () => {})
       this.vault.audit.write('response.streamed', {
         request_id: requestId, content_type: contentType, content_encoding: contentEncoding || null,
       })
+      // The request has run. There is nothing to store for a replay, but the
+      // approval is spent, and a resend has to know that (see #approval).
+      if (approvedRequestHash) {
+        const approval = this.approvals.get(approvedRequestHash)
+        if (approval) approval.executed_at = new Date().toISOString()
+      }
       return {
-        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: 0,
-        stream: scrubEventStream(source, scrubber, () => {
-          this.vault.audit?.write('response.stream_cut', {
-            request_id: requestId, reason: 'credential_split_across_events',
-          })
+        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: headerRedactions,
+        stream: scrubEventStream(source, scrubber, {
+          // A compressed stream is an amplifier, and zlib's maxOutputLength
+          // bounds one chunk, not the stream: 71 KB of gzip streamed out 70
+          // MiB. The bound is counted here, over everything decoded.
+          maxBytes: compressed ? MAX_DECOMPRESSED : Infinity,
+          onCut: (reason) => {
+            this.vault.audit?.write('response.stream_cut', { request_id: requestId, reason })
+          },
         }),
       }
     }
@@ -720,7 +764,9 @@ export class Pipeline {
     // latin1 is a byte-for-byte round trip, so a binary body (an image, a
     // tarball, protobuf) survives unchanged while ASCII secrets still match.
     // Decoding as utf8 here silently corrupted every non-text response.
-    const { text, redactions } = scrubber.scrub(raw.toString('latin1'))
+    const scrubbedBody = scrubber.scrub(raw.toString('latin1'))
+    const text = scrubbedBody.text
+    const redactions = scrubbedBody.redactions + headerRedactions
     outHeaders['av-request-id'] = requestId
     outHeaders['av-decision'] = 'allow'
     outHeaders['av-grant'] = grant.id
@@ -972,23 +1018,52 @@ function decompress(buf, encoding) {
  * contiguous in the bytes anywhere. So the `data:` payloads are concatenated
  * and watched separately. That catches a raw-text stream split across events.
  *
- * What neither catches is a secret split across *application* fields, as in
- * `{"delta":"ghp_REAL"}` then `{"delta":"SECRET"}`: reassembling that means
- * knowing the upstream's JSON shape, which a byte proxy does not. For that
- * case the stream is cut rather than continued — the agent may have received
- * a fragment, and it will not receive the rest. It requires a hostile upstream,
- * which already holds the credential; what it buys is teaching the agent a
- * secret it was never given, and that is worth failing closed over.
+ * A secret split across *application* fields, as in `{"delta":"ghp_REAL"}`
+ * then `{"delta":"SECRET"}`, is caught by reading each JSON payload and
+ * concatenating the values found at the same key path — `delta.text`,
+ * `choices.0.delta.content` — which is how a client puts the text back
+ * together. When any of these finds a secret the stream is cut rather than
+ * continued — the agent may have received a fragment, and it will not receive
+ * the rest. It requires a hostile upstream, which already holds the
+ * credential; what it buys is teaching the agent a secret it was never given,
+ * and that is worth failing closed over.
+ *
+ * The stream is also cut, never left hanging or thrown, when the upstream
+ * fails part way, when one event grows past MAX_EVENT_BYTES without ending,
+ * and when more than `maxBytes` has been decoded.
  */
-async function* scrubEventStream(source, scrubber, onLeak) {
+async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut } = {}) {
   const frame = scrubber.stream()
   let pending = ''
+  let scanned = 0
+  let carry = ''
   let assembled = ''
+  let total = 0
+  const byPath = new Map()
+  const keep = scrubber.overlap * 4
+
+  const cut = (reason, detail) => {
+    onCut?.(reason)
+    return Buffer.from(`event: error\ndata: ${JSON.stringify({ code: 'AV_UNSCANNABLE', detail })}\n\n`, 'latin1')
+  }
+
+  /**
+   * Line endings as LF. The spec allows CRLF and a bare CR as well, and
+   * framing only on `\n\n` meant a CRLF stream was never split at all: the
+   * agent got nothing until the upstream closed, and every byte sat in
+   * `pending` until then. A CR at the very end is held back, since it may be
+   * the first half of a CRLF still in flight.
+   */
+  const lf = (text) => {
+    let t = carry + text
+    carry = ''
+    if (t.endsWith('\r')) { carry = '\r'; t = t.slice(0, -1) }
+    return t.replace(/\r\n?/g, '\n')
+  }
 
   const dataOf = (event) => event.split('\n')
     .filter((l) => l.startsWith('data:'))
     .map((l) => l.slice(5).replace(/^ /, ''))
-    .join('')
 
   /**
    * The payload so far, as a client would actually put it back together.
@@ -996,13 +1071,18 @@ async function* scrubEventStream(source, scrubber, onLeak) {
    * An LLM token stream is `{"delta":"ghp_SSE"}` then `{"delta":"CRET"}`, and
    * every client concatenates the VALUES. So this pulls out the JSON string
    * literals that are not object keys — a literal followed by `:` is a key —
-   * and joins them. That reconstructs exactly what the reader ends up with.
+   * and joins them.
    *
    * It used to strip all punctuation instead, which is wrong in both
    * directions: it glued the key text onto the value (`delta` + `ghp_...`),
    * so an exact secret could only be caught by the loose shape patterns, and
    * those then had to match without a leading boundary — which is what made
    * them fire on ordinary English like `disk-usage_by_repository`.
+   *
+   * Joining every value is still not what a client does, which is why the
+   * per-path view below exists: the metadata values of a real Anthropic
+   * stream (`content_block_delta`, `text_delta`) land between the halves of
+   * the text here, and neither half matches.
    */
   const jsonValues = (text) => {
     let out = ''
@@ -1026,35 +1106,84 @@ async function* scrubEventStream(source, scrubber, onLeak) {
     return scrubber.scrub(bare).redactions > 0
   }
 
-  for await (const chunk of source) {
-    pending += frame.push(chunk.toString('latin1'))
+  /** Append each string in one JSON payload to the run kept for its key path. */
+  const leakedByPath = (payload) => {
+    let parsed
+    try { parsed = JSON.parse(payload) } catch { return false }
+    for (const [path, value] of jsonStringsByPath(parsed)) {
+      const run = ((byPath.get(path) ?? '') + value).slice(-keep)
+      // Re-inserted so the map's order is least recently used first.
+      byPath.delete(path)
+      byPath.set(path, run)
+      if (byPath.size > MAX_SSE_PATHS) byPath.delete(byPath.keys().next().value)
+      if (scrubber.scrub(run).redactions > 0) return true
+    }
+    return false
+  }
+
+  /** Every complete event now in `pending`, taken out of it. */
+  const events = () => {
+    const out = []
     let boundary
-    while ((boundary = pending.indexOf('\n\n')) !== -1) {
-      const event = pending.slice(0, boundary + 2)
+    // From where the last search stopped: searching the whole of a growing
+    // `pending` on every chunk is quadratic in the size of one event.
+    while ((boundary = pending.indexOf('\n\n', scanned)) !== -1) {
+      out.push(pending.slice(0, boundary + 2))
       pending = pending.slice(boundary + 2)
-      assembled += dataOf(event)
-      // Keep only enough to span a split; an LLM response is unbounded.
-      if (assembled.length > scrubber.overlap * 4) {
-        assembled = assembled.slice(-scrubber.overlap * 4)
-      }
-      if (leaked(assembled)) {
-        onLeak?.()
-        yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
+      scanned = 0
+    }
+    scanned = Math.max(0, pending.length - 1)
+    return out
+  }
+
+  /** Add one event to every reassembly; true if any of them now holds a secret. */
+  const leaks = (event) => {
+    const data = dataOf(event)
+    assembled += data.join('')
+    // Keep only enough to span a split; an LLM response is unbounded.
+    if (assembled.length > keep) assembled = assembled.slice(-keep)
+    return leaked(assembled) || (data.length > 0 && leakedByPath(data.join('\n')))
+  }
+
+  const SPLIT = 'the upstream split a credential across events; the stream was cut'
+
+  try {
+    for await (const chunk of source) {
+      total += chunk.length
+      if (total > maxBytes) {
+        yield cut('stream_too_large', `the upstream stream decoded to more than ${Math.round(maxBytes / 1024 / 1024)} MiB; the stream was cut`)
         return
       }
-      yield Buffer.from(event, 'latin1')
+      pending += lf(frame.push(chunk.toString('latin1')))
+      for (const event of events()) {
+        if (leaks(event)) { yield cut('credential_split_across_events', SPLIT); return }
+        yield Buffer.from(event, 'latin1')
+      }
+      if (pending.length > MAX_EVENT_BYTES) {
+        yield cut('event_too_large', `one event grew past ${Math.round(MAX_EVENT_BYTES / 1024 / 1024)} MiB without ending; the stream was cut`)
+        return
+      }
     }
+  } catch {
+    // The upstream failed part way. What is held back is an unfinished event
+    // and is dropped with it; the agent is told the stream ended badly
+    // rather than left waiting, and nothing is thrown at the code writing
+    // the response.
+    yield cut('upstream_failed', 'the upstream stream failed before it finished; the stream was cut')
+    return
   }
-  const tail = pending + frame.flush()
-  if (tail) {
-    assembled += dataOf(tail)
-    if (leaked(assembled)) {
-      onLeak?.()
-      yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
-      return
-    }
-    yield Buffer.from(tail, 'latin1')
+  // What the scrubber held back can be several events, not one.
+  pending += lf(frame.flush()) + (carry ? '\n' : '')
+  for (const event of [...events(), pending].filter(Boolean)) {
+    if (leaks(event)) { yield cut('credential_split_across_events', SPLIT); return }
+    yield Buffer.from(event, 'latin1')
   }
 }
 
-
+/** Every string in a parsed JSON value, with its key path (`delta.text`). */
+function* jsonStringsByPath(value, path = '') {
+  if (typeof value === 'string') { yield [path, value]; return }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, path ? `${path}.${k}` : k)
+  }
+}
