@@ -90,3 +90,21 @@ export async function signed(control, auth, operation) {
   if (ch.status !== 200) throw new Error(`challenge refused: ${JSON.stringify(ch.body)}`)
   return { challengeId: ch.body.challengeId, ...auth.assert(ch.body.challenge) }
 }
+
+/** The web UI in front of a daemon, with the launch link already claimed. */
+export async function startUi(d) {
+  const { UiServer } = await import('../../src/ui/server.js')
+  const ui = await new UiServer(d.sock, { port: 0 }).start()
+  const cookie = (await fetch(ui.url, { redirect: 'manual' })).headers.get('set-cookie').split(';')[0]
+  const api = (method, path, body) => fetch(`${ui.origin}/api/${path}`, {
+    method,
+    headers: { 'x-av-ui': '1', cookie, 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  /** Do what the page does: get a challenge through the UI, sign it there. */
+  const presence = async (auth, operation) => {
+    const ch = await (await api('POST', 'presence/challenge', { operation })).json()
+    return { challengeId: ch.challengeId, ...auth.assert(ch.challenge, ui.origin) }
+  }
+  return { ui, api, presence, cookie, stop: () => ui.stop() }
+}

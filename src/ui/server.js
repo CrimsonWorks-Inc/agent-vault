@@ -307,13 +307,18 @@ export class UiServer {
         await this.#requirePresence(key, url, body, req)
       }
 
+      // The proof is forwarded, because the daemon checks it again for itself.
+      // It used to be dropped here, so a vault with any factor refused every
+      // Touch ID change made from this page as having no human behind it.
       if (key === 'POST touchid/enroll') {
         return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', {
-          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret,
+          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret, presence: body?.presence,
         }))
       }
       if (key === 'POST touchid/remove') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', { action: 'remove' }))
+        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', {
+          action: 'remove', presence: body?.presence,
+        }))
       }
 
       switch (key) {
@@ -521,7 +526,8 @@ export class UiServer {
           id: body?.id, granted: !!body?.granted, ...parseOverrides(body?.overrides || {}),
         })
       case 'POST lock': return of('vault.lock', {})
-      case 'POST touchid/enroll': return of('touchid.enroll', body)
+      // Only the fields that are forwarded, which is what the daemon binds.
+      case 'POST touchid/enroll': return of('touchid.enroll', { credential_id: body?.credential_id, prf_secret: body?.prf_secret })
       case 'POST touchid/remove': return of('touchid.remove', {})
       default: return { op: key }
     }

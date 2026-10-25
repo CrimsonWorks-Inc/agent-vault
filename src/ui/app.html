@@ -306,8 +306,11 @@
       prf = asrt.getClientExtensionResults()?.prf?.results?.first
     }
     if (!prf) throw new Error('This browser or Mac does not support the WebAuthn PRF extension, so Touch ID unlock is not available here. Your passphrase still works.')
-    await gated({ op: 'touchid.enroll' }, (proof) =>
-      api('POST', 'touchid/enroll', { credential_id: bufToB64u(cred.rawId), prf_secret: bufToB64(prf), presence: proof }))
+    // Signed over what is sent. A bare { op } bound nothing, and the servers
+    // compare against the whole request, so it never verified.
+    const body = { credential_id: bufToB64u(cred.rawId), prf_secret: bufToB64(prf) }
+    await gated(await operationFor('touchid.enroll', body), (proof) =>
+      api('POST', 'touchid/enroll', { ...body, presence: proof }))
   }
 
   /**
