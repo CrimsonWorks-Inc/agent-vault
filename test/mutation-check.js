@@ -594,6 +594,35 @@ const MUTATIONS = [
     to: '      for (const socket of []) socket.destroy()',
     tests: ['test/security/fix-control-listeners.test.js'],
   },
+  {
+    // Fix-control round 2: the prefix is not an allowlist.
+    what: 'every AGENT_VAULT_* variable is exempt from the exec scrub',
+    file: 'src/cli/index.js',
+    from: '  if (VAULT_CONFIG.has(name)) return false',
+    to: '  if (/^AGENT_VAULT/i.test(name)) return false',
+    tests: ['test/security/fix-control-cli.test.js'],
+  },
+  {
+    what: 'a URL password with an empty user part is not a password',
+    file: 'src/cli/index.js',
+    from: '  return urlHasPassword(String(value))',
+    to: '  return /:\\/\\/[^/\\s:@]+:[^/\\s@]+@/.test(String(value))',
+    tests: ['test/security/fix-control-cli.test.js'],
+  },
+  {
+    what: 'exec inherits the variables it generates',
+    file: 'src/cli/index.js',
+    from: '      if (!VAULT_GENERATED.includes(k) && !looksLikeCredential(k, v)) env[k] = v',
+    to: '      if (!looksLikeCredential(k, v)) env[k] = v',
+    tests: ['test/security/fix-control-cli.test.js'],
+  },
+  {
+    what: 'env leaves an earlier placeholder in the shell',
+    file: 'src/cli/index.js',
+    from: "    if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')",
+    to: '',
+    tests: ['test/security/fix-control-cli.test.js'],
+  },
 ]
 
 let survived = 0

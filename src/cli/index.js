@@ -701,6 +701,9 @@ const COMMANDS = {
       ['AGENT_VAULT_HINT', 'Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>'],
     ]
     const lines = vars.map(([k, v]) => `export ${k}=${shellQuote(v)}`)
+    // Evaluated into a shell that may already hold one from an earlier
+    // session, which would then ride along with this session's token.
+    if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')
     out(lines.join('\n'), { env: lines })
   },
 
@@ -717,7 +720,7 @@ const COMMANDS = {
     // AWS SDK then used the real key directly, past the vault.
     const env = {}
     for (const [k, v] of Object.entries(process.env)) {
-      if (!looksLikeCredential(k, v)) env[k] = v
+      if (!VAULT_GENERATED.includes(k) && !looksLikeCredential(k, v)) env[k] = v
     }
     Object.assign(env, {
       AGENT_VAULT: '1',
@@ -1430,10 +1433,34 @@ function shellQuote(v) {
  * in it, whatever it is called.
  */
 function looksLikeCredential(name, value) {
-  if (/^AGENT_VAULT/i.test(name)) return false
+  // The vault's own configuration, by name. The whole AGENT_VAULT prefix used
+  // to be exempt, so AGENT_VAULT_SECRET or AGENT_VAULT_PASSWORD reached the
+  // child untouched. The variables exec generates are not here: they are
+  // rebuilt from the state file, never inherited (see VAULT_GENERATED).
+  if (VAULT_CONFIG.has(name)) return false
   if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET_?KEY|CLIENT_?SECRET|CREDENTIALS?)(_|$)/i.test(name)) return true
   if (/(^|_)(KEY|DSN)$/i.test(name)) return true
-  return /:\/\/[^/\s:@]+:[^/\s@]+@/.test(String(value))
+  return urlHasPassword(String(value))
+}
+
+/** The vault settings a child may inherit as they are. */
+const VAULT_CONFIG = new Set(['AGENT_VAULT_DIR', 'AGENT_VAULT_PORT', 'AGENT_VAULT_ALLOW_ROOT'])
+
+/**
+ * What `env` and `exec` write. Never inherited: a value left over from an
+ * earlier session would sit beside this one's token — an old placeholder
+ * from another session or credential, used by whatever reads the carrier.
+ */
+const VAULT_GENERATED = ['AGENT_VAULT', 'AGENT_VAULT_URL', 'AGENT_VAULT_SESSION', 'AGENT_VAULT_PLACEHOLDER', 'AGENT_VAULT_HINT']
+
+/**
+ * Whether a value carries a URL with a password in it, anywhere. The user
+ * part may be empty: `redis://:hunter2@cache:6379` is the usual Redis form,
+ * and requiring a username let every one of them through.
+ */
+function urlHasPassword(value) {
+  if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(value)) return true
+  try { return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) && new URL(value).password !== '' } catch { return false }
 }
 
 function printHelp() {

@@ -183,3 +183,94 @@ test('a fresh-presence change on a vault with no factor says to set one, and exi
     assert.match(r.stderr, /agent-vault passphrase set/)
   } finally { await d.stop() }
 })
+
+// Round 2. The whole AGENT_VAULT prefix was exempt from the scrub, so
+// AGENT_VAULT_SECRET went straight through; and a URL password with an empty
+// user part — the usual Redis form — did not count as a password.
+test('exec drops vault-prefixed secrets and user-less URL passwords', async () => {
+  const d = await withCliDaemon()
+  try {
+    await cli(d.dir, ['session', 'create', '--cred', 'demo'])
+    const planted = {
+      AGENT_VAULT_SECRET: 'synthetic-av-secret', AGENT_VAULT_PASSWORD: 'synthetic-av-password',
+      CACHE_URL: 'redis://:synthetic-redis-password@localhost:6379',
+      QUEUE: 'amqps://:synthetic-amqp-password@mq.example:5671/vhost',
+    }
+    const r = await cli(d.dir, ['exec', '--', process.execPath, '-e', 'console.log(JSON.stringify(process.env))'], { env: planted })
+    assert.equal(r.code, 0, r.stderr)
+    const seen = JSON.parse(r.stdout.trim().split('\n').pop())
+    for (const k of Object.keys(planted)) assert.ok(!(k in seen), `${k} reached the child`)
+    assert.ok(!r.stdout.includes('synthetic-'), 'a planted value reached the child under some name')
+  } finally { await d.stop() }
+})
+
+test('exec keeps the vault settings and URLs with no password in them', async () => {
+  const d = await withCliDaemon()
+  try {
+    await cli(d.dir, ['session', 'create', '--cred', 'demo'])
+    const kept = {
+      AGENT_VAULT_PORT: '7420', REDIS_URL: 'redis://localhost:6379/0', API_BASE: 'http://[::1]:8080/v1',
+      GIT_REMOTE: 'https://git@github.com/org/repo.git', NOTE: 'meet me @ 10:30 http://x/y',
+    }
+    const r = await cli(d.dir, ['exec', '--', process.execPath, '-e', 'console.log(JSON.stringify(process.env))'], { env: kept })
+    assert.equal(r.code, 0, r.stderr)
+    const seen = JSON.parse(r.stdout.trim().split('\n').pop())
+    for (const [k, v] of Object.entries(kept)) assert.equal(seen[k], v, `${k} was dropped or changed`)
+    assert.equal(seen.AGENT_VAULT_DIR, d.dir, 'the vault directory is a setting, not a secret')
+    assert.match(seen.AGENT_VAULT_SESSION, /^avs1\./)
+  } finally { await d.stop() }
+})
+
+/** Two sessions, with the state left holding the second token and no placeholder. */
+async function tokenOnlyAfterAnother(d) {
+  const first = JSON.parse((await cli(d.dir, ['session', 'create', '--cred', 'demo', '--json'])).stdout).data
+  const second = JSON.parse((await cli(d.dir, ['session', 'create', '--cred', 'demo', '--json'])).stdout).data
+  const path = join(d.dir, 'cli-state.json')
+  const st = JSON.parse(readFileSync(path, 'utf8'))
+  assert.equal(st.token, second.token, 'the fixture records the second session')
+  delete st.placeholder
+  writeFileSync(path, JSON.stringify(st))
+  assert.match(first.placeholder, /^av1\./)
+  return { first, second }
+}
+
+test('exec does not pass on a placeholder inherited from an earlier session', async () => {
+  const d = await withCliDaemon()
+  try {
+    const { first, second } = await tokenOnlyAfterAnother(d)
+    const r = await cli(d.dir, ['exec', '--', process.execPath, '-e', 'console.log(JSON.stringify(process.env))'], {
+      env: { AGENT_VAULT_PLACEHOLDER: first.placeholder, AGENT_VAULT_SESSION: first.token, AGENT_VAULT_URL: 'http://127.0.0.1:1/' },
+    })
+    assert.equal(r.code, 0, r.stderr)
+    const seen = JSON.parse(r.stdout.trim().split('\n').pop())
+    assert.equal(seen.AGENT_VAULT_PLACEHOLDER, undefined, 'the old session\'s placeholder rode along')
+    assert.equal(seen.AGENT_VAULT_SESSION, second.token)
+    assert.notEqual(seen.AGENT_VAULT_URL, 'http://127.0.0.1:1/')
+  } finally { await d.stop() }
+})
+
+test('env output clears a placeholder the shell already holds when there is none now', async () => {
+  const d = await withCliDaemon()
+  try {
+    const { first } = await tokenOnlyAfterAnother(d)
+    const r = await cli(d.dir, ['env'])
+    assert.equal(r.code, 0, r.stderr)
+    const shown = spawnSync('sh', ['-c', 'eval "$1"; printf "[%s]" "${AGENT_VAULT_PLACEHOLDER-unset}"', 'sh', r.stdout], {
+      encoding: 'utf8', env: { ...process.env, AGENT_VAULT_PLACEHOLDER: first.placeholder },
+    })
+    assert.equal(shown.stdout, '[unset]', 'an earlier session\'s placeholder survived the eval')
+  } finally { await d.stop() }
+})
+
+test('exec and env still deliver the current placeholder when there is one', async () => {
+  const d = await withCliDaemon()
+  try {
+    const s = JSON.parse((await cli(d.dir, ['session', 'create', '--cred', 'demo', '--json'])).stdout).data
+    const r = await cli(d.dir, ['exec', '--', process.execPath, '-e', 'console.log(process.env.AGENT_VAULT_PLACEHOLDER)'], {
+      env: { AGENT_VAULT_PLACEHOLDER: 'av1.stale' },
+    })
+    assert.equal(r.stdout.trim().split('\n').pop(), s.placeholder)
+    const env = await cli(d.dir, ['env'])
+    assert.ok(!env.stdout.includes('unset'), env.stdout)
+  } finally { await d.stop() }
+})
