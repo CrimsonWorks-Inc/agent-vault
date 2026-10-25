@@ -61,13 +61,23 @@ export class McpServer {
       this.sessions.delete(oldest)
     }
     const sid = randomUUID()
-    this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1 })
+    // Whether it was recorded is kept with it, so the close can match.
+    this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1, recorded: !!record })
     if (record) this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
     return sid
   }
 
-  closeSession(sid) {
-    if (this.sessions.delete(sid)) this.vault.audit?.write('mcp.session_closed', { mcp_session_id: sid })
+  /**
+   * Forget a transport session. Recorded when its opening was, or when the
+   * caller closing it has a live session. Always recording it undid the quiet
+   * anonymous initialize: closing needs no token either, so initialize and
+   * DELETE in a loop wrote a record per cycle while holding no memory at all.
+   */
+  closeSession(sid, { record = false } = {}) {
+    const entry = this.sessions.get(sid)
+    if (!entry) return
+    this.sessions.delete(sid)
+    if (entry.recorded || record) this.vault.audit?.write('mcp.session_closed', { mcp_session_id: sid })
   }
 
   hasSession(sid) { return this.sessions.has(sid) }

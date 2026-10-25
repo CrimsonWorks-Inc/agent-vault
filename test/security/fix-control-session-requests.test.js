@@ -191,3 +191,39 @@ test('the web page never sees the token, single or batch', async () => {
     await u.stop()
   }
 })
+
+// Round 2. Closing needs no token either, and every close was recorded, so an
+// initialize and DELETE loop wrote a record per cycle while holding no memory.
+const mcpAt = (method, headers = {}, body) => fetch(`http://127.0.0.1:${d.daemon.gatewayPort}/mcp`, {
+  method, headers: { 'content-type': 'application/json', ...headers }, body,
+})
+const initBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} })
+
+test('anonymous MCP open and close cycles write nothing to the audit log', async () => {
+  const before = d.vault.audit.seq
+  for (let i = 0; i < 100; i++) {
+    const res = await mcpAt('POST', {}, initBody)
+    const sid = res.headers.get('mcp-session-id')
+    assert.ok(sid)
+    assert.equal((await mcpAt('DELETE', { 'mcp-session-id': sid })).status, 204)
+    assert.ok(!d.daemon.mcp.hasSession(sid), 'the close still closes')
+  }
+  const written = d.vault.audit.seq - before
+  assert.ok(written < 10, `${written} audit records for 100 anonymous open/close cycles`)
+})
+
+test('an authenticated client\'s MCP session is recorded when it opens and when it closes', async () => {
+  present()
+  const s = await d.control('POST', '/v1/sessions', { cred: 'demo', methods: ['GET'] })
+  absent()
+  const auth = { authorization: `Bearer ${s.body.token}` }
+  const sid = (await mcpAt('POST', auth, initBody)).headers.get('mcp-session-id')
+  assert.equal((await mcpAt('DELETE', { ...auth, 'mcp-session-id': sid })).status, 204)
+  const kinds = d.vault.audit.read({ limit: 20 }).filter((r) => r.mcp_session_id === sid).map((r) => r.kind)
+  assert.deepEqual(kinds, ['mcp.session_opened', 'mcp.session_closed'])
+
+  // Recorded at the open, so the close is recorded whoever sends it.
+  const sid2 = (await mcpAt('POST', auth, initBody)).headers.get('mcp-session-id')
+  await mcpAt('DELETE', { 'mcp-session-id': sid2 })
+  assert.ok(d.vault.audit.read({ limit: 20 }).some((r) => r.kind === 'mcp.session_closed' && r.mcp_session_id === sid2))
+})

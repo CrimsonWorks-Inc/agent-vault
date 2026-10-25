@@ -902,7 +902,7 @@ export class Daemon {
 
     if (req.method === 'DELETE') {
       const sid = req.headers['mcp-session-id']
-      if (sid) this.mcp.closeSession(sid)
+      if (sid) this.mcp.closeSession(sid, { record: !!session })
       return send(204, null)
     }
 

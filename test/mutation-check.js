@@ -653,6 +653,14 @@ const MUTATIONS = [
     to: '    const ttl = ttlMs ?? positive(Number(phPolicy.ttl) * 1000)',
     tests: ['test/security/fix-control-ledger.test.js'],
   },
+  {
+    // Fix-control round 2: a quiet open needs a quiet close.
+    what: 'every MCP transport close is audited, anonymous ones included',
+    file: 'src/daemon/mcp.js',
+    from: "    if (entry.recorded || record) this.vault.audit?.write('mcp.session_closed'",
+    to: "    if (true) this.vault.audit?.write('mcp.session_closed'",
+    tests: ['test/security/fix-control-session-requests.test.js'],
+  },
 ]
 
 let survived = 0
