@@ -1493,6 +1493,45 @@ const MUTATIONS = [
     to: '  if (false) {',
     tests: ['test/security/store-backup.test.js'],
   },
+  // ---- store F19: activity ----
+  {
+    // F19's own mutation.
+    what: "a denial's detail is copied into the activity",
+    file: 'src/store/activity.js',
+    from: '      const d = denials.get(key) ?? { code, rule, count: 0 }',
+    to: '      const d = denials.get(key) ?? { code, rule, count: 0, detail: r.detail }',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    // Missing records are not zero activity.
+    what: 'a log that starts after the session is reported complete',
+    file: 'src/store/activity.js',
+    from: "  const note = anomaly ?? (created ? null : 'the audit log starts after this session was created, so its early activity is not in it')",
+    to: '  const note = anomaly',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    what: 'a truncated or unanchored log is reported complete',
+    file: 'src/store/activity.js',
+    from: '  const hit = rows.find((r) => ANOMALIES.has(r.kind))',
+    to: '  const hit = null',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    what: 'a placeholder in a recorded path is repeated in the activity',
+    file: 'src/store/activity.js',
+    from: "  for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}[[av:placeholder]]${out.slice(hit.end)}`\n",
+    to: '',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    // A held write counted as a use hides it from unused_methods.
+    what: 'a request held for approval counts as a use',
+    file: 'src/store/activity.js',
+    from: '  return (r) => ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)',
+    to: '  return (r) => false',
+    tests: ['test/security/store-activity.test.js'],
+  },
 ]
 
 let survived = 0

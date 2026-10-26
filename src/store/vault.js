@@ -71,7 +71,7 @@ function shortenedIso(current, now, ttlMs) {
 export const EXPIRY_WARN_DAYS = 7
 
 /** 'expired', 'soon' or null. The sooner of the human's date and the observed one wins. */
-function expiryWarning(cred, now = Date.now()) {
+export function expiryWarning(cred, now = Date.now()) {
   const dates = [cred.expires_at, cred.health?.observed_expires_at].filter((d) => d != null)
   if (!dates.length) return null
   const ends = Math.min(...dates.map(expiryMs))
