@@ -56,6 +56,34 @@ test('elevationOf fails closed on anything it cannot read', () => {
   assert.deepEqual(elevationOf(hostile), ['approval_auto_writes'])
 })
 
+test('elevationOf fails closed on an unreadable list whatever the approval mode', () => {
+  // Contract 0.4: a spec it cannot read is elevated. Not only when it says
+  // auto: what it would permit is exactly the part that cannot be read.
+  for (const spec of [
+    { cred: 'demo', methods: 'POST' },
+    { cred: 'demo', methods: 7 },
+    { cred: 'demo', approval: 'on-write', methods: 'POST' },
+    { cred: 'demo', approval: 'each', methods: ['GET', 7] },
+    { cred: 'demo', routes: 'POST /x' },
+    { cred: 'demo', approval: 'each', routes: [{ methods: 'DELETE', paths: ['/x'] }] },
+    { cred: 'demo', routes: [null] },
+    { grants: [{ cred: 'a', methods: ['GET'] }, { cred: 'b', methods: 'POST' }] },
+    { grants: [{ cred: 'a' }, { cred: 'b', approval: 'first-use', routes: 'GET:/x' }], infinite: false },
+  ]) {
+    assert.deepEqual(elevationOf(spec), ['approval_auto_writes'], JSON.stringify(spec))
+  }
+  assert.deepEqual(elevationOf({ cred: 'demo', methods: 'POST', infinite: true }).sort(), ['approval_auto_writes', 'infinite'])
+
+  // Readable lists are read as before: absent or null is the default, and a
+  // mode other than auto asks before writes, so none of these is elevated.
+  assert.deepEqual(elevationOf({ cred: 'demo', methods: null, routes: null }), [])
+  assert.deepEqual(elevationOf({ cred: 'demo', approval: 'each', methods: ['POST'], routes: [{ methods: ['DELETE'], paths: ['/x'] }] }), [])
+  assert.deepEqual(elevationOf({ grants: [{ cred: 'a', methods: ['GET'] }, { cred: 'b', approval: 'on-write', methods: ['POST'] }] }), [])
+  assert.deepEqual(elevationOf({ cred: 'demo', approval: 'auto', routes: [{ methods: ['GET'], paths: ['/x'] }] }), [])
+  // An unknown mode is not auto here either; #planSession refuses it (below).
+  assert.deepEqual(elevationOf({ cred: 'demo', approval: 'yolo', methods: ['POST'] }), [])
+})
+
 test('owner fields are read by one parser, and the CLI parse feeds it', () => {
   assert.deepEqual(OWNER_FIELDS, ['approval', 'infinite'])
   assert.deepEqual(overridesOf({ methods: ['GET'], approval: 'auto', infinite: true, junk: 1 }), {

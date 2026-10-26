@@ -1164,6 +1164,14 @@ const MUTATIONS = [
   },
   // ---- wave 2, requested: R1 (elevated sessions) -----------------------------
   {
+    // Contract 0.4: unreadable means elevated, whatever the approval mode.
+    what: 'elevationOf reads an unreadable methods or routes list as ordinary unless it says auto',
+    file: 'src/daemon/session-requests.js',
+    from: 'grants.some((g) => !readable(g) || (g.approval === \'auto\' && permitsWrite(g)))',
+    to: 'grants.some((g) => (g.approval === \'auto\' && permitsWrite(g)))',
+    tests: ['test/security/requested-r1.test.js'],
+  },
+  {
     // One function decides elevation for create, decide and decide-many. If it
     // calls everything ordinary, the window lets an agent make auto-writes.
     what: 'elevationOf calls every session ordinary, so auto with writes rides the window',

@@ -79,9 +79,11 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
  * function decides this for creating, deciding and bulk-deciding, so no path
  * can call an elevated session ordinary.
  *
- * Fail-closed: anything it cannot read counts as elevated. `methods` absent or
- * null is the creation default, GET and HEAD, which is how #createSession
- * reads it too; anything else that is not a list of strings is a write.
+ * Fail-closed: anything it cannot read counts as elevated, whatever its
+ * approval mode. `methods` absent or null is the creation default, GET and
+ * HEAD, which is how #createSession reads it too; `methods` or `routes`
+ * present as anything but a list of method names is unreadable. An unknown
+ * approval mode is not read here at all: #planSession refuses it.
  */
 export function elevationOf(spec) {
   const out = []
@@ -90,7 +92,7 @@ export function elevationOf(spec) {
     if (spec.infinite === true) out.push('infinite')
     if (spec.grants !== undefined && !Array.isArray(spec.grants)) return [...out, 'approval_auto_writes']
     const grants = spec.grants !== undefined ? spec.grants : [spec]
-    if (grants.some((g) => !g || typeof g !== 'object' || Array.isArray(g) || (g.approval === 'auto' && permitsWrite(g)))) {
+    if (grants.some((g) => !readable(g) || (g.approval === 'auto' && permitsWrite(g)))) {
       out.push('approval_auto_writes')
     }
     return out
@@ -99,20 +101,22 @@ export function elevationOf(spec) {
   }
 }
 
-/** Whether a grant spec permits a method outside GET, HEAD and OPTIONS. */
-function permitsWrite(g) {
-  const methods = g.methods == null ? ['GET', 'HEAD'] : g.methods
-  if (!Array.isArray(methods)) return true
-  const named = [...methods]
+const names = (v) => Array.isArray(v) && v.every((m) => typeof m === 'string')
+
+/** Whether elevationOf can tell what a grant spec permits. */
+function readable(g) {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return false
+  if (g.methods != null && !names(g.methods)) return false
   // Method-bound routes (F3) name methods of their own.
-  if (g.routes != null) {
-    if (!Array.isArray(g.routes)) return true
-    for (const r of g.routes) {
-      if (!r || !Array.isArray(r.methods)) return true
-      named.push(...r.methods)
-    }
-  }
-  return named.some((m) => typeof m !== 'string' || !SAFE_METHODS.has(m.toUpperCase()))
+  if (g.routes != null && !(Array.isArray(g.routes) && g.routes.every((r) => r && names(r.methods)))) return false
+  return true
+}
+
+/** Whether a readable grant spec permits a method outside GET, HEAD and OPTIONS. */
+function permitsWrite(g) {
+  const named = [...(g.methods == null ? ['GET', 'HEAD'] : g.methods)]
+  for (const r of g.routes || []) named.push(...r.methods)
+  return named.some((m) => !SAFE_METHODS.has(m.toUpperCase()))
 }
 
 export function fingerprint(proposal) {
