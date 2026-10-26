@@ -1172,6 +1172,14 @@ const MUTATIONS = [
     tests: ['test/security/requested-r1.test.js'],
   },
   {
+    // `granted: "false"` is truthy and approved an ordinary request.
+    what: 'the single decide route takes any truthy verdict',
+    file: 'src/daemon/server.js',
+    from: "          if (typeof input.granted !== 'boolean') {",
+    to: '          if (false) {',
+    tests: ['test/security/requested-r1.test.js'],
+  },
+  {
     // One function decides elevation for create, decide and decide-many. If it
     // calls everything ordinary, the window lets an agent make auto-writes.
     what: 'elevationOf calls every session ordinary, so auto with writes rides the window',

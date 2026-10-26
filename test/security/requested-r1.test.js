@@ -335,6 +335,38 @@ test('a request approved without owner options stays ordinary, inside the window
   } finally { await d.stop() }
 })
 
+test('a verdict that is not true or false is refused on the single decide route', async () => {
+  const d = await startDaemon({ passphrase: PASSPHRASE })
+  try {
+    const id = await requestFor(d, { methods: ['GET'] })
+    const before = sessionCount(d)
+    // Refused before the gate, so with no window it is the verdict that is
+    // wrong, not the presence. `"false"` is truthy and used to approve.
+    for (const granted of ['false', 0, 1, null, undefined, 'true']) {
+      const r = await d.control('POST', '/v1/session-requests/decide', { id, granted })
+      assert.equal(r.status, 403, `${JSON.stringify(granted)}: ${JSON.stringify(r.body)}`)
+      assert.equal(r.body.rule, 'bulk_decision')
+    }
+    openWindow(d)
+    for (const granted of ['false', 0, 1, null]) {
+      const r = await d.control('POST', '/v1/session-requests/decide', { id, granted })
+      assert.equal(r.status, 403, `${JSON.stringify(granted)}: ${JSON.stringify(r.body)}`)
+      assert.equal(r.body.rule, 'bulk_decision')
+    }
+    assert.equal(d.daemon.sessionRequests.get(id).state, 'pending', 'nothing was decided')
+    assert.equal(sessionCount(d), before, 'and nothing was created')
+
+    // A real verdict still works, both ways.
+    const ok = await d.control('POST', '/v1/session-requests/decide', { id, granted: true })
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    assert.equal(sessionCount(d), before + 1)
+    const id2 = await requestFor(d, { methods: ['GET'] })
+    const no = await d.control('POST', '/v1/session-requests/decide', { id: id2, granted: false })
+    assert.equal(no.status, 200, JSON.stringify(no.body))
+    assert.equal(d.daemon.sessionRequests.get(id2).state, 'denied')
+  } finally { await d.stop() }
+})
+
 test('an override with an unknown mode is refused when it is settled', async () => {
   const d = await startDaemon({ passphrase: PASSPHRASE })
   try {

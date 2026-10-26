@@ -225,6 +225,11 @@ export class Daemon {
 
   /** The decision itself, after the gate has let it through. */
   #settleSessionRequest(record, granted, final) {
+    // Not truthiness, here as in checkDecisions: `granted: "false"` is a
+    // string, and it approved.
+    if (typeof granted !== 'boolean') {
+      throw deny('AV_POLICY_DENIED', 'the verdict must be true or false', { rule: 'bulk_decision' })
+    }
     if (!granted) {
       record.state = 'denied'
       record.decided_at = new Date().toISOString()
@@ -1259,6 +1264,10 @@ export class Daemon {
         }
 
         case 'POST /v1/session-requests/decide': {
+          // Before the gate, which reads the verdict to decide what to ask for.
+          if (typeof input.granted !== 'boolean') {
+            throw deny('AV_POLICY_DENIED', 'the verdict must be true or false', { rule: 'bulk_decision' })
+          }
           const record = this.sessionRequests.get(input.id)
           if (!record) throw deny('AV_NOT_FOUND', `no session request ${input.id}`)
           if (record.state !== 'pending') {
