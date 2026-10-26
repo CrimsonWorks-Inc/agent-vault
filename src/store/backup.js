@@ -9,6 +9,9 @@
 // export writes nothing but its audit record, and restore goes through the
 // vault's restoreEntries, which seals each value as it stores it.
 //
+// A credential's quarantine travels with it, and restore puts it back: a
+// restore must never release what a human or a tripwire stopped.
+//
 // What a bundle carries is a closed list. Sessions, grants, placeholders,
 // approvals, listeners, factors, wraps, settings and the audit log are not in
 // it, so a restore gives no capability back, and a bundle that carries
@@ -33,7 +36,7 @@ const MAX_BUNDLE_BYTES = 16 * 1024 * 1024
 const MIN_RECOVERY = 12
 const CONFLICT_MODES = new Set(['skip', 'rename', 'fail'])
 
-const CRED_KEYS = new Set(['slug', 'kind', 'connector', 'created_at', 'fields', 'scrub_patterns', 'pins', 'expires_at'])
+const CRED_KEYS = new Set(['slug', 'kind', 'connector', 'created_at', 'fields', 'scrub_patterns', 'pins', 'expires_at', 'quarantine'])
 const FIELD_KEYS = new Set(['name', 'value', 'sites'])
 const PATTERN_KEYS = new Set(['id', 'source', 'added_at'])
 const TEMPLATE_KEYS = new Set(['name', 'spec'])
@@ -112,6 +115,8 @@ function checkPlaintext(plain) {
     if (c.expires_at != null && (typeof c.expires_at !== 'string' || Number.isNaN(Date.parse(c.expires_at)))) {
       throw formatError(`the expiry of ${c.slug} is malformed`)
     }
+    // Its values are checked by the vault, with setQuarantine's rules, when it is restored.
+    if (c.quarantine != null && !plainObject(c.quarantine)) throw formatError(`the quarantine of ${c.slug} is malformed`)
   }
   for (const t of plain.templates) {
     // The same rules saveTemplate applies, so a restore cannot stop halfway on one.
@@ -146,8 +151,8 @@ async function openBundle(bundle, recoveryPassphrase) {
 }
 
 /**
- * Seal every credential (current values only), its scrub patterns, pins and
- * expiry, and every template, under a key derived from the recovery
+ * Seal every credential (current values only), its scrub patterns, pins,
+ * expiry and quarantine, and every template, under a key derived from the recovery
  * passphrase. Recorded by digest, after it is built: a vault that locked while
  * the key was being derived cannot record it, so it hands nothing out.
  */
@@ -189,6 +194,7 @@ export async function inspectBackup(bundle, { recoveryPassphrase } = {}) {
       has_scrub_patterns: !!c.scrub_patterns?.length,
       has_pins: Object.values(c.pins ?? {}).some((l) => l.length),
       expires_at: c.expires_at ?? null,
+      quarantined: c.quarantine != null,
     })),
     templates: plain.templates.map((t) => t.name),
   }
@@ -241,7 +247,7 @@ export async function restoreBackup(vault, bundle, { recoveryPassphrase, onConfl
       renames.push({ from: c.slug, to: slug })
     }
     taken.add(slug)
-    plan.push({ ...c, slug })
+    plan.push({ ...c, slug, from: c.slug })
   }
   let out
   try { out = vault.restoreEntries({ credentials: plan, templates: plain.templates }) } catch (e) { throw refused(e) }

@@ -86,6 +86,30 @@ function isoOrUndefined(v) {
   return Number.isNaN(ms) ? undefined : new Date(ms).toISOString()
 }
 
+/**
+ * A bundle's quarantine record, checked by the rules setQuarantine keeps, or
+ * the whole restore refused: one that cannot be read is never dropped, since
+ * dropping it would release the credential.
+ */
+function restoredQuarantine(q, format) {
+  const ok = q && typeof q === 'object' && !Array.isArray(q) &&
+    Object.keys(q).every((k) => ['since', 'by', 'rule_id', 'reason_untrusted'].includes(k)) &&
+    isoOrUndefined(q.since) !== undefined && (q.by === 'control' || q.by === 'tripwire') &&
+    (q.rule_id == null || (typeof q.rule_id === 'string' && /^[a-z0-9_-]{1,32}$/.test(q.rule_id))) &&
+    (q.reason_untrusted == null || (typeof q.reason_untrusted === 'string' && q.reason_untrusted.length <= 200))
+  if (!ok) throw format('a quarantine record is malformed')
+  return { since: q.since, by: q.by, rule_id: q.rule_id ?? null, reason_untrusted: q.reason_untrusted ?? null }
+}
+
+/** `a` is `b`, or a restored copy of it (`-restored`, `-restored-2`, … as F8 renames), or `b` is one of `a`. */
+function sameCredential(a, b) {
+  const copyOf = (slug, base) => {
+    const m = /-restored(?:-\d+)?$/.exec(slug)
+    return !!m && slug.slice(0, m.index) === base.slice(0, 24 - m[0].length)
+  }
+  return a === b || copyOf(a, b) || copyOf(b, a)
+}
+
 const DAY_MS = 86_400_000
 
 // Binds the sealed webhook URL to what it is, so no other blob opens as one.
@@ -1307,9 +1331,10 @@ export class Vault {
 
   /**
    * Every credential as a backup carries it (F8): current values, sites,
-   * scrub patterns, pins and expiry. Quarantined ones too, because a backup
-   * that left them out would lose them. Only the export reads this, behind a
-   * fresh proof of presence.
+   * scrub patterns, pins, expiry and quarantine. Quarantined ones too, because
+   * a backup that left them out would lose them, and with their quarantine as
+   * stored, because a restore must not release them. Only the export reads
+   * this, behind a fresh proof of presence.
    */
   backupCredentials() {
     this.#requireUnlocked()
@@ -1319,6 +1344,7 @@ export class Vault {
       scrub_patterns: (c.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
       pins: c.pins ?? {},
       expires_at: c.expires_at ?? null,
+      quarantine: c.quarantine ? structuredClone(c.quarantine) : null,
     }))
   }
 
@@ -1330,6 +1356,14 @@ export class Vault {
    * and then threw on that credential's scrub pattern was a refusal that had
    * changed the vault; now a refusal anywhere, or a write that fails, leaves
    * the vault as it was.
+   *
+   * A restore never releases a quarantine. A credential quarantined in the
+   * bundle comes back quarantined, with the record as it was stored. One this
+   * vault holds quarantined under the bundle's slug (`from`, the slug before a
+   * rename) or under a renamed copy of it keeps the restored copy quarantined,
+   * whatever the bundle says, so restoring an older bundle under `rename`
+   * cannot hand out a released copy. Releasing stays clearQuarantine, a
+   * human's explicit act.
    *
    * `credentials` are in bundle form with conflicts already resolved: a slug
    * that is taken is refused. A template whose name is taken is skipped, the
@@ -1377,6 +1411,16 @@ export class Vault {
       if (patternTotal > MAX_SCRUB_TOTAL) throw scrubRefusal(`at most ${MAX_SCRUB_TOTAL} patterns in the vault`)
       for (const p of patterns) this.#checkScrubSource(p?.source, secrets)
       if (patterns.length) cred.scrub_patterns = patterns.map((p) => ({ id: id.scrubPattern(), source: p.source, added_at: now }))
+      if (c.quarantine != null) cred.quarantine = restoredQuarantine(c.quarantine, format)
+      else {
+        // The earliest, as setQuarantine keeps the first record.
+        const names = [c.from ?? c.slug, c.slug]
+        const held = Object.values(this.db.credentials)
+          .filter((h) => h.quarantine && names.some((n) => sameCredential(h.slug, n)))
+          .map((h) => h.quarantine)
+          .sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0]
+        if (held) cred.quarantine = structuredClone(held)
+      }
       staged.push(cred)
     }
     const before = this.db.templates
@@ -1411,6 +1455,10 @@ export class Vault {
       this.audit.write('cred.added', { credential_slug: cred.slug, connector: cred.connector_kind, fields: cred.fields.map((f) => f.name) })
       if (cred.expires_at !== undefined) this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: cred.expires_at })
       for (const p of cred.scrub_patterns ?? []) this.#auditScrubPattern(cred, p)
+      if (cred.quarantine) {
+        const { since, by, rule_id, reason_untrusted } = cred.quarantine
+        this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted, since, restored: true })
+      }
     }
     for (const name of restoredTemplates) {
       const t = this.db.templates[name]

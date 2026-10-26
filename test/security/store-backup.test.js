@@ -79,7 +79,8 @@ test('the plaintext is credentials and templates only: no session, grant, placeh
     const plain = await plaintextOf(bundle)
     assert.deepEqual(Object.keys(plain).sort(), ['credentials', 'templates'])
     const demo = plain.credentials.find((c) => c.slug === 'demo')
-    assert.deepEqual(Object.keys(demo).sort(), ['connector', 'created_at', 'expires_at', 'fields', 'kind', 'pins', 'scrub_patterns', 'slug'])
+    // quarantine travels with the credential, so a restore cannot release it (round 3).
+    assert.deepEqual(Object.keys(demo).sort(), ['connector', 'created_at', 'expires_at', 'fields', 'kind', 'pins', 'quarantine', 'scrub_patterns', 'slug'])
     assert.deepEqual(demo.fields.map((f) => f.value), ['ghp_ROTATEDBACKUP00112233445566778899aa'])
     assert.ok(!JSON.stringify(plain).includes(SECRET), 'a retired value was exported')
     assert.deepEqual(plain.templates, [{ name: 'gh-read', spec: { cred: 'demo', methods: ['GET'], spend_usd: 0.5 } }])
@@ -95,7 +96,7 @@ test('inspect lists what a bundle holds without a single value', async () => {
     assert.equal(out.created_at, bundle.created_at)
     assert.deepEqual(out.credentials.find((c) => c.slug === 'demo'), {
       slug: 'demo', kind: 'http', host: 'api.example.com', fields: ['token'],
-      has_scrub_patterns: true, has_pins: false, expires_at: '2031-01-01T00:00:00.000Z',
+      has_scrub_patterns: true, has_pins: false, expires_at: '2031-01-01T00:00:00.000Z', quarantined: false,
     })
     assert.deepEqual(out.templates, ['gh-read'])
     assert.ok(!JSON.stringify(out).includes(SECRET))

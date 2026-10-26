@@ -1670,6 +1670,38 @@ const MUTATIONS = [
     to: '      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow })',
     tests: ['test/security/store-review-r2.test.js'],
   },
+  {
+    // Round 3 (a): a restore must never release a quarantine.
+    what: "a backup leaves out each credential's quarantine",
+    file: 'src/store/vault.js',
+    from: '      quarantine: c.quarantine ? structuredClone(c.quarantine) : null,',
+    to: '      quarantine: null,',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (b).
+    what: "a restore drops the bundle's quarantine instead of re-applying it",
+    file: 'src/store/vault.js',
+    from: '      if (c.quarantine != null) cred.quarantine = restoredQuarantine(c.quarantine, format)',
+    to: '      if (c.quarantine != null) restoredQuarantine(c.quarantine, format)',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (c).
+    what: "a restore releases the copy of a credential this vault holds quarantined",
+    file: 'src/store/vault.js',
+    from: '        if (held) cred.quarantine = structuredClone(held)',
+    to: '        if (held) void held',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (c): a renamed copy holds the restore too.
+    what: "only the exact slug holds a restore, not a renamed copy of it",
+    file: 'src/store/vault.js',
+    from: '  return a === b || copyOf(a, b) || copyOf(b, a)',
+    to: '  return a === b',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
 ]
 
 let survived = 0
