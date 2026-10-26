@@ -399,6 +399,76 @@ export class AuditLog {
     return { ok: true, count: rows.length, head: prev }
   }
 
+
+  export({ sinceSeq = 0, limit = 5000 } = {}) {
+    if (limit < 1) limit = 1
+    if (limit > 5000) limit = 5000
+    const all = this.read({ limit: 1000000 })
+    const rows = all.filter(r => r.seq > sinceSeq).slice(0, limit)
+    const next_seq = rows.length ? rows[rows.length - 1].seq : sinceSeq
+    const res = { rows, next_seq, head: { seq: this.seq, hash: this.prevHash } }
+    this.write('audit.exported', { from_seq: rows[0]?.seq || null, to_seq: next_seq, rows: rows.length })
+    return res
+  }
+
+  checkpoint(['vault_' + 'id']) {
+    const seq = this.seq
+    const head = this.prevHash
+    const ts = new Date().toISOString()
+    const mac = require('node:crypto').createHmac('sha256', this.key).update(`witness|${['vault_' + 'id']}|${seq}|${head}|${ts}`).digest('hex')
+    this.write('audit.checkpoint_issued', { seq })
+    return { ['vault_' + 'id'], seq, head, ts, mac }
+  }
+
+  verifyWitness(checkpoints, ['vault_' + 'id']) {
+    const res = { ok: true, checked: 0, ahead: [], mismatched: [], forged: [], other_vault: [] }
+    const rowsMap = new Map()
+    const rows = this.read({ limit: 1000000 })
+    for (const r of rows) rowsMap.set(r.seq, r)
+
+    for (let i = 0; i < checkpoints.length; i++) {
+      const c = checkpoints[i]
+      const expectedMac = require('node:crypto').createHmac('sha256', this.key).update(`witness|${c.['vault_' + 'id']}|${c.seq}|${c.head}|${c.ts}`).digest('hex')
+      if (c.mac !== expectedMac) {
+        res.forged.push(i)
+        res.ok = false
+        continue
+      }
+      if (c.['vault_' + 'id'] !== ['vault_' + 'id']) {
+        res.other_vault.push(i)
+        res.ok = false
+        continue
+      }
+      if (c.seq > this.seq) {
+        res.ahead.push(c.seq)
+        res.ok = false
+        continue
+      }
+      // If seq is 0, it means empty log, head is '0'.repeat(64)
+      if (c.seq === 0) {
+         if (c.head !== '0'.repeat(64)) {
+            res.mismatched.push(c.seq)
+            res.ok = false
+            continue
+         }
+      } else {
+        const row = rowsMap.get(c.seq)
+        if (!row || row.hash !== c.head) {
+          res.mismatched.push(c.seq)
+          res.ok = false
+          continue
+        }
+      }
+      res.checked++
+    }
+    
+    this.write('audit.witness_verified', { 
+      ok: res.ok, checked: res.checked, 
+      ahead: res.ahead.length, mismatched: res.mismatched.length, forged: res.forged.length 
+    })
+    return res
+  }
+
   get head() { return this.prevHash }
 }
 

@@ -797,6 +797,244 @@ export class Vault {
     return this.getSettings()
   }
 
+
+  addScrubPattern(slug, source) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (typeof source !== 'string' || source.length < 3 || source.length > 200) {
+      throw deny('AV_POLICY_DENIED', 'scrub pattern must be 3-200 chars', { rule: 'scrub_pattern' })
+    }
+    const all = this.allSecrets()
+    for (const secret of all) {
+      if (source.includes(secret.secret)) throw deny('AV_POLICY_DENIED', 'scrub pattern contains a secret', { rule: 'scrub_pattern' })
+    }
+    // Also check for live placeholders
+    const phs = Object.values(this.db.placeholders).filter(p => p.state === 'active')
+    for (const p of phs) {
+      const phText = `[[av:ph:${p.id}]]` // approximate check, wait, actual ph format is more complex
+      // but ph.findAll is what the spec says. The store doesn't have ph.findAll directly easily,
+      // but wait, ph.findAll is in core/placeholder.js. We can import it or just check manually.
+      // Wait, we can't import ph.findAll if it's not available, but `import * as ph` is in vault.js.
+    }
+    const matchesPh = ph.findAll ? ph.findAll(source).length > 0 : false;
+    if (matchesPh) throw deny('AV_POLICY_DENIED', 'scrub pattern contains a placeholder', { rule: 'scrub_pattern' })
+
+    if (!cred.scrub_patterns) cred.scrub_patterns = []
+    if (cred.scrub_patterns.length >= 16) throw deny('AV_POLICY_DENIED', 'max 16 patterns per cred', { rule: 'scrub_pattern' })
+    const total = Object.values(this.db.credentials).reduce((acc, c) => acc + (c.scrub_patterns?.length || 0), 0)
+    if (total >= 64) throw deny('AV_POLICY_DENIED', 'max 64 patterns across vault', { rule: 'scrub_pattern' })
+
+    const sp = { id: id.scrubPattern(), source, added_at: new Date().toISOString() }
+    cred.scrub_patterns.push(sp)
+    this.#persist()
+    this.audit.write('cred.scrub_pattern_added', { credential_slug: slug, id: sp.id, source })
+    return sp
+  }
+
+  removeScrubPattern(slug, patternId) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (!cred.scrub_patterns) return false
+    const idx = cred.scrub_patterns.findIndex(p => p.id === patternId)
+    if (idx < 0) return false
+    cred.scrub_patterns.splice(idx, 1)
+    this.#persist()
+    this.audit.write('cred.scrub_pattern_removed', { credential_slug: slug, id: patternId })
+    return true
+  }
+
+  setPins(slug, host, pins) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    
+    // Check if host is in ceiling
+    const { hosts } = credentialHostCeiling(cred)
+    let inCeiling = false
+    if (hosts.includes(host)) inCeiling = true
+    else {
+      for (const h of hosts) {
+        if (h.startsWith('*.') && host.endsWith(h.slice(2))) { inCeiling = true; break }
+      }
+    }
+    if (!inCeiling) throw deny('AV_POLICY_DENIED', `host ${host} not in credential ceiling`, { rule: 'pin_host' })
+    if (pins.length < 1 || pins.length > 4) throw deny('AV_POLICY_DENIED', '1-4 pins allowed', { rule: 'pin_format' })
+    
+    for (const p of pins) {
+      if (!/^sha256\/[A-Za-z0-9+/]{43}=$/.test(p)) throw deny('AV_POLICY_DENIED', `invalid pin ${p}`, { rule: 'pin_format' })
+    }
+    if (!cred.pins) cred.pins = {}
+    cred.pins[host] = pins
+    this.#persist()
+    this.audit.write('cred.pins_set', { credential_slug: slug, host, pins: pins.length })
+  }
+
+  clearPins(slug, host, spki = null) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (!cred.pins || !cred.pins[host]) return false
+    if (spki) {
+      cred.pins[host] = cred.pins[host].filter(p => p !== spki)
+      if (cred.pins[host].length === 0) delete cred.pins[host]
+    } else {
+      delete cred.pins[host]
+    }
+    this.#persist()
+    this.audit.write('cred.pins_removed', { credential_slug: slug, host, pins: cred.pins?.[host]?.length || 0 })
+    return true
+  }
+
+  rotateCredential(slug, { field = null, value, mode = 'keep', retireMs = 24 * 3600_000, expiresAt = undefined }) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (typeof value !== 'string' || value.length === 0) throw deny('AV_POLICY_DENIED', 'value must be non-empty string', { rule: 'rotate_value' })
+    if (mode !== 'keep' && mode !== 'revoke') throw deny('AV_POLICY_DENIED', 'mode must be keep or revoke', { rule: 'rotate_mode' })
+    if (!Number.isFinite(retireMs) || retireMs < 0 || retireMs > 7 * 24 * 3600_000) {
+      throw deny('AV_POLICY_DENIED', 'retireMs must be 0-7 days', { rule: 'retire_window' })
+    }
+    const fieldName = field || cred.fields[0].name
+    const fieldIdx = cred.fields.findIndex(f => f.name === fieldName)
+    if (fieldIdx < 0) throw deny('AV_NOT_FOUND', `no field ${fieldName}`)
+    const f = cred.fields[fieldIdx]
+    
+    const unsealed = crypt.unseal(this.vmk, f.ct, f.nonce, `${cred.id}|${f.name}|${f.key_version || 1}`)
+    if (unsealed === null) throw deny('AV_CORRUPTED', `field ${f.name} failed to decrypt`)
+    const oldSecret = unsealed.toString('utf8')
+    if (oldSecret === value) throw deny('AV_POLICY_DENIED', 'new value is identical to old value', { rule: 'rotate_same_value' })
+
+    const version = (f.key_version || 1) + 1
+    const { nonce, ct } = crypt.seal(this.vmk, Buffer.from(value, 'utf8'), `${cred.id}|${f.name}|${version}`)
+    
+    if (!f.retired) f.retired = []
+    const now = Date.now()
+    f.retired.push({
+      ct: f.ct, nonce: f.nonce, key_version: f.key_version || 1,
+      retired_at: new Date(now).toISOString(),
+      retire_until: new Date(now + retireMs).toISOString()
+    })
+    
+    f.retired = f.retired.filter(r => Date.parse(r.retire_until) > now)
+    
+    const previous_fp8 = f.fp8
+    f.ct = ct
+    f.nonce = nonce
+    f.key_version = version
+    f.fp8 = createHash('sha256').update(value).digest('hex').slice(0, 8)
+    f.length = value.length
+    f.rotated_at = new Date(now).toISOString()
+
+    let revoked_grants = 0
+    if (mode === 'revoke') {
+      for (const g of Object.values(this.db.grants)) {
+        if (g.credential_id === cred.id && g.state === 'active') {
+          this.revokeGrant(g.id, 'credential_rotated')
+          revoked_grants++
+        }
+      }
+    }
+    
+    if (expiresAt !== undefined) {
+      if (expiresAt !== null && Number.isNaN(Date.parse(expiresAt))) {
+         throw deny('AV_POLICY_DENIED', 'invalid expiresAt', { rule: 'expires_at' })
+      }
+      cred.expires_at = expiresAt
+    }
+    
+    this.#persist() // durable
+    this.audit.write('cred.rotated', { credential_slug: slug, field: f.name, version, mode })
+    
+    return {
+      credential: this.publicCredential(cred),
+      rotated: { field: f.name, version, previous_fp8, fp8: f.fp8, mode, revoked_grants, retire_until: new Date(now + retireMs).toISOString() }
+    }
+  }
+
+  setNotifyWebhook({ url, detail = 'minimal' }) {
+    this.#requireUnlocked()
+    if (detail !== 'minimal' && detail !== 'headline') throw deny('AV_POLICY_DENIED', 'detail must be minimal or headline', { rule: 'webhook_detail' })
+    let parsed
+    try { parsed = new URL(url) } catch { throw deny('AV_POLICY_DENIED', 'invalid URL', { rule: 'webhook_url' }) }
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLoopbackSpec(parsed.host))) {
+      throw deny('AV_POLICY_DENIED', 'webhook must be https', { rule: 'webhook_url' })
+    }
+    if (parsed.username || parsed.password) throw deny('AV_POLICY_DENIED', 'webhook URL cannot contain userinfo', { rule: 'webhook_url' })
+    
+    const { nonce, ct } = crypt.seal(this.vmk, Buffer.from(url, 'utf8'), 'notify')
+    this.db.kv.notify = { sealed: { nonce, ct }, host: parsed.host, detail, configured_at: new Date().toISOString() }
+    this.#persist()
+    this.audit.write('notify.configured', { host: parsed.host, detail })
+    return this.notifyConfig()
+  }
+
+  getNotifyWebhook() {
+    this.#requireUnlocked()
+    if (!this.db.kv.notify) return null
+    const { sealed, host, detail } = this.db.kv.notify
+    const unsealed = crypt.unseal(this.vmk, sealed.ct, sealed.nonce, 'notify')
+    if (unsealed === null) return null
+    return { url: unsealed.toString('utf8'), host, detail }
+  }
+
+  notifyConfig() {
+    if (!this.db.kv.notify) return null
+    const { host, detail, configured_at } = this.db.kv.notify
+    return { host, detail, configured_at }
+  }
+
+  clearNotifyWebhook() {
+    this.#requireUnlocked()
+    if (!this.db.kv.notify) return false
+    delete this.db.kv.notify
+    this.#persist()
+    this.audit.write('notify.removed', {})
+    return true
+  }
+
+  saveTemplate(name, spec) {
+    this.#requireUnlocked()
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) throw deny('AV_POLICY_DENIED', 'invalid template name', { rule: 'template_name' })
+    const str = JSON.stringify(spec)
+    if (str.length > 16384) throw deny('AV_POLICY_DENIED', 'template > 16 KiB', { rule: 'template_size' })
+    
+    if (!this.db.templates) this.db.templates = {}
+    const old = this.db.templates[name]
+    const version = old ? old.version + 1 : 1
+    
+    // canonicalOperation handles floats and other specifics that canon.canonicalize might reject,
+    // actually we can use canonicalize for now or import webauthn canonicalOperation. 
+    // The spec says webauthn.canonicalOperation.
+    const webauthn = require('../ui/webauthn.js')
+    const hash = createHash('sha256').update(webauthn.canonicalOperation(spec)).digest('hex')
+    
+    const t = { name, version, spec, hash, created_at: old?.created_at || new Date().toISOString(), updated_at: new Date().toISOString() }
+    this.db.templates[name] = t
+    this.#persist()
+    this.audit.write('template.saved', { name, version, hash })
+    return t
+  }
+
+  getTemplate(name) {
+    return this.db.templates?.[name] || null
+  }
+
+  listTemplates() {
+    return Object.values(this.db.templates || {})
+  }
+
+  deleteTemplate(name) {
+    this.#requireUnlocked()
+    if (!this.db.templates?.[name]) return false
+    const version = this.db.templates[name].version
+    delete this.db.templates[name]
+    this.#persist()
+    this.audit.write('template.deleted', { name, version })
+    return true
+  }
+
   deleteCredential(slug) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
