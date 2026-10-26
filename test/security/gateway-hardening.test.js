@@ -392,3 +392,163 @@ test('the ordinary streams are left whole when the vault holds a base64-style se
     await throughGateway(events, (body) => assert.equal(body, sent(events)), SLASHED)
   }
 })
+
+// ----------------------------------------- nested encodings (layered decoder)
+
+// Each encoding as a client applies it (`enc`) and as a client reads it back
+// (`dec`). A stack is built inner-to-outer with `enc` and recovered
+// outer-to-inner with `dec`, so every fixture below can check itself: without
+// the gateway the stack hands the agent the secret.
+const LAYER = {
+  json: { enc: (s) => [...s].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join(''), dec: (s) => JSON.parse(`"${s}"`) },
+  percent: { enc: (s) => [...s].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''), dec: (s) => s.replace(/%([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))) },
+  base64: { enc: (s) => Buffer.from(s, 'latin1').toString('base64'), dec: (s) => Buffer.from(s, 'base64').toString('latin1') },
+  hex: { enc: (s) => Buffer.from(s, 'latin1').toString('hex'), dec: (s) => Buffer.from(s, 'hex').toString('latin1') },
+}
+
+/** Wrap `secret` in `layers`, outermost first; the string an upstream sends. */
+const wrap = (secret, layers) => [...layers].reverse().reduce((s, l) => LAYER[l].enc(s), secret)
+/** Undo `layers`, outermost first, as the agent's client would. */
+const unwrap = (raw, layers) => layers.reduce((s, l) => LAYER[l].dec(s), raw)
+
+/** A stack holds the secret for a client that peels it outermost-first. */
+function recoversStack(text, layers, secret) {
+  try { if (unwrap(text, layers).includes(secret)) return true } catch { /* no longer peelable */ }
+  return text.includes(secret)
+}
+
+test('Grok\'s two-layer case: base64 percent-encoded with every % as a \\uXXXX escape is redacted', async () => {
+  for (const secret of SECRETS) {
+    // base64(secret) -> percent-encode -> JSON-escape every `%` as %.
+    const b64 = Buffer.from(secret).toString('base64')
+    const pct = encodeURIComponent(b64)
+    const raw = pct.replace(/%/g, '\\u0025')
+    const body = `{"echo":"${raw}"}`
+    // Self-check: JSON.parse then decodeURIComponent then base64 is the secret.
+    const seen = Buffer.from(decodeURIComponent(JSON.parse(`"${raw}"`)), 'base64').toString('latin1')
+    assert.ok(seen.includes(secret), 'fixture does not decode to the secret')
+    const s = buffered(secret, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+    const res = await s.pipeline.handle(withKey(s))
+    const got = res.body.toString('latin1')
+    assert.ok(!got.includes(raw), `the wrapped secret was forwarded: ${got}`)
+    const recovered = Buffer.from(decodeURIComponent((() => { try { return JSON.parse(got).echo } catch { return '' } })()), 'base64').toString('latin1')
+    assert.ok(!recovered.includes(secret), `the agent recovered the secret: ${got}`)
+  }
+})
+
+test('every pair of the four encodings, nested, is redacted in a buffered body', async () => {
+  const kinds = ['json', 'percent', 'base64', 'hex']
+  for (const secret of SECRETS) {
+    for (const a of kinds) {
+      for (const b of kinds) {
+        if (a === b) continue
+        const layers = [a, b] // a is the outer layer, b the inner
+        const raw = wrap(secret, layers)
+        const label = `${a}(${b}) on ${secret}`
+        assert.ok(recoversStack(raw, layers, secret), `fixture ${label} does not decode to the secret`)
+        const body = `{"echo":"${raw}"}`
+        const s = buffered(secret, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+        const res = await s.pipeline.handle(withKey(s))
+        const got = (() => { try { return JSON.parse(res.body.toString('latin1')).echo } catch { return res.body.toString('latin1') } })()
+        assert.ok(!recoversStack(got, layers, secret), `${label}: the agent recovered the secret from ${got}`)
+        assert.ok(!res.body.toString('latin1').includes(secret), `${label}: the raw secret is in the body`)
+      }
+    }
+  }
+})
+
+test('three-layer stacks within the limit are redacted', async () => {
+  const stacks = [
+    ['json', 'percent', 'base64'], // Grok's shape, built generally
+    ['base64', 'json', 'percent'],
+    ['percent', 'hex', 'json'],
+    ['json', 'base64', 'hex'],
+  ]
+  for (const secret of SECRETS) {
+    for (const layers of stacks) {
+      const raw = wrap(secret, layers)
+      const label = `${layers.join('(')}${')'.repeat(layers.length - 1)} on ${secret}`
+      assert.ok(recoversStack(raw, layers, secret), `fixture ${label} does not decode to the secret`)
+      const body = `{"echo":"${raw}"}`
+      const s = buffered(secret, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+      const res = await s.pipeline.handle(withKey(s))
+      const got = (() => { try { return JSON.parse(res.body.toString('latin1')).echo } catch { return res.body.toString('latin1') } })()
+      assert.ok(!recoversStack(got, layers, secret), `${label}: recovered from ${got}`)
+    }
+  }
+})
+
+test('a four-layer stack is beyond the limit but does not crash', async () => {
+  // Four distinct encodings is one layer deeper than DECODE_DEPTH, so the
+  // scrubber is not expected to peel all of it. The contract here is only
+  // that the gateway handles it without throwing an unexpected error.
+  const layers = ['json', 'percent', 'base64', 'hex']
+  const raw = wrap(SLASHED, layers)
+  assert.ok(recoversStack(raw, layers, SLASHED), 'fixture does not decode to the secret')
+  const body = `{"echo":"${raw}"}`
+  const s = buffered(SLASHED, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+  const res = await s.pipeline.handle(withKey(s)) // must not throw
+  assert.ok(res.status === 200, 'the response was handled')
+  // The raw four-deep stack may pass, but a byte-exact secret never does.
+  assert.ok(!res.body.toString('latin1').includes(SLASHED))
+})
+
+test('a buffered body whose nesting exceeds the decode budget fails closed, not through', async () => {
+  // base64(secret) percent-encoded then JSON-escaped: a real two-layer stack.
+  // With a decode budget too small to finish it, the body is refused rather
+  // than forwarded part-scanned — AV_UNSCANNABLE, as for a body too large.
+  const b64 = Buffer.from(SLASHED).toString('base64')
+  const raw = encodeURIComponent(b64).replace(/%/g, '\\u0025')
+  const body = `{"echo":"${raw}"}`
+  const respond = () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) })
+  const s = setup({ fields: { key: SLASHED }, respond, scrubBudget: { nestedBytes: 4 } })
+  const refused = await s.pipeline.handle(withKey(s))
+  assert.equal(refused.status, 502, 'the over-budget body was not refused')
+  assert.match(refused.body.toString('latin1'), /AV_UNSCANNABLE/)
+  assert.ok(!refused.body.toString('latin1').includes(raw), 'the over-budget body was forwarded')
+  // The same body, within the default budget, is scrubbed and delivered.
+  const ok = buffered(SLASHED, respond)
+  const res = await ok.pipeline.handle(withKey(ok))
+  assert.equal(res.status, 200)
+  assert.ok(!res.body.toString('latin1').includes(raw))
+})
+
+test('an event stream whose nesting exceeds the decode budget is cut', async () => {
+  const b64 = Buffer.from(SLASHED).toString('base64')
+  const raw = encodeURIComponent(b64).replace(/%/g, '\\u0025')
+  const events = [data({ choices: [{ index: 0, delta: { content: `payload ${raw}` } }] })]
+  const s = setup({ fields: { key: SLASHED }, fetchImpl: streaming(events, false), scrubBudget: { nestedBytes: 4 } })
+  const res = await s.pipeline.handle(withKey(s))
+  const body = await drain(res.stream)
+  assert.match(body, /AV_UNSCANNABLE/, 'the over-budget event was not cut')
+  assert.ok(!body.includes(SLASHED))
+})
+
+// ----------------------------------------------- controls for the layered decoder
+
+test('an ordinary base64 image data URL passes through unmodified', async () => {
+  const png = Buffer.from('x'.repeat(4096) + 'a perfectly ordinary image not a secret').toString('base64')
+  const body = JSON.stringify({ name: 'avatar', image: `data:image/png;base64,${png}`, size: 4135 })
+  const s = buffered(SLASHED, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+  const res = await s.pipeline.handle(withKey(s))
+  assert.equal(res.body.toString('latin1'), body)
+  assert.equal(res.headers['av-redacted'], undefined)
+})
+
+test('a large ordinary JSON response with mixed encodings passes through unmodified and uncut', async () => {
+  // Records that each carry an escaped URL (`\/` and `%`), a hex digest and a
+  // base64 blob, with no secret anywhere: exactly the mix that makes all four
+  // decoders fire, at a size well inside the budget.
+  const rec = (i) => ({
+    id: i, url: `https:\\/\\/api.example.com\\/v1\\/items\\/${i}?q=%2Fdocs&page=${i % 10}`,
+    sha: 'a3f10b9c'.repeat(8), note: `item \\u00e9 ${i} \\u2014 "ok"`, blob: Buffer.from('z'.repeat(48 + (i % 7))).toString('base64'),
+  })
+  const arr = []
+  while (JSON.stringify(arr).length < 256 * 1024) arr.push(rec(arr.length))
+  const body = JSON.stringify(arr)
+  const s = buffered(SLASHED, () => ({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(body) }))
+  const res = await s.pipeline.handle(withKey(s))
+  assert.equal(res.status, 200)
+  assert.equal(res.body.toString('latin1'), body)
+  assert.equal(res.headers['av-redacted'], undefined)
+})

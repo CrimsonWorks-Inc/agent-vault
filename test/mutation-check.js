@@ -496,8 +496,8 @@ const MUTATIONS = [
   {
     what: 'the scrubber reads only the fixed needles, not decoded or unwrapped text',
     file: 'src/core/scrub.js',
-    from: 'const spans = this.viewSpans(out)',
-    to: 'const spans = []',
+    from: 'const { spans, unscannable } = this.collectSpans(out)',
+    to: 'const spans = [], unscannable = false',
     tests: ['test/security/gateway-core.test.js'],
   },
   {
@@ -587,15 +587,15 @@ const MUTATIONS = [
   {
     what: 'an event-stream path run is trimmed before the new value is searched',
     file: 'src/daemon/pipeline.js',
-    from: "if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'",
-    to: "if (scrubber.scrub(run.slice(-keep)).redactions > 0) return 'credential_split_across_events'",
+    from: 'const r = scrubber.scrub(run)',
+    to: 'const r = scrubber.scrub(run.slice(-keep))',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
     what: 'the joined event-stream view is trimmed before the new event is searched',
     file: 'src/daemon/pipeline.js',
-    from: "if (leaked(joined)) return 'credential_split_across_events'",
-    to: "if (leaked(assembled)) return 'credential_split_across_events'",
+    from: 'const reason = leaked(joined)',
+    to: 'const reason = leaked(assembled)',
     tests: ['test/security/gateway-response.test.js'],
   },
   {
@@ -742,8 +742,8 @@ const MUTATIONS = [
   {
     what: 'the decoded view leaves JSON\'s two-character escapes such as \\/ as they are',
     file: 'src/core/scrub.js',
-    from: '|%([0-9a-fA-F]{2})|\\\\(["\\\\/bfnrt])/g',
-    to: '|%([0-9a-fA-F]{2})/g',
+    from: '|\\\\(["\\\\/bfnrt])/g',
+    to: '/g',
     tests: ['test/security/gateway-hardening.test.js'],
   },
   {
@@ -751,6 +751,26 @@ const MUTATIONS = [
     file: 'src/core/scrub.js',
     from: 'this.decoded = [...this.plain, ...this.blobs]',
     to: 'this.decoded = [...this.plain]',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    // Nesting one encoding inside another (base64 in percent in a JSON string)
+    // is caught only because the scrubber peels more than one layer. Held to a
+    // single layer, every stacked encoding reaches the agent.
+    what: 'the response scrubber peels only one layer, so nested encodings leak',
+    file: 'src/core/scrub.js',
+    from: 'const DECODE_DEPTH = 3',
+    to: 'const DECODE_DEPTH = 1',
+    tests: ['test/security/gateway-hardening.test.js'],
+  },
+  {
+    // A body the layered decoder could not finish within budget must be
+    // refused, not forwarded part-scanned. Ignoring the flag passes those
+    // bytes through unread.
+    what: 'a response too nested to finish scanning is forwarded instead of refused',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (scrubbedBody.unscannable) {',
+    to: 'if (false) {',
     tests: ['test/security/gateway-hardening.test.js'],
   },
 ]

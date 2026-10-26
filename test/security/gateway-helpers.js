@@ -27,6 +27,7 @@ export function setup({
   hosts = ['up.test'],
   respond,
   fetchImpl,
+  scrubBudget,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'av-gw-'))
   dirs.push(dir)
@@ -40,6 +41,7 @@ export function setup({
   const sent = []
   const pipeline = new Pipeline(vault, {
     allowedHosts: new Set(['127.0.0.1']),
+    scrubBudget,
     fetchImpl: fetchImpl || (async (r) => {
       sent.push({ ...r, body: r.body ? Buffer.from(r.body).toString('utf8') : null })
       return respond ? respond(r) : { status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.from('ok') }

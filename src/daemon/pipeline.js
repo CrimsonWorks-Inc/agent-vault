@@ -97,6 +97,9 @@ export class Pipeline {
     this.allowedHosts = opts.allowedHosts || ALLOWED_HOSTS
     this.upstream = opts.fetchImpl || defaultUpstream
     this.approvalHoldMs = opts.approvalHoldMs ?? 0
+    // Optional override for the response scrubber's layered-decode budget, so
+    // a test can drive the fail-closed path without a multi-megabyte body.
+    this.scrubBudget = opts.scrubBudget
   }
 
   /**
@@ -752,7 +755,7 @@ export class Pipeline {
     }
 
     // --- scrub -------------------------------------------------------------
-    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))])
+    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))], this.scrubBudget ?? {})
     // The path as the audit log may hold it, computed here because this
     // scrubber already exists. Doing it in handle() meant #safeMessage, which
     // calls allSecrets() — decrypting every credential in the vault — on every
@@ -870,6 +873,15 @@ export class Pipeline {
     // tarball, protobuf) survives unchanged while ASCII secrets still match.
     // Decoding as utf8 here silently corrupted every non-text response.
     const scrubbedBody = scrubber.scrub(raw.toString('latin1'))
+    // The scrubber ran out of its layered-decode budget with a secret-bearing
+    // candidate still wrapped: it could not finish scanning this body, so it
+    // is refused rather than forwarded part-scanned. Same answer as a body too
+    // large to buffer or an encoding we cannot decode — bytes we cannot scan.
+    if (scrubbedBody.unscannable) {
+      throw deny('AV_UNSCANNABLE', 'the response nested encodings deeper than could be decoded within budget, so it could not be fully scrubbed', {
+        rule: 'scrub_budget', hint: 'The response was discarded rather than passed through part-scanned.',
+      })
+    }
     const text = scrubbedBody.text
     const redactions = scrubbedBody.redactions + headerRedactions
     outHeaders['av-request-id'] = requestId
@@ -1253,15 +1265,22 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     return out
   }
 
-  /** True when the payload so far, however reassembled, contains a secret. */
+  /**
+   * The reason to cut because of the payload so far, however reassembled, or
+   * null. A secret found in any reassembly cuts; so does a reassembly the
+   * scrubber could not finish decoding within its budget, which is refused
+   * rather than forwarded part-scanned.
+   */
   const leaked = (text) => {
-    if (scrubber.scrub(text).redactions > 0) return true
-    // As a JSON client reassembles it: values only, concatenated.
-    const values = jsonValues(text)
-    if (values && scrubber.scrub(values).redactions > 0) return true
-    // And a last, cruder pass for framing that is not JSON at all.
-    const bare = text.replace(/[^A-Za-z0-9_\-+/=]/g, '')
-    return scrubber.scrub(bare).redactions > 0
+    // As a JSON client reassembles it (values only, concatenated), and a
+    // last cruder pass for framing that is not JSON at all.
+    for (const v of [text, jsonValues(text), text.replace(/[^A-Za-z0-9_\-+/=]/g, '')]) {
+      if (!v) continue
+      const r = scrubber.scrub(v)
+      if (r.redactions > 0) return 'credential_split_across_events'
+      if (r.unscannable) return 'response_unscannable'
+    }
+    return null
   }
 
   /** Append each string in one JSON payload to its runs; the reason to cut, or null. */
@@ -1293,7 +1312,8 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     const joined = assembled + data.join('')
     // Keep only enough to span a split; an LLM response is unbounded.
     assembled = joined.length > keep ? joined.slice(-keep) : joined
-    if (leaked(joined)) return 'credential_split_across_events'
+    const reason = leaked(joined)
+    if (reason) return reason
     return data.length > 0 ? leakedByPath(data.join('\n')) : null
   }
 
@@ -1301,6 +1321,7 @@ async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut 
     credential_split_across_events: 'the upstream split a credential across events; the stream was cut',
     too_many_paths: `the upstream stream used more than ${MAX_SSE_PATHS} JSON key paths, more than can be tracked for a credential split across events; the stream was cut`,
     too_many_indexes: `the upstream stream put more than ${MAX_SSE_INDEXES} index fields over one value, more than can be tracked for a credential split across events; the stream was cut`,
+    response_unscannable: 'the upstream nested encodings deeper than could be decoded within budget, so an event could not be fully scrubbed; the stream was cut',
   }
 
   try {
@@ -1554,7 +1575,9 @@ function eventRuns(scrubber, keep) {
       const full = room(key)
       if (full) return full
       const run = (runs.get(key) ?? '') + value
-      if (scrubber.scrub(run).redactions > 0) return 'credential_split_across_events'
+      const r = scrubber.scrub(run)
+      if (r.redactions > 0) return 'credential_split_across_events'
+      if (r.unscannable) return 'response_unscannable'
       runs.set(key, run.length > keep ? run.slice(-keep) : run)
       here?.runs.set(key, chosen)
     }
