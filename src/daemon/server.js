@@ -220,7 +220,18 @@ export class Daemon {
       const final = { ...record.proposal, ...overridesOf(d.overrides || {}) }
       return this.#settleSessionRequest(record, d.granted, final)
     }
-    return approvalView(this.pipeline.decideApproval(d.id, d.granted))
+    return this.#settleApproval(d.id, d.granted)
+  }
+
+  /**
+   * A held request's decision, after the gate. The pipeline reads the verdict
+   * however it likes, so only a real boolean reaches it.
+   */
+  #settleApproval(id, granted) {
+    if (typeof granted !== 'boolean') {
+      throw deny('AV_POLICY_DENIED', 'the verdict must be true or false', { rule: 'bulk_decision' })
+    }
+    return approvalView(this.pipeline.decideApproval(id, granted))
   }
 
   /** The decision itself, after the gate has let it through. */
@@ -1526,12 +1537,19 @@ export class Daemon {
           // carrier on its own. Every answer is a human's answer now, bound to
           // which answer it is, so a signature for "approve" cannot be spent on
           // "deny" or the other way round.
-          const granted = input.granted !== false
+          //
+          // Not truthiness, as on the session-request route: `granted: "false"`
+          // is not `false`, and it approved. Refused before the gate, which
+          // reads the verdict to name the operation it asks a human for.
+          if (typeof input.granted !== 'boolean') {
+            throw deny('AV_POLICY_DENIED', 'the verdict must be true or false', { rule: 'bulk_decision' })
+          }
+          const granted = input.granted
           this.#requireHumanForWidening(
             granted ? 'approval grant' : 'approval deny',
             this.#wideningOperation(route, url, input), input.presence,
           )
-          return json(200, approvalView(this.pipeline.decideApproval(input.id, granted)))
+          return json(200, this.#settleApproval(input.id, granted))
         }
 
         // The audit log is keyed from the vault master key, so a locked vault

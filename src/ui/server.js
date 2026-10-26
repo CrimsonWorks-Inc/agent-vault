@@ -323,6 +323,15 @@ export class UiServer {
         return this.#send(res, 200, { ...minted, rpId: this.rpId })
       }
 
+      // A verdict is true or false, nothing else. `!!"false"` is true, so a
+      // string verdict used to reach the daemon as an approval. Refused before
+      // the signature check, as the daemon refuses it before its gate.
+      if ((key === 'POST approvals' || key === 'POST session-requests/decide') && typeof body?.granted !== 'boolean') {
+        throw Object.assign(new Error('the verdict must be true or false'), {
+          status: 403, problem: { code: 'AV_POLICY_DENIED', rule: 'bulk_decision' },
+        })
+      }
+
       // Everything that widens or changes capability stops here unless the
       // caller brings a signature for this exact operation.
       if (UiServer.GATED.has(key)) {
@@ -437,7 +446,7 @@ export class UiServer {
         case 'POST session-requests/decide': {
           const answered = await this.#control('POST', '/v1/session-requests/decide', {
             id: body?.id,
-            granted: !!body?.granted,
+            granted: body.granted,
             overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
             presence: body?.presence,
           })
@@ -554,7 +563,7 @@ export class UiServer {
         // overridesOf is the daemon's own reader of a decision's overrides,
         // owner fields included, so the two cannot bind different things.
         return of('session_request.decide', {
-          id: body?.id, granted: !!body?.granted, ...overridesOf(parseOverrides(body?.overrides || {})),
+          id: body?.id, granted: body?.granted, ...overridesOf(parseOverrides(body?.overrides || {})),
         })
       case 'POST lock': return of('vault.lock', {})
       // Only the fields that are forwarded, which is what the daemon binds.

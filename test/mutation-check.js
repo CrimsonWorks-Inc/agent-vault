@@ -1175,9 +1175,18 @@ const MUTATIONS = [
     // `granted: "false"` is truthy and approved an ordinary request.
     what: 'the single decide route takes any truthy verdict',
     file: 'src/daemon/server.js',
-    from: "          if (typeof input.granted !== 'boolean') {",
-    to: '          if (false) {',
+    // The comment pins it to this route: the approvals route has the same check.
+    from: "// Before the gate, which reads the verdict to decide what to ask for.\n          if (typeof input.granted !== 'boolean') {",
+    to: '// Before the gate, which reads the verdict to decide what to ask for.\n          if (false) {',
     tests: ['test/security/requested-r1.test.js'],
+  },
+  {
+    // `input.granted !== false` approved a held request on "false", 0 or null.
+    what: 'the approvals route takes any verdict that is not literally false',
+    file: 'src/daemon/server.js',
+    from: "// reads the verdict to name the operation it asks a human for.\n          if (typeof input.granted !== 'boolean') {",
+    to: '// reads the verdict to name the operation it asks a human for.\n          if (false) {',
+    tests: ['test/security/approval-verdict.test.js'],
   },
   {
     // One function decides elevation for create, decide and decide-many. If it

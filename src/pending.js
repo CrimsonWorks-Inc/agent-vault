@@ -86,7 +86,10 @@ export async function fetchPending(get) {
  * proposal; the daemon binds its presence check to exactly what is sent here.
  */
 export function decision(item, { granted, overrides = null }) {
-  const body = { [item.decide.idField]: item.id, granted: !!granted }
+  // Not coerced: `!!"false"` is true, and a verdict that is not a boolean is a
+  // caller's bug to surface, never an approval.
+  if (typeof granted !== 'boolean') throw new TypeError('the verdict must be true or false')
+  const body = { [item.decide.idField]: item.id, granted }
   if (overrides && Object.keys(overrides).length) body.overrides = overrides
   return { path: item.decide.path, body }
 }
