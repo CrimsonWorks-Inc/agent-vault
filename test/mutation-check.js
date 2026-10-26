@@ -1446,6 +1446,53 @@ const MUTATIONS = [
     to: '    if (false) throw deny(',
     tests: ['test/security/store-audit-witness.test.js'],
   },
+  // ---- store F8: backup and restore ----
+  {
+    // F8 mutation 2: a restore must give no capability back.
+    what: 'the backup plaintext includes the sessions',
+    file: 'src/store/backup.js',
+    from: "  const bytes = Buffer.from(JSON.stringify({ credentials, templates }), 'utf8')",
+    to: "  const bytes = Buffer.from(JSON.stringify({ credentials, templates, sessions: vault.db.sessions }), 'utf8')",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'a bundle that carries more than credentials and templates is read anyway',
+    file: 'src/store/backup.js',
+    from: "  if (!plainObject(plain) || !onlyKeys(plain, new Set(['credentials', 'templates'])) ||",
+    to: '  if (!plainObject(plain) ||',
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'the backup is written to the audit log, not just its digest',
+    file: 'src/store/backup.js',
+    from: "  vault.audit.write('backup.exported', { credentials: credentials.length, templates: templates.length, bundle_sha256: digest })",
+    to: "  vault.audit.write('backup.exported', { credentials: credentials.length, templates: templates.length, bundle_sha256: digest, bundle })",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    // A work factor of 2^17 on the event loop stalls the whole gateway.
+    what: 'the backup key is derived synchronously',
+    file: 'src/store/backup.js',
+    from: '  return crypt.scryptAsync(recoveryPassphrase, salt, { ...BACKUP_KDF, keylen: 32, maxmem: MAXMEM })',
+    to: '  return Promise.resolve(crypt.passphraseFactor(recoveryPassphrase, salt))',
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'a fail-mode restore with a conflict writes what it can',
+    file: 'src/store/backup.js',
+    from: "      if (onConflict === 'fail') throw refused(",
+    to: "      if (false) throw refused(",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    // Dropping the pins restores a credential with less protection than the
+    // human gave it.
+    what: "a restore goes ahead when it cannot restore a bundle's pins",
+    file: 'src/store/backup.js',
+    from: "  if (hasPins && typeof vault.setPins !== 'function') {",
+    to: '  if (false) {',
+    tests: ['test/security/store-backup.test.js'],
+  },
 ]
 
 let survived = 0
