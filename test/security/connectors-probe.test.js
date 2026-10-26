@@ -409,10 +409,11 @@ test('V-Q7: a body that never ends is cut off and destroyed, and the probe retur
       pending.then(() => 'done'),
       new Promise((r) => setTimeout(() => r('timeout'), within).unref()),
     ])
+    const destroyedByProbe = stream.destroyed
     stream.destroy()
     await pending.catch(() => {})
     assert.equal(winner, 'done', `${name}: the probe was still waiting after ${Date.now() - started} ms`)
-    assert.equal(stream.destroyed, true)
+    assert.equal(destroyedByProbe, true, `${name}: the probe left the body stream open`)
   }
 })
 
