@@ -521,6 +521,9 @@ test('F-1: pins are looked up by the host of the URL the probe sends to, however
     ['[0:0::1]:8443', { '[::1]': [pin] }],
     ['[::1]:8443', { '[0:0::1]': [pin] }],
     ['[::1]:8443', { '[0:0:0:0:0:0:0:1]:8443': [pin] }],
+    // A bare IPv6 key: pins are looked up by the bracketless URL host.
+    ['[::1]:8443', { '::1': [pin] }],
+    ['[::1]:8443', { ' 0:0::1 ': [pin] }],
     ['api.github.com', { 'API.GitHub.com.': [pin] }],
   ]
   let n = 0

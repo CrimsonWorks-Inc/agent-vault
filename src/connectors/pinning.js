@@ -29,7 +29,15 @@
 // set, which let a certificate for the header's name pass for the URL host.
 // A Host header that names anything other than the URL's host and port is
 // refused before a connection (AV_POLICY_DENIED, rule 'host_mismatch'); it is
-// not rewritten.
+// not rewritten. An IPv6 URL host loses its brackets for the connection and
+// the certificate check, and is never sent as a server name.
+//
+// The caller's headers are read once. Each own enumerable name and its value
+// are copied, a value that is not a string refused (rule 'header_format'),
+// and the Host check and the request both use that copy. Node reads a headers
+// object again when it builds the request, so a getter or a Proxy that
+// answered the check with the URL host could otherwise put another host on
+// the wire.
 //
 // Order is the whole protection. Node sends the headers — which carry the
 // substituted secret — on the first write or end. When pins are set, neither
@@ -134,22 +142,38 @@ export function verifiedChainPins(tlsSocket) {
 }
 
 /**
- * Every value given for a Host header, under any spelling of the name. Node
- * sends an object's own keys, and a flat array as name, value pairs.
+ * One copy of the caller's headers: a null-prototype object of strings, the
+ * only headers anything here reads or Node is given. An object's own
+ * enumerable names, or a flat array of name, value pairs, are each read once.
+ * null when a value is not a string, an array is not whole pairs or names a
+ * header twice, or `headers` is neither an object nor null.
  */
-function hostHeaderValues(headers) {
-  if (headers == null || typeof headers !== 'object') return []
-  const out = []
+function snapshotHeaders(headers) {
+  const out = Object.create(null)
+  if (headers == null) return out
+  if (typeof headers !== 'object') return null
   if (Array.isArray(headers)) {
-    for (let i = 0; i + 1 < headers.length; i += 2) {
-      if (String(headers[i]).toLowerCase() === 'host') out.push(headers[i + 1])
+    const length = headers.length
+    if (!Number.isSafeInteger(length) || length % 2 !== 0) return null
+    for (let i = 0; i < length; i += 2) {
+      const name = headers[i]
+      const value = headers[i + 1]
+      if (typeof name !== 'string' || typeof value !== 'string' || Object.hasOwn(out, name)) return null
+      out[name] = value
     }
     return out
   }
-  for (const key of Object.keys(headers)) {
-    if (key.toLowerCase() === 'host') out.push(headers[key])
+  for (const name of Object.keys(headers)) {
+    const value = headers[name]
+    if (typeof value !== 'string') return null
+    out[name] = value
   }
   return out
+}
+
+/** Every value the snapshot gives for a Host header, under any spelling. */
+function hostHeaderValues(sent) {
+  return Object.keys(sent).filter((name) => name.toLowerCase() === 'host').map((name) => sent[name])
 }
 
 /**
@@ -166,7 +190,7 @@ export function hostHeaderMatches(value, parsed) {
 }
 
 /** The URL's host as a certificate names it: no IPv6 brackets. */
-function urlIdentity(parsed) {
+export function urlIdentity(parsed) {
   const host = parsed.hostname
   return host.startsWith('[') ? host.slice(1, -1) : host
 }
@@ -205,9 +229,17 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
     let parsed
     try { parsed = new URL(url) } catch (e) { fail(e); return }
 
+    // The caller's headers are read here and never again.
+    let sent
+    try { sent = snapshotHeaders(headers) } catch { sent = null }
+    if (!sent) {
+      fail(deny('AV_POLICY_DENIED', 'headers must be names with string values, each read once', { rule: 'header_format' }))
+      return
+    }
+
     // The one name every identity decision uses.
     const identity = urlIdentity(parsed)
-    if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {
+    if (!hostHeaderValues(sent).every((v) => hostHeaderMatches(v, parsed))) {
       fail(deny('AV_POLICY_DENIED', 'the Host header names a different host than the URL', { rule: 'host_mismatch' }))
       return
     }
@@ -226,12 +258,14 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
 
     const isHttp = parsed.protocol === 'http:'
     const open = isHttp ? httpRequest : httpsRequest
+    // The connect address has no IPv6 brackets: Node resolves '[::1]' as a
+    // name and fails. Node brackets it again in the Host header it writes.
     const opts = {
-      hostname: parsed.hostname,
+      hostname: identity,
       port: parsed.port || (isHttp ? 80 : 443),
       path: `${parsed.pathname}${parsed.search}`,
       method,
-      headers,
+      headers: sent,
     }
     // Set, so Node does not take it from a Host header. An IP is never sent
     // as SNI; '' tells Node to check the certificate against the URL host.

@@ -1282,6 +1282,34 @@ const MUTATIONS = [
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {
+    // The Host check reads a copy of the headers. Handing Node the caller's
+    // object instead lets a getter or a Proxy answer the check with the URL
+    // host and Node with another, and the secret goes out under that Host.
+    what: 'pinnedRequest gives Node the caller\'s headers, not the copy it checked',
+    file: 'src/connectors/pinning.js',
+    from: '      method,\n      headers: sent,\n    }',
+    to: '      method,\n      headers,\n    }',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // parsed.hostname keeps IPv6 brackets, and Node looks '[::1]' up as a
+    // name. Every IPv6 request failed with ENOTFOUND.
+    what: 'pinnedRequest connects to the bracketed IPv6 host',
+    file: 'src/connectors/pinning.js',
+    from: '    const opts = {\n      hostname: identity,',
+    to: '    const opts = {\n      hostname: parsed.hostname,',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // A pin key written as a bare IPv6 address names the same host as the
+    // bracketed URL host, and must not be skipped.
+    what: 'probe pin keys that are a bare IPv6 address are not read as a host',
+    file: 'src/connectors/probe.js',
+    from: "const host = isIP(bare) === 6 ? `[${bare}]` : hostOnly(key)",
+    to: 'const host = hostOnly(key)',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
     // With no pins, verification has to stay exactly what Node already does.
     // Turning it off would accept any certificate for an unpinned host.
     what: 'a request with no pins skips certificate verification',
@@ -1296,7 +1324,7 @@ const MUTATIONS = [
     // and the probe went out unpinned.
     what: 'probe pins are looked up by the declared host, not the URL host',
     file: 'src/connectors/probe.js',
-    from: 'const pins = pinsFor(cred, new URL(url).hostname)',
+    from: 'const pins = pinsFor(cred, urlIdentity(new URL(url)))',
     to: 'const pins = pinsFor(cred, destination.host)',
     tests: ['test/security/connectors-probe.test.js'],
   },

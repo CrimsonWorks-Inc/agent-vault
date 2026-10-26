@@ -57,7 +57,8 @@ function makeChain() {
   openssl(dir, ['x509', '-req', '-in', 'int.csr', '-CA', 'root.crt', '-CAkey', 'root.key', '-out', 'int.crt', '-days', '2', '-CAcreateserial', '-extfile', 'int.ext'])
   writeExt(dir, 'leaf.ext', 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n')
   writeExt(dir, 'other.ext', 'subjectAltName=DNS:elsewhere.test\nextendedKeyUsage=serverAuth\n')
-  for (const [name, ext] of [['leaf', 'leaf.ext'], ['leaf2', 'leaf.ext'], ['other', 'other.ext']]) {
+  writeExt(dir, 'v6.ext', 'subjectAltName=IP:::1\nextendedKeyUsage=serverAuth\n')
+  for (const [name, ext] of [['leaf', 'leaf.ext'], ['leaf2', 'leaf.ext'], ['other', 'other.ext'], ['v6', 'v6.ext']]) {
     openssl(dir, ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', `${name}.key`, '-out', `${name}.csr`, '-subj', '/CN=localhost'])
     openssl(dir, ['x509', '-req', '-in', `${name}.csr`, '-CA', 'int.crt', '-CAkey', 'int.key', '-out', `${name}.crt`, '-days', '2', '-CAcreateserial', '-extfile', ext])
   }
@@ -71,6 +72,7 @@ function makeChain() {
   openssl(dir, ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'evil.key', '-out', 'evil.csr', '-subj', '/CN=localhost'])
   openssl(dir, ['x509', '-req', '-in', 'evil.csr', '-CA', 'fake.crt', '-CAkey', 'fake.key', '-out', 'evil.crt', '-days', '2', '-CAcreateserial', '-extfile', 'leaf.ext'])
   openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'self.key', '-out', 'self.crt', '-days', '2', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'])
+  openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'self6.key', '-out', 'self6.crt', '-days', '2', '-subj', '/CN=v6', '-addext', 'subjectAltName=IP:::1'])
   openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'selfother.key', '-out', 'selfother.crt', '-days', '2', '-subj', '/CN=elsewhere.test', '-addext', 'subjectAltName=DNS:elsewhere.test'])
   for (const [name, from, to] of [['expired', '20200101000000Z', '20200102000000Z'], ['future', '20990101000000Z', '20990102000000Z']]) {
     openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', `${name}.key`, '-out', `${name}.crt`, '-not_before', from, '-not_after', to, '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'])
@@ -94,6 +96,8 @@ function makeChain() {
     rootPin: pin('root.crt'),
     evilPin: pin('evil.crt'),
     selfPin: pin('self.crt'),
+    v6Pin: pin('v6.crt'),
+    self6Pin: pin('self6.crt'),
     selfOtherPin: pin('selfother.crt'),
     expiredPin: pin('expired.crt'),
     futurePin: pin('future.crt'),
@@ -103,6 +107,7 @@ function makeChain() {
     forgedWithRoot: serve('evil.key', 'evil.crt', 'int.crt', 'root.crt'),
     unlinked: serve('self.key', 'self.crt', 'int.crt'),
     selfSigned: serve('self.key', 'self.crt'),
+    selfSigned6: serve('self6.key', 'self6.crt'),
     selfOther: serve('selfother.key', 'selfother.crt'),
     expired: serve('expired.key', 'expired.crt'),
     future: serve('future.key', 'future.crt'),
@@ -116,12 +121,15 @@ function makeChain() {
 const chain = makeChain()
 after(() => chain.close())
 
-function listen(server) {
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
+function listen(server, address) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, address, () => resolve(server.address().port))
+  })
 }
 
 /** A server that counts application bytes and requests, and records them. */
-async function serve(material, handler) {
+async function serve(material, handler, address = '127.0.0.1') {
   const seen = { bytes: 0, requests: 0, connections: 0, authorization: [], body: [], urls: [], reused: [], servername: [], host: [] }
   const server = material ? https.createServer(material) : http.createServer()
   server.on('request', (req, res) => {
@@ -148,7 +156,7 @@ async function serve(material, handler) {
     seen.servername.push(socket.servername || null)
     socket.on('data', (c) => { seen.bytes += c.length })
   })
-  const port = await listen(server)
+  const port = await listen(server, address)
   return { server, seen, port, close: () => new Promise((r) => server.close(r)) }
 }
 
@@ -749,11 +757,16 @@ test('F-1: a Host header with another port, no port, another case of another nam
       ` 127.0.0.1:${p}`,
       'Elsewhere.TEST',
       `localhost:${p}`,
-      [`127.0.0.1:${p}`],
-      42,
     ]
     for (const host of refusedHosts) {
       assertHostMismatch(await outcome(pinnedRequest(withHost(p, [chain.selfPin], host))), JSON.stringify(host))
+    }
+    // A Host that is not a string never reaches the check: the header copy
+    // refuses it first.
+    for (const host of [[`127.0.0.1:${p}`], 42]) {
+      const out = await outcome(pinnedRequest(withHost(p, [chain.selfPin], host)))
+      assert.equal(out.code, 'AV_POLICY_DENIED', JSON.stringify(out))
+      assert.equal(out.rule, 'header_format', JSON.stringify(host))
     }
     // Any spelling of the header name, and the raw array form.
     assertHostMismatch(await outcome(pinnedRequest(get(p, [chain.selfPin], { headers: { HOST: 'elsewhere.test' } }))), 'HOST')
@@ -819,5 +832,200 @@ test('F-1 controls: a matching or absent Host header is delivered with and witho
     await genuine.close()
     await self.close()
     await plain.close()
+  }
+})
+
+// Round 5, F-1. The Host check and the request are one read of the headers.
+// Node copies a headers object into the request after the check has run, so
+// a getter or a Proxy could answer the check with the URL host and Node with
+// another. Each of these delivered the bearer secret with Host evil.example
+// before the copy. `leaf.crt` names 127.0.0.1 and is leaf-pinned, so every
+// one of them completes a handshake: what is asserted is the Host on the wire.
+
+function assertNoForeignHost(s, out, label) {
+  assert.equal(s.seen.host.some((h) => String(h).toLowerCase().includes('evil.example')), false,
+    `${label}: ${JSON.stringify({ out, host: s.seen.host })}`)
+  if (out.ok) {
+    assert.equal(s.seen.host.at(-1), `127.0.0.1:${s.port}`, label)
+    assert.equal(s.seen.authorization.at(-1), `Bearer ${SECRET}`, label)
+  } else {
+    assertHostMismatch(out, label)
+  }
+}
+
+test('Round 5 F-1: a getter or a Proxy cannot pass the Host check and then put another host on the wire', async () => {
+  const s = await serve(chain.material('leaf'))
+  try {
+    const good = `127.0.0.1:${s.port}`
+    const pins = [chain.leafPin]
+
+    // A getter: the URL host on the first read, evil.example after.
+    let getterReads = 0
+    const getter = { authorization: `Bearer ${SECRET}` }
+    Object.defineProperty(getter, 'host', {
+      enumerable: true,
+      get() { getterReads++; return getterReads === 1 ? good : 'evil.example' },
+    })
+    const viaGetter = await outcome(pinnedRequest(get(s.port, pins, { headers: getter })))
+    assertNoForeignHost(s, viaGetter, 'getter')
+    assert.equal(getterReads, 1, 'the getter is read once')
+    assert.equal(viaGetter.ok, true, JSON.stringify(viaGetter))
+
+    // A Proxy `get` trap with the same two answers.
+    let trapReads = 0
+    const trapped = new Proxy({ authorization: `Bearer ${SECRET}`, host: good }, {
+      get(t, k) {
+        if (k !== 'host') return t[k]
+        trapReads++
+        return trapReads === 1 ? good : 'evil.example'
+      },
+    })
+    const viaTrap = await outcome(pinnedRequest(get(s.port, pins, { headers: trapped })))
+    assertNoForeignHost(s, viaTrap, 'get trap')
+    assert.equal(trapReads, 1, 'the get trap is read once')
+
+    // A Proxy whose key list grows a Host after the first enumeration. The
+    // copy has no Host, so Node writes the URL host.
+    let listings = 0
+    const phased = new Proxy({ authorization: `Bearer ${SECRET}`, host: 'evil.example' }, {
+      ownKeys() { listings++; return listings === 1 ? ['authorization'] : ['host', 'authorization'] },
+      getOwnPropertyDescriptor(t, k) { return { enumerable: true, configurable: true, value: t[k] } },
+    })
+    const viaKeys = await outcome(pinnedRequest(get(s.port, pins, { headers: phased })))
+    assertNoForeignHost(s, viaKeys, 'ownKeys')
+    assert.equal(listings, 1, 'the key list is read once')
+    assert.equal(viaKeys.ok, true, JSON.stringify(viaKeys))
+
+    // The flat array form, with a Proxy on the Host value's index.
+    let indexReads = 0
+    const pairs = new Proxy(['authorization', `Bearer ${SECRET}`, 'host', good], {
+      get(t, k) {
+        if (k !== '3') return Reflect.get(t, k)
+        indexReads++
+        return indexReads === 1 ? good : 'evil.example'
+      },
+    })
+    const viaArray = await outcome(pinnedRequest(get(s.port, pins, { headers: pairs })))
+    assertNoForeignHost(s, viaArray, 'array')
+    assert.equal(indexReads, 1, 'the array entry is read once')
+    assert.equal(viaArray.ok, true, JSON.stringify(viaArray))
+
+    // The order flipped: a foreign Host on the first read is refused, and
+    // nothing connects.
+    const before = s.seen.connections
+    let lateReads = 0
+    const late = { authorization: `Bearer ${SECRET}` }
+    Object.defineProperty(late, 'host', {
+      enumerable: true,
+      get() { lateReads++; return lateReads === 1 ? 'evil.example' : good },
+    })
+    assertHostMismatch(await outcome(pinnedRequest(get(s.port, pins, { headers: late }))), 'foreign first read')
+    await settle()
+    assert.equal(s.seen.connections, before)
+  } finally {
+    await s.close()
+  }
+})
+
+test('Round 5 F-1: headers that are not names with string values are refused before a connection', async () => {
+  const s = await serve(chain.material('leaf'))
+  try {
+    const refused = [
+      ['number value', { authorization: `Bearer ${SECRET}`, 'content-length': 0 }],
+      ['array value', { authorization: [`Bearer ${SECRET}`] }],
+      ['object value', { authorization: { toString: () => `Bearer ${SECRET}` } }],
+      ['odd array', ['authorization', `Bearer ${SECRET}`, 'host']],
+      ['array name not a string', [1, 'x', 'authorization', `Bearer ${SECRET}`]],
+      ['array name twice', ['authorization', `Bearer ${SECRET}`, 'authorization', 'Bearer other']],
+      ['a string', 'authorization: x'],
+      ['a getter that throws', Object.defineProperty({}, 'host', { enumerable: true, get() { throw new Error('boom') } })],
+    ]
+    for (const [label, headers] of refused) {
+      const out = await outcome(pinnedRequest(get(s.port, [chain.leafPin], { headers })))
+      assert.equal(out.code, 'AV_POLICY_DENIED', `${label}: ${JSON.stringify(out)}`)
+      assert.equal(out.rule, 'header_format', label)
+    }
+    await settle()
+    assert.equal(s.seen.connections, 0)
+
+    // Controls: no headers, and a null-prototype object, are sent.
+    for (const headers of [undefined, null, Object.assign(Object.create(null), { authorization: `Bearer ${SECRET}` })]) {
+      const out = await outcome(pinnedRequest(get(s.port, [chain.leafPin], { headers })))
+      assert.equal(out.ok, true, JSON.stringify(out))
+    }
+    assert.deepEqual(s.seen.host, Array(3).fill(`127.0.0.1:${s.port}`))
+  } finally {
+    await s.close()
+  }
+})
+
+// Round 5, F-2. An IPv6 URL host keeps its brackets in parsed.hostname, and
+// Node looked '[::1]' up as a name: every IPv6 request failed with
+// ENOTFOUND. The connection uses the bare address; the certificate must name
+// it as an IP SAN, and an IP is never sent as a server name.
+
+async function serveV6(material) {
+  try {
+    return await serve(material, null, '::1')
+  } catch (e) {
+    if (e.code === 'EADDRNOTAVAIL' || e.code === 'EAFNOSUPPORT') return null
+    throw e
+  }
+}
+
+test('Round 5 F-2: an IPv6 URL connects, the certificate is checked against the IP SAN, and pins apply', async (t) => {
+  const self6 = await serveV6(chain.selfSigned6)
+  if (!self6) { t.skip('no IPv6 loopback'); return }
+  const genuine6 = await serveV6(chain.material('v6'))
+  const wrongSan = await serveV6(chain.selfSigned)
+  const wrongChain = await serveV6(chain.material('leaf'))
+  const v6 = (port, pins, extra = {}) => get(port, pins, { url: `https://[::1]:${port}/user`, ...extra })
+  try {
+    // A pinned self-signed leaf with IP:::1, with no Host and with the
+    // bracketed Host Node itself writes.
+    const bare = await outcome(pinnedRequest(v6(self6.port, [chain.self6Pin])))
+    assert.equal(bare.ok, true, JSON.stringify(bare))
+    assert.equal(bare.body, 'hello')
+    const bracketed = await outcome(pinnedRequest(v6(self6.port, [chain.self6Pin], {
+      headers: { authorization: `Bearer ${SECRET}`, host: `[::1]:${self6.port}` },
+    })))
+    assert.equal(bracketed.ok, true, JSON.stringify(bracketed))
+    assert.deepEqual(self6.seen.host, [`[::1]:${self6.port}`, `[::1]:${self6.port}`])
+    assert.deepEqual(self6.seen.servername, [null, null])
+    assert.deepEqual(self6.seen.authorization, [`Bearer ${SECRET}`, `Bearer ${SECRET}`])
+
+    // A chain the trusting child accepts: intermediate pin and no pins.
+    const [viaInt, unpinned, wrongPin] = await trusted(
+      v6(genuine6.port, [chain.intPin]),
+      v6(genuine6.port, null),
+      v6(genuine6.port, [WRONG]),
+    )
+    assert.equal(viaInt.ok, true, JSON.stringify(viaInt))
+    assert.equal(unpinned.ok, true, JSON.stringify(unpinned))
+    assert.equal(wrongPin.code, 'AV_PIN_MISMATCH', JSON.stringify(wrongPin))
+    assert.equal(genuine6.seen.requests, 2)
+
+    // A certificate without IP:::1 is refused, pinned leaf or trusted chain,
+    // and nothing is written.
+    const leafWrongSan = await outcome(pinnedRequest(v6(wrongSan.port, [chain.selfPin])))
+    assert.equal(leafWrongSan.code, 'ERR_TLS_CERT_ALTNAME_INVALID', JSON.stringify(leafWrongSan))
+    const [chainWrongSan, chainWrongSanUnpinned] = await trusted(v6(wrongChain.port, [chain.intPin]), v6(wrongChain.port, null))
+    assert.equal(chainWrongSan.code, 'ERR_TLS_CERT_ALTNAME_INVALID', JSON.stringify(chainWrongSan))
+    assert.equal(chainWrongSanUnpinned.ok, false, JSON.stringify(chainWrongSanUnpinned))
+
+    // A Host that is not the URL host is still refused before a connection.
+    for (const host of ['::1', 'evil.example', `127.0.0.1:${self6.port}`]) {
+      assertHostMismatch(await outcome(pinnedRequest(v6(self6.port, [chain.self6Pin], {
+        headers: { authorization: `Bearer ${SECRET}`, host },
+      }))), host)
+    }
+    await settle()
+    for (const s of [wrongSan, wrongChain]) {
+      assert.equal(s.seen.requests, 0)
+      assert.equal(s.seen.bytes, 0)
+    }
+    assert.equal(self6.seen.connections, 2)
+  } finally {
+    for (const s of [self6, genuine6, wrongSan, wrongChain]) await s?.close()
   }
 })
