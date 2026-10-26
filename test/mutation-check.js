@@ -1166,6 +1166,24 @@ const MUTATIONS = [
     to: 'out.observed_expires_at = iso || String(rawExpiry).trim()',
     tests: ['test/security/connectors-health.test.js'],
   },
+  {
+    // Node flushes the request, headers and all, once the handshake has
+    // completed. Ending before the pin comparison delivers the secret.
+    what: 'the request is ended before the certificate pin is checked',
+    file: 'src/connectors/pinning.js',
+    from: 'const presented = chainPins(socket)\n        if (!presented.some((p) => pinList.includes(p))) {',
+    to: 'req.end(body); const presented = chainPins(socket)\n        if (!presented.some((p) => pinList.includes(p))) {',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // With no pins, verification has to stay exactly what Node already does.
+    // Turning it off would accept any certificate for an unpinned host.
+    what: 'a request with no pins skips certificate verification',
+    file: 'src/connectors/pinning.js',
+    from: '// Certificate verification stays at Node\'s default.\n      const req = open(opts, onResponse)',
+    to: 'opts.rejectUnauthorized = false\n      const req = open(opts, onResponse)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
 ]
 
 let survived = 0
