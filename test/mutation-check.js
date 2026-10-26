@@ -1391,6 +1391,30 @@ const MUTATIONS = [
     to: '    if (false) throw refuse',
     tests: ['test/security/store-notify.test.js'],
   },
+  // ---- store F17: templates ----
+  {
+    // The hash is what a human's signature binds; over raw JSON text it
+    // depends on key order, and the CLI and the daemon would disagree.
+    what: 'the template hash is taken over the JSON text, not the canonical form',
+    file: 'src/store/vault.js',
+    from: '      hash: createHash(\'sha256\').update(canonicalOperation(stored)).digest(\'hex\'),',
+    to: '      hash: createHash(\'sha256\').update(text).digest(\'hex\'),',
+    tests: ['test/security/store-templates.test.js'],
+  },
+  {
+    what: 'a template spec may carry template, template_hash or presence',
+    file: 'src/store/vault.js',
+    from: "      if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`",
+    to: "      if (false) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`",
+    tests: ['test/security/store-templates.test.js'],
+  },
+  {
+    what: 'a template spec of any size is stored',
+    file: 'src/store/vault.js',
+    from: '    if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-templates.test.js'],
+  },
 ]
 
 let survived = 0

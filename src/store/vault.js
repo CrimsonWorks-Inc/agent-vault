@@ -18,6 +18,7 @@ import * as ph from '../core/placeholder.js'
 import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
+import { canonicalOperation } from '../ui/webauthn.js'
 
 export const SCHEMA_VERSION = 1
 
@@ -94,6 +95,11 @@ const NOTIFY_AAD = 'av/notify/webhook'
 const MAX_SCRUB_SOURCE = 256
 const MAX_SCRUB_PER_CRED = 16
 const MAX_SCRUB_TOTAL = 64
+
+// F17's bounds on templates.
+const TEMPLATE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
+const MAX_TEMPLATE_BYTES = 16 * 1024
+const MAX_TEMPLATES = 64
 
 // What elevated a session (C3). Recorded, not decided, here: the daemon decides
 // with elevationOf(), and the store refuses anything it does not recognise.
@@ -1156,6 +1162,73 @@ export class Vault {
     return true
   }
 
+  // ------------------------------------------------------ F17: templates
+
+  /**
+   * Save a named session shape (F17): configuration, not standing approval.
+   * Creating a session from one still passes the normal gate. The hash is
+   * over the canonical operation form, which accepts the floats a spec may
+   * carry (spend_usd) where canon.canonicalize would not, and it is what a
+   * human's signature binds, so an edit after they looked is refused.
+   */
+  saveTemplate(name, spec) {
+    this.#requireUnlocked()
+    if (typeof name !== 'string' || !TEMPLATE_NAME.test(name)) {
+      throw deny('AV_POLICY_DENIED', 'a template name is 1-32 characters of [a-z0-9-], starting with a letter or digit', { rule: 'template_name' })
+    }
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      throw deny('AV_POLICY_DENIED', 'a template spec is a session-create object', { rule: 'session_shape' })
+    }
+    for (const k of ['template', 'template_hash', 'presence']) {
+      if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`, { rule: 'session_shape' })
+    }
+    let text
+    try { text = JSON.stringify(spec) } catch { throw deny('AV_POLICY_DENIED', 'a template spec must be plain JSON', { rule: 'session_shape' }) }
+    if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {
+      throw deny('AV_POLICY_DENIED', `a template spec is at most ${MAX_TEMPLATE_BYTES} bytes of JSON`, { rule: 'template_size' })
+    }
+    const templates = this.db.templates || {}
+    const old = Object.hasOwn(templates, name) ? templates[name] : null
+    if (!old && Object.keys(templates).length >= MAX_TEMPLATES) {
+      throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
+    }
+    // Stored as the JSON it will be read back as, so the hash describes
+    // exactly what a later read returns.
+    const stored = JSON.parse(text)
+    const now = new Date().toISOString()
+    const template = {
+      name, version: old ? old.version + 1 : 1, spec: stored,
+      hash: createHash('sha256').update(canonicalOperation(stored)).digest('hex'),
+      created_at: old?.created_at ?? now, updated_at: now,
+    }
+    this.db.templates = { ...templates, [name]: template }
+    this.#persist()
+    this.audit.write('template.saved', { name, version: template.version, template_hash: template.hash })
+    return structuredClone(template)
+  }
+
+  getTemplate(name) {
+    const t = this.db.templates
+    return t && typeof name === 'string' && Object.hasOwn(t, name) ? structuredClone(t[name]) : null
+  }
+
+  listTemplates() {
+    return Object.values(this.db.templates || {}).sort((a, b) => a.name.localeCompare(b.name)).map((t) => structuredClone(t))
+  }
+
+  /** Remove a template. It grants nothing, so removing it narrows only. */
+  deleteTemplate(name) {
+    this.#requireUnlocked()
+    const t = this.db.templates
+    if (!t || typeof name !== 'string' || !Object.hasOwn(t, name)) return false
+    const { version } = t[name]
+    const { [name]: _gone, ...rest } = t
+    this.db.templates = rest
+    this.#persist()
+    this.audit.write('template.deleted', { name, version })
+    return true
+  }
+
   deleteCredential(slug) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
@@ -1221,7 +1294,7 @@ export class Vault {
    * `infinite: 'false'` is truthy, and `ttlMs: NaN` was a session that
    * `new Date(NaN)` threw on halfway through.
    */
-  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], template = null, templateVersion = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
     this.#requireUnlocked()
     if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
@@ -1233,6 +1306,11 @@ export class Vault {
     }
     if (!Array.isArray(elevated) || elevated.length > ELEVATIONS.size || !elevated.every((e) => ELEVATIONS.has(e))) {
       throw deny('AV_POLICY_DENIED', 'elevated must list only approval_auto_writes and infinite', { rule: 'elevation_invalid' })
+    }
+    // F17: which template, at which version, a session came from. Both or neither.
+    if (template === null ? templateVersion !== null
+      : (typeof template !== 'string' || !TEMPLATE_NAME.test(template) || !Number.isSafeInteger(templateVersion) || templateVersion < 1)) {
+      throw deny('AV_POLICY_DENIED', 'a session names its template and version together, or neither', { rule: 'template_name' })
     }
     const sid = ph.newSid()
     const secret = randomBytes(33).toString('base64url')
@@ -1254,13 +1332,17 @@ export class Vault {
       max_expires_at: infinite ? null : new Date(now + ceiling).toISOString(),
       idle_timeout_ms: infinite ? null : ((remote ? 1 : 2) * 3600_000),
       infinite,
+      // What it was created with, for the detail view (F19). Metadata only:
+      // nothing reads these to decide anything.
+      elevated: [...new Set(elevated)], template, template_version: templateVersion,
       last_seen_at: new Date(now).toISOString(),
     }
     this.db.sessions[sid] = session
     this.#persist()
     this.audit.write('session.created', {
       session_id: sid, workspace_id: workspaceId, label, remote,
-      infinite, expires_at: session.expires_at, elevated: [...new Set(elevated)],
+      infinite, expires_at: session.expires_at, elevated: session.elevated,
+      template, template_version: templateVersion,
     })
     return { session, token }
   }
