@@ -1526,8 +1526,8 @@ const MUTATIONS = [
   {
     what: "a JSON body's repeated _method is read as its last copy only",
     file: 'src/daemon/pipeline.js',
-    from: 'for (const [k, v] of topLevelJsonEntries(text))',
-    to: 'for (const [k, v] of Object.entries(parsed))',
+    from: 'for (const v of topLevelJsonValues(text, isOverrideField))',
+    to: 'for (const v of Object.entries(parsed).filter(([k]) => isOverrideField(k)).map(([, v]) => v))',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   {

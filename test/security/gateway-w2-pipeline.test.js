@@ -621,6 +621,7 @@ test('a method-override field naming another method is refused, and nothing is s
     ['JSON duplicate, last matches', { extra: [json], body: '{"_method":"DELETE","_method":"POST"}' }],
     ['JSON duplicate, first matches', { extra: [json], body: '{"_method":"POST", "a":{"b":[1,"}"]},"_method":"DELETE"}' }],
     ['JSON non-string value', { extra: [json], body: '{"_method":["DELETE"]}' }],
+    ['JSON escaped key', { extra: [json], body: ' { "a" : "x\\"," , "\\u005fmethod" : "DELETE" } ' }],
     ['JSON +json type', { extra: [['content-type', 'application/vnd.api+json']], body: '{"_method":"PUT"}' }],
     ['multipart', { extra: [multipart], body: `${part('a', '1')}${part('_method', 'DELETE')}--XyZ--\r\n` }],
   ]) {

@@ -1864,39 +1864,43 @@ function methodOverrideFields(req) {
   } else if (/[/+]json\b/.test(type)) {
     let parsed
     try { parsed = JSON.parse(text) } catch { return out }
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) for (const [k, v] of topLevelJsonEntries(text)) if (isOverrideField(k)) out.push(typeof v === 'string' ? v : JSON.stringify(v))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) for (const v of topLevelJsonValues(text, isOverrideField)) out.push(typeof v === 'string' ? v : JSON.stringify(v))
   }
   return out
 }
 
 /**
- * The top-level [key, value] pairs of a JSON object that JSON.parse has
- * already accepted, duplicates included: JSON.parse keeps only the last
- * copy of a key, and a server that keeps the first would run the other.
+ * The values of the top-level keys `wanted` accepts, in a JSON object that
+ * JSON.parse has already accepted, every copy of a repeated key included:
+ * JSON.parse keeps only the last, and a server that keeps the first would
+ * run the other. Only a wanted value is parsed; the rest is stepped over.
  */
-function topLevelJsonEntries(text) {
+function topLevelJsonValues(text, wanted) {
   const out = []
   let i = text.indexOf('{') + 1
   const ws = () => { while (/\s/.test(text[i] ?? '')) i++ }
-  const string = () => { const start = i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; return JSON.parse(text.slice(start, ++i)) }
+  const skipString = () => { i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; i++ }
   const skipValue = () => {
-    const start = i
     let depth = 0
     while (i < text.length) {
       const c = text[i]
-      if (c === '"') { string(); if (!depth) break; continue }
+      if (c === '"') { skipString(); if (!depth) return; continue }
       if (c === '{' || c === '[') depth++
-      else if (c === '}' || c === ']') { if (!depth) break; depth--; if (!depth) { i++; break } }
-      else if (c === ',' && !depth) break
+      else if (c === '}' || c === ']') { if (!depth) return; if (!--depth) { i++; return } }
+      else if (c === ',' && !depth) return
       i++
     }
-    return JSON.parse(text.slice(start, i))
   }
   for (ws(); text[i] === '"'; ws()) {
-    const key = string(); ws(); i++ /* : */; ws()
-    out.push([key, skipValue()]); ws()
-    if (text[i] === ',') i++
+    let start = i
+    skipString()
+    const key = JSON.parse(text.slice(start, i))
+    ws(); i++ /* : */; ws()
+    start = i
+    skipValue()
+    if (wanted(key)) out.push(JSON.parse(text.slice(start, i)))
     ws()
+    if (text[i] === ',') i++
   }
   return out
 }
