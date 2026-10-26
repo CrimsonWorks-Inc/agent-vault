@@ -33,6 +33,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import * as webauthn from './webauthn.js'
 import { rememberSession } from '../client-state.js'
 import { fetchPending, parseOverrides, collectApproved } from '../pending.js'
+import { overridesOf } from '../daemon/session-requests.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -191,7 +192,12 @@ export class UiServer {
    * counter as well, so this process must not advance it first and make the
    * daemon's own check look like a cloned credential.
    */
-  static DAEMON_VERIFIED = new Set(['POST credentials', 'DELETE credentials', 'POST sessions'])
+  static DAEMON_VERIFIED = new Set([
+    'POST credentials', 'DELETE credentials', 'POST sessions',
+    // A decision that makes an elevated session (auto-approved writes, or no
+    // expiry) needs a fresh proof, which the daemon checks for itself.
+    'POST session-requests/decide', 'POST pending/decide-many',
+  ])
 
   async #serveApi(req, res, url) {
     const cookie = this.#cookieFrom(req)
@@ -545,8 +551,10 @@ export class UiServer {
         // The same fields the daemon binds its own check to: the id, the
         // verdict and any narrowing. A signature for "approve, narrowed to GET
         // /user" therefore cannot be replayed to grant the wide original.
+        // overridesOf is the daemon's own reader of a decision's overrides,
+        // owner fields included, so the two cannot bind different things.
         return of('session_request.decide', {
-          id: body?.id, granted: !!body?.granted, ...parseOverrides(body?.overrides || {}),
+          id: body?.id, granted: !!body?.granted, ...overridesOf(parseOverrides(body?.overrides || {})),
         })
       case 'POST lock': return of('vault.lock', {})
       // Only the fields that are forwarded, which is what the daemon binds.
