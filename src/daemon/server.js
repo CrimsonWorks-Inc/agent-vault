@@ -21,7 +21,8 @@ import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN } from '../core/scrub.js'
-import { SessionRequests, proposalOf } from './session-requests.js'
+import { SessionRequests, proposalOf, overridesOf, elevationOf, OWNER_FIELDS } from './session-requests.js'
+import * as vaultStore from '../store/vault.js'
 import { checkDecisions } from '../pending.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
@@ -36,6 +37,16 @@ const VERSION = (() => {
 })()
 
 const MAX_BODY = 16 * 1024 * 1024
+
+// The fields of one grant in the single-credential form of a session body. A
+// body with `grants` may not also carry any of these at the top level.
+const GRANT_FIELDS = [
+  'cred', 'hosts', 'methods', 'paths', 'deny_paths', 'budget', 'approval', 'uses', 'rate', 'max_concurrent',
+  'quota', 'routes', 'payload', 'redirects', 'spend_tokens', 'spend_usd', 'grant_ttl_minutes',
+]
+const APPROVAL_MODES = ['each', 'on-write', 'first-use', 'auto']
+const MAX_GRANTS = 16
+const MAX_BATCH = 32
 
 // Where `agent-vault ui` listens unless told otherwise, and so the one web UI
 // origin the daemon trusts without being told. WebAuthn's relying party is
@@ -206,7 +217,7 @@ export class Daemon {
       if (record.state !== 'pending') {
         throw deny('AV_POLICY_DENIED', `already ${record.state}`, { rule: 'session_requests' })
       }
-      const final = proposalOf({ ...record.proposal, ...proposalOf(d.overrides || {}) })
+      const final = { ...record.proposal, ...overridesOf(d.overrides || {}) }
       return this.#settleSessionRequest(record, d.granted, final)
     }
     return approvalView(this.pipeline.decideApproval(d.id, d.granted))
@@ -221,12 +232,18 @@ export class Daemon {
       this.vault.audit?.write('session_request.denied', { request_id: record.id })
       return SessionRequests.redact(record)
     }
+    // A lifetime and "no lifetime" cannot both be the answer. The owner
+    // added `infinite`; the agent asked for minutes; nothing picks for them.
+    if (final.infinite === true && final.ttl_minutes != null) {
+      throw deny('AV_POLICY_DENIED', 'an infinite session has no lifetime to set, and this request names one', { rule: 'ttl' })
+    }
     // Created through the same helper the human's own route uses, so an
-    // approved proposal cannot reach a second, laxer path.
+    // approved proposal cannot reach a second, laxer path. A ttl of 0 is
+    // passed on and refused there, rather than read as "the default".
+    const { ttl_minutes: ttlMinutes, ...spec } = final
     const created = this.#createSession({
-      ...final,
-      budget: final.budget,
-      ttl_hours: final.ttl_minutes ? final.ttl_minutes / 60 : undefined,
+      ...spec,
+      ttl_hours: ttlMinutes != null ? ttlMinutes / 60 : undefined,
       label: `requested by an agent (${record.id})`,
     })
     record.state = 'approved'
@@ -256,47 +273,168 @@ export class Daemon {
     return result
   }
 
+  /**
+   * Read and check a session-create body without changing anything.
+   *
+   * Every grant is resolved and validated here, before a session exists, so a
+   * refusal leaves no half-made session behind. The gate is chosen from
+   * `elevated`, which is computed here once, over the same body.
+   */
+  #planSession(input) {
+    const shape = (detail) => deny('AV_POLICY_DENIED', detail, {
+      rule: 'session_shape',
+      hint: 'A session is either one credential (cred and its limits at the top level) or grants: [{cred, …}, …], one entry per credential.',
+    })
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw shape('send one of cred, grants or template')
+    const has = (k) => input[k] !== undefined
+    if (has('template') && (has('cred') || has('grants'))) throw shape('send one of cred, grants or template')
+    if (has('template')) throw shape('templates are not available on this daemon; send cred or grants')
+    if (has('grants') && GRANT_FIELDS.some(has)) throw shape('send one of cred, grants or template')
+    let specs
+    if (has('grants')) {
+      if (!Array.isArray(input.grants) || !input.grants.length || input.grants.length > MAX_GRANTS) {
+        throw shape(`grants is a list of 1 to ${MAX_GRANTS} grant specs`)
+      }
+      specs = input.grants
+    } else {
+      specs = [Object.fromEntries(GRANT_FIELDS.filter(has).map((k) => [k, input[k]]))]
+    }
+    // The gateway picks a grant by credential, so two grants for one
+    // credential would leave it guessing which one a request spends.
+    const seen = new Set()
+    for (const spec of specs) {
+      if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw shape('each grant spec must be an object')
+      if (seen.has(spec.cred)) throw shape(`credential ${spec.cred} appears twice`)
+      seen.add(spec.cred)
+    }
+
+    const invalid = (field, detail) => deny('AV_POLICY_DENIED', detail, { rule: 'policy_invalid', field })
+    if (input.label != null && (typeof input.label !== 'string' || input.label.length > 80)) {
+      throw invalid('label', 'label is a string of at most 80 characters')
+    }
+    // A lifetime is checked, never coerced. NaN became a RangeError, 0 became
+    // the default, and a negative number made a session born expired.
+    const ttl = (detail) => deny('AV_POLICY_DENIED', detail, { rule: 'ttl' })
+    if (input.infinite != null && typeof input.infinite !== 'boolean') throw ttl('infinite is true or false')
+    const infinite = input.infinite === true
+    if (input.ttl_hours != null) {
+      if (infinite) throw ttl('an infinite session has no lifetime to set')
+      if (typeof input.ttl_hours !== 'number' || !Number.isFinite(input.ttl_hours) || !(input.ttl_hours > 0)) {
+        throw ttl('ttl_hours must be a positive number of hours')
+      }
+    }
+    const remote = !!input.remote
+    // A capability that never ends must not be reachable from the network.
+    if (infinite && remote) {
+      throw deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be remote', { rule: 'infinite_remote' })
+    }
+
+    const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x)
+    const grants = specs.map((spec) => {
+      const cred = this.vault.findCredential(spec.cred)
+      if (!cred) throw deny('AV_NOT_FOUND', `no credential ${spec.cred}`)
+      // Never a default for a mode nobody chose: an unknown one used to mean
+      // auto, because needsApproval fell through to false.
+      if (spec.approval != null && !APPROVAL_MODES.includes(spec.approval)) {
+        throw deny('AV_POLICY_DENIED', 'approval is not one of the four modes', {
+          rule: 'approval', hint: 'approval is one of: each, on-write, first-use, auto',
+        })
+      }
+      // Read the same way elevationOf reads them: absent or null is the
+      // default, and anything else must be a list of names.
+      if (spec.methods != null && !strings(spec.methods)) throw invalid('methods', 'methods must be a list of method names')
+      if (spec.paths != null && !strings(spec.paths)) throw invalid('paths', 'paths must be a list of path globs')
+      if (spec.budget != null && !(Number.isInteger(spec.budget) && spec.budget >= 0)) {
+        throw invalid('budget', 'budget must be a whole number of requests, 0 or more')
+      }
+      if (spec.uses != null && !(Number.isInteger(spec.uses) && spec.uses >= 1)) {
+        throw invalid('uses', 'uses must be a whole number, 1 or more')
+      }
+      const profile = getProfile(cred.connector_kind)
+      // A grant can only reach the hosts the credential itself declares.
+      // Without this an agent minting its own session could aim the
+      // credential at a host it controls (the exfiltration path found in
+      // the pen test).
+      const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
+      const hosts = policyMod.confineHosts(spec.hosts, ceiling)
+      const policy = {
+        hosts,
+        methods: spec.methods ?? ['GET', 'HEAD'],
+        paths: spec.paths ?? ['/**'],
+        budget: { unit: profile.defaultBudget.unit, limit: spec.budget ?? profile.defaultBudget.limit },
+        approval: spec.approval ?? 'on-write',
+      }
+      const problems = policyMod.validate?.(policy) || []
+      if (problems.length) throw invalid(problems[0].field, `${problems[0].field}: ${problems[0].message}`)
+      return { cred, profile, spec, policy, lint: policyMod.lint(policy, { kind: cred.connector_kind }) }
+    })
+    return {
+      label: input.label, ttlMs: input.ttl_hours != null ? input.ttl_hours * 3600_000 : null,
+      infinite, remote, grants, elevated: elevationOf(input),
+    }
+  }
+
   #createSession(input) {
-          const cred = this.vault.findCredential(input.cred)
-          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
-          const profile = getProfile(cred.connector_kind)
-          const { session, token } = this.vault.createSession({
-            label: input.label, ttlMs: input.ttl_hours ? input.ttl_hours * 3600_000 : null, policy: {}, remote: !!input.remote,
-          })
-          // A grant can only reach the hosts the credential itself declares.
-          // Without this an agent minting its own session could aim the
-          // credential at a host it controls (the exfiltration path found in
-          // the pen test).
-          const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
-          const hosts = policyMod.confineHosts(input.hosts, ceiling)
-          const policy = {
-            hosts,
-            methods: input.methods || ['GET', 'HEAD'],
-            paths: input.paths || ['/**'],
-            budget: { unit: profile.defaultBudget.unit, limit: input.budget ?? profile.defaultBudget.limit },
-            approval: input.approval || 'on-write',
-          }
-          const problems = policyMod.lint(policy, { kind: cred.connector_kind })
-          const grant = this.vault.createGrant({
-            sessionId: session.id, credentialId: cred.id, fields: [cred.fields[0].name], policy,
-          })
-          // The grant's placeholder_policy is a ceiling, not a default. It sat
-          // on the right of a `??`, so an agent asking for a million uses got
-          // a million even where the human had configured one-time use.
-          const maxUses = grant.policy?.placeholder_policy?.max_uses
-          const asked = input.uses ?? null
-          const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
-          const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses })
-          return {
-            session_id: session.id, token, expires_at: session.expires_at,
-            grant_id: grant.id, placeholder,
-            usage: cred.fields[0].sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)),
-            base_url: `http://127.0.0.1:${this.gatewayPort}/p/${cred.slug}`,
-            // The profile's own read-only probe, so a caller can print an
-            // example request that works instead of a made-up path.
-            probe_path: profile.probe?.path || null,
-            lint: problems,
-          }
+    return this.#makeSession(this.#planSession(input))
+  }
+
+  /** Create what a plan describes. Only ever called after its gate. */
+  #makeSession(plan) {
+    const { session, token } = this.vault.createSession({
+      label: plan.label, ttlMs: plan.ttlMs, infinite: plan.infinite, elevated: plan.elevated,
+      policy: {}, remote: plan.remote,
+    })
+    try {
+      // A store that cannot keep a session open forever must not hand back
+      // an ordinary one to someone who asked for "never expires".
+      if (plan.infinite && session.infinite !== true) {
+        throw deny('AV_POLICY_DENIED', 'this vault cannot create a session without expiry', { rule: 'ttl' })
+      }
+      const grants = plan.grants.map(({ cred, profile, spec, policy, lint }) => {
+        const field = cred.fields[0]
+        const grant = this.vault.createGrant({
+          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy,
+        })
+        // The grant's placeholder_policy is a ceiling, not a default. It sat
+        // on the right of a `??`, so an agent asking for a million uses got
+        // a million even where the human had configured one-time use.
+        const maxUses = grant.policy?.placeholder_policy?.max_uses
+        const asked = spec.uses ?? null
+        const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
+        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses })
+        return {
+          cred: cred.slug, grant_id: grant.id, placeholder,
+          usage: field.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)),
+          base_url: `http://127.0.0.1:${this.gatewayPort}/p/${cred.slug}`,
+          // The profile's own read-only probe, so a caller can print an
+          // example request that works instead of a made-up path.
+          probe_path: profile.probe?.path || null,
+          env: profile.env ? { base: profile.env.base, key: profile.env.key } : null,
+          expires_at: grant.expires_at ?? null,
+          lint,
+        }
+      })
+      const [first] = grants
+      return {
+        session_id: session.id, token, label: session.label,
+        expires_at: session.expires_at ?? null, infinite: session.infinite === true,
+        grants,
+        // grants[0] again, so every client written for one grant keeps working.
+        grant_id: first.grant_id, placeholder: first.placeholder, usage: first.usage,
+        base_url: first.base_url, probe_path: first.probe_path, lint: first.lint,
+      }
+    } catch (e) {
+      // Nothing half-made survives a failure: the session goes, and every
+      // grant and placeholder with it.
+      try { this.vault.revokeSession(session.id, 'incomplete') } catch { /* the original error is the one to report */ }
+      throw e
+    }
+  }
+
+  /** Gate a session-create body at the level its elevation needs. Exactly one gate runs. */
+  #gateSession(op, operation, elevated, presence) {
+    if (elevated.length) this.#requireFreshPresence(op, operation, presence)
+    else this.#requireHumanForWidening(op, operation, presence)
   }
 
   /**
@@ -467,6 +605,7 @@ export class Daemon {
       case 'DELETE /v1/credentials': return of('cred.remove', { slug: url.searchParams.get('slug') })
       case 'POST /v1/sessions': return of('session.create', input)
       case 'POST /v1/placeholders': return of('placeholder.issue', input)
+      case 'POST /v1/placeholders/batch': return of('placeholder.issue_many', input)
       // The verdict picks the op name, the same way the UI's builder does, so
       // the human is shown which answer they are giving.
       case 'POST /v1/approvals': return of(input?.granted === false ? 'approval.deny' : 'approval.approve', input)
@@ -829,7 +968,10 @@ export class Daemon {
       this.vault.assertSessionLive(session)
 
       if (url.pathname === '/v1/session') {
-        return json(200, { id: session.id, label: session.label, expires_at: session.expires_at, remote: session.remote })
+        return json(200, {
+          id: session.id, label: session.label, expires_at: session.expires_at ?? null,
+          infinite: session.infinite === true, remote: session.remote,
+        })
       }
       if (url.pathname === '/v1/credentials') {
         return json(200, this.vault.grantsForSession(session.id).map((g) => {
@@ -1039,8 +1181,15 @@ export class Daemon {
           return json(200, { ok: true })
 
         case 'POST /v1/sessions': {
-          this.#requireHumanForWidening('session create', this.#wideningOperation(route, url, input), input.presence)
-          return json(200, this.#createSession(input))
+          // Checked before the gate, so nobody is asked for a passphrase to
+          // make something that would be refused anyway. The check changes
+          // nothing. Auto-approved writes and "never expires" each take the
+          // human out of every later request, so they need a proof made for
+          // this one operation; a window someone opened for something else
+          // does not count.
+          const plan = this.#planSession(input)
+          this.#gateSession('session create', this.#wideningOperation(route, url, input), plan.elevated, input.presence)
+          return json(200, this.#makeSession(plan))
         }
         // ------------------------------------------------- session requests
         //
@@ -1049,6 +1198,15 @@ export class Daemon {
         // question for a human, which is why this route is not gated — there
         // is no capability here to guard.
         case 'POST /v1/session-requests': {
+          // Refused, not dropped, so an agent never believes it asked for
+          // something it did not get.
+          const owned = OWNER_FIELDS.filter((f) => Object.hasOwn(input || {}, f))
+          if (owned.length) {
+            throw deny('AV_POLICY_DENIED', `a session request cannot carry ${owned.join(' or ')}`, {
+              rule: 'owner_only_field',
+              hint: 'Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason.',
+            })
+          }
           const proposal = proposalOf(input)
           if (!proposal.cred) throw deny('AV_NOT_FOUND', 'a session request must name a credential')
           if (!this.vault.findCredential(proposal.cred)) {
@@ -1111,18 +1269,21 @@ export class Daemon {
           // the HTTP approvals bound everything about a request except its
           // headers, and an approved POST arrived as a DELETE. Whatever is
           // outside the binding is what an agent can change afterwards.
-          const final = proposalOf({ ...record.proposal, ...proposalOf(input.overrides || {}) })
+          const final = { ...record.proposal, ...overridesOf(input.overrides || {}) }
           // Bound to the decision AS SENT — the id, the verdict, and any
           // narrowing — which is the convention every other gated route uses
           // and the only thing a client can sign without predicting a merge.
           // It binds the outcome just as tightly, because the stored proposal
           // is written once when the agent asks and never touched again: the
           // id plus the overrides determine `final` exactly.
-          this.#requireHumanForWidening(
+          // An approval whose result is elevated needs a fresh proof, like
+          // creating one directly. A denial creates nothing.
+          this.#gateSession(
             'session request approval',
             webauthn.operationFor('session_request.decide', {
-              id: record.id, granted: !!input.granted, ...proposalOf(input.overrides || {}),
+              id: record.id, granted: !!input.granted, ...overridesOf(input.overrides || {}),
             }),
+            input.granted ? elevationOf(final) : [],
             input.presence,
           )
           const settled = this.#settleSessionRequest(record, input.granted, final)
@@ -1151,9 +1312,18 @@ export class Daemon {
         case 'POST /v1/pending/decide-many': {
           const problem = checkDecisions(input?.decisions)
           if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'bulk_decision' })
-          this.#requireHumanForWidening(
+          // One elevated approval in the list makes the whole list fresh: the
+          // signature covers all of it, so it is held to the strictest item.
+          const elevated = input.decisions.some((d) => {
+            if (d.kind !== 'session' || d.granted !== true) return false
+            const record = this.sessionRequests.get(d.id)
+            if (!record || record.state !== 'pending') return false
+            return elevationOf({ ...record.proposal, ...overridesOf(d.overrides || {}) }).length > 0
+          })
+          this.#gateSession(
             'bulk decision',
             webauthn.operationFor('pending.decide_many', { decisions: input.decisions }),
+            elevated ? ['approval_auto_writes'] : [],
             input.presence,
           )
           const decided = []
@@ -1185,10 +1355,30 @@ export class Daemon {
         }
 
         case 'GET /v1/sessions':
-          return json(200, Object.values(this.vault.db.sessions).map((s) => ({
-            id: s.id, label: s.label, state: s.state, expires_at: s.expires_at, remote: s.remote,
-            grants: this.vault.grantsForSession(s.id).length,
-          })))
+          return json(200, Object.values(this.vault.db.sessions).map((s) => {
+            const grants = this.vault.grantsForSession(s.id)
+            const infinite = s.infinite === true
+            return {
+              id: s.id, label: s.label, state: s.state, expires_at: s.expires_at ?? null, remote: s.remote,
+              grants: grants.length,
+              // Each grant's own values, so a client can list what a session
+              // can map and how each one asks.
+              creds: grants.map((g) => ({
+                slug: this.vault.db.credentials[g.credential_id]?.slug ?? null,
+                grant_id: g.id, approval: g.policy?.approval ?? null, methods: g.policy?.methods ?? null,
+              })),
+              infinite,
+              // Recomputed from what is stored, by the function that gated it.
+              // A grant with no mode stated is read the way the gateway reads
+              // it, as auto.
+              elevated: elevationOf({
+                infinite,
+                grants: grants.map((g) => ({
+                  approval: g.policy?.approval ?? 'auto', methods: g.policy?.methods, routes: g.policy?.routes,
+                })),
+              }),
+            }
+          }))
         case 'DELETE /v1/sessions':
           this.vault.revokeSession(url.searchParams.get('sid'))
           return json(200, { ok: true })
@@ -1210,7 +1400,7 @@ export class Daemon {
           // session nobody has touched since it ran out still says 'active'.
           const now = Date.now()
           const active = Object.values(this.vault.db.sessions)
-            .filter((s) => s.state === 'active' && Date.parse(s.expires_at) > now)
+            .filter((s) => s.state === 'active' && sessionExpiry(s) > now)
           if (!input.sid && active.length > 1) {
             throw deny('AV_SESSION_REQUIRED', `${active.length} sessions are active; name the one to issue for`, {
               rule: 'explicit_session',
@@ -1231,6 +1421,86 @@ export class Daemon {
           if (!grant) throw deny('AV_NO_GRANT', `no grant for ${input.cred} in session ${session.id}`)
           const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses: input.uses ?? null })
           return json(200, { placeholder, usage: cred.fields[0].sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s), placeholder)) })
+        }
+
+        // Several placeholders for one session, in one act of presence: what
+        // `agent-vault env` and `exec --map` write into a child's environment.
+        // Gated like the single route, because each one is a fresh
+        // authorization to spend a credential. All or nothing: every item is
+        // resolved before the first placeholder is issued.
+        case 'POST /v1/placeholders/batch': {
+          const shape = (detail) => deny('AV_POLICY_DENIED', detail, {
+            rule: 'batch_shape',
+            hint: `Send { sid, items: [{ cred, field?, uses? }] } with 1 to ${MAX_BATCH} items, one per credential field.`,
+          })
+          // Never defaulted. Picking whichever session is active is how one
+          // agent's request spends another's grant.
+          if (typeof input.sid !== 'string' || !input.sid) throw shape('name the session: sid')
+          if (!Array.isArray(input.items) || !input.items.length || input.items.length > MAX_BATCH) {
+            throw shape(`items is a list of 1 to ${MAX_BATCH} entries`)
+          }
+          if (input.purpose != null && !['env', 'exec'].includes(input.purpose)) throw shape('purpose is env, exec or null')
+          const pairs = new Set()
+          for (const item of input.items) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) throw shape('each item must be an object')
+            if (typeof item.cred !== 'string' || !item.cred) throw shape('each item names a credential: cred')
+            if (item.field != null && (typeof item.field !== 'string' || !item.field)) throw shape('field is a field name')
+            if (item.uses != null && !(Number.isInteger(item.uses) && item.uses >= 1)) throw shape('uses is a whole number, 1 or more')
+            // Two placeholders for one field in one batch would rotate each
+            // other out: the second could kill the first before anyone used it.
+            const key = `${item.cred}\u0000${item.field ?? ''}`
+            if (pairs.has(key)) throw shape('each credential field appears once')
+            pairs.add(key)
+          }
+          this.#requireHumanForWidening('placeholder issue', this.#wideningOperation(route, url, input), input.presence)
+          if (this.vault.locked) throw deny('AV_LOCKED', 'the vault is locked')
+
+          const session = this.vault.db.sessions[input.sid]
+          if (!session) throw deny('AV_NOT_FOUND', `no session ${input.sid}`)
+          this.vault.assertSessionLive(session)
+          const grants = this.vault.grantsForSession(session.id)
+          const resolved = input.items.map((item) => {
+            const cred = this.vault.findCredential(item.cred)
+            if (!cred) throw deny('AV_NOT_FOUND', `no credential ${item.cred}`)
+            if (cred.quarantine) {
+              throw deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
+                rule: 'quarantine', hint: `A human can release it: agent-vault cred release ${cred.slug}`,
+              })
+            }
+            const grant = grants.find((g) => g.credential_id === cred.id)
+            if (!grant) throw deny('AV_NO_GRANT', `no grant for ${cred.slug} in session ${session.id}`)
+            this.vault.assertGrantLive?.(grant)
+            const fieldName = item.field ?? grant.fields[0]
+            const field = cred.fields.find((f) => f.name === fieldName)
+            if (!field || !grant.fields.includes(fieldName)) {
+              throw deny('AV_NO_GRANT', `the grant for ${cred.slug} does not cover that field`)
+            }
+            // The grant's ceiling wins over what the caller asks for, exactly
+            // as on the single route.
+            const maxUses = grant.policy?.placeholder_policy?.max_uses
+            const asked = item.uses ?? null
+            const uses = maxUses == null ? asked : Math.min(asked ?? maxUses, maxUses)
+            return { cred, grant, field, uses }
+          })
+          const port = this.gatewayPort
+          const items = resolved.map(({ cred, grant, field, uses }) => {
+            const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses })
+            const profile = getProfile(cred.connector_kind)
+            return {
+              cred: cred.slug, field: field.name, placeholder,
+              usage: field.sites.map((st) => sitesMod.describeSite(sitesMod.parseSite(st), placeholder)),
+              base_url: `http://127.0.0.1:${port}/p/${cred.slug}`,
+              env: profile.env ? { base: profile.env.base, key: profile.env.key } : null,
+            }
+          })
+          // The file a client writes from this is outside the daemon, which
+          // has no audit key there. This record is the evidence that it was
+          // handed placeholders, and for which credentials.
+          this.vault.audit.write('placeholder.issued_batch', {
+            session_id: session.id, count: items.length,
+            credential_slugs: [...new Set(items.map((i) => i.cred))], purpose: input.purpose ?? null,
+          })
+          return json(200, { session_id: session.id, gateway_url: `http://127.0.0.1:${port}`, items })
         }
 
         case 'GET /v1/approvals':
@@ -1643,6 +1913,15 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
+}
+
+/**
+ * When a session ends, in ms. The store's helper when it has one, which knows
+ * that an infinite session has none; otherwise the stored timestamp, where a
+ * missing one is NaN and so never counts as live.
+ */
+function sessionExpiry(s) {
+  return vaultStore.sessionExpiryMs?.(s) ?? Date.parse(s?.expires_at)
 }
 
 /** The shape of a web UI origin this daemon will consider trusting. */

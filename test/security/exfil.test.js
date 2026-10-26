@@ -25,6 +25,32 @@ const control = (method, path, body) => new Promise((resolve, reject) => {
   req.end(body ? JSON.stringify(body) : undefined)
 })
 
+/** A second vault and daemon like the shared one, with a passphrase set. */
+async function ownVault(passphrase) {
+  const d = mkdtempSync(join(tmpdir(), 'av-exfil-own-'))
+  const v = Vault.create(d, { factor: 'none' })
+  v.addCredential({
+    slug: 'test', kind: 'http', connector: { host: 'api.example.com', scheme: 'https' },
+    fields: { token: SECRET }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  v.setPassphrase(passphrase)
+  const socketPath = join(d, 'c.sock')
+  const dm = await new Daemon(v, { port: 0, socketPath }).start()
+  const call = (method, path, body) => new Promise((resolve, reject) => {
+    const req = unixRequest({ socketPath, path, method, headers: { 'content-type': 'application/json' } }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString() || '{}') }))
+    })
+    req.on('error', reject)
+    req.end(body ? JSON.stringify(body) : undefined)
+  })
+  return {
+    control: call, gatewayPort: dm.gatewayPort,
+    stop: async () => { await dm.stop(); rmSync(d, { recursive: true, force: true }) },
+  }
+}
+
 before(async () => {
   dir = mkdtempSync(join(tmpdir(), 'av-exfil-'))
   vault = Vault.create(dir, { factor: 'none' })
@@ -83,7 +109,12 @@ test('a session confined to the credential host cannot then be pointed elsewhere
   assert.equal(captured.length, 0, 'the real token must not have been sent anywhere')
 })
 
-test('the real credential value never reaches a caller-controlled destination', async () => {
+test('the real credential value never reaches a caller-controlled destination', async (t) => {
+  // Its own vault, with a passphrase: an auto-approving write session needs a
+  // fresh proof (R1), and the shared vault stays factor-less for the tests
+  // below that depend on it.
+  const own = await ownVault('exfil-own-passphrase')
+  t.after(() => own.stop())
   // The whole point: after the fix there is no path from a self-minted session
   // to the token landing on a host the agent controls.
   //
@@ -92,15 +123,16 @@ test('the real credential value never reaches a caller-controlled destination', 
   // own: each way the gateway might be steered at the catcher, then the one
   // request that is meant to arrive, the agent sending everything it holds
   // there directly.
-  const made = await control('POST', '/v1/sessions', {
+  const made = await own.control('POST', '/v1/sessions', {
     cred: 'test', methods: ['GET', 'POST'], paths: ['/**'], approval: 'auto', budget: 10,
+    presence: { passphrase: 'exfil-own-passphrase' },
   })
   assert.equal(made.status, 200, JSON.stringify(made.body))
   const { token, placeholder } = made.body
   const before = captured.length
 
   for (const method of ['GET', 'POST']) {
-    const res = await fetch(`http://127.0.0.1:${gatewayPort}/t/http/127.0.0.1:${catcherPort}/x`, {
+    const res = await fetch(`http://127.0.0.1:${own.gatewayPort}/t/http/127.0.0.1:${catcherPort}/x`, {
       method,
       headers: { host: '127.0.0.1', authorization: `Bearer ${placeholder}`, 'av-session': token },
       body: method === 'POST' ? JSON.stringify({ token: placeholder }) : undefined,

@@ -51,6 +51,70 @@ export function proposalOf(input = {}) {
   return out
 }
 
+/**
+ * The fields only the owner may set: an approval mode and an unlimited
+ * lifetime. Either one can take the human out of the loop for good, so an
+ * agent may not ask for them at all — a proposal carrying one is refused, not
+ * trimmed, so the agent never believes it asked for something it did not.
+ */
+export const OWNER_FIELDS = ['approval', 'infinite']
+
+/**
+ * A human's overrides, read once. The daemon's binding, its settle path and
+ * the web UI's signed operation all call this, so none of them can disagree
+ * about which fields a decision carried.
+ */
+export function overridesOf(input = {}) {
+  const out = proposalOf(input)
+  for (const f of OWNER_FIELDS) if (input?.[f] !== undefined && input?.[f] !== null) out[f] = input[f]
+  return out
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+/**
+ * Why a session spec needs fresh presence. [] means it does not.
+ *
+ * `spec` is a session-create input: `{cred, …}` or `{grants: […]}`. One
+ * function decides this for creating, deciding and bulk-deciding, so no path
+ * can call an elevated session ordinary.
+ *
+ * Fail-closed: anything it cannot read counts as elevated. `methods` absent or
+ * null is the creation default, GET and HEAD, which is how #createSession
+ * reads it too; anything else that is not a list of strings is a write.
+ */
+export function elevationOf(spec) {
+  const out = []
+  try {
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return ['approval_auto_writes']
+    if (spec.infinite === true) out.push('infinite')
+    if (spec.grants !== undefined && !Array.isArray(spec.grants)) return [...out, 'approval_auto_writes']
+    const grants = spec.grants !== undefined ? spec.grants : [spec]
+    if (grants.some((g) => !g || typeof g !== 'object' || Array.isArray(g) || (g.approval === 'auto' && permitsWrite(g)))) {
+      out.push('approval_auto_writes')
+    }
+    return out
+  } catch {
+    return [...new Set([...out, 'approval_auto_writes'])]
+  }
+}
+
+/** Whether a grant spec permits a method outside GET, HEAD and OPTIONS. */
+function permitsWrite(g) {
+  const methods = g.methods == null ? ['GET', 'HEAD'] : g.methods
+  if (!Array.isArray(methods)) return true
+  const named = [...methods]
+  // Method-bound routes (F3) name methods of their own.
+  if (g.routes != null) {
+    if (!Array.isArray(g.routes)) return true
+    for (const r of g.routes) {
+      if (!r || !Array.isArray(r.methods)) return true
+      named.push(...r.methods)
+    }
+  }
+  return named.some((m) => typeof m !== 'string' || !SAFE_METHODS.has(m.toUpperCase()))
+}
+
 export function fingerprint(proposal) {
   const canonical = JSON.stringify(proposal, Object.keys(proposal).sort())
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
@@ -163,6 +227,13 @@ export class SessionRequests {
    * only thing that exists afterwards is a question for a human.
    */
   propose({ proposal, reason }) {
+    // The route refuses these before it gets here; this is for any other
+    // caller. An agent's proposal never carries an owner field.
+    if (OWNER_FIELDS.some((f) => proposal?.[f] !== undefined)) {
+      const err = new Error('only the owner can choose the approval mode or an unlimited lifetime')
+      err.code = 'AV_OWNER_ONLY'
+      throw err
+    }
     this.#sweep()
     // Only what is actually waiting counts. This counted every record in
     // every state, and settled ones were never removed, so after 64 decisions

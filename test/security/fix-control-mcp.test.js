@@ -12,11 +12,13 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { Readable } from 'node:stream'
-import { startDaemon, SECRET } from './fix-control-helpers.js'
+import { startDaemon, SECRET, PASSPHRASE } from './fix-control-helpers.js'
 
 async function sessionFor(d, body) {
   d.daemon.presenceGraceUntil = Date.now() + 60_000
-  const s = await d.control('POST', '/v1/sessions', { cred: 'demo', methods: ['GET', 'POST'], paths: ['/**'], approval: 'auto', ...body })
+  // Auto-approved writes need a fresh proof (R1), so the fixture vault has a
+  // passphrase and the create call carries it.
+  const s = await d.control('POST', '/v1/sessions', { cred: 'demo', methods: ['GET', 'POST'], paths: ['/**'], approval: 'auto', ...body, presence: { passphrase: PASSPHRASE } })
   d.daemon.presenceGraceUntil = 0
   assert.equal(s.status, 200, JSON.stringify(s.body))
   return { token: s.body.token, session: d.vault.sessionByToken(s.body.token), grantId: s.body.grant_id }
@@ -30,7 +32,7 @@ async function call(d, s, name, args) {
 
 let d, s, seen = []
 before(async () => {
-  d = await startDaemon()
+  d = await startDaemon({ passphrase: PASSPHRASE })
   s = await sessionFor(d)
 })
 after(() => d?.stop())
@@ -74,7 +76,7 @@ test('vault_http does not leave a live placeholder behind per call', async () =>
 })
 
 test('the session token is what authenticates, so a query-site credential works', async () => {
-  const q = await startDaemon({ sites: ['query:api_key'] })
+  const q = await startDaemon({ sites: ['query:api_key'], passphrase: PASSPHRASE })
   try {
     const qs = await sessionFor(q)
     let url

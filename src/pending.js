@@ -41,6 +41,9 @@ function describe(kind, raw) {
       // The one dimension a session request states in plain minutes could only
       // be reached by hand-writing the HTTP body.
       narrowable: ['methods', 'paths', 'budget', 'uses', 'ttl_minutes'],
+      // What only the owner can add, never narrow: an agent cannot propose
+      // either one, so they are offered here as the human's own choices.
+      owner_settable: ['approval', 'infinite'],
       proposal: raw.proposal || {},
       decide: { path: '/v1/session-requests/decide', idField: 'id' },
     }
@@ -53,6 +56,7 @@ function describe(kind, raw) {
     created_at: raw.created_at,
     caution: null,
     narrowable: [],
+    owner_settable: [],
     grant_id: raw.grant_id || null,
     decide: { path: '/v1/approvals', idField: 'id' },
   }
@@ -104,6 +108,10 @@ export function parseOverrides(args = {}) {
   // spelling a hand would reach for, so accept both.
   const ttl = args.ttl_minutes ?? args['ttl-minutes']
   if (ttl !== undefined && ttl !== null && ttl !== '') out.ttl_minutes = Number(ttl)
+  // Owner fields. The mode is passed through as typed and validated by the
+  // daemon, so a typo is refused there rather than quietly meaning something.
+  if (typeof args.approval === 'string' && args.approval !== '') out.approval = args.approval
+  if (args.infinite === true || args.infinite === 'true') out.infinite = true
   return out
 }
 
@@ -141,6 +149,8 @@ export function describeGranted(g = {}) {
   if (g.paths) bits.push(g.paths.join(' '))
   if (g.budget) bits.push(`${g.budget} requests`)
   if (g.uses) bits.push(`${g.uses}-use placeholder`)
+  if (g.approval) bits.push(`approval ${g.approval}`)
+  if (g.infinite === true) bits.push('never expires')
   return bits.join(' · ')
 }
 
