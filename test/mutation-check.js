@@ -1467,7 +1467,7 @@ const MUTATIONS = [
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   {
-    what: 'a redirect hop sends a method-override header the credential happens to use',
+    what: 'a redirect hop sends a body or framing header a credential is declared at',
     file: 'src/daemon/pipeline.js',
     from: '      if (HOP_NEVER.has(lower)) continue',
     to: '',
