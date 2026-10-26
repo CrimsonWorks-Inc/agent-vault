@@ -1370,6 +1370,7 @@ ${c.cli} ui                         open this page`)}`,
         const op = await operationFor(granted ? 'approval.approve' : 'approval.deny', { id, granted })
         await gated(op, (proof) => api('POST', 'approvals', { id, granted, presence: proof }))
       }
+      for (const key of [...drafts.keys()]) if (key.startsWith(`${id}|`)) drafts.delete(key)
       toast(granted ? 'Approved' : 'Denied')
       render()
     },
@@ -1480,10 +1481,39 @@ ${c.cli} ui                         open this page`)}`,
     syncBulkBar()
   }
 
+  /**
+   * What the human has typed or chosen on a card — a narrowing, an owner
+   * option — kept outside the DOM for the same reason as the selection: the
+   * five-second re-render wiped it, so a narrowing half typed was gone, and an
+   * approval could go out wider than the one being written.
+   */
+  const drafts = new Map()
+  const DRAFTED = '.narrow-input, .owner-approval, .owner-infinite'
+  const draftKey = (input) => {
+    const card = input.closest('[data-for]')
+    return card ? `${card.dataset.for}|${input.dataset.field || input.className}` : null
+  }
+  function rememberDraft(input) {
+    if (!input?.matches?.(DRAFTED)) return
+    const key = draftKey(input)
+    if (key) drafts.set(key, input.type === 'checkbox' ? input.checked : input.value)
+  }
+  document.addEventListener('input', (e) => rememberDraft(e.target))
+  document.addEventListener('change', (e) => rememberDraft(e.target))
+  function restoreDrafts() {
+    for (const input of document.querySelectorAll(DRAFTED)) {
+      const key = draftKey(input)
+      if (!drafts.has(key)) continue
+      if (input.type === 'checkbox') input.checked = drafts.get(key)
+      else input.value = drafts.get(key)
+    }
+  }
+
   async function render() {
     try {
       el.innerHTML = await views[current]()
       restoreSelection()
+      restoreDrafts()
     } catch (err) {
       el.innerHTML = `<header class="page"><h1>Cannot reach the daemon</h1></header>
         <p class="sub">${esc(err.message)}</p>

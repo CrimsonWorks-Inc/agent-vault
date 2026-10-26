@@ -162,3 +162,14 @@ test('the docs say how to start an auto-approving session, and that read-only ne
   assert.ok(PAGE.includes('The file holds placeholders, which only work through this vault, and is written readable by you alone. It is never overwritten unless you say so.'))
   assert.ok(PAGE.includes('Revoking: agent-vault session revoke &lt;sid&gt;, or Panic, ends an infinite session like any other.'))
 })
+
+test('what the human typed on an approval survives the five-second re-render', () => {
+  // The approvals view re-renders on a timer. Narrowings and owner options
+  // were inputs it rebuilt from scratch, so they vanished mid-edit.
+  const render = PAGE.slice(PAGE.indexOf('async function render() {'), PAGE.indexOf('async function refreshChrome()'))
+  assert.match(render, /restoreDrafts\(\)/)
+  assert.match(PAGE, /const DRAFTED = '\.narrow-input, \.owner-approval, \.owner-infinite'/)
+  const decide = PAGE.slice(PAGE.indexOf('async decide(btn) {'))
+  assert.match(decide.slice(0, decide.indexOf("toast(granted ? 'Approved' : 'Denied')")), /drafts\.delete\(key\)/,
+    'a decided item’s drafts are forgotten, so they cannot reappear on another')
+})
