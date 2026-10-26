@@ -22,7 +22,7 @@ import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN } from '../core/scrub.js'
 import { SessionRequests, proposalOf, overridesOf, elevationOf, OWNER_FIELDS } from './session-requests.js'
-import * as vaultStore from '../store/vault.js'
+import { sessionExpiryMs } from '../store/vault.js'
 import { checkDecisions } from '../pending.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
@@ -1420,7 +1420,7 @@ export class Daemon {
           // session nobody has touched since it ran out still says 'active'.
           const now = Date.now()
           const active = Object.values(this.vault.db.sessions)
-            .filter((s) => s.state === 'active' && sessionExpiry(s) > now)
+            .filter((s) => s.state === 'active' && sessionExpiryMs(s) > now)
           if (!input.sid && active.length > 1) {
             throw deny('AV_SESSION_REQUIRED', `${active.length} sessions are active; name the one to issue for`, {
               rule: 'explicit_session',
@@ -1940,15 +1940,6 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
-}
-
-/**
- * When a session ends, in ms. The store's helper when it has one, which knows
- * that an infinite session has none; otherwise the stored timestamp, where a
- * missing one is NaN and so never counts as live.
- */
-function sessionExpiry(s) {
-  return vaultStore.sessionExpiryMs?.(s) ?? Date.parse(s?.expires_at)
 }
 
 /** The shape of a web UI origin this daemon will consider trusting. */

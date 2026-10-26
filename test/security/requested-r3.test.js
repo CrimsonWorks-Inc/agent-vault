@@ -5,47 +5,16 @@
 // on a vault with no factor, never remote, and never something an agent can
 // propose. With no idle expiry (Q2) it ends when someone revokes it.
 //
-// Store slice A (vault.createSession({infinite}) and the expiry helpers) is
-// built in parallel. Until it lands, `stubSliceA` gives the vault the shape
-// slice A promises, so these tests exercise the daemon, CLI and UI side now and
-// the real store once it is there. The tests of the store's own liveness rules
-// skip until then.
+// The store keeps the lifetime rules (slice A): only a session that is exactly
+// `infinite: true` with `expires_at: null` never ends.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { startDaemon, startUi, cli, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
-import * as vaultStore from '../../src/store/vault.js'
 import * as webauthn from '../../src/ui/webauthn.js'
 
-const SLICE_A = typeof vaultStore.sessionExpiryMs === 'function'
-
-/** What slice A's createSession does for `infinite`, on a store that predates it. */
-function stubSliceA(vault) {
-  if (SLICE_A) return
-  const original = vault.createSession.bind(vault)
-  vault.createSession = ({ infinite, elevated, ...opts }) => {
-    const made = original(opts)
-    if (infinite) Object.assign(made.session, { infinite: true, expires_at: null, max_expires_at: null, idle_timeout_ms: null })
-    else made.session.infinite = false
-    return made
-  }
-  // Slice A's issuePlaceholder bounds a placeholder by a session expiry that
-  // may be Infinity. The old one would compute new Date(NaN), so for these
-  // tests an infinite session lends it a far-off date for the one call.
-  const issue = vault.issuePlaceholder.bind(vault)
-  vault.issuePlaceholder = (args) => {
-    const s = vault.db.sessions[vault.db.grants[args.grantId]?.session_id]
-    if (s?.infinite !== true) return issue(args)
-    const far = new Date(Date.now() + 100 * 365 * 86_400_000).toISOString()
-    Object.assign(s, { expires_at: far, max_expires_at: far })
-    try { return issue(args) } finally { Object.assign(s, { expires_at: null, max_expires_at: null }) }
-  }
-}
-
 async function daemon(opts = {}) {
-  const d = await startDaemon({ socketName: 'control.sock', ...opts })
-  stubSliceA(d.vault)
-  return d
+  return startDaemon({ socketName: 'control.sock', ...opts })
 }
 
 const INFINITE = { cred: 'demo', infinite: true }
@@ -230,9 +199,9 @@ test('the CLI on a vault with no factor says to set a passphrase first', async (
   } finally { await d.stop() }
 })
 
-// ------------------------------------------------ the store's own rules (slice A)
+// ------------------------------------------------ the store's own rules
 
-test('a stored expiry that does not parse is never live', { skip: !SLICE_A && 'store slice A has not landed' }, async () => {
+test('a stored expiry that does not parse is never live', async () => {
   const d = await daemon()
   try {
     for (const expires of ['garbage', null]) {
@@ -243,7 +212,7 @@ test('a stored expiry that does not parse is never live', { skip: !SLICE_A && 's
   } finally { await d.stop() }
 })
 
-test('an infinite session is the default for an implicit placeholder when it is the only one', { skip: !SLICE_A && 'store slice A has not landed' }, async () => {
+test('an infinite session is the default for an implicit placeholder when it is the only one', async () => {
   const d = await daemon({ passphrase: PASSPHRASE })
   try {
     const r = await d.control('POST', '/v1/sessions', { ...INFINITE, presence: { passphrase: PASSPHRASE } })
