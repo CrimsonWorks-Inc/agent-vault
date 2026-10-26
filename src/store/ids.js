@@ -49,4 +49,5 @@ export const id = {
   sessionRequest: () => `sr_${ulid()}`,
   client: () => `cl_${ulid()}`,
   scrubPattern: () => `sp_${ulid()}`,
+  vault: () => `vlt_${ulid()}`,
 }

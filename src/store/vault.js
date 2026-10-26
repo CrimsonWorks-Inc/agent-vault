@@ -370,6 +370,17 @@ export class Vault {
           this.#persist()
         }
       },
+      // What a witness checkpoint names (F9): stable for the vault's life,
+      // created on first use and written durably, since a witness file
+      // outlives any one run.
+      vaultId: () => {
+        if (!this.db?.kv) return null
+        if (!this.db.kv.vault_id) {
+          this.db.kv.vault_id = id.vault()
+          this.#persist()
+        }
+        return this.db.kv.vault_id
+      },
     }
   }
 

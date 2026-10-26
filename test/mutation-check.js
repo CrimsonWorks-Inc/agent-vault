@@ -487,8 +487,8 @@ const MUTATIONS = [
   {
     what: 'a float in audit fields throws after the change is made',
     file: 'src/store/audit.js',
-    from: "...recordable(fields)",
-    to: "...fields",
+    from: 'const own = recordable(fields) ?? {}',
+    to: 'const own = fields ?? {}',
     tests: ['test/security/fix-control-audit.test.js'],
   },
   {
@@ -1414,6 +1414,37 @@ const MUTATIONS = [
     from: '    if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {',
     to: '    if (false) {',
     tests: ['test/security/store-templates.test.js'],
+  },
+  // ---- store F9: audit export and witness; C10 ----
+  {
+    // F9's own mutation.
+    what: 'a witness ahead of the log is treated as ok',
+    file: 'src/store/audit.js',
+    from: '    out.ok = !out.forged.length && !out.ahead.length && !out.mismatched.length',
+    to: '    out.ok = !out.forged.length && !out.mismatched.length',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    what: 'a witness past the last record is not reported ahead',
+    file: 'src/store/audit.js',
+    from: '      } else if (c.seq > last) {',
+    to: '      } else if (false) {',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    what: "a witness checkpoint's MAC is not checked",
+    file: 'src/store/audit.js',
+    from: "      if (!shaped || !timingSafeEqual(Buffer.from(c.mac, 'hex'), Buffer.from(this.#witnessMac(c.vault_id, c.seq, c.head, c.ts), 'hex'))) {",
+    to: '      if (!shaped) {',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    // C10: `seq` from a caller rewrote the record's place in the chain.
+    what: 'a caller may set a chain field in an audit record',
+    file: 'src/store/audit.js',
+    from: '    if (reserved) throw deny(',
+    to: '    if (false) throw deny(',
+    tests: ['test/security/store-audit-witness.test.js'],
   },
 ]
 
