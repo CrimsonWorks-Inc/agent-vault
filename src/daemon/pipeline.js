@@ -17,9 +17,15 @@ import * as sub from '../core/substitute.js'
 import * as sitesMod from '../core/sites.js'
 import * as policyMod from '../core/policy.js'
 import * as canon from '../core/canon.js'
-import { Scrubber } from '../core/scrub.js'
+import { evaluatePayload, parseStrictJson } from '../core/payload.js'
+import * as models from '../core/model-usage.js'
+import { Tripwires } from './tripwire.js'
+import { detectAll } from '../core/detect.js'
+import * as profiles from '../connectors/profiles.js'
+import { Scrubber, compileScrubPattern } from '../core/scrub.js'
 import { deny, VaultError } from '../core/errors.js'
 import { id } from '../store/ids.js'
+import * as vaultMod from '../store/vault.js'
 import { getProfile } from '../connectors/profiles.js'
 import * as ph from '../core/placeholder.js'
 
@@ -87,6 +93,12 @@ const PRE_CONNECT_ERRORS = new Set([
 ])
 
 export class Pipeline {
+  #buckets = new Map()
+  #inFlight = new Map()
+  #preflightBuckets = new Map()
+  #patterns = new Map()
+  #spendRecovered = false
+
   /**
    * @param {import('../store/vault.js').Vault} vault
    * @param {{approvals: Map, allowedHosts?: Set<string>, fetchImpl?: Function}} opts
@@ -100,6 +112,18 @@ export class Pipeline {
     // Optional override for the response scrubber's layered-decode budget, so
     // a test can drive the fail-closed path without a multi-megabyte body.
     this.scrubBudget = opts.scrubBudget
+    // Hooks other parts of the daemon set. Each is optional, and a failure
+    // in one never changes what this request gets.
+    this.onPending = null   // (event) => void, after a request is held (F14)
+    this.onPanic = null     // async ({ reason, at_ms }) => { session_requests_denied } (F16)
+    // The store's pure expiry helpers (slice A). Without them preflight
+    // cannot tell a live session from an expired one, so it says expired.
+    this.expiryMs = opts.expiryMs ?? vaultMod.expiryMs ?? (() => -Infinity)
+    this.sessionExpiryMs = opts.sessionExpiryMs ?? vaultMod.sessionExpiryMs ?? (() => -Infinity)
+    // The connectors' header reader (F10). Without it nothing is observed.
+    this.extractHealth = opts.extractHealth ?? profiles.extractHealth
+    this.tripwires = new Tripwires(vault, this)
+    this.#recoverSpend()
   }
 
   /**
@@ -108,6 +132,9 @@ export class Pipeline {
    * @returns {Promise<{status, headers, body, requestId}>}
    */
   async handle(req) {
+    // A daemon that started locked could not sweep then; it does on the
+    // first request after unlock, before this one can reserve anything.
+    if (!this.#spendRecovered) this.#recoverSpend()
     const requestId = id.request()
     const started = Date.now()
     // Every placeholder row this request spent. It was one variable that each
@@ -126,13 +153,15 @@ export class Pipeline {
     // They stay null when the failure came before there was anything to name.
     let session = null
     let route = null
+    const resources = { release: null, quota: null, spend: null }
+    let streaming = false
 
     try {
       this.#refuseBrowsers(req)
       session = this.#authenticate(req)
       route = this.#route(req, session)
       const result = await this.#proxy({
-        req, session, route, requestId,
+        req, session, route, requestId, resources,
         onConsume: (r) => { consumed.push(r) },
         onApprovalSpent: (a) => { spentApproval = a },
         markUpstream: () => { upstreamOpened = true },
@@ -141,7 +170,7 @@ export class Pipeline {
         request_id: requestId, session_id: session.id, grant_id: route.grantId,
         credential_slug: route.slug,
         req: {
-          host: result.host, method: req.method, path_glob_matched: result.rule, status: result.status,
+          host: result.host, method: req.method, path_glob_matched: result.rule, route_matched: result.routeMatched ?? null, status: result.status,
           // The path, which the log used to leave out entirely. Under a grant
           // of /repos/frozencrow/** every request recorded the same glob, so
           // the log could say a credential had been used forty times and not
@@ -156,10 +185,15 @@ export class Pipeline {
           streamed: !!result.stream,
           redactions: result.redactions,
         },
+        spend: result.spend ?? null,
         decision: 'allow',
         peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         duration_ms: Date.now() - started,
       })
+      if (result.stream) {
+        result.stream = closeAware(result.stream, () => resources.release?.())
+        streaming = true
+      }
       return { ...result, requestId }
     } catch (e) {
       // Every error's detail goes to the agent, including text this code did
@@ -175,7 +209,7 @@ export class Pipeline {
       if (err.hint) err.hint = this.#safeMessage({ message: err.hint }, scrubber)
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
-      if (!upstreamOpened) for (const row of consumed) this.vault.refundPlaceholder(row.id)
+
       // And give the human's approval back, for the same reason. It moves to
       // `consumed` before the upstream call — which is what makes a resend
       // execute exactly once — so a failure in between left it consumed with
@@ -200,6 +234,8 @@ export class Pipeline {
         this.vault.audit.write(err.auditKind, {
           request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule,
           detail: err.detail,
+          ...(err.retryAfter !== undefined ? { retry_after: err.retryAfter } : {}),
+          ...(err.code === 'AV_PIN_MISMATCH' ? { presented_spki: e.presented ?? [] } : {}),
           // Whoever got this far. Null before authentication, which is itself
           // the useful answer: an unauthenticated probe and a session exceeding
           // its grant are different events and no longer look the same.
@@ -219,14 +255,553 @@ export class Pipeline {
           peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         })
       }
+      if (!upstreamOpened) {
+        for (const row of consumed) this.vault.refundPlaceholder(row.id)
+        if (resources.quota && route?.grant.state === 'active' && session?.state === 'active') {
+          const state = route.grant.quota_state
+          if (state?.window_ms === resources.quota.window_ms) {
+            if (state.start === resources.quota.start) state.count = Math.max(0, state.count - 1)
+            else if (state.start === resources.quota.start + state.window_ms) state.prev = Math.max(0, state.prev - 1)
+          }
+        }
+        if (resources.spend) this.#refundSpend(resources.spend)
+        if (resources.quota) this.vault.save({ durable: false })
+      } else if (resources.spend) this.#settleSpend(resources.spend, null)
+      // After the audit record and the refund, before the agent hears back.
+      // A tripwire that fails cannot cost the agent its denial: the request
+      // is refused either way, and what the tripwire did is in the log.
+      try {
+        await this.tripwires.observe({ sessionId: session?.id ?? null, credentialId: route?.cred?.id ?? null, code: err.code, rule: err.rule })
+      } catch { /* the denial below stands */ }
       return {
         status: err.http,
-        headers: { 'content-type': 'application/problem+json', 'av-decision': 'deny', 'av-request-id': requestId },
+        headers: { 'content-type': 'application/problem+json', 'av-decision': 'deny', 'av-request-id': requestId, ...(err.http === 429 ? { 'retry-after': String(err.retryAfter ?? 1) } : {}) },
         body: Buffer.from(JSON.stringify(err.toProblem(), null, 2)),
         requestId,
         error: err,
       }
+    } finally {
+      if (!streaming) resources.release?.()
     }
+  }
+
+  /**
+   * assertSessionLive's answer, without its side effects. Preflight must not
+   * mark a session expired or kill its placeholders, and it decides with the
+   * same pure helper the store does, so the two cannot disagree.
+   */
+  #peekSession(session) {
+    if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
+    const expires = this.sessionExpiryMs(session)
+    if (session.state === 'expired' || !(expires > Date.now())) throw deny('AV_SESSION_EXPIRED', `session ${session.id} has expired`)
+  }
+
+  /** assertGrantLive's answer, without marking anything expired. */
+  #peekGrant(grant) {
+    if (grant.state === 'expired') throw grantExpired(this.vault.db.credentials[grant.credential_id]?.slug)
+    if (grant.state !== 'active') throw deny('AV_NO_GRANT', 'this grant is no longer active')
+    if (!(this.expiryMs(grant.expires_at) > Date.now())) throw grantExpired(this.vault.db.credentials[grant.credential_id]?.slug)
+  }
+
+  #checkQuarantine(cred) {
+    if (cred.quarantine) throw deny('AV_QUARANTINED', `${cred.slug} is quarantined`, { rule: 'quarantine', hint: 'A human can release it: agent-vault cred release <slug>' })
+  }
+
+  #extraPatterns() {
+    const sources = new Set()
+    const patterns = []
+    for (const cred of Object.values(this.vault.db.credentials)) {
+      for (const pattern of cred.scrub_patterns ?? []) {
+        sources.add(pattern.source)
+        try {
+          if (!this.#patterns.has(pattern.source)) this.#patterns.set(pattern.source, compileScrubPattern(pattern.source).re)
+          patterns.push({ name: pattern.id, re: this.#patterns.get(pattern.source) })
+        } catch {
+          throw deny('AV_UNSCANNABLE', 'a stored scrub pattern is invalid', { rule: 'scrub_pattern_invalid' })
+        }
+      }
+    }
+    for (const source of this.#patterns.keys()) if (!sources.has(source)) this.#patterns.delete(source)
+    return patterns
+  }
+
+  /**
+   * The request budget. A limit that is present but not a canonical integer
+   * can only come from a bug or a hand edit, and its failure is silent and
+   * total: `used >= NaN` is false forever. So it refuses, and so does a
+   * counter that cannot count. A budget that names no limit (a legacy layer)
+   * constrains nothing, as before.
+   */
+  #budget(grant, effective) {
+    const b = effective.budget
+    if (b === undefined || (b && !b.invalid && b.limit === undefined)) return
+    if (!b || b.invalid || (b.unit !== undefined && b.unit !== 'requests') || !Number.isSafeInteger(b.limit) || b.limit < 0 || !Number.isSafeInteger(grant.budget_used) || grant.budget_used < 0) {
+      throw deny('AV_POLICY_DENIED', 'this grant has a budget whose limit is not a whole number of requests, so no request can be counted against it', {
+        rule: 'budget_invalid',
+        hint: 'Recreate the grant with a numeric budget limit.',
+      })
+    }
+    if (grant.budget_used >= b.limit) {
+      throw deny('AV_POLICY_DENIED', `grant budget of ${b.limit} requests is spent`, {
+        rule: 'budget',
+        hint: 'A human must widen the grant or start a new session.',
+      })
+    }
+  }
+
+  #validLimit(effective, field) {
+    const value = effective[field]
+    if (value === undefined) return
+    if (policyMod.validate({ [field]: value }).length) throw deny('AV_POLICY_DENIED', `the ${field} limit is invalid`, { rule: `${field}_invalid` })
+  }
+
+  #prune(map, sessions = false) {
+    const records = sessions ? this.vault.db.sessions : this.vault.db.grants
+    const live = new Set(Object.values(records).filter((r) => r.state === 'active' && (r.expires_at == null || Date.parse(r.expires_at) > Date.now())).map((r) => r.id))
+    if (map.size > live.size) for (const key of map.keys()) if (!live.has(key)) map.delete(key)
+  }
+
+  #rate(grant, effective, peek = false) {
+    this.#validLimit(effective, 'rate')
+    if (effective.rate === undefined) return null
+    const { count, per } = effective.rate
+    const now = performance.now()
+    const prior = this.#buckets.get(grant.id)
+    const tokens = prior ? Math.min(count, prior.tokens + Math.max(0, now - prior.at) * count / policyMod.PER_MS[per]) : count
+    if (!Number.isFinite(tokens) || tokens < 0) throw deny('AV_POLICY_DENIED', 'rate state is invalid', { rule: 'rate_invalid' })
+    if (tokens < 1) throw deny('AV_QUOTA_EXCEEDED', 'the grant rate limit was reached', { rule: 'rate', retryAfter: Math.max(1, Math.ceil((1 - tokens) * policyMod.PER_MS[per] / count / 1000)) })
+    if (!peek) {
+      this.#buckets.set(grant.id, { tokens: tokens - 1, at: now })
+      this.#prune(this.#buckets)
+    }
+    return tokens
+  }
+
+  #quota(grant, effective, enforce = true) {
+    this.#validLimit(effective, 'quota')
+    if (effective.quota === undefined) return null
+    const window_ms = policyMod.WINDOW_MS[effective.quota.window]
+    const now = Date.now()
+    let state = grant.quota_state ? { ...grant.quota_state } : { window_ms, start: now, count: 0, prev: 0 }
+    if (![state.window_ms, state.start, state.count, state.prev].every(Number.isSafeInteger) || state.window_ms <= 0 || state.count < 0 || state.prev < 0) throw deny('AV_POLICY_DENIED', 'quota state is invalid', { rule: 'quota_invalid' })
+    if (state.window_ms !== window_ms) state = { window_ms, start: Math.max(now, state.start), count: state.count + state.prev, prev: 0 }
+    if (now >= state.start + window_ms) {
+      state.prev = now >= state.start + 2 * window_ms ? 0 : state.count
+      state.start += window_ms * Math.floor((now - state.start) / window_ms)
+      state.count = 0
+    }
+    const estimate = state.prev * (1 - Math.max(0, now - state.start) / window_ms) + state.count
+    if (enforce && estimate + 1 > effective.quota.count) throw deny('AV_QUOTA_EXCEEDED', 'the rolling quota was reached', { rule: 'quota', retryAfter: Math.max(1, Math.ceil((state.start + window_ms - now) / 1000)) })
+    return state
+  }
+
+  #acquire(grant, effective) {
+    this.#validLimit(effective, 'max_concurrent')
+    const n = this.#inFlight.get(grant.id) ?? 0
+    if (effective.max_concurrent !== undefined && n >= effective.max_concurrent) throw deny('AV_QUOTA_EXCEEDED', 'the concurrency limit was reached', { rule: 'max_concurrent', retryAfter: 1 })
+    this.#inFlight.set(grant.id, n + 1)
+    this.#prune(this.#inFlight)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const count = this.#inFlight.get(grant.id) ?? 0
+      if (count <= 1) this.#inFlight.delete(grant.id)
+      else this.#inFlight.set(grant.id, count - 1)
+    }
+  }
+
+  #effectiveFor(grant) {
+    const cred = this.vault.db.credentials[grant.credential_id]
+    return policyMod.intersect([getProfile(cred.connector_kind).policyCeiling, this.vault.db.sessions[grant.session_id]?.policy, grant.policy])
+  }
+
+  limitsFor(grantId) {
+    const grant = this.vault.db.grants[grantId]
+    if (!grant) return null
+    const effective = this.#effectiveFor(grant)
+    const prior = this.#buckets.get(grantId)
+    const rate = effective.rate
+    const validRate = rate && !policyMod.validate({ rate }).length
+    const tokens = validRate ? Math.min(rate.count, prior ? prior.tokens + Math.max(0, performance.now() - prior.at) * rate.count / policyMod.PER_MS[rate.per] : rate.count) : null
+    let quota = null
+    try {
+      const state = this.#quota(grant, effective, false)
+      if (state) quota = { ...effective.quota, estimate: state.prev * (1 - Math.max(0, Date.now() - state.start) / state.window_ms) + state.count }
+    } catch {}
+    return { rate: validRate ? { ...rate, tokens_now: tokens } : null, max_concurrent: { limit: effective.max_concurrent ?? null, in_flight: this.#inFlight.get(grantId) ?? 0 }, quota }
+  }
+
+  #spendState(grant) {
+    const state = grant.spend ?? { tokens_used: 0, usd_micros_used: 0, reserved: {} }
+    if (!Number.isSafeInteger(state.tokens_used) || state.tokens_used < 0 || !Number.isSafeInteger(state.usd_micros_used) || state.usd_micros_used < 0 || !state.reserved || typeof state.reserved !== 'object' || Array.isArray(state.reserved)) throw deny('AV_POLICY_DENIED', 'spend state is invalid', { rule: 'spend_invalid' })
+    for (const reservation of Object.values(state.reserved)) {
+      if (!reservation || ![reservation.tokens, reservation.usd_micros, reservation.at].every(Number.isSafeInteger) || reservation.tokens < 0 || reservation.usd_micros < 0) throw deny('AV_POLICY_DENIED', 'spend reservation is invalid', { rule: 'spend_invalid' })
+    }
+    return state
+  }
+
+  /**
+   * Stage 5: could this call stay inside the spend limit? It reserves
+   * nothing yet; stage 10 does, in the same synchronous block as the consume.
+   * What is already reserved by calls still in flight counts, so two calls
+   * that fit alone but not together cannot both start.
+   */
+  #checkSpend(grant, effective, route, req, decision) {
+    if (effective.spend === undefined || !models.METERED_KINDS.includes(route.cred.connector_kind)) return null
+    const limit = effective.spend
+    if (!limit || limit.invalid || Object.entries(limit).some(([k, v]) => !['tokens', 'usd_micros'].includes(k) || !Number.isSafeInteger(v) || v < 0)) {
+      throw deny('AV_POLICY_DENIED', 'this grant has a spend limit that is not a whole number', { rule: 'spend_invalid' })
+    }
+    const kind = route.cred.connector_kind
+    const meter = models.meterRequest(kind, { method: decision.method, path: decision.path, contentType: sub.getHeader(req, 'content-type'), body: req.body })
+    if (meter.unmodeled) {
+      throw deny('AV_POLICY_DENIED', `${decision.method} ${decision.path} is not an endpoint whose cost can be bounded, so it cannot run under a spend limit`, { rule: 'spend_unmodeled' })
+    }
+    if (!meter.metered || meter.free) return null
+    const reservation = models.reservationFor(kind, meter, { usd: limit.usd_micros !== undefined })
+    const state = this.#spendState(grant)
+    for (const key of ['tokens', 'usd_micros']) {
+      const reserved = Object.values(state.reserved).reduce((n, r) => n + r[key], 0)
+      const committed = state[`${key}_used`] + reserved
+      const total = committed + reservation[key]
+      if (!Number.isSafeInteger(total)) throw deny('AV_POLICY_DENIED', 'this grant\'s spend counters are not whole numbers', { rule: 'spend_invalid' })
+      if (limit[key] !== undefined && total > limit[key]) {
+        const left = Math.max(0, limit[key] - committed)
+        const say = key === 'tokens' ? (n) => `${n} more tokens` : (n) => `$${(n / 1e6).toFixed(2)} more`
+        throw deny('AV_POLICY_DENIED', 'this call could cost more than the spend limit has left', {
+          rule: 'spend',
+          hint: `This grant may spend ${say(left)}; this call could cost up to ${key === 'tokens' ? `${reservation.tokens} tokens` : `$${(reservation.usd_micros / 1e6).toFixed(2)}`}.`,
+        })
+      }
+    }
+    return { kind, meter, reservation }
+  }
+
+  /**
+   * Charge, in full, every reservation a previous process left behind. A
+   * crash never refunds: the call may have run and been billed.
+   */
+  #recoverSpend() {
+    if (this.vault.locked) return
+    this.#spendRecovered = true
+    let changed = false
+    for (const grant of Object.values(this.vault.db.grants)) {
+      let state
+      try { state = this.#spendState(grant) } catch { continue }
+      for (const [rid, reservation] of Object.entries(state.reserved)) {
+        this.vault.audit.write('spend.reservation_charged', { grant_id: grant.id, reservation_id: rid, reason: 'restart' })
+        state.tokens_used += reservation.tokens
+        state.usd_micros_used += reservation.usd_micros
+        delete state.reserved[rid]
+        changed = true
+      }
+    }
+    if (changed) this.vault.save({ durable: false })
+  }
+
+  #refundSpend(spending) {
+    if (spending.settled) return
+    delete spending.grant.spend.reserved[spending.rid]
+    spending.settled = true
+    this.vault.save({ durable: false })
+  }
+
+  #spendAudit(spending) {
+    return spending ? { reserved_tokens: spending.reservation.tokens, charged_tokens: 0, charged_usd_micros: 0, settled: 'pending' } : null
+  }
+
+  #settleSpend(spending, usage, streamed = false) {
+    if (!spending || spending.settled) return null
+    const charge = models.chargeFor(spending.kind, spending.meter, spending.reservation, usage)
+    const result = { reserved_tokens: spending.reservation.tokens, charged_tokens: charge.tokens, charged_usd_micros: charge.usd_micros, settled: usage ? 'usage' : 'reservation' }
+    if (streamed) this.vault.audit.write('spend.settled', { request_id: spending.requestId, grant_id: spending.grant.id, charged_tokens: charge.tokens, charged_usd_micros: charge.usd_micros, settled: result.settled })
+    const state = spending.grant.spend
+    state.tokens_used += charge.tokens
+    state.usd_micros_used += charge.usd_micros
+    delete state.reserved[spending.rid]
+    spending.settled = true
+    this.vault.save({ durable: false })
+    return result
+  }
+
+  spendFor(grantId) {
+    const grant = this.vault.db.grants[grantId]
+    if (!grant) return null
+    const limit = this.#effectiveFor(grant).spend
+    if (!limit) return null
+    const state = this.#spendState(grant)
+    return { tokens_used: state.tokens_used, usd_micros_used: state.usd_micros_used,
+      reserved_tokens: Object.values(state.reserved).reduce((n, r) => n + r.tokens, 0),
+      reserved_usd_micros: Object.values(state.reserved).reduce((n, r) => n + r.usd_micros, 0),
+      limit_tokens: limit.tokens ?? null, limit_usd_micros: limit.usd_micros ?? null, prices_version: models.PRICES_VERSION }
+  }
+
+  /**
+   * Settle a streamed call when its stream is finished with, however that
+   * happens. Usage is read from the events the agent was sent (they are
+   * already scrubbed, and the counters are integers). A stream that was cut,
+   * aborted or never finished is charged its full reservation: it may have
+   * run to the end upstream, and charging less than it could have cost is the
+   * one direction a limit must not err in.
+   */
+  #trackStream(stream, spending, closeSource, state) {
+    let partial = '', usage = null, failed = false
+    return closeAware(stream, (complete) => {
+      closeSource()
+      this.#settleSpend(spending, complete && !failed && !state.cut ? usage : null, true)
+    }, (chunk) => {
+      if (!spending || failed) return
+      // The scrubber emits LF-framed events; CRLF is normalised anyway, so a
+      // reframing upstream of here cannot hide the usage event.
+      partial += chunk.toString('utf8').replace(/\r\n?/g, '\n')
+      let boundary
+      while ((boundary = partial.indexOf('\n\n')) !== -1) {
+        const event = partial.slice(0, boundary)
+        partial = partial.slice(boundary + 2)
+        if (/^event: error$/m.test(event)) failed = true
+        const data = event.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).replace(/^ /, '')).join('\n')
+        usage = models.usageFromEvent(spending.kind, data, usage)
+      }
+      // One event cannot outgrow what the scrubber would hold, but this copy
+      // is bounded on its own terms: past it, usage is not read at all.
+      if (partial.length > MAX_EVENT_BYTES) { failed = true; partial = '' }
+    })
+  }
+
+  /**
+   * F10: what the response says about the credential itself. Every request
+   * here substituted the credential, so a 401 or 403 is about it. This runs
+   * after the upstream acted, so nothing in it may turn the response into a
+   * failure: the store records it or does not.
+   */
+  #observeHealth(route, res) {
+    try {
+      const health = this.extractHealth?.(route.profile, res.headers)
+      const patch = { source: 'response', checked_at: new Date().toISOString() }
+      if (typeof health?.observed_expires_at === 'string') patch.observed_expires_at = health.observed_expires_at
+      if (res.status === 401 || res.status === 403) {
+        patch.status = res.status === 401 ? 'unauthorized' : 'forbidden'
+        patch.http_status = res.status
+      }
+      if (patch.status || patch.observed_expires_at) this.vault.recordHealth?.(route.cred.id, patch)
+    } catch { /* observation only */ }
+  }
+
+  /**
+   * F20: would this request be allowed, held, or refused? Stages 1 to 8 of the
+   * real pipeline, run with nothing spent: the session is not touched, no
+   * rate token is taken, quota and spend are only peeked, no approval is
+   * created, nothing is minted or consumed, and a denial here never reaches
+   * the tripwires. Advisory: the real request is checked again from scratch.
+   *
+   * A refusal of the preflight itself (no session, throttled, too big) is
+   * thrown, so the caller answers with the normal problem body.
+   */
+  async preflight(req, { assumePlaceholder = false } = {}) {
+    if (!this.#spendRecovered) this.#recoverSpend()
+    const requestId = id.request()
+    const checks = []
+    let current = 'session', session = null, route = null, effective = null
+    const stage = (next) => {
+      if (next === current) return
+      checks.push({ stage: current, ok: true })
+      current = next
+    }
+    this.#refuseBrowsers(req)
+    session = this.#authenticate(req, { touch: false })
+    const now = performance.now()
+    const prior = this.#preflightBuckets.get(session.id)
+    const bucket = !prior || now - prior.at >= 1000 ? { count: 0, at: now } : { ...prior }
+    if (bucket.count >= 10) throw deny('AV_QUOTA_EXCEEDED', 'preflight rate limit was reached', { rule: 'preflight_rate', retryAfter: 1 })
+    bucket.count++
+    this.#preflightBuckets.set(session.id, bucket)
+    this.#prune(this.#preflightBuckets, true)
+    if (req.body?.length > 1024 * 1024) throw deny('AV_POLICY_DENIED', 'a preflight body may be at most 1 MiB', { rule: 'preflight_size' })
+    let would, code = null, rule = null, approvalState
+    try {
+      stage('route')
+      route = this.#route(req, session, stage, true)
+      effective = policyMod.describeEffective(policyMod.intersect([route.profile.policyCeiling, session.policy, route.grant.policy]))
+      const result = await this.#proxy({ req, session, route, requestId, preflight: true, assumePlaceholder, stage })
+      checks.push({ stage: current, ok: true })
+      would = result.would
+      approvalState = result.approval_state
+    } catch (e) {
+      const err = e instanceof VaultError ? e : deny('AV_INTERNAL', 'preflight could not finish')
+      code = err.code; rule = err.rule ?? null; would = 'deny'
+      const scrubber = (() => { try { return this.#errorScrubber() } catch { return null } })()
+      checks.push({
+        stage: current, ok: false, code, rule,
+        detail: this.#safeMessage({ message: err.detail }, scrubber),
+        ...(err.hint ? { hint: this.#safeMessage({ message: err.hint }, scrubber) } : {}),
+      })
+    }
+    // One record per call, bounded by the throttle. It names the verdict,
+    // never the request.
+    this.vault.audit.write('request.preflighted', { request_id: requestId, session_id: session.id, credential_slug: route?.slug ?? null, would, code: code ?? null, rule: rule ?? null })
+    return { would, request_id: requestId, checks, effective, ...(approvalState ? { approval_state: approvalState } : {}), advisory: 'A prediction, not a permission. The real request is checked again and can still be refused.' }
+  }
+
+  /**
+   * F6: follow a redirect only where the grant would have allowed the request
+   * it leads to. Each hop is checked like a request of its own (policy, the
+   * query rules, budget, rate, quota, pins) and charged like one, before the
+   * credential goes anywhere. The first check that fails stops the chain and
+   * the agent gets the last 3xx, with `av-redirect-stopped` saying why.
+   * Never for a method other than GET and HEAD, and never where the method
+   * needs a human: each hop would need its own decision.
+   */
+  async #redirects(response, { route, effective, decision, headers, upstreamUrl, requestId }) {
+    let res = response, current = upstreamUrl, hops = 0
+    const method = decision.method
+    while ([301, 302, 303, 307, 308].includes(res.status)) {
+      let reason = null, next = null
+      const max = effective.redirects?.max
+      if (!['GET', 'HEAD'].includes(method) || policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'
+      else if (!Number.isInteger(max) || max < 0 || max > 5 || hops >= max) reason = 'max'
+      if (!reason) {
+        try { if (typeof res.headers.location !== 'string') throw new Error('missing location'); next = new URL(res.headers.location, current) } catch { reason = 'host' }
+      }
+      if (!reason && (next.username || next.password)) reason = 'host'
+      if (!reason && (!['http:', 'https:'].includes(next.protocol) || (route.scheme === 'https' && next.protocol !== 'https:'))) reason = 'scheme'
+      let hop, quota
+      if (!reason) {
+        try { hop = policyMod.evaluateHttp(effective, { method, host: next.hostname, path: next.pathname }) }
+        catch (e) { reason = e.rule === 'hosts' ? 'host' : 'path' }
+      }
+      // The port, which policy does not see. A request only ever reaches the
+      // port the credential names for its own host, or the scheme's default;
+      // a Location must not choose another service on an allowed host.
+      if (!reason) {
+        const credHost = policyMod.hostOnly(route.cred.connector?.host || '')
+        const credPort = route.port && credHost === hop.host ? route.port : ''
+        if (next.port !== credPort) reason = 'host'
+      }
+      if (!reason) {
+        // The query rules only: a hop has no body.
+        const querySets = effective.payload_sets?.map((set) => Object.fromEntries(Object.entries({ query: set.query, query_strict: set.query_strict }).filter(([, v]) => v !== undefined)))
+        try { evaluatePayload(querySets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }
+      }
+      if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
+      if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
+      if (!reason) { try { quota = this.#quota(route.grant, effective) } catch { reason = 'quota' } }
+      if (!reason && route.cred.pins?.[hop.host] != null && next.protocol !== 'https:') reason = 'pins'
+      if (!reason && !this.vault.chargeGrant?.(route.grant.id)) reason = 'budget'
+      if (reason) {
+        this.vault.audit.write('request.redirect_returned', { request_id: requestId, hop: hops, status: res.status, to_host: hop?.host ?? (next ? this.#safeMessage({ message: next.hostname }) : null), reason })
+        return { ...res, redirectStopped: reason }
+      }
+      if (quota) { quota.count += 1; route.grant.quota_state = quota; this.vault.save({ durable: false }) }
+      const hopHeaders = Object.fromEntries(Object.entries(headers).filter(([name]) => !['content-type', 'content-length', 'host'].includes(name.toLowerCase())))
+      hopHeaders.host = next.host
+      next.pathname = policyMod.encodePathForWire(hop.path)
+      let following
+      try { following = await this.upstream({ url: next.href, method, headers: hopHeaders, body: null, pins: route.cred.pins?.[hop.host] ?? null }) }
+      catch (e) {
+        if (e?.code !== 'AV_PIN_MISMATCH') {
+          res.res?.destroy()
+          throw deny('AV_UPSTREAM_UNREACHABLE', `could not reach ${hop.host} while following a redirect`, { rule: 'upstream', refunded: false })
+        }
+        this.vault.audit.write('request.redirect_returned', { request_id: requestId, hop: hops, status: res.status, to_host: hop.host, reason: 'pins' })
+        return { ...res, redirectStopped: 'pins' }
+      }
+      // The hop's own response is discarded unread; only the last one is
+      // scrubbed and returned.
+      res.res?.destroy()
+      this.vault.audit.write('request.redirect_followed', { request_id: requestId, hop: ++hops, status: res.status, to_host: hop.host, to_path: this.#safePath(hop.path) })
+      res = following
+      current = next.href
+    }
+    return res
+  }
+
+  /** F13: what a held request would send, safe for the human to read. */
+  #previewOf(req, substitutions, decision) {
+    const scrubber = this.#errorScrubber()
+    return approvalPreview({
+      req, decision,
+      substitutions: substitutions.map((s) => ({
+        text: s.occ.text,
+        label: `${this.vault.db.credentials[s.row.credential_id].slug}.${s.row.field}`,
+        location: sub.describeLocation(s.occ.location),
+        part: previewPart(s.occ.location.region),
+      })),
+      scrub: (text) => { const r = scrubber.scrub(text); return r.unscannable ? '[withheld: unscannable]' : r.text },
+    })
+  }
+
+  /**
+   * Deny held approvals in bulk: rotation, a tripwire, quarantine, panic.
+   * Internal, never a route, and it returns how many, never the approvals.
+   * `filter` narrows by credential, session or grants; a filter that names
+   * nothing (or `all: true`) denies every held approval, because a caller
+   * that lost its id should deny too much rather than too little.
+   */
+  denyApprovals(filter = {}, reason = 'denied') {
+    if (this.vault.locked || !this.vault.audit) throw deny('AV_LOCKED', 'unlock the vault before denying approvals')
+    const grantIds = Array.isArray(filter.grantIds) ? new Set(filter.grantIds) : null
+    let count = 0
+    for (const approval of this.approvals.values()) {
+      // Held, or granted and not yet run. A consumed one has already run.
+      if (approval.state !== 'pending' && !(approval.state === 'granted' && !approval.result)) continue
+      if (!filter.all) {
+        const grant = this.vault.db.grants[approval.grant_id]
+        if (filter.sessionId && grant?.session_id !== filter.sessionId) continue
+        if (filter.credentialId && grant?.credential_id !== filter.credentialId) continue
+        if (grantIds && !grantIds.has(approval.grant_id)) continue
+      }
+      // Recorded before it changes: a denial that cannot be audited must not
+      // happen.
+      this.vault.audit.write('approval.denied', { approval_id: approval.id, reason })
+      approval.state = 'denied'
+      approval.decided_at = new Date().toISOString()
+      approval.denied_reason = reason
+      count++
+    }
+    return count
+  }
+
+  denyAllPending(reason) { return this.denyApprovals({ all: true }, reason) }
+
+  /**
+   * Panic: every held approval denied, every active session revoked (infinite
+   * ones too), then the session requests through `onPanic`, then the record,
+   * then the lock if asked. The steps this pipeline owns run first, so a hook
+   * that fails cannot stop them; it is recorded as a partial panic and its
+   * count reported as null rather than as a number nobody counted.
+   *
+   * Open to anyone, by design: it can only take capability away.
+   */
+  async panic({ reason = null, lock = false } = {}) {
+    if (this.vault.locked) throw deny('AV_LOCKED', 'the vault is already locked, so nothing can be revoked')
+    const at = Date.now()
+    const deniedApprovals = this.denyAllPending('panic')
+    let revoked = 0
+    for (const session of Object.values(this.vault.db.sessions)) {
+      if (session.state !== 'active') continue
+      this.vault.revokeSession(session.id, 'panic')
+      this.tripwires.reset(session.id)
+      revoked++
+    }
+    let sessionRequests = null
+    if (this.onPanic) {
+      try {
+        const out = await this.onPanic({ reason, at_ms: at })
+        if (!Number.isSafeInteger(out?.session_requests_denied) || out.session_requests_denied < 0) throw new Error('the panic hook did not say how many it denied')
+        sessionRequests = out.session_requests_denied
+      } catch {
+        this.vault.audit.write('tripwire.panic_partial', { step: 'session_requests' })
+      }
+    }
+    const reasonText = typeof reason === 'string' ? this.#safeMessage({ message: reason.slice(0, 200) }) : null
+    // Before the lock: the audit key goes with it.
+    this.vault.audit.write('panic.triggered', {
+      revoked_sessions: revoked, denied_approvals: deniedApprovals, denied_session_requests: sessionRequests,
+      locked: !!lock, reason_untrusted: reasonText,
+    })
+    if (lock) this.vault.lock()
+    return { revoked_sessions: revoked, denied_approvals: deniedApprovals, denied_session_requests: sessionRequests, locked: !!lock }
   }
 
   // ------------------------------------------------------------------ steps
@@ -251,7 +826,7 @@ export class Pipeline {
    * session. The third is what lets git, gh and SDK constructors work without
    * a custom header.
    */
-  #authenticate(req) {
+  #authenticate(req, { touch = true } = {}) {
     const explicit = sub.getHeader(req, 'av-session')
     const auth = sub.getHeader(req, 'authorization') || ''
     const bearer = /^bearer\s+(avs1\.\S+)$/i.exec(auth)
@@ -260,8 +835,9 @@ export class Pipeline {
     if (token) {
       const session = this.vault.sessionByToken(token.trim())
       if (!session) throw deny('AV_SESSION_REQUIRED', 'session token is not recognised')
-      this.vault.assertSessionLive(session)
-      this.vault.touchSession(session)
+      if (touch) this.vault.assertSessionLive(session)
+      else this.#peekSession(session)
+      if (touch) this.vault.touchSession(session)
       return session
     }
 
@@ -296,8 +872,9 @@ export class Pipeline {
           hint: 'This placeholder was never issued by this vault, or it was garbage-collected.',
         })
       }
-      this.vault.assertSessionLive(session)
-      this.vault.touchSession(session)
+      if (touch) this.vault.assertSessionLive(session)
+      else this.#peekSession(session)
+      if (touch) this.vault.touchSession(session)
       return session
     }
 
@@ -345,7 +922,7 @@ export class Pipeline {
    */
   #errorScrubber() {
     const secrets = this.vault.allSecrets()
-    return secrets.length ? new Scrubber(secrets.map((x) => ({ ...x, always: true }))) : null
+    return new Scrubber(secrets.map((x) => ({ ...x, always: true })), { ...this.scrubBudget, extraPatterns: this.#extraPatterns() })
   }
 
   /**
@@ -370,7 +947,7 @@ export class Pipeline {
   }
 
   /** /p/<slug>/<path>  or  /t/<scheme>/<host>/<path> */
-  #route(req, session) {
+  #route(req, session, stage = () => {}, peek = false) {
     const path = req.path || '/'
     if (path.startsWith('/p/')) {
       const rest = path.slice(3)
@@ -381,10 +958,18 @@ export class Pipeline {
       if (!cred) throw deny('AV_NOT_FOUND', `no credential named ${slug}`, {
         next: { cli: ['agent-vault cred list'], mcp: { tool: 'vault_list_creds' } },
       })
+      stage('quarantine')
+      this.#checkQuarantine(cred)
+      stage('grant')
       const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
+      // An expired grant drops out of grantsForSession once the store has
+      // noticed. Without this the agent would be told it never had one.
+      if (!grant && this.vault.findGrant?.(session.id, cred.id)?.state === 'expired') throw grantExpired(slug)
       if (!grant) throw deny('AV_NO_GRANT', `this session has no grant for ${slug}`, {
         next: { cli: ['agent-vault cred list --available'], mcp: { tool: 'vault_list_creds' } },
       })
+      if (peek) this.#peekGrant(grant)
+      else this.vault.assertGrantLive?.(grant)
       const profile = getProfile(cred.connector_kind)
       // A credential may name host:port and a scheme; policy always matches on
       // the hostname alone, while the connection uses the full authority.
@@ -419,6 +1004,11 @@ export class Pipeline {
         const profile = getProfile(cred.connector_kind)
         const eff = policyMod.intersect([profile.policyCeiling, session.policy, g.policy])
         if ((eff.hosts || []).some((pat) => policyMod.matchHost(pat, host))) {
+          stage('quarantine')
+          this.#checkQuarantine(cred)
+          stage('grant')
+          if (peek) this.#peekGrant(g)
+          else this.vault.assertGrantLive?.(g)
           // If the credential names this exact host with a port, use that port.
           const credRaw = cred.connector.host || ''
           const credHost = policyMod.hostOnly(credRaw)
@@ -448,12 +1038,13 @@ export class Pipeline {
     })
   }
 
-  async #proxy({ req, session, route, requestId, onConsume, onApprovalSpent, markUpstream }) {
+  async #proxy({ req, session, route, requestId, resources = {}, onConsume, onApprovalSpent, markUpstream, preflight = false, assumePlaceholder = false, stage = () => {} }) {
     const { cred, grant, profile } = route
     const effective = policyMod.intersect([profile.policyCeiling, session.policy, grant.policy])
     let approvedRequestHash = null
 
     // --- locate every placeholder, in every encoding -----------------------
+    stage('placeholders')
     const located = sub.locate(req)
     if (located.unscannable) {
       throw deny('AV_UNSCANNABLE', located.unscannable, { rule: 'body_size' })
@@ -531,7 +1122,7 @@ export class Pipeline {
       substitutions.push({ occ, row, field, site })
     }
 
-    if (!substitutions.length) {
+    if (!substitutions.length && !assumePlaceholder) {
       throw deny('AV_SESSION_REQUIRED', 'no placeholder in this request', {
         rule: 'no_placeholder',
         hint: `Put a placeholder at: ${cred.fields.map((f) => f.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s))).join(' | ')).join(' | ')}. Get one with: agent-vault ph next ${cred.slug}`,
@@ -539,29 +1130,23 @@ export class Pipeline {
       })
     }
 
-    // --- policy ------------------------------------------------------------
+    // --- policy, then the limits, in the contract's stage order -----------
+    // Every check after this one reads the DECIDED method and path, the ones
+    // that go on the wire. Reading the raw path here and the normalised one
+    // there is two readers of one input: `/graphql/.` would not end in
+    // /graphql for the payload check and would be sent as /graphql.
+    stage('policy')
     const decision = policyMod.evaluateHttp(effective, { method: req.method, host: route.host, path: route.path })
-
-    // --- budget ------------------------------------------------------------
-    const budget = effective.budget
-    // A limit that is present but not a number can only come from a bug, and
-    // the failure mode is silent and total: `used >= NaN` is false forever, so
-    // the grant is uncounted while the policy still shows a budget. Refuse
-    // rather than proceed on a counter that cannot count.
-    const stated = budget && budget.limit !== undefined && budget.limit !== null && budget.limit !== ''
-      ? Number(budget.limit) : null
-    if (budget && budget.limit !== undefined && budget.limit !== null && budget.limit !== '' && !Number.isFinite(stated)) {
-      throw deny('AV_POLICY_DENIED', 'this grant has a budget whose limit is not a number, so no request can be counted against it', {
-        rule: 'budget',
-        hint: 'Recreate the grant with a numeric budget limit, or with no budget at all.',
-      })
-    }
-    if (stated !== null && grant.budget_used >= stated) {
-      throw deny('AV_POLICY_DENIED', `grant budget of ${stated} ${budget.unit || 'requests'} is spent`, {
-        rule: 'budget',
-        hint: 'A human must widen the grant or start a new session.',
-      })
-    }
+    stage('payload')
+    evaluatePayload(effective.payload_sets, { method: decision.method, path: decision.path, query: req.query, body: req.body, contentType: sub.getHeader(req, 'content-type') })
+    stage('budget')
+    this.#budget(grant, effective)
+    stage('spend')
+    const spending = this.#checkSpend(grant, effective, route, req, decision)
+    stage('rate')
+    this.#rate(grant, effective, preflight)
+    stage('quota')
+    this.#quota(grant, effective)
 
     // --- method override --------------------------------------------------
     // Plenty of frameworks run a POST carrying X-HTTP-Method-Override: DELETE
@@ -571,6 +1156,7 @@ export class Pipeline {
     // might act on is held to the same allowlist and the same approval rule.
     const overrides = methodOverrides(req.headers)
     for (const m of overrides) {
+      policyMod.evaluateHttp(effective, { method: m, host: route.host, path: route.path })
       if (effective.methods && !effective.methods.includes(m)) {
         throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
           rule: 'methods',
@@ -630,9 +1216,20 @@ export class Pipeline {
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
       }).map(([n, v]) => [n, stableHeader(n, v)]),
     })
+    stage('approval')
     const firstUse = grant.counters.requests === 0
-    if ([decision.method, ...overrides].some((method) => policyMod.needsApproval(effective, { method, firstUse }))) {
-      const verdict = this.#approval(requestHash, { grant, decision, overrides, requestId, reason: sub.getHeader(req, 'av-reason') })
+    const needsHuman = [decision.method, ...overrides].some((method) => policyMod.needsApproval(effective, { method, firstUse }))
+    // Preflight stops here. It reports an approval that already exists by its
+    // state and never creates one: a prediction must not put a request in
+    // front of a human.
+    if (preflight) {
+      const held = this.approvals.get(requestHash)
+      if (needsHuman && held?.state === 'denied') throw deny('AV_POLICY_DENIED', 'a human denied this request', { rule: 'approval' })
+      const allowed = !needsHuman || held?.state === 'granted' || (held?.state === 'consumed' && !!held.result)
+      return { would: allowed ? 'allow' : 'hold', approval_state: held?.state ?? null }
+    }
+    if (needsHuman) {
+      const verdict = this.#approval(requestHash, { grant, decision, overrides, requestId, req, substitutions, reason: sub.getHeader(req, 'av-reason') })
       if (verdict.status === 'pending') {
         return {
           status: 202,
@@ -670,6 +1267,7 @@ export class Pipeline {
       if (verdict.status === 'granted') onApprovalSpent?.(verdict.approval)
     }
 
+    resources.release = this.#acquire(grant, effective)
     // --- consume, then substitute -----------------------------------------
     const injected = []
     let outgoing = { method: req.method, path: decision.path, query: req.query, headers: req.headers.map(([n, v]) => [n, v]), body: req.body }
@@ -684,6 +1282,20 @@ export class Pipeline {
         credential_slug: cred.slug, field: s.row.field, site: s.site.spec,
         uses: row.uses, max_uses: row.max_uses,
       })
+    }
+    const quota = this.#quota(grant, effective)
+    if (quota) {
+      grant.quota_state = quota
+      quota.count += 1
+      resources.quota = quota
+      this.vault.save({ durable: false })
+    }
+    if (spending) {
+      const rid = id.request()
+      grant.spend ??= { tokens_used: 0, usd_micros_used: 0, reserved: {} }
+      grant.spend.reserved[rid] = { ...spending.reservation, at: Date.now() }
+      resources.spend = { ...spending, grant, rid, requestId }
+      this.vault.save({ durable: false })
     }
     // Every placeholder the agent sent was replaced, wherever it was. Checked
     // on what will actually be sent rather than trusted from the substitution
@@ -735,7 +1347,7 @@ export class Pipeline {
     const upstreamUrl = `${route.scheme === 'http' ? 'http' : 'https'}://${authority}${wirePath}${outgoing.query ? `?${outgoing.query}` : ''}`
     let res
     try {
-      res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body })
+      res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body, pins: cred.pins?.[decision.host] ?? null })
       // A response came back, so the request was certainly delivered and a
       // side effect may have happened. No refund from here on.
       markUpstream()
@@ -747,6 +1359,11 @@ export class Pipeline {
       // side effect, so those are refunded; anything that might have reached
       // the server is not, because refunding a write that happened is worse
       // than charging for one that did not.
+      if (e?.code === 'AV_PIN_MISMATCH') {
+        const err = deny('AV_PIN_MISMATCH', `${decision.host} presented no pinned key`, { rule: e.reason === 'plaintext' ? 'pin_plaintext' : 'spki_pin', refunded: true })
+        err.presented = e.presented ?? []
+        throw err
+      }
       if (!PRE_CONNECT_ERRORS.has(e?.code)) markUpstream()
       throw deny('AV_UPSTREAM_UNREACHABLE', `could not reach ${decision.host}: ${e.message}`, {
         rule: 'upstream',
@@ -754,8 +1371,9 @@ export class Pipeline {
       })
     }
 
+    res = await this.#redirects(res, { route, effective, decision, headers, upstreamUrl, requestId })
     // --- scrub -------------------------------------------------------------
-    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))], this.scrubBudget ?? {})
+    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))], { ...this.scrubBudget, extraPatterns: this.#extraPatterns() })
     // The path as the audit log may hold it, computed here because this
     // scrubber already exists. Doing it in handle() meant #safeMessage, which
     // calls allSecrets() — decrypting every credential in the vault — on every
@@ -763,7 +1381,7 @@ export class Pipeline {
     // memory, more often, for no benefit.
     const auditPath = this.#redactPlaceholders(scrubber.scrub(String(decision.path ?? '').split('?')[0]).text)
 
-    const outHeaders = {}
+    const outHeaders = res.redirectStopped ? { 'av-redirect-stopped': res.redirectStopped } : {}
     let headerRedactions = 0
     for (const [n, v] of Object.entries(res.headers)) {
       const lower = n.toLowerCase()
@@ -827,17 +1445,21 @@ export class Pipeline {
         const approval = this.approvals.get(approvedRequestHash)
         if (approval) approval.executed_at = new Date().toISOString()
       }
+      this.#observeHealth(route, res)
+      const streamState = { cut: false }
       return {
         status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: headerRedactions,
-        stream: scrubEventStream(source, scrubber, {
+        stream: this.#trackStream(scrubEventStream(source, scrubber, {
           // A compressed stream is an amplifier, and zlib's maxOutputLength
           // bounds one chunk, not the stream: 71 KB of gzip streamed out 70
           // MiB. The bound is counted here, over everything decoded.
           maxBytes: compressed ? MAX_DECOMPRESSED : Infinity,
           onCut: (reason) => {
+            streamState.cut = true
             this.vault.audit?.write('response.stream_cut', { request_id: requestId, reason })
           },
-        }),
+        }), resources.spend, () => source.destroy(), streamState),
+        spend: this.#spendAudit(resources.spend), routeMatched: decision.route_matched ?? null,
       }
     }
 
@@ -903,7 +1525,12 @@ export class Pipeline {
       this.vault.audit.write('response.scrubbed', { request_id: requestId, redactions })
     }
 
+    let usage = null
+    try { usage = models.usageFromBody(cred.connector_kind, JSON.parse(Buffer.from(text, 'latin1').toString('utf8'))) } catch {}
+    const spent = this.#settleSpend(resources.spend, usage)
+    this.#observeHealth(route, res)
     const result = {
+      spend: spent, routeMatched: decision.route_matched ?? null,
       status: res.status, headers: outHeaders, body: Buffer.from(text, 'latin1'),
       host: decision.host, rule: decision.rule, auditPath, redactions,
     }
@@ -943,7 +1570,7 @@ export class Pipeline {
   }
 
   /** Approval state machine, keyed by the request hash so retries are safe. */
-  #approval(requestHash, { grant, decision, overrides = [], requestId, reason }) {
+  #approval(requestHash, { grant, decision, overrides = [], requestId, reason, req, substitutions }) {
     const existing = this.approvals.get(requestHash)
     if (existing) {
       if (existing.state === 'granted') {
@@ -992,15 +1619,18 @@ export class Pipeline {
       summary: overrides.length
         ? `${decision.method} (overridden to ${overrides.join(', ')}) ${decision.host}${decision.path}`
         : `${decision.method} ${decision.host}${decision.path}`,
-      reason: reason || null,
+      reason: reason ? this.#safeMessage({ message: reason }) : null,
+      preview: this.#previewOf(req, substitutions, decision),
       state: 'pending',
       created_at: new Date().toISOString(),
     }
+    approval.summary = this.#safeMessage({ message: approval.summary })
     this.approvals.set(requestHash, approval)
     this.vault.audit.write('approval.requested', {
       request_id: requestId, approval_id: approval.id, grant_id: grant.id, summary: approval.summary,
       agent_reason_untrusted: approval.reason,
     })
+    try { this.onPending?.({ kind: 'request', id: approval.id, headline: approval.summary, created_at: approval.created_at }) } catch {}
     return { status: 'pending', approval }
   }
 
@@ -1087,7 +1717,17 @@ function methodOverrides(headers) {
  * response stream is handed back rather than buffered here, so the pipeline
  * can decide between streaming and buffering.
  */
-function defaultUpstream({ url, method, headers, body }) {
+// The connectors' pinned request (F11), loaded by its contract name. It is
+// the default upstream once it exists. Until then, a request with no pins
+// goes out as before, and one WITH pins is refused, unsent: a pin nothing can
+// check must not quietly become no pin at all.
+let pinning
+async function defaultUpstream({ url, method, headers, body, pins = null }) {
+  if (pinning === undefined) {
+    try { pinning = await import('../connectors/pinning.js') } catch { pinning = null }
+  }
+  if (typeof pinning?.pinnedRequest === 'function') return pinning.pinnedRequest({ url, method, headers, body, pins })
+  if (pins != null) throw Object.assign(new Error('certificate pins are set and pin checking is not available'), { code: 'AV_PIN_MISMATCH', reason: 'unavailable' })
   return new Promise((resolve, reject) => {
     const u = new URL(url)
     const fn = u.protocol === 'http:' ? httpRequest : httpsRequest
@@ -1594,6 +2234,132 @@ function eventRuns(scrubber, keep) {
         }
       }
       return null
+    },
+  }
+}
+
+// Request headers that commonly carry a credential. Never shown in a preview.
+const PREVIEW_OMITTED = new Set(['authorization', 'proxy-authorization', 'cookie', 'x-api-key', 'x-goog-api-key'])
+const PREVIEW_MAX = 8192
+
+/**
+ * F13: a held request as a human may safely read it, built from the request
+ * the agent sent (before substitution).
+ *
+ * Each placeholder at its site becomes `«slug.field @ location»`. Any other
+ * placeholder text, in any encoding the detector knows, becomes
+ * `«placeholder»`, and so does a session token. Then `scrub` runs over all
+ * of it, so a real secret the agent pasted shows as `[[av:redacted:…]]`.
+ * Headers that carry credentials by name are left out. The whole preview is
+ * at most 8 KiB. It is shown to a human and never audited.
+ *
+ * substitutions: [{ text, label, location, part }], where `part` is the
+ * part of the request it was found in ('headers', 'query', 'body', 'path');
+ * scrub: (text) => text.
+ */
+export function approvalPreview({ req, decision, substitutions, scrub }) {
+  // One placeholder can sit at two sites, as the same text. Each part of the
+  // preview is labelled with the site in THAT part, so the body never says
+  // "header" for the copy that is in the body.
+  const clean = (value, part) => {
+    let text = String(value)
+    const hits = detectAll(text)
+    const ordered = [...substitutions.filter((s) => s.part === part), ...substitutions.filter((s) => s.part !== part)]
+    for (const s of ordered) text = text.split(s.text).join(`«${s.label} @ ${s.location}»`)
+    if (hits.length) {
+      // Every other spelling, found with the detector and removed with a
+      // scrubber over exactly those texts and their encodings.
+      const r = new Scrubber(hits.map((h) => ({ secret: h.text, replacement: '«placeholder»', always: true, label: 'placeholder' }))).scrub(text)
+      text = r.unscannable ? '«placeholder»' : r.text
+    }
+    text = text.replace(new RegExp(SESSION_TOKEN.source, 'g'), '«session token»')
+    return scrub(text)
+  }
+  const cap = (text, n = 256) => (text.length > n ? `${text.slice(0, n)}…` : text)
+
+  const raw = req.body ? Buffer.from(req.body) : Buffer.alloc(0)
+  const type = sub.getHeader(req, 'content-type') || null
+  let kind = raw.length ? 'text' : 'none'
+  let text = raw.length ? raw.toString('utf8') : null
+  if (text !== null && (!Buffer.from(text, 'utf8').equals(raw) || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text))) { kind = 'binary'; text = null }
+  if (text !== null && /^application\/(?:json|[^/;]+\+json)\s*(?:;|$)/i.test(type ?? '')) {
+    kind = 'json'
+    // Pretty-printed only when it parses strictly. JSON.parse keeps the LAST
+    // of two duplicate keys, so a pretty copy would show the human one value
+    // while the upstream may act on the other; such a body is shown as sent.
+    try { text = JSON.stringify(parseStrictJson(text), null, 2) } catch { /* shown as sent */ }
+  } else if (text !== null && /^application\/x-www-form-urlencoded\s*(?:;|$)/i.test(type ?? '')) kind = 'form'
+
+  const full = text === null ? null : clean(text, 'body')
+  let shown = full === null ? null : Buffer.from(full).subarray(0, 4096).toString('utf8')
+  const headers = []
+  for (const [name, value] of req.headers) {
+    const lower = String(name).toLowerCase()
+    if (PREVIEW_OMITTED.has(lower) || HOP_BY_HOP.has(lower) || lower.startsWith('av-')) continue
+    if (headers.length === 32) break
+    headers.push([clean(name, 'headers'), cap(clean(value, 'headers'))])
+  }
+  const preview = {
+    method: clean(decision.method, 'path'), host: clean(decision.host, 'path'), path: cap(clean(decision.path, 'path'), 1024),
+    query: [...new URLSearchParams(req.query ?? '')].slice(0, 64).map(([name, value]) => [cap(clean(name, 'query')), cap(clean(value, 'query'))]),
+    headers,
+    content_type: type === null ? null : cap(clean(type, 'headers')),
+    body: { text: shown, bytes: raw.length, shown_bytes: shown === null ? 0 : Buffer.byteLength(shown), truncated: full !== null && full !== shown, kind },
+    placeholders: substitutions.map((s) => ({ label: s.label, location: s.location })),
+    untrusted: true,
+  }
+  // Every variable part is bounded, not only the body: a URL alone can be
+  // larger than the whole allowance.
+  while (Buffer.byteLength(JSON.stringify(preview)) > PREVIEW_MAX) {
+    if (preview.body.text) {
+      shown = preview.body.text.slice(0, Math.max(0, preview.body.text.length - 256))
+      Object.assign(preview.body, { text: shown, shown_bytes: Buffer.byteLength(shown), truncated: true })
+    } else if (preview.headers.length) preview.headers.pop()
+    else if (preview.query.length) preview.query.pop()
+    else if (preview.placeholders.length) preview.placeholders.pop()
+    else { preview.path = cap(preview.path, 256); break }
+  }
+  return preview
+}
+
+/** Which part of a request a located placeholder sits in. */
+function previewPart(region) {
+  if (region === 'header' || region === 'header-name' || region === 'basic') return 'headers'
+  if (region === 'query' || region === 'query-key') return 'query'
+  if (region === 'path') return 'path'
+  return 'body'
+}
+
+/** The refusal for a grant whose own lifetime ran out (F18). */
+function grantExpired(slug) {
+  return deny('AV_GRANT_EXPIRED', `this session's grant for ${slug ?? 'this credential'} expired`, {
+    rule: 'grant_ttl',
+    next: { mcp: { tool: 'vault_request_session' } },
+  })
+}
+
+/** Cleanup also runs when an iterator is closed before its first next(). */
+function closeAware(source, finish, observe = null) {
+  const iterator = source[Symbol.asyncIterator]()
+  let closed = false
+  const end = (complete) => { if (!closed) { closed = true; finish(complete) } }
+  return {
+    [Symbol.asyncIterator]() { return this },
+    async next() {
+      try {
+        const item = await iterator.next()
+        if (item.done) end(true)
+        else observe?.(item.value)
+        return item
+      } catch (e) { end(false); throw e }
+    },
+    async return(value) {
+      try { return await iterator.return?.(value) ?? { done: true, value } }
+      finally { end(false) }
+    },
+    async throw(error) {
+      try { if (iterator.throw) return await iterator.throw(error); throw error }
+      finally { end(false) }
     },
   }
 }
