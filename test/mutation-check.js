@@ -1157,6 +1157,15 @@ const MUTATIONS = [
     to: 'if (false) {',
     tests: ['test/security/gateway-hardening.test.js'],
   },
+  {
+    // An unparseable provider date is not an expiry. Keeping the raw text
+    // would store whatever the upstream sent as observed_expires_at.
+    what: 'an unparseable expiry header is kept as the observed expiry',
+    file: 'src/connectors/profiles.js',
+    from: 'if (iso) out.observed_expires_at = iso',
+    to: 'out.observed_expires_at = iso || String(rawExpiry).trim()',
+    tests: ['test/security/connectors-health.test.js'],
+  },
 ]
 
 let survived = 0
