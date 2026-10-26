@@ -106,6 +106,37 @@ test('control: with a presence authenticator left, the passphrase can be removed
   } finally { await d.stop() }
 })
 
+test('an authenticator-only vault says widening is still gated when no window can open', async () => {
+  // Removing the passphrase is allowed with an authenticator left, so this is
+  // the ordinary state after it. The window route answered as if the vault
+  // had no factor at all: "ungated", "nothing is gated", set a passphrase.
+  const { d } = await authenticatorOnly()
+  try {
+    const res = await d.control('POST', '/v1/presence/window', {})
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    assert.equal(res.body.granted, false)
+    assert.equal(res.body.ungated, false)
+    assert.deepEqual(res.body.factors, ['authenticator'])
+    assert.match(res.body.detail, /authenticator/)
+    assert.doesNotMatch(res.body.detail, /nothing is gated/)
+    assert.match(res.body.next, /agent-vault ui/)
+    assert.equal(d.daemon.presenceGraceUntil, 0, 'no window was opened')
+    assert.equal((await unsignedSession(d)).status, 401, 'and what it says is what the gate does')
+  } finally { await d.stop() }
+})
+
+test('control: a vault with no factor at all still says it is ungated', async () => {
+  const d = await startDaemon()
+  try {
+    const res = await d.control('POST', '/v1/presence/window', {})
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    assert.equal(res.body.granted, false)
+    assert.equal(res.body.ungated, true)
+    assert.equal(res.body.next, 'agent-vault passphrase set')
+    assert.equal((await unsignedSession(d)).status, 200, 'and what it says is what the gate does')
+  } finally { await d.stop() }
+})
+
 test('control: a passphrase changes with the current one', async () => {
   const d = await startDaemon({ passphrase: PASSPHRASE })
   try {

@@ -1555,10 +1555,25 @@ export class Daemon {
         case 'POST /v1/presence/window': {
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
           if (!this.vault.hasPassphrase) {
-            // No passphrase means no window to open — every widening call is
-            // already ungated, and audited as such. This answered
+            // No passphrase means no window to open. This answered
             // `granted: true`, which reads as "a window is open" to anything
-            // that checks, so say what is actually true instead.
+            // that checks, so say what is actually true instead — and what is
+            // true depends on the authenticator. With one enrolled, which is
+            // where removing the passphrase leaves a vault, every widening call
+            // still needs its signature: the socket is not ungated, it is
+            // gated by the one factor a window cannot stand in for. The test
+            // is the gate's own, so the two cannot disagree.
+            if (this.vault.db?.kv?.webauthn) {
+              return json(200, {
+                granted: false,
+                ungated: false,
+                factors: ['authenticator'],
+                detail: 'this vault has no passphrase, so no window was opened; every widening change still needs your authenticator',
+                next: 'agent-vault ui   (confirm it there with your authenticator)',
+              })
+            }
+            // With no factor at all, every widening call is ungated, and
+            // audited as such.
             return json(200, {
               granted: false,
               ungated: true,

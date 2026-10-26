@@ -392,6 +392,13 @@ const MUTATIONS = [
     tests: ['test/security/fix-control-approvals.test.js'],
   },
   {
+    what: 'an authenticator-only vault reports its socket as ungated',
+    file: 'src/daemon/server.js',
+    from: '            if (this.vault.db?.kv?.webauthn) {\n              return json(200, {\n                granted: false,\n                ungated: false,',
+    to: '            if (false) {\n              return json(200, {\n                granted: false,\n                ungated: false,',
+    tests: ['test/security/fix-control-factors.test.js'],
+  },
+  {
     what: 'Touch ID changes from the UI drop the proof on the way to the daemon',
     file: 'src/ui/server.js',
     from: "action: 'remove', presence: body?.presence,",
