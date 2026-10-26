@@ -83,3 +83,20 @@ test('header arrays and a Headers-like get() are read the same way', () => {
   const fromGet = extractHealth(github(), { get: (n) => (n.toLowerCase() === 'x-ratelimit-remaining' ? '9' : null) })
   assert.equal(fromGet.ratelimit_remaining, 9)
 })
+
+test('V-H2: an ISO expiry with an offset is a real calendar date, shifted by the offset', () => {
+  const gh = getProfile('github')
+  const at = (raw) => extractHealth(gh, { 'github-authentication-token-expiration': raw })?.observed_expires_at
+  assert.equal(at('2027-01-31T00:00:00+01:00'), '2027-01-30T23:00:00.000Z')
+  assert.equal(at('2027-01-31T00:00:00-0530'), '2027-01-31T05:30:00.000Z')
+  assert.equal(at('2027-01-01T00:30:00+01:00'), '2026-12-31T23:30:00.000Z')
+  assert.equal(at('2027-01-31T00:00:00+14:00'), '2027-01-30T10:00:00.000Z')
+  assert.equal(at('2027-01-31T00:00:00+00:00'), '2027-01-31T00:00:00.000Z')
+  assert.equal(at('2027-01-31T00:00:00Z'), '2027-01-31T00:00:00.000Z')
+  const bad = [
+    '2027-02-30T00:00:00+01:00', '2027-02-29T00:00:00-05:00', '2027-04-31T12:00:00+0200', '2027-01-31T25:00:00+01:00',
+    '2027-01-31T23:59:60+01:00', '2027-01-31T00:00:00+99:99', '2027-01-31T00:00:00+14:01', '2027-01-31T00:00:00-15:00',
+    '2027-01-31T00:00:00+01:60', '2027-02-29T00:00:00Z', '0000-01-01T00:00:00+01:00', '+275760-09-13T00:00:00Z',
+  ]
+  for (const raw of bad) assert.equal(at(raw), undefined, raw)
+})

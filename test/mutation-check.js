@@ -1285,6 +1285,13 @@ const MUTATIONS = [
     tests: ['test/security/connectors-probe.test.js'],
   },
   {
+    what: 'an expiry offset outside +-14:00 is applied',
+    file: 'src/connectors/profiles.js',
+    from: 'if (hours > 14 || minutes > 59 || (hours === 14 && minutes > 0)) return null',
+    to: 'if (false) return null',
+    tests: ['test/security/connectors-health.test.js'],
+  },
+  {
     // Scopes are copied off a response header. Without the scrub, a header
     // that echoes the secret is returned and stored on the health record.
     what: 'probe scopes are returned without scrubbing the credential',

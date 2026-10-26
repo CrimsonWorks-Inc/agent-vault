@@ -240,12 +240,18 @@ function parseExpiry(raw) {
   m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2}))?$/.exec(s)
   if (!m) return null
   if (!m[4]) return utcIso(+m[1], +m[2], +m[3], 0, 0, 0)
-  const offset = m[8]
-  if (!offset || offset === 'Z' || offset === '+00:00' || offset === '+0000') {
-    return utcIso(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6])
-  }
-  const ms = Date.parse(s)
-  if (!Number.isFinite(ms)) return null
+  // The wall-clock fields must be a real date before the offset moves them:
+  // Date.parse would roll 2027-02-30 over into March.
+  const local = utcIso(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6])
+  if (!local) return null
+  const offset = /^([+-])(\d{2}):?(\d{2})$/.exec(m[8])
+  if (!offset) return local
+  const hours = +offset[2]
+  const minutes = +offset[3]
+  if (hours > 14 || minutes > 59 || (hours === 14 && minutes > 0)) return null
+  const shift = (offset[1] === '-' ? -1 : 1) * (hours * 60 + minutes) * 60_000
+  const ms = Date.parse(local) - shift
+  if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) return null
   return new Date(ms).toISOString()
 }
 
