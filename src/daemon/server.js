@@ -349,6 +349,9 @@ export class Daemon {
     const grants = specs.map((spec) => {
       const cred = this.vault.findCredential(spec.cred)
       if (!cred) throw deny('AV_NOT_FOUND', `no credential ${spec.cred}`)
+      // The store refuses the grant too, but only after the gate has asked for
+      // a passphrase and a session exists to be torn down again.
+      if (cred.quarantine) throw quarantined(cred)
       // Never a default for a mode nobody chose: an unknown one used to mean
       // auto, because needsApproval fell through to false.
       if (spec.approval != null && !APPROVAL_MODES.includes(spec.approval)) {
@@ -1482,14 +1485,10 @@ export class Daemon {
           const resolved = input.items.map((item) => {
             const cred = this.vault.findCredential(item.cred)
             if (!cred) throw deny('AV_NOT_FOUND', `no credential ${item.cred}`)
-            if (cred.quarantine) {
-              throw deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
-                rule: 'quarantine', hint: `A human can release it: agent-vault cred release ${cred.slug}`,
-              })
-            }
+            if (cred.quarantine) throw quarantined(cred)
             const grant = grants.find((g) => g.credential_id === cred.id)
             if (!grant) throw deny('AV_NO_GRANT', `no grant for ${cred.slug} in session ${session.id}`)
-            this.vault.assertGrantLive?.(grant)
+            this.vault.assertGrantLive(grant)
             const fieldName = item.field ?? grant.fields[0]
             const field = cred.fields.find((f) => f.name === fieldName)
             if (!field || !grant.fields.includes(fieldName)) {
@@ -1940,6 +1939,13 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
+}
+
+/** The store's refusal for a quarantined credential, met before anything is made. */
+function quarantined(cred) {
+  return deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
+    rule: 'quarantine', hint: `A human can release it: agent-vault cred release ${cred.slug}`,
+  })
 }
 
 /** The shape of a web UI origin this daemon will consider trusting. */

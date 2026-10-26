@@ -432,6 +432,21 @@ test('a batch is all or nothing', async () => {
   } finally { await d.stop() }
 })
 
+test('a batch with one quarantined credential issues nothing, not even the items before it', async () => {
+  const d = await twoCreds()
+  try {
+    const s = await sessionWith(d, [{ cred: 'demo' }, { cred: 'oai' }])
+    const rows = () => Object.keys(d.vault.db.placeholders).length
+    const before = [issuedRecords(d), rows()]
+    d.vault.setQuarantine('oai')
+    const r = await d.control('POST', '/v1/placeholders/batch', { sid: s.session_id, items: [{ cred: 'demo' }, { cred: 'oai' }] })
+    assert.equal(r.status, 403, JSON.stringify(r.body))
+    assert.equal(r.body.code, 'AV_QUARANTINED')
+    assert.equal(r.body.rule, 'quarantine')
+    assert.deepEqual([issuedRecords(d), rows()], before)
+  } finally { await d.stop() }
+})
+
 test('a batch of the wrong shape is refused before anything is resolved', async () => {
   const d = await twoCreds()
   try {

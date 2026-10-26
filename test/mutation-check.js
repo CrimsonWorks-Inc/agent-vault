@@ -1338,6 +1338,34 @@ const MUTATIONS = [
     to: '      if (false) {',
     tests: ['test/security/requested-r3.test.js'],
   },
+  // ---- wave 2, requested: C3 (the elevation reaches the audit log) ----------
+  {
+    // The daemon decides the elevation and the store records it. Dropping it
+    // here makes every session.created say [] while the gate still ran fresh.
+    what: 'the daemon does not hand a session its elevation',
+    file: 'src/daemon/server.js',
+    from: 'infinite: plan.infinite, elevated: plan.elevated,',
+    to: 'infinite: plan.infinite, elevated: [],',
+    tests: ['test/security/requested-c3.test.js'],
+  },
+  {
+    // The store refuses the grant as well, but only after the gate has asked
+    // for a passphrase and a session.created has been written and revoked.
+    what: 'a session for a quarantined credential is planned and gated',
+    file: 'src/daemon/server.js',
+    from: '      // a passphrase and a session exists to be torn down again.\n      if (cred.quarantine) throw quarantined(cred)',
+    to: '      // a passphrase and a session exists to be torn down again.\n      if (false) throw quarantined(cred)',
+    tests: ['test/security/requested-seams.test.js'],
+  },
+  {
+    // The store refuses one placeholder at a time, so a quarantined second
+    // item would leave the first one issued.
+    what: 'a placeholder batch resolves a quarantined credential',
+    file: 'src/daemon/server.js',
+    from: '            if (cred.quarantine) throw quarantined(cred)\n            const grant = grants.find',
+    to: '            if (false) throw quarantined(cred)\n            const grant = grants.find',
+    tests: ['test/security/requested-r2.test.js'],
+  },
   // ---- store slice A (R3, F6, F10, F15, F16, F18, C3) ----
   {
     // R3 mutation 1: a null expiry read as "never" without asking whether the
