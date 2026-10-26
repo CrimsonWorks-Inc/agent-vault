@@ -153,6 +153,34 @@ test('a spent approval set aside for a new ask cannot be decided either', async 
   assert.equal(approvalOf(id).state, 'consumed')
 })
 
+test('the control API strips a cached result even if the pipeline hands one back', async () => {
+  // Two layers hold this: the pipeline returns only approvals that were
+  // pending, which have no result yet, and the control API drops `result`
+  // from whatever it is given. With the first in place the second is never
+  // reached, so stand in for a pipeline that regressed and check it alone.
+  const { id } = await spent()
+  const leaked = { ...approvalOf(id), result: { status: 200, headers: { 'av-placeholder-next': 'avph_leak' }, body: 'ran-ok' } }
+  const pipeline = d.daemon.pipeline
+  const { decideApproval, pendingApprovals } = pipeline
+  pipeline.decideApproval = () => leaked
+  pipeline.pendingApprovals = () => [leaked]
+  try {
+    const single = await inWindow(() => d.control('POST', '/v1/approvals', { id, granted: false }))
+    assert.equal(single.status, 200, JSON.stringify(single.body))
+    assertNoResult(single.body)
+    const decisions = [{ id, kind: 'request', granted: false }]
+    const bulk = await inWindow(() => d.control('POST', '/v1/pending/decide-many', { decisions }))
+    assert.equal(bulk.status, 200, JSON.stringify(bulk.body))
+    assert.equal(bulk.body.decided[0].outcome, 'decided')
+    assertNoResult(bulk.body.decided[0].result) // the item's `result` is the approval view itself
+    const listed = await d.control('GET', '/v1/approvals')
+    assert.equal(listed.status, 200, JSON.stringify(listed.body))
+    assertNoResult(listed.body)
+  } finally {
+    Object.assign(pipeline, { decideApproval, pendingApprovals })
+  }
+})
+
 // -------------------------------------- one bad upstream, one request, no more
 
 // In a child process, because the test runner keeps its own handlers on this

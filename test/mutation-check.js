@@ -389,7 +389,9 @@ const MUTATIONS = [
     file: 'src/daemon/server.js',
     from: "  const { result, ...rest } = approval\n  return rest",
     to: "  return approval",
-    tests: ['test/security/fix-control-approvals.test.js'],
+    // With the pipeline refusing anything not pending, only a test that
+    // stands in for a regressed pipeline can reach this layer.
+    tests: ['test/security/fix-control-approvals.test.js', 'test/security/wave1-compose.test.js'],
   },
   {
     what: 'an authenticator-only vault reports its socket as ungated',
