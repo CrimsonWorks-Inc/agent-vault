@@ -1487,6 +1487,70 @@ const MUTATIONS = [
     to: "      const method = 'GET'",
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
+  {
+    // Round 4: an override in a field, and the headers a hop keeps.
+    what: 'a method-override field naming another method is let through',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (String(value).toUpperCase() !== decision.method) {',
+    to: '      if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a method-override field in the query is not read',
+    file: 'src/daemon/pipeline.js',
+    from: "  pairs(req.query ?? '')\n",
+    to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a method-override field in a form body is not read',
+    file: 'src/daemon/pipeline.js',
+    from: "  if (type.startsWith('application/x-www-form-urlencoded')) pairs(text)",
+    to: '  if (false) pairs(text)',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a method-override field in a multipart body is not read',
+    file: 'src/daemon/pipeline.js',
+    from: "  else if (type.startsWith('multipart/form-data')) {",
+    to: '  else if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a method-override field in a JSON body is not read',
+    file: 'src/daemon/pipeline.js',
+    from: '  } else if (/[/+]json\\b/.test(type)) {',
+    to: '  } else if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: "a JSON body's repeated _method is read as its last copy only",
+    file: 'src/daemon/pipeline.js',
+    from: 'for (const [k, v] of topLevelJsonEntries(text))',
+    to: 'for (const [k, v] of Object.entries(parsed))',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a method-override field name is not folded as PHP and Rack read it',
+    file: 'src/daemon/pipeline.js',
+    from: "  const n = String(name).toLowerCase().replace(/[ .-]/g, '_')",
+    to: '  const n = String(name).toLowerCase()',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a hop drops the API-version headers a provider needs',
+    file: 'src/daemon/pipeline.js',
+    from: "  'anthropic-version', 'anthropic-beta', 'openai-beta', 'openai-organization', 'openai-project',\n  'x-api-version', 'api-version',\n",
+    to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: "a hop forwards the agent's cookie and forwarding headers",
+    file: 'src/daemon/pipeline.js',
+    from: "  'accept', 'user-agent', 'accept-language',",
+    to: "  'cookie', 'x-forwarded-for', 'x-forwarded-host', 'accept', 'user-agent', 'accept-language',",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
 ]
 
 let survived = 0

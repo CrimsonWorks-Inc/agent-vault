@@ -748,8 +748,8 @@ export class Pipeline {
    * X-HTTP-Method-Override made it a DELETE upstream after the check had
    * passed it as a GET. Any header the agent chose could do the same (a
    * framing header, a conditional on a write, a framework's own override),
-   * so the hop carries the credential at its declared header, Accept and
-   * User-Agent, and nothing else.
+   * so the hop carries the credential at its declared header and the fixed
+   * list in HOP_FORWARDED, and nothing else.
    */
   #hopHeaders(headers, credentialHeaders, host) {
     const out = { host, 'accept-encoding': 'identity' }
@@ -1222,6 +1222,21 @@ export class Pipeline {
       // And the method-bound routes (F3), which bind a method to its paths.
       // The methods allowlist is the check above, so it is left out here.
       policyMod.evaluateHttp({ ...effective, methods: null }, { method: m, host: route.host, path: route.path })
+    }
+    // The same override as a field: Rails and Laravel run a POST whose form
+    // body says `_method=DELETE` as a DELETE, Laravel reads it from the query
+    // and a JSON body too, and Express's method-override can be pointed at
+    // any of them. The request was checked as its request-line method, so a
+    // field naming any other is refused outright rather than checked as a
+    // second method: nothing the agent needs is lost by sending the method
+    // it means on the request line.
+    for (const value of methodOverrideFields(req)) {
+      if (String(value).toUpperCase() !== decision.method) {
+        throw deny('AV_POLICY_DENIED', `a method-override field (such as _method) asks for a method other than ${decision.method}`, {
+          rule: 'method_override',
+          hint: 'Send the method you mean on the request line, without a method-override field.',
+        })
+      }
     }
 
     // --- approval ----------------------------------------------------------
@@ -1765,8 +1780,22 @@ export class Pipeline {
 /** Headers a framework may honour in place of the request-line method. */
 const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override'])
 
-/** The headers a redirect hop forwards besides the credential's (F6). */
-const HOP_FORWARDED = new Set(['accept', 'user-agent'])
+/**
+ * The headers a redirect hop forwards besides the credential's (F6): a fixed
+ * list, each of which picks a representation, a version or a cache answer
+ * and none of which can change the method, the body, its framing, who is
+ * asking or with what credential. The API-version headers are here because a
+ * provider refuses or changes behaviour without them. Authorization, Cookie,
+ * Content-*, Transfer-Encoding, every *-Override, X-Forwarded-*, Host and
+ * Range stay off it; the credential reaches a hop only at its declared site.
+ * No connector profile declares a header it needs on every request, so there
+ * is nothing to add from there.
+ */
+const HOP_FORWARDED = new Set([
+  'accept', 'user-agent', 'accept-language', 'cache-control', 'if-none-match', 'if-modified-since',
+  'anthropic-version', 'anthropic-beta', 'openai-beta', 'openai-organization', 'openai-project',
+  'x-api-version', 'api-version',
+])
 
 /**
  * Never on a redirect hop, even as a credential's declared site: a hop has no
@@ -1785,6 +1814,89 @@ function methodOverrides(headers) {
         if (method && !out.includes(method)) out.push(method)
       }
     }
+  }
+  return out
+}
+
+/**
+ * Query and body fields a framework may honour in place of the request-line
+ * method, by their names after `fieldName`: Rails and Laravel's `_method`,
+ * `__method`, and the override headers spelled as fields.
+ */
+const METHOD_OVERRIDE_FIELDS = new Set(['_method', '__method', 'x_http_method_override', 'x_http_method', 'x_method_override'])
+
+/**
+ * A field name as a framework may read it. PHP turns a space, a dot and an
+ * unmatched `[` in a name into `_`, so `.method` is Laravel's `_method`, and
+ * `_method[]` is still the `_method` field to Rack and PHP. Letter case and
+ * `-` against `_` are folded too: a near-miss is only ever refused, and only
+ * when it names another method.
+ */
+function isOverrideField(name) {
+  const n = String(name).toLowerCase().replace(/[ .-]/g, '_')
+  return METHOD_OVERRIDE_FIELDS.has(n.replace(/\[.*$/s, '')) || METHOD_OVERRIDE_FIELDS.has(n.replace(/\[/g, '_'))
+}
+
+/**
+ * Every value a method-override field carries: in the query, in a form or
+ * multipart body, and at the top level of a JSON body. Each copy of a
+ * repeated field is returned, since frameworks differ on which one wins.
+ */
+function methodOverrideFields(req) {
+  const out = []
+  // `;` separated pairs too, as older Rack read a query.
+  const pairs = (raw) => { for (const [k, v] of new URLSearchParams(String(raw).replace(/^\?/, '').replace(/;/g, '&'))) if (isOverrideField(k)) out.push(v) }
+  pairs(req.query ?? '')
+  if (req.body == null || !req.body.length) return out
+  const type = String(sub.getHeader(req, 'content-type') ?? '').toLowerCase()
+  const text = (Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body)).replace(/^﻿/, '')
+  if (type.startsWith('application/x-www-form-urlencoded')) pairs(text)
+  else if (type.startsWith('multipart/form-data')) {
+    // Each part's name, from its Content-Disposition, and its value up to the
+    // next delimiter. A part that names an override and has no readable
+    // value counts as naming another method.
+    for (const m of text.matchAll(/content-disposition:[^\r\n]*?;\s*name\*?\s*=\s*(?:"([^"]*)"|([^;\r\n]*))[^\r\n]*\r?\n/gi)) {
+      if (!isOverrideField(m[1] ?? m[2].trim())) continue
+      const rest = text.slice(m.index + m[0].length)
+      const value = /^(?:[^\r\n]+\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(rest)
+      out.push(value ? value[1] : '')
+    }
+  } else if (/[/+]json\b/.test(type)) {
+    let parsed
+    try { parsed = JSON.parse(text) } catch { return out }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) for (const [k, v] of topLevelJsonEntries(text)) if (isOverrideField(k)) out.push(typeof v === 'string' ? v : JSON.stringify(v))
+  }
+  return out
+}
+
+/**
+ * The top-level [key, value] pairs of a JSON object that JSON.parse has
+ * already accepted, duplicates included: JSON.parse keeps only the last
+ * copy of a key, and a server that keeps the first would run the other.
+ */
+function topLevelJsonEntries(text) {
+  const out = []
+  let i = text.indexOf('{') + 1
+  const ws = () => { while (/\s/.test(text[i] ?? '')) i++ }
+  const string = () => { const start = i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; return JSON.parse(text.slice(start, ++i)) }
+  const skipValue = () => {
+    const start = i
+    let depth = 0
+    while (i < text.length) {
+      const c = text[i]
+      if (c === '"') { string(); if (!depth) break; continue }
+      if (c === '{' || c === '[') depth++
+      else if (c === '}' || c === ']') { if (!depth) break; depth--; if (!depth) { i++; break } }
+      else if (c === ',' && !depth) break
+      i++
+    }
+    return JSON.parse(text.slice(start, i))
+  }
+  for (ws(); text[i] === '"'; ws()) {
+    const key = string(); ws(); i++ /* : */; ws()
+    out.push([key, skipValue()]); ws()
+    if (text[i] === ',') i++
+    ws()
   }
   return out
 }

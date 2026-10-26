@@ -14,7 +14,7 @@ function fixture(t, policy = {}, { kind = 'http', upstream, options = {} } = {})
   const dir = mkdtempSync(join(tmpdir(), 'av-gw-w2-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
   const vault = Vault.create(dir, { factor: 'none' })
-  const added = vault.addCredential({ slug: 'test', kind, connector: { host: kind === 'openai' ? 'api.openai.com' : 'api.example.test' }, fields: { token: SECRET }, sites: { token: ['header:authorization:Bearer'] } })
+  const added = vault.addCredential({ slug: 'test', kind, connector: { host: { openai: 'api.openai.com', anthropic: 'api.anthropic.com' }[kind] ?? 'api.example.test' }, fields: { token: SECRET }, sites: { token: ['header:authorization:Bearer'] } })
   const cred = vault.findCredential(added.slug)
   const { session, token } = vault.createSession({ label: 'gateway', policy: {} })
   const grant = vault.createGrant({ sessionId: session.id, credentialId: cred.id, fields: ['token'], policy: { hosts: [cred.connector.host], methods: ['GET', 'POST', 'HEAD'], paths: ['/**'], budget: { unit: 'requests', limit: 100 }, approval: 'auto', ...policy } })
@@ -526,7 +526,7 @@ test('a request a method override made a write does not have its redirect follow
   assert.equal(result.headers['av-redirect-stopped'], 'approval'); assert.equal(held.sent.length, 1)
 })
 
-test('a followed redirect sends nothing of the agent\'s but the credential, Accept and User-Agent', async t => {
+test('a followed redirect sends nothing of the agent\'s but the credential and the hop allowlist', async t => {
   // An override that names GET leaves the request a GET, so it is followed,
   // and the override is not carried to the hop either.
   const f = hopFixture(t, { routes: ROUTES }, 'https://api.example.test/admin/keys')
@@ -591,4 +591,98 @@ test('a method override on a direct request is still refused, and an ordinary re
   const result = await f.pipeline.handle(f.req({ path: '/p/test/public/start' }))
   assert.equal(result.status, 200); assert.equal(result.body.toString(), 'done'); assert.equal(f.sent.length, 2)
   assert.equal(f.sent[1].url, 'https://api.example.test/public/next'); assert.equal(f.sent[1].headers.authorization, `Bearer ${SECRET}`)
+})
+
+// ------------------------------------- round 4: an override in a field, and what a hop keeps
+
+// Rails and Laravel run a POST whose form body says `_method=DELETE` as a
+// DELETE, and Laravel reads `_method` from the query and a JSON body too.
+// Only the override headers were read, so the request was checked as a POST.
+const form = ['content-type', 'application/x-www-form-urlencoded']
+const json = ['content-type', 'application/json']
+const multipart = ['content-type', 'multipart/form-data; boundary=XyZ']
+const part = (name, value) => `--XyZ\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
+
+test('a method-override field naming another method is refused, and nothing is sent', async t => {
+  for (const [label, over] of [
+    ['query _method=DELETE', { query: '_method=DELETE' }],
+    ['form body _method=DELETE', { extra: [form], body: 'a=1&_method=DELETE' }],
+    ['JSON {"_method":"DELETE"}', { extra: [json], body: '{"_method":"DELETE"}' }],
+    ['lower case value', { query: 'x=1&_method=delete' }],
+    ['__method', { query: '__method=DELETE' }],
+    ['percent-encoded name', { query: '%5Fmethod=DELETE' }],
+    ['upper case name', { extra: [form], body: '_METHOD=DELETE' }],
+    ['PHP reads .method as _method', { query: '.method=DELETE' }],
+    ['PHP reads " method" as _method', { query: '+method=DELETE' }],
+    ['bracketed', { extra: [form], body: '_method[]=DELETE' }],
+    ['semicolon-separated', { query: 'a=1;_method=DELETE' }],
+    ['override header spelled as a field', { query: 'X-HTTP-Method-Override=DELETE' }],
+    ['form copy after a matching one', { extra: [form], body: '_method=POST&_method=DELETE' }],
+    ['JSON duplicate, last matches', { extra: [json], body: '{"_method":"DELETE","_method":"POST"}' }],
+    ['JSON duplicate, first matches', { extra: [json], body: '{"_method":"POST", "a":{"b":[1,"}"]},"_method":"DELETE"}' }],
+    ['JSON non-string value', { extra: [json], body: '{"_method":["DELETE"]}' }],
+    ['JSON +json type', { extra: [['content-type', 'application/vnd.api+json']], body: '{"_method":"PUT"}' }],
+    ['multipart', { extra: [multipart], body: `${part('a', '1')}${part('_method', 'DELETE')}--XyZ--\r\n` }],
+  ]) {
+    await t.test(label, async t => {
+      // DELETE is allowed: the refusal is the override's, not the methods list's.
+      const f = fixture(t, { methods: ['GET', 'POST', 'DELETE'] })
+      const result = await f.pipeline.handle(f.req({ method: 'POST', query: over.query ?? '', headers: [...f.req().headers, ...(over.extra ?? [])], body: over.body == null ? null : Buffer.from(over.body) }))
+      assert.equal(result.status, 403); assert.equal(problem(result).code, 'AV_POLICY_DENIED'); assert.equal(problem(result).rule, 'method_override')
+      assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0); assert.equal(f.grant.budget_used, 0)
+    })
+  }
+  // On a GET too, and preflight says the same without changing anything.
+  const g = fixture(t)
+  assert.equal(problem(await g.pipeline.handle(g.req({ query: '_method=DELETE' }))).rule, 'method_override'); assert.equal(g.sent.length, 0)
+  const before = JSON.stringify(g.vault.db)
+  const predicted = await g.pipeline.preflight(g.req({ query: '_method=DELETE' }))
+  assert.equal(predicted.would, 'deny'); assert.equal(predicted.checks.at(-1).rule, 'method_override')
+  assert.equal(JSON.stringify(g.vault.db), before)
+})
+
+test('a method-override field naming the request\'s own method is sent as it is', async t => {
+  for (const [label, over] of [
+    ['query _method=POST', { query: '_method=POST' }],
+    ['form _method=post', { extra: [form], body: '_method=post&a=1' }],
+    ['JSON {"_method":"POST"}', { extra: [json], body: '{"_method":"POST"}' }],
+    ['multipart', { extra: [multipart], body: `${part('_method', 'POST')}--XyZ--\r\n` }],
+    // Not an override to anything that reads one: nested, a value, another name.
+    ['nested JSON field', { extra: [json], body: '{"a":{"_method":"DELETE"}}' }],
+    ['a value, not a name', { query: 'note=_method%3DDELETE' }],
+    ['another name', { query: 'my_method=DELETE' }],
+    ['a body no framework reads as form', { extra: [['content-type', 'text/plain']], body: '_method=DELETE' }],
+  ]) {
+    await t.test(label, async t => {
+      const f = fixture(t)
+      const result = await f.pipeline.handle(f.req({ method: 'POST', query: over.query ?? '', headers: [...f.req().headers, ...(over.extra ?? [])], body: over.body == null ? null : Buffer.from(over.body) }))
+      assert.equal(result.status, 200, result.body.toString()); assert.equal(f.sent.length, 1); assert.equal(f.sent[0].method, 'POST')
+    })
+  }
+})
+
+// A hop carried only Accept and User-Agent, so an upstream that requires an
+// API-version header answered the redirected request with an error.
+test('a hop keeps the API-version headers a provider needs, and never a cookie, override or forwarding header', async t => {
+  let n = 0
+  const f = fixture(t, { hosts: ['api.anthropic.com'], redirects: { max: 2 } }, { kind: 'anthropic', upstream: () => (++n === 1 ? { status: 302, headers: { location: '/v1/models?limit=5' }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
+  f.vault.db.credentials[f.cred.id].fields.find(x => x.name === 'token').sites = ['header:x-api-key']
+  const result = await f.pipeline.handle(f.req({
+    path: '/p/test/v1/models',
+    headers: [
+      ['host', 'localhost'], ['av-session', f.token], ['x-api-key', f.ph],
+      ['anthropic-version', '2023-06-01'], ['anthropic-beta', 'tools-2024'], ['accept-language', 'en'], ['cache-control', 'no-cache'],
+      ['if-none-match', '"e"'], ['if-modified-since', 'Mon, 26 Oct 2026 00:00:00 GMT'],
+      ['cookie', 'session=agent'], ['X-HTTP-Method-Override', 'GET'], ['x-forwarded-for', '10.0.0.1'], ['x-forwarded-host', 'evil.test'], ['range', 'bytes=0-1'], ['authorization', 'Bearer agent-chosen'],
+    ],
+  }))
+  assert.equal(result.status, 200, result.body.toString()); assert.equal(f.sent.length, 2)
+  const hop = f.sent[1].headers
+  assert.deepEqual(lowerKeys(hop), ['accept-encoding', 'accept-language', 'anthropic-beta', 'anthropic-version', 'cache-control', 'host', 'if-modified-since', 'if-none-match', 'x-api-key'])
+  assert.equal(hop['anthropic-version'], '2023-06-01'); assert.equal(hop['x-api-key'], SECRET); assert.equal(hop.host, 'api.anthropic.com')
+  // The OpenAI-shaped ones too.
+  let m = 0
+  const o = fixture(t, { redirects: { max: 2 } }, { upstream: () => (++m === 1 ? { status: 302, headers: { location: '/next' }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
+  await o.pipeline.handle(o.req({ headers: [...o.req().headers, ['OpenAI-Beta', 'assistants=v2'], ['openai-organization', 'org'], ['openai-project', 'p'], ['x-api-version', '1'], ['api-version', '2'], ['Cookie', 'a=b']] }))
+  assert.deepEqual(lowerKeys(o.sent[1].headers), ['accept-encoding', 'api-version', 'authorization', 'host', 'openai-beta', 'openai-organization', 'openai-project', 'x-api-version'])
 })
