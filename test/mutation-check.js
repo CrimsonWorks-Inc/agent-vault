@@ -315,8 +315,10 @@ const MUTATIONS = [
   {
     what: 'an agent can approve its own session request',
     file: 'src/daemon/server.js',
-    from: "          this.#requireHumanForWidening(\n            'session request approval',",
-    to: "          if (0) this.#requireHumanForWidening(\n            'session request approval',",
+    // Re-anchored when the gate became #gateSession, which picks the widening
+    // or the fresh level from the decision's elevation.
+    from: "          this.#gateSession(\n            'session request approval',",
+    to: "          if (0) this.#gateSession(\n            'session request approval',",
     tests: ['test/security/session-requests.test.js'],
   },
   {
@@ -327,8 +329,10 @@ const MUTATIONS = [
     // indentation changed with it and the old anchor stopped matching - the
     // drift report is the only reason that was noticed rather than quietly
     // leaving this protection unchecked.
-    from: '    const created = this.#createSession({\n      ...final,',
-    to: '    const created = this.#createSession({\n      ...record.proposal,',
+    // And again when ttl_minutes was split off the final spec before it is
+    // passed on, so a lifetime of 0 is refused rather than read as default.
+    from: '    const { ttl_minutes: ttlMinutes, ...spec } = final',
+    to: '    const { ttl_minutes: ttlMinutes, ...spec } = record.proposal',
     tests: ['test/security/session-requests.test.js'],
   },
   {
@@ -630,7 +634,8 @@ const MUTATIONS = [
   {
     what: 'env leaves an earlier placeholder in the shell',
     file: 'src/cli/index.js',
-    from: "    if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')",
+    // legacyEnv() is a function of its own now, one indent shallower.
+    from: "  if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')",
     to: '',
     tests: ['test/security/fix-control-cli.test.js'],
   },
@@ -1156,6 +1161,140 @@ const MUTATIONS = [
     from: 'if (scrubbedBody.unscannable) {',
     to: 'if (false) {',
     tests: ['test/security/gateway-hardening.test.js'],
+  },
+  // ---- wave 2, requested: R1 (elevated sessions) -----------------------------
+  {
+    // One function decides elevation for create, decide and decide-many. If it
+    // calls everything ordinary, the window lets an agent make auto-writes.
+    what: 'elevationOf calls every session ordinary, so auto with writes rides the window',
+    file: 'src/daemon/session-requests.js',
+    from: 'export function elevationOf(spec) {',
+    to: 'export function elevationOf(spec) { return []',
+    tests: ['test/security/requested-r1.test.js', 'test/security/control-gate.test.js'],
+  },
+  {
+    // The fresh level exists because a window admits every caller on the
+    // socket. Accepting it makes the elevated gate the widening one.
+    what: 'the fresh presence gate accepts the shared passphrase window',
+    file: 'src/daemon/server.js',
+    from: '  #requireFreshPresence(op, operation, presence) {',
+    to: '  #requireFreshPresence(op, operation, presence) {\n    if (Date.now() < this.presenceGraceUntil) return',
+    tests: ['test/security/requested-r1.test.js', 'test/security/control-gate.test.js'],
+  },
+  {
+    what: 'POST /v1/sessions gates an elevated body as ordinary widening',
+    file: 'src/daemon/server.js',
+    from: "this.#gateSession('session create', this.#wideningOperation(route, url, input), plan.elevated, input.presence)",
+    to: "this.#gateSession('session create', this.#wideningOperation(route, url, input), [], input.presence)",
+    tests: ['test/security/requested-r1.test.js', 'test/security/control-gate.test.js'],
+  },
+  {
+    what: 'approving a session request into auto with writes needs only the window',
+    file: 'src/daemon/server.js',
+    from: '            input.granted ? elevationOf(final) : [],',
+    to: '            [],',
+    tests: ['test/security/requested-r1.test.js', 'test/security/control-gate.test.js'],
+  },
+  {
+    what: 'a bulk decision with an elevated item needs only the window',
+    file: 'src/daemon/server.js',
+    from: "            elevated ? ['approval_auto_writes'] : [],",
+    to: '            [],',
+    tests: ['test/security/requested-r1.test.js', 'test/security/control-gate.test.js'],
+  },
+  {
+    // An agent that could ask for approval: auto gets it the moment a human
+    // clicks approve without reading closely.
+    what: 'a session request may carry an owner-only field',
+    file: 'src/daemon/server.js',
+    from: '          if (owned.length) {',
+    to: '          if (false) {',
+    tests: ['test/security/requested-r1.test.js'],
+  },
+  {
+    // needsApproval falls through to false, so a mode nobody knows meant auto.
+    what: 'an unknown approval mode is stored instead of refused',
+    file: 'src/daemon/server.js',
+    from: 'if (spec.approval != null && !APPROVAL_MODES.includes(spec.approval)) {',
+    to: 'if (false) {',
+    tests: ['test/security/requested-r1.test.js'],
+  },
+  // ---- wave 2, requested: R2 (env files) --------------------------------------
+  {
+    // Without O_EXCL an existing .env is opened and written over.
+    what: 'the env file writer opens an existing file instead of refusing it',
+    file: 'src/cli/files.js',
+    from: 'fd = openSync(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode)',
+    to: 'fd = openSync(path, O_WRONLY | O_CREAT | O_NOFOLLOW, mode)',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // The umask only removes bits; without fchmod a 0277 umask leaves 0400 and
+    // a permissive one is never tightened on a replaced file.
+    what: 'the env file mode is left to the umask',
+    file: 'src/cli/files.js',
+    from: '  fchmodSync(fd, mode)',
+    to: '  void fchmodSync',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // --force through a symlink would replace the link and report success.
+    what: 'force replaces a symlink or someone else\'s file',
+    file: 'src/cli/files.js',
+    from: "if (!st.isFile() || st.uid !== process.getuid()) throw problem('ENOTREGULAR'",
+    to: "if (false) throw problem('ENOTREGULAR'",
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // The second line of defence: whatever the batch answers, only a
+    // placeholder for this session and credential reaches the file or child.
+    what: 'env and exec write whatever the batch answered, unchecked',
+    file: 'src/cli/index.js',
+    from: '    assertPlaceholderOnly(entries, { sid, port, slugs })',
+    to: '    void assertPlaceholderOnly',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    what: 'the final check accepts a placeholder for another session',
+    file: 'src/cli/files.js',
+    from: "parsed?.text === v && parsed.sid === sid && parsed.slug === e.cred",
+    to: "parsed?.text === v && parsed.slug === e.cred",
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // #route picks a grant by credential, so two grants for one would be ambiguous.
+    what: 'a multi-grant session may name one credential twice',
+    file: 'src/daemon/server.js',
+    from: '      if (seen.has(spec.cred)) throw shape(`credential ${spec.cred} appears twice`)',
+    to: '      if (false) throw shape(`credential ${spec.cred} appears twice`)',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // Each placeholder is a fresh authorization to spend a credential.
+    what: 'the placeholder batch is issued with no human',
+    file: 'src/daemon/server.js',
+    from: "          this.#requireHumanForWidening('placeholder issue', this.#wideningOperation(route, url, input), input.presence)\n          if (this.vault.locked) throw deny('AV_LOCKED', 'the vault is locked')",
+    to: "          if (this.vault.locked) throw deny('AV_LOCKED', 'the vault is locked')",
+    tests: ['test/security/requested-r2.test.js', 'test/security/control-gate.test.js'],
+  },
+  // ---- wave 2, requested: R3 (infinite sessions) ------------------------------
+  {
+    // A capability that never ends must not be reachable from the network.
+    // Checked before the gate, so it is refused before anyone is asked.
+    what: 'an infinite session may be remote',
+    file: 'src/daemon/server.js',
+    from: '    if (infinite && remote) {',
+    to: '    if (false) {',
+    tests: ['test/security/requested-r3.test.js'],
+  },
+  {
+    // NaN became a RangeError, 0 the default, and a negative number a session
+    // born expired.
+    what: 'ttl_hours is not required to be a positive number',
+    file: 'src/daemon/server.js',
+    from: "      if (typeof input.ttl_hours !== 'number' || !Number.isFinite(input.ttl_hours) || !(input.ttl_hours > 0)) {",
+    to: '      if (false) {',
+    tests: ['test/security/requested-r3.test.js'],
   },
 ]
 
