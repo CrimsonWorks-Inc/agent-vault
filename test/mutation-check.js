@@ -1171,8 +1171,41 @@ const MUTATIONS = [
     // completed. Ending before the pin comparison delivers the secret.
     what: 'the request is ended before the certificate pin is checked',
     file: 'src/connectors/pinning.js',
-    from: 'const presented = chainPins(socket)\n        if (!presented.some((p) => pinList.includes(p))) {',
-    to: 'req.end(body); const presented = chainPins(socket)\n        if (!presented.some((p) => pinList.includes(p))) {',
+    from: 'const proven = verifiedChainPins(socket)\n        if (!proven.some((p) => pinList.includes(p))) {',
+    to: 'req.end(body); const proven = verifiedChainPins(socket)\n        if (!proven.some((p) => pinList.includes(p))) {',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // A pin narrows Node's trust and never stands in for it. With CA
+    // verification off, a pinned self-signed or wrong-name certificate is
+    // accepted, which the same chain with no pins is not.
+    what: 'a pinned request turns certificate verification off',
+    file: 'src/connectors/pinning.js',
+    from: 'opts.rejectUnauthorized = true',
+    to: 'opts.rejectUnauthorized = false',
+    tests: ['test/security/connectors-pinning.test.js', 'test/security/connectors-probe.test.js'],
+  },
+  {
+    // Node links issuers by name and key identifier only. Without the
+    // signature check, a forged leaf borrows a real intermediate's pin.
+    what: 'an issuer satisfies a pin without having signed the certificate below it',
+    file: 'src/connectors/pinning.js',
+    from: 'signed = child.checkIssued(x509) && child.verify(x509.publicKey)',
+    to: 'signed = child.checkIssued(x509)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pins value that is not an array is read as no pins',
+    file: 'src/connectors/pinning.js',
+    from: "if (!Array.isArray(pins)) return 'invalid'",
+    to: "if (!Array.isArray(pins)) return 'none'",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pin list with a malformed entry is used anyway',
+    file: 'src/connectors/pinning.js',
+    from: "return pins.every((p) => typeof p === 'string' && PIN_RE.test(p)) ? 'pinned' : 'invalid'",
+    to: "return 'pinned'",
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {

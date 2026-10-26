@@ -6,14 +6,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import https from 'node:https'
 import { Readable } from 'node:stream'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { X509Certificate } from 'node:crypto'
 import { getProfile } from '../../src/connectors/profiles.js'
-import { runProbe } from '../../src/connectors/probe.js'
-import { pinnedRequest, spkiOf } from '../../src/connectors/pinning.js'
+import * as probe from '../../src/connectors/probe.js'
+import { spkiOf } from '../../src/connectors/pinning.js'
+
+const { runProbe } = probe
 
 const SECRET = 'ghp_REALSECRET0000111122223333444455556666'
 const PLACEHOLDER = 'av1.abcdefghjkmn.gh_token.abcdefghjkmnpqrstvwxyz2345.abcdef'
@@ -357,14 +359,102 @@ test('the second probe inside 60 seconds is throttled, and one after the window 
   assert.equal(sent.length, 2)
 })
 
-test('a mismatched pin sends nothing, and a matching pin probes only /user', async () => {
+test('V-Q9: pins of the wrong shape refuse the probe before the secret is read', async () => {
+  const pin = `sha256/${'C'.repeat(43)}=`
+  const shapes = [
+    { 'api.github.com': pin },
+    { 'api.github.com': { 0: pin } },
+    { 'api.github.com': [pin, 'garbage'] },
+    { 'api.github.com': 42 },
+    pin,
+    [pin],
+    true,
+  ]
+  let n = 0
+  for (const pins of shapes) {
+    const sent = []
+    const v = vault()
+    await assert.rejects(
+      () => runProbe({ vault: v, cred: cred({ id: `cred_pin_shape_${n++}`, pins }), profile: getProfile('github'), upstream: upstreamOf(sent) }),
+      (err) => err.code === 'AV_PIN_MISMATCH' && err.reason === 'pin_format',
+      JSON.stringify(pins),
+    )
+    assert.equal(sent.length, 0, `${JSON.stringify(pins)} was sent unpinned`)
+    assert.equal(v.revealed.length, 0)
+  }
+})
+
+test('pins under two spellings of the same host are joined, and an empty one does not hide the other', async () => {
+  const sent = []
+  const pin = `sha256/${'C'.repeat(43)}=`
+  await runProbe({
+    vault: vault(),
+    cred: cred({ id: 'cred_pin_dupe', pins: { 'api.github.com': [], 'API.GitHub.com': [pin], 'other.test': [`sha256/${'E'.repeat(43)}=`] } }),
+    profile: getProfile('github'),
+    upstream: upstreamOf(sent),
+  })
+  assert.deepEqual(sent[0].pins, [pin])
+  let n2 = 0
+  for (const pins of [undefined, null, {}, { 'api.github.com': null }, { 'api.github.com': [] }]) {
+    const none = []
+    await runProbe({ vault: vault(), cred: cred({ id: `cred_pin_none_${n2++}`, pins }), profile: getProfile('github'), upstream: upstreamOf(none) })
+    assert.equal(none[0].pins, null, JSON.stringify(pins))
+  }
+})
+let n2 = 0
+
+const PROBE_CHILD = `
+const { runProbe } = await import(process.env.AV_PROBE_URL)
+const { getProfile } = await import(process.env.AV_PROFILES_URL)
+const health = []
+const vault = {
+  revealField: () => process.env.AV_SECRET,
+  recordHealth: (id, patch) => { health.push(patch); return patch },
+}
+const out = { health }
+try {
+  out.result = await runProbe({
+    vault,
+    cred: JSON.parse(process.env.AV_CRED),
+    profile: getProfile('github'),
+    path: '/user/keys',
+    method: 'POST',
+    body: 'pwned',
+  })
+} catch (e) {
+  out.error = { code: e.code, reason: e.reason, message: e.message }
+}
+process.stdout.write(JSON.stringify(out))
+`
+
+/** runProbe with the real pinnedRequest, in a child that trusts `trust`. */
+function probeIn(trust, credential) {
+  return new Promise((resolve, reject) => {
+    execFile(process.execPath, ['--input-type=module', '-e', PROBE_CHILD], {
+      env: {
+        ...process.env,
+        NODE_EXTRA_CA_CERTS: trust,
+        AV_PROBE_URL: new URL('../../src/connectors/probe.js', import.meta.url).href,
+        AV_PROFILES_URL: new URL('../../src/connectors/profiles.js', import.meta.url).href,
+        AV_SECRET: SECRET,
+        AV_CRED: JSON.stringify(credential),
+      },
+      timeout: 30_000,
+    }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(`probe child failed: ${err.message}\n${stderr}`))
+      resolve(JSON.parse(stdout))
+    })
+  })
+}
+
+test('with the real upstream: pins add to CA verification, a mismatch sends nothing, and a match probes only /user', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'av-probe-'))
+  const ossl = (args) => execFileSync('openssl', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
   try {
-    execFileSync('openssl', [
-      'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-      '-keyout', 'key.pem', '-out', 'cert.pem', '-days', '2',
-      '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1',
-    ], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
+    ossl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'root.key', '-out', 'root.crt', '-days', '2', '-subj', '/CN=ProbeRoot', '-addext', 'basicConstraints=critical,CA:TRUE'])
+    writeFileSync(join(dir, 'leaf.ext'), 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n')
+    ossl(['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'key.pem', '-out', 'leaf.csr', '-subj', '/CN=localhost'])
+    ossl(['x509', '-req', '-in', 'leaf.csr', '-CA', 'root.crt', '-CAkey', 'root.key', '-out', 'cert.pem', '-days', '2', '-CAcreateserial', '-extfile', 'leaf.ext'])
     const cert = readFileSync(join(dir, 'cert.pem'))
     const key = readFileSync(join(dir, 'key.pem'))
     const pin = spkiOf(new X509Certificate(cert))
@@ -384,49 +474,27 @@ test('a mismatched pin sends nothing, and a matching pin probes only /user', asy
       socket.on('data', (c) => { bytes += c.length })
     })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const port = server.address().port
-    const host = `127.0.0.1:${port}`
+    const host = `127.0.0.1:${server.address().port}`
+    const at = (id, pins) => cred({ id, connector: { host, scheme: 'https' }, pins })
     try {
-      const v = vault()
-      await assert.rejects(
-        () => runProbe({
-          vault: v,
-          cred: cred({
-            id: 'cred_pin_bad',
-            connector: { host, scheme: 'https' },
-            pins: { '127.0.0.1': [`sha256/${'D'.repeat(43)}=`] },
-          }),
-          profile: getProfile('github'),
-          upstream: pinnedRequest,
-          now: 200_000,
-          path: '/user/keys',
-          body: 'pwned',
-        }),
-        (err) => err.code === 'AV_PIN_MISMATCH' && !String(err.message).includes(SECRET),
-      )
+      // Trusted chain, wrong pin: nothing is sent.
+      const bad = await probeIn(join(dir, 'root.crt'), at('cred_pin_bad', { '127.0.0.1': [`sha256/${'D'.repeat(43)}=`] }))
+      assert.equal(bad.error?.code, 'AV_PIN_MISMATCH')
+      assert.equal(String(bad.error.message).includes(SECRET), false)
+      assert.equal(bad.health[0].status, 'error')
+      assert.equal(bad.health[0].source, 'probe')
+
+      // The pin matches, but nothing trusts the chain: Node refuses it.
+      const untrusted = await runProbe({ vault: vault(), cred: at('cred_pin_untrusted', { '127.0.0.1': [pin] }), profile: getProfile('github') })
+      assert.equal(untrusted.status, 'unreachable')
       await new Promise((r) => setTimeout(r, 200))
       assert.equal(bytes, 0)
       assert.equal(requests, 0)
-      assert.equal(v.health[0].patch.status, 'error')
-      assert.equal(v.health[0].patch.source, 'probe')
 
-      const v2 = vault()
-      const result = await runProbe({
-        vault: v2,
-        cred: cred({
-          id: 'cred_pin_ok',
-          connector: { host, scheme: 'https' },
-          pins: { '127.0.0.1': [pin] },
-        }),
-        profile: getProfile('github'),
-        upstream: pinnedRequest,
-        now: 201_000,
-        path: '/user/keys',
-        method: 'POST',
-        body: 'pwned',
-      })
-      assert.equal(result.status, 'ok')
-      assert.equal(leaks(result, [SECRET, PLACEHOLDER, BODY]), false)
+      const good = await probeIn(join(dir, 'root.crt'), at('cred_pin_ok', { '127.0.0.1': [pin] }))
+      assert.equal(good.error, undefined)
+      assert.equal(good.result.status, 'ok')
+      assert.equal(leaks(good, [SECRET, PLACEHOLDER, BODY]), false)
       assert.equal(requests, 1)
       assert.equal(seen.method, 'GET')
       assert.equal(seen.url, '/user')

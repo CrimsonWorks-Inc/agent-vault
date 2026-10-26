@@ -10,6 +10,9 @@
 // recordHealth is optional-chained until the store's slice A is merged.
 // A second probe of the same credential inside 60 seconds is AV_QUOTA_EXCEEDED
 // and does not touch the network.
+//
+// Pins that are not a list of pins refuse the probe before the secret is
+// read (AV_PIN_MISMATCH, reason 'pin_format'). They never mean "no pins".
 
 import { Scrubber } from '../core/scrub.js'
 import { deny, VaultError } from '../core/errors.js'
@@ -17,7 +20,7 @@ import { credentialHostCeiling, hostOnly, matchHost } from '../core/policy.js'
 import { parseSite } from '../core/sites.js'
 import { SCANNER_PATTERN } from '../core/placeholder.js'
 import { extractHealth } from './profiles.js'
-import { pinnedRequest } from './pinning.js'
+import { pinnedRequest, pinListState } from './pinning.js'
 
 const PROBE_WINDOW_MS = 60_000
 const probeAt = new Map()
@@ -56,6 +59,11 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
     })
   }
 
+  const pins = pinsFor(cred, destination.host)
+  if (pinListState(pins) === 'invalid') {
+    throw Object.assign(new Error('certificate pin mismatch'), { code: 'AV_PIN_MISMATCH', presented: [], reason: 'pin_format' })
+  }
+
   const at = Number.isInteger(now) && now >= 0 ? now : Date.now()
   takeProbeSlot(cred.id, at)
 
@@ -71,7 +79,6 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
     headers['content-type'] = 'application/x-www-form-urlencoded'
     requestBody = ''
   }
-  const pins = pinsFor(cred, destination.host)
   const send = typeof upstream === 'function' ? upstream : pinnedRequest
   const started = Date.now()
 
@@ -238,14 +245,22 @@ function firstHeaderSite(cred) {
   return null
 }
 
+/**
+ * The stored pin list for `host`. Keys that name the same host are joined, so
+ * an empty duplicate cannot hide a real list. A table or entry of the wrong
+ * shape comes back as `false`, which pinListState refuses; it is never null.
+ */
 function pinsFor(cred, host) {
   const table = cred?.pins
-  if (!table || typeof table !== 'object' || Array.isArray(table)) return null
+  if (table == null) return null
+  if (typeof table !== 'object' || Array.isArray(table)) return false
+  const found = []
   for (const [key, value] of Object.entries(table)) {
-    if (hostOnly(key) !== host) continue
-    if (Array.isArray(value) && value.length > 0) return value
+    if (hostOnly(key) !== host || value == null) continue
+    if (!Array.isArray(value)) return false
+    found.push(...value)
   }
-  return null
+  return found.length > 0 ? found : null
 }
 
 function scrubText(text, scrubber) {
