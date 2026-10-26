@@ -80,7 +80,6 @@ test('the probe hits only the profile method and path, and ignores a caller path
     cred: cred({ id: 'cred_path' }),
     profile: getProfile('github'),
     upstream: upstreamOf(sent),
-    now: 1_000,
     path: '/user/keys',
     method: 'DELETE',
     body: 'pwned',
@@ -113,7 +112,6 @@ test('slack is a POST to the profile path with an empty form body, not the calle
     cred: cred({ id: 'cred_slack', connector: { host: 'slack.com', scheme: 'https' } }),
     profile: getProfile('slack'),
     upstream: upstreamOf(sent, () => ({ status: 200, headers: {} })),
-    now: 2_000,
     path: '/api/admin.users.session.reset',
     method: 'GET',
     body: 'token=stolen',
@@ -142,7 +140,6 @@ test('a header site with no scheme sends the raw secret, and the first header si
     }),
     profile: getProfile('anthropic'),
     upstream: upstreamOf(sent, () => ({ status: 204, headers: {} })),
-    now: 3_000,
   })
   assert.equal(sent[0].url, 'https://api.anthropic.com/v1/models')
   assert.equal(sent[0].method, 'GET')
@@ -178,7 +175,6 @@ test('the result and the health record never contain the secret, a placeholder, 
         body: Buffer.from(`${SECRET} ${PLACEHOLDER} ${BODY}`),
         res: stream,
       })),
-      now: 4_000,
     })
     const needles = [SECRET, PLACEHOLDER, BODY]
     assert.equal(leaks(result, needles), false)
@@ -210,7 +206,6 @@ test('status classes: 401, 403, other codes, and a network error', async () => {
       cred: cred({ id: `cred_status_${code}` }),
       profile: getProfile('github'),
       upstream: async () => ({ status: code, headers: {} }),
-      now: 10_000 + n++,
     })
     assert.equal(result.status, status, String(code))
     assert.equal(result.ok, ok, String(code))
@@ -225,7 +220,6 @@ test('status classes: 401, 403, other codes, and a network error', async () => {
     cred: cred({ id: 'cred_down' }),
     profile: getProfile('github'),
     upstream: async () => { throw new Error(`connect failed for ${SECRET} and ${PLACEHOLDER} ${BODY}`) },
-    now: 11_000,
   })
   assert.equal(result.status, 'unreachable')
   assert.equal(result.ok, false)
@@ -240,7 +234,7 @@ test('http and postgres have no probe, and a credential with no header site is r
   const up = upstreamOf(sent)
   for (const kind of ['http', 'postgres']) {
     await assert.rejects(
-      () => runProbe({ vault: vault(), cred: cred({ id: `cred_${kind}` }), profile: getProfile(kind), upstream: up, now: 20_000 }),
+      () => runProbe({ vault: vault(), cred: cred({ id: `cred_${kind}` }), profile: getProfile(kind), upstream: up }),
       (err) => err.code === 'AV_NOT_FOUND' && err.rule === 'no_probe'
         && err.hint === 'This kind has no fixed read-only probe. Use vault_http on a path you know.',
     )
@@ -252,7 +246,6 @@ test('http and postgres have no probe, and a credential with no header site is r
       cred: cred({ id: 'cred_basic', fields: [{ name: 'password', sites: ['basic:pass'] }] }),
       profile: getProfile('github'),
       upstream: up,
-      now: 21_000,
     }),
     (err) => err.code === 'AV_NOT_FOUND' && err.rule === 'no_probe',
   )
@@ -281,7 +274,6 @@ test('a host that is not a hostname is refused and nothing is sent', async () =>
         cred: cred({ id: `cred_bad_${n++}`, connector: { host, scheme: 'https' } }),
         profile: getProfile('github'),
         upstream: up,
-        now: 30_000 + n,
       }),
       (err) => err.code === 'AV_POLICY_DENIED' && err.rule === 'credential_host',
     )
@@ -292,7 +284,6 @@ test('a host that is not a hostname is refused and nothing is sent', async () =>
       cred: cred({ id: 'cred_file', connector: { host: 'api.github.com', scheme: 'file' } }),
       profile: getProfile('github'),
       upstream: up,
-      now: 31_000,
     }),
     (err) => err.code === 'AV_POLICY_DENIED' && err.rule === 'credential_host',
   )
@@ -306,7 +297,6 @@ test('an ordinary host, port and http scheme are used as declared', async () => 
     cred: cred({ id: 'cred_port', connector: { host: '127.0.0.1:8443', scheme: 'HTTP' } }),
     profile: getProfile('github'),
     upstream: upstreamOf(sent, () => ({ status: 200, headers: {} })),
-    now: 41_000,
   })
   assert.equal(sent.length, 1)
   assert.equal(sent[0].url, 'http://127.0.0.1:8443/user')
@@ -324,13 +314,26 @@ test('pins for the host are forwarded, and a missing recordHealth still returns 
     cred: cred({ id: 'cred_pins', pins: { 'API.GitHub.com': [pin] } }),
     profile: getProfile('github'),
     upstream: upstreamOf(sent),
-    now: 50_000,
   })
   assert.deepEqual(sent[0].pins, [pin])
   assert.equal(result.status, 'ok')
 })
 
-test('the second probe inside 60 seconds is throttled, and one after the window is not', async () => {
+/** Run `fn` with the probe throttle's clock reading `clock.at`. */
+async function withClock(fn) {
+  const { probeClock } = probe
+  assert.equal(typeof probeClock?.now, 'function', 'the throttle has its own clock')
+  const saved = probeClock.now
+  const clock = { at: 1_000_000 }
+  probeClock.now = () => clock.at
+  try {
+    return await fn(clock)
+  } finally {
+    probeClock.now = saved
+  }
+}
+
+test('the second probe inside 60 seconds is throttled, and one after the window is not', () => withClock(async (clock) => {
   const sent = []
   const v = vault()
   const base = {
@@ -339,24 +342,132 @@ test('the second probe inside 60 seconds is throttled, and one after the window 
     profile: getProfile('github'),
     upstream: upstreamOf(sent),
   }
-  const first = await runProbe({ ...base, now: 100_000 })
+  const first = await runProbe(base)
   assert.equal(first.status, 'ok')
   assert.equal(sent.length, 1)
+  clock.at += 1_000
   await assert.rejects(
-    () => runProbe({ ...base, now: 100_000 + 1_000 }),
+    () => runProbe(base),
     (err) => {
       assert.equal(err.code, 'AV_QUOTA_EXCEEDED')
       assert.equal(err.rule, 'probe_throttle')
-      assert.equal(Number.isInteger(err.retryAfter), true)
-      assert.ok(err.retryAfter >= 1 && err.retryAfter <= 60)
+      assert.equal(err.http, 429)
+      assert.equal(err.retryAfter, 59)
       return true
     },
   )
+  clock.at += 58_999
+  await assert.rejects(() => runProbe(base), (err) => err.code === 'AV_QUOTA_EXCEEDED' && err.retryAfter === 1)
   assert.equal(sent.length, 1, 'a throttled probe does not touch the upstream')
-  assert.equal(v.revealed.length, 1)
-  const again = await runProbe({ ...base, now: 100_000 + 60_000 })
+  assert.equal(v.revealed.length, 1, 'a throttled probe does not read the secret')
+  clock.at += 1
+  const again = await runProbe(base)
   assert.equal(again.status, 'ok')
   assert.equal(sent.length, 2)
+}))
+
+test('V-Q5: a now on the call does not skip the throttle', async () => {
+  const sent = []
+  const base = { cred: cred({ id: 'cred_now' }), profile: getProfile('github'), upstream: upstreamOf(sent) }
+  await runProbe({ ...base, vault: vault() })
+  let bypassed = 0
+  for (let i = 1; i <= 3; i++) {
+    try {
+      await runProbe({ ...base, vault: vault(), now: Date.now() + i * 61_000 })
+      bypassed++
+    } catch (err) {
+      assert.equal(err.code, 'AV_QUOTA_EXCEEDED')
+    }
+  }
+  assert.equal(bypassed, 0, 'a caller-supplied now skipped the 60 s throttle')
+  assert.equal(sent.length, 1)
+})
+
+test('V-Q5: a far-future now on the call does not lock the credential out', () => withClock(async (clock) => {
+  const sent = []
+  const base = { cred: cred({ id: 'cred_now_future' }), profile: getProfile('github'), upstream: upstreamOf(sent) }
+  await runProbe({ ...base, vault: vault(), now: Number.MAX_SAFE_INTEGER })
+  clock.at += 60_000
+  const later = await runProbe({ ...base, vault: vault() })
+  assert.equal(later.status, 'ok')
+  assert.equal(sent.length, 2)
+}))
+
+test('V-Q7: a body that never ends is cut off and destroyed, and the probe returns', async () => {
+  // A fast endless body hits the byte bound; a trickle hits the time bound.
+  const fast = new Readable({ read() { setImmediate(() => { if (!this.destroyed) this.push(Buffer.alloc(16 * 1024)) }) } })
+  const slow = new Readable({ read() { setTimeout(() => { if (!this.destroyed) this.push(Buffer.alloc(1)) }, 50) } })
+  for (const [name, stream, within] of [['fast', fast, 1_500], ['trickle', slow, 4_000]]) {
+    const started = Date.now()
+    const pending = runProbe({
+      vault: vault(),
+      cred: cred({ id: `cred_endless_${name}` }),
+      profile: getProfile('github'),
+      upstream: async () => ({ status: 200, headers: {}, res: stream }),
+    })
+    const winner = await Promise.race([
+      pending.then(() => 'done'),
+      new Promise((r) => setTimeout(() => r('timeout'), within).unref()),
+    ])
+    stream.destroy()
+    await pending.catch(() => {})
+    assert.equal(winner, 'done', `${name}: the probe was still waiting after ${Date.now() - started} ms`)
+    assert.equal(stream.destroyed, true)
+  }
+})
+
+test('V-Q7: an ordinary short body is drained to its end and not cut', async () => {
+  const stream = Readable.from([Buffer.alloc(1024), Buffer.alloc(1024)])
+  const result = await runProbe({
+    vault: vault(),
+    cred: cred({ id: 'cred_short_body' }),
+    profile: getProfile('github'),
+    upstream: async () => ({ status: 200, headers: {}, res: stream }),
+  })
+  assert.equal(result.status, 'ok')
+  assert.equal(stream.readableEnded, true)
+})
+
+test('V-Q8: a recordHealth failure after a 200 is a store error, not unreachable', async () => {
+  const calls = []
+  const storeError = Object.assign(new Error(`vault is locked ${SECRET}`), { code: 'AV_LOCKED' })
+  const v = vault()
+  v.recordHealth = (id, patch) => {
+    calls.push(patch.status)
+    throw storeError
+  }
+  await assert.rejects(
+    () => runProbe({
+      vault: v,
+      cred: cred({ id: 'cred_store_busy' }),
+      profile: getProfile('github'),
+      upstream: async () => ({ status: 200, headers: {} }),
+    }),
+    (err) => {
+      assert.equal(err.code, 'AV_LOCKED')
+      assert.equal(String(err.message).includes(SECRET), false)
+      return true
+    },
+  )
+  assert.deepEqual(calls, ['ok'], 'the upstream answer was re-recorded after the store failed')
+
+  // The same for a network failure: one record, and the store error surfaces.
+  const down = []
+  const v2 = vault()
+  v2.recordHealth = (id, patch) => {
+    down.push(patch.status)
+    throw storeError
+  }
+  await assert.rejects(
+    () => runProbe({
+      vault: v2,
+      cred: cred({ id: 'cred_store_busy_down' }),
+      profile: getProfile('github'),
+      upstream: async () => { throw new Error('ECONNREFUSED') },
+    }),
+    (err) => err.code === 'AV_LOCKED',
+  )
+  assert.deepEqual(down, ['unreachable'])
 })
 
 test('V-Q9: pins of the wrong shape refuse the probe before the secret is read', async () => {

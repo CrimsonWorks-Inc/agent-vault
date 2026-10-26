@@ -7,9 +7,11 @@
 // is drained and dropped. Nothing returned or logged contains the secret, a
 // placeholder, or that body.
 //
-// recordHealth is optional-chained until the store's slice A is merged.
-// A second probe of the same credential inside 60 seconds is AV_QUOTA_EXCEEDED
-// and does not touch the network.
+// recordHealth is optional-chained until the store's slice A is merged. If it
+// throws, that store error is what the caller gets: the upstream's answer is
+// never re-recorded as `unreachable`. A second probe of the same credential
+// inside 60 seconds is AV_QUOTA_EXCEEDED and does not touch the network. The
+// throttle reads the daemon's own clock, never a time on the call.
 //
 // Pins that are not a list of pins refuse the probe before the secret is
 // read (AV_PIN_MISMATCH, reason 'pin_format'). They never mean "no pins".
@@ -23,17 +25,28 @@ import { extractHealth } from './profiles.js'
 import { pinnedRequest, pinListState } from './pinning.js'
 
 const PROBE_WINDOW_MS = 60_000
+// The body is never read. A little is drained so an ordinary response can
+// finish; past either bound the stream is destroyed.
+const DRAIN_LIMIT_BYTES = 64 * 1024
+const DRAIN_TIMEOUT_MS = 2_000
 const probeAt = new Map()
 const PLACEHOLDER_RE = new RegExp(SCANNER_PATTERN, 'g')
 // The same session-token shape the pipeline refuses to forward.
 const SESSION_RE = /avs1\.[0-9a-z]{12}\.[A-Za-z0-9_-]{20,}/g
 
 /**
- * @param {{ vault: object, cred: object, profile: object, upstream?: Function, now?: number }} opts
- * `path`, `method` and `body`, if a caller passes them, are not read.
+ * The throttle's clock: the daemon's monotonic milliseconds, so a wall-clock
+ * step cannot lock a credential out or free it early. It is never read from
+ * the call; tests replace `now` here.
+ */
+export const probeClock = { now: () => Math.floor(performance.now()) }
+
+/**
+ * @param {{ vault: object, cred: object, profile: object, upstream?: Function }} opts
+ * `path`, `method`, `body` and `now`, if a caller passes them, are not read.
  * @returns {Promise<{ ok: boolean, status: string, http_status: number|null, latency_ms: number, scopes: string[]|null, ratelimit_remaining: number|null, observed_expires_at: string|null, checked_at: string }>}
  */
-export async function runProbe({ vault, cred, profile, upstream, now, path, method, body } = {}) {
+export async function runProbe({ vault, cred, profile, upstream, path, method, body } = {}) {
   // These three are the request a caller might try to supply. The probe does
   // not use them. Keeping the names is what makes that choice testable.
   void path
@@ -64,8 +77,7 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
     throw Object.assign(new Error('certificate pin mismatch'), { code: 'AV_PIN_MISMATCH', presented: [], reason: 'pin_format' })
   }
 
-  const at = Number.isInteger(now) && now >= 0 ? now : Date.now()
-  takeProbeSlot(cred.id, at)
+  takeProbeSlot(cred.id, probeClock.now())
 
   const secret = await vault.revealField(cred.id, header.field)
   const scrubber = new Scrubber([{ secret, label: cred.slug || 'cred', always: true }])
@@ -81,13 +93,14 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
   }
   const send = typeof upstream === 'function' ? upstream : pinnedRequest
   const started = Date.now()
+  let answered = null
 
   const finish = async (status, httpStatus, extracted) => {
     const scopes = scrubList(extracted?.scopes, scrubber)
     const observed = scrubText(extracted?.observed_expires_at ?? null, scrubber)
     const ratelimit = Number.isInteger(extracted?.ratelimit_remaining) ? extracted.ratelimit_remaining : null
     const checked_at = new Date().toISOString()
-    const elapsed = Date.now() - started
+    const elapsed = (answered ?? Date.now()) - started
     const latency_ms = Number.isInteger(elapsed) && elapsed >= 0 ? elapsed : 0
     const patch = {
       status,
@@ -97,7 +110,13 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
       observed_expires_at: observed,
       scopes,
     }
-    await vault.recordHealth?.(cred.id, patch)
+    try {
+      await vault.recordHealth?.(cred.id, patch)
+    } catch (e) {
+      // The store refused the write. That is its error to report; the
+      // upstream already answered and is not "unreachable".
+      throw scrubThrown(e, scrubber)
+    }
     return {
       ok: status === 'ok',
       status,
@@ -110,17 +129,15 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
     }
   }
 
+  let response
   try {
-    const response = await send({
+    response = await send({
       url: destination.urlFor(probePath),
       method: probeMethod,
       headers,
       body: requestBody,
       pins,
     })
-    await discard(response?.res)
-    const httpStatus = Number.isInteger(response?.status) ? response.status : null
-    return await finish(classify(httpStatus), httpStatus, extractHealth(profile, response?.headers))
   } catch (e) {
     if (e?.code === 'AV_PIN_MISMATCH') {
       await finish('error', null, null)
@@ -129,6 +146,10 @@ export async function runProbe({ vault, cred, profile, upstream, now, path, meth
     if (e instanceof VaultError) throw scrubThrown(e, scrubber)
     return await finish('unreachable', null, null)
   }
+  answered = Date.now()
+  await discard(response?.res)
+  const httpStatus = Number.isInteger(response?.status) ? response.status : null
+  return await finish(classify(httpStatus), httpStatus, extractHealth(profile, response?.headers))
 }
 
 function isProbePath(path) {
@@ -289,24 +310,41 @@ function scrubThrown(err, scrubber) {
   return out
 }
 
+/**
+ * Drain and drop a body nobody reads: at most DRAIN_LIMIT_BYTES, for at most
+ * DRAIN_TIMEOUT_MS. Past either bound the stream is destroyed, so a body that
+ * never ends neither holds the probe nor keeps a socket reading.
+ */
 function discard(stream) {
   if (!stream || typeof stream.on !== 'function') return Promise.resolve()
-  if (stream.readableEnded || stream.closed) return Promise.resolve()
+  if (stream.readableEnded || stream.destroyed) return Promise.resolve()
   return new Promise((resolve) => {
     let done = false
-    const timer = setTimeout(finish, 30_000)
-    timer.unref?.()
-    function finish() {
+    let bytes = 0
+    const timer = setTimeout(() => finish(true), DRAIN_TIMEOUT_MS)
+    const onData = (chunk) => {
+      // Drop every chunk. Do not concatenate: the body is not a result.
+      bytes += chunk?.length ?? 0
+      if (bytes > DRAIN_LIMIT_BYTES) finish(true)
+    }
+    const onEnd = () => finish(false)
+    function finish(cut) {
       if (done) return
       done = true
       clearTimeout(timer)
+      stream.off?.('data', onData)
+      stream.off?.('end', onEnd)
+      stream.off?.('close', onEnd)
+      if (cut) {
+        try { stream.destroy?.() } catch { /* already gone */ }
+      }
       resolve()
     }
-    stream.on('end', finish)
-    stream.on('error', finish)
-    stream.on('close', finish)
-    // Drop every chunk. Do not concatenate: the body is not a result.
-    stream.on('data', () => {})
+    // Stays attached: a destroyed response may still report its socket.
+    stream.on('error', () => finish(true))
+    stream.on('end', onEnd)
+    stream.on('close', onEnd)
+    stream.on('data', onData)
     if (typeof stream.resume === 'function') stream.resume()
   })
 }

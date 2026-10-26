@@ -1248,6 +1248,43 @@ const MUTATIONS = [
     tests: ['test/security/connectors-probe.test.js'],
   },
   {
+    // A route that spreads its body into runProbe would hand the caller the
+    // throttle's clock: skip the window, or lock the credential out.
+    what: 'the probe throttle reads a time supplied on the call',
+    file: 'src/connectors/probe.js',
+    from: 'takeProbeSlot(cred.id, probeClock.now())',
+    to: 'takeProbeSlot(cred.id, arguments[0]?.now ?? probeClock.now())',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe body past the drain bound is left open',
+    file: 'src/connectors/probe.js',
+    from: 'if (cut) {\n        try { stream.destroy?.() } catch { /* already gone */ }',
+    to: 'if (false) {\n        try { stream.destroy?.() } catch { /* already gone */ }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe body that never ends holds the probe open',
+    file: 'src/connectors/probe.js',
+    from: 'const timer = setTimeout(() => finish(true), DRAIN_TIMEOUT_MS)',
+    to: 'const timer = null',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a recordHealth failure is swallowed',
+    file: 'src/connectors/probe.js',
+    from: "// upstream already answered and is not \"unreachable\".\n      throw scrubThrown(e, scrubber)",
+    to: "// upstream already answered and is not \"unreachable\".\n      void e",
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe pin entry of the wrong shape is skipped',
+    file: 'src/connectors/probe.js',
+    from: 'if (!Array.isArray(value)) return false',
+    to: 'if (!Array.isArray(value)) continue',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
     // Scopes are copied off a response header. Without the scrub, a header
     // that echoes the secret is returned and stored on the health record.
     what: 'probe scopes are returned without scrubbing the credential',
