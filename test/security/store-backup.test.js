@@ -230,7 +230,9 @@ test('a scrub pattern in a bundle that would carry a secret into this vault is r
   try {
     const cred = { slug: 'demo', kind: 'http', connector: { host: 'api.example.com' }, fields: [{ name: 'token', value: SECRET, sites: [] }], scrub_patterns: [{ source: `x${SECRET}` }] }
     const b = await sealedBundle({ credentials: [cred], templates: [] })
-    await refusedCleanlyAsync(t, () => restoreBackup(t.vault, b, { recoveryPassphrase: RECOVERY }), { code: 'AV_POLICY_DENIED', rule: 'backup_format' }, { audited: 1 })
+    // The rule addScrubPattern gives the same pattern: one set of rules, wherever it arrives.
+    await refusedCleanlyAsync(t, () => restoreBackup(t.vault, b, { recoveryPassphrase: RECOVERY }), { code: 'AV_POLICY_DENIED', rule: 'scrub_pattern' }, { audited: 1 })
+    assert.equal(records(t, 'backup.refused').at(-1).reason, 'scrub_pattern')
   } finally { t.done() }
 })
 

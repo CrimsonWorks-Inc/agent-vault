@@ -7,21 +7,20 @@
 // same scrypt and the same ChaCha20-Poly1305 seal (src/store/crypto.js) — at
 // the parameters F8 fixes, and nothing is ever written to disk in the clear:
 // export writes nothing but its audit record, and restore goes through the
-// vault's own write paths, which seal each value as they store it.
+// vault's restoreEntries, which seals each value as it stores it.
 //
 // What a bundle carries is a closed list. Sessions, grants, placeholders,
 // approvals, listeners, factors, wraps, settings and the audit log are not in
 // it, so a restore gives no capability back, and a bundle that carries
 // anything else — a factor, a wrap, a session — is refused whole rather than
-// partly read. Restore never touches the vault's factors, and checks the
-// factor invariant (assertFactorInvariant) over the state it leaves.
+// partly read. Restore is all or nothing, never touches the vault's factors,
+// and checks the factor invariant (assertFactorInvariant) before it writes.
 
 import { createHash, randomBytes } from 'node:crypto'
 import * as crypt from './crypto.js'
 import * as ph from '../core/placeholder.js'
 import { deny } from '../core/errors.js'
 import { canonicalOperation } from '../ui/webauthn.js'
-import { assertFactorInvariant } from './vault.js'
 
 export const BACKUP_FORMAT = 'agent-vault-backup'
 export const BACKUP_VERSION = 1
@@ -156,13 +155,7 @@ export async function exportBackup(vault, { recoveryPassphrase } = {}) {
   checkRecovery(recoveryPassphrase)
   requireUnlocked(vault)
   const createdAt = new Date().toISOString()
-  const credentials = Object.values(vault.db.credentials).map((c) => ({
-    slug: c.slug, kind: c.connector_kind, connector: c.connector ?? null, created_at: c.created_at,
-    fields: c.fields.map((f) => ({ name: f.name, value: vault.revealField(c.id, f.name), sites: f.sites || [] })),
-    scrub_patterns: (c.scrub_patterns || []).map(({ id, source, added_at }) => ({ id, source, added_at })),
-    pins: c.pins ?? {},
-    expires_at: c.expires_at ?? null,
-  }))
+  const credentials = vault.backupCredentials()
   const templates = vault.listTemplates().map(({ name, spec }) => ({ name, spec }))
   const salt = randomBytes(16)
   const key = await keyFor(recoveryPassphrase, salt)
@@ -211,29 +204,30 @@ function renamed(slug, taken) {
 }
 
 /**
- * Put a bundle's credentials and templates back. Every credential goes
- * through the vault's own write paths (addCredential, setCredentialExpiry,
- * addScrubPattern, setPins, saveTemplate), so their rules and audit records
- * apply. Everything that can be checked is checked first, so `fail` — or any
- * refusal — writes nothing.
+ * Put a bundle's credentials and templates back. This decides only what the
+ * conflict mode does with a taken slug; the vault's restoreEntries checks
+ * every credential, pattern, expiry, template and the factor invariant
+ * against its own rules before it writes anything, then stores all of it in
+ * one write. So `fail`, any refusal, and a write that fails leave the vault
+ * as it was, and the log holds one `backup.refused` for it.
  */
 export async function restoreBackup(vault, bundle, { recoveryPassphrase, onConflict = 'skip' } = {}) {
   if (!CONFLICT_MODES.has(onConflict)) {
     throw deny('AV_POLICY_DENIED', 'on_conflict must be skip, rename or fail', { rule: 'backup_conflict' })
   }
   requireUnlocked(vault)
+  // Every refusal from here on is recorded, once: a locked vault cannot record.
   const refused = (e) => {
-    if (['backup_auth', 'backup_format', 'backup_conflict'].includes(e?.rule) && !vault.locked) {
-      vault.audit.write('backup.refused', { reason: e.rule })
+    if (e?.code && e.code !== 'AV_LOCKED' && !vault.locked) {
+      vault.audit.write('backup.refused', { reason: e.rule ?? e.code })
     }
     return e
   }
   let plain
   try { plain = await openBundle(bundle, recoveryPassphrase) } catch (e) { throw refused(e) }
   requireUnlocked(vault)
-  const factorsBefore = { vmk_wraps: vault.db.kv.vmk_wraps, webauthn: vault.db.kv.webauthn ?? null }
 
-  // The plan, decided in full before the first write.
+  // The plan, decided in full before anything is checked against the vault.
   const taken = new Set(Object.values(vault.db.credentials).map((c) => c.slug))
   const plan = []
   const skipped = []
@@ -249,45 +243,8 @@ export async function restoreBackup(vault, bundle, { recoveryPassphrase, onConfl
     taken.add(slug)
     plan.push({ ...c, slug })
   }
-  const hasPins = plan.some((c) => Object.values(c.pins ?? {}).some((l) => l.length))
-  if (hasPins && typeof vault.setPins !== 'function') {
-    // Dropping them would restore a credential with less protection than the
-    // human gave it. Refused until this vault can store pins (F11).
-    throw refused(formatError('it carries certificate pins, which this vault cannot restore yet'))
-  }
-  const values = [...plan.flatMap((c) => c.fields.map((f) => f.value)), ...vault.allSecrets().map((s) => s.secret)].filter(Boolean)
-  const patternTotal = Object.values(vault.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
-  if (plan.reduce((n, c) => n + (c.scrub_patterns?.length || 0), patternTotal) > 64 || plan.some((c) => (c.scrub_patterns?.length || 0) > 16) ||
-    plan.some((c) => (c.scrub_patterns || []).some((p) => values.some((v) => p.source.includes(v))))) {
-    throw refused(formatError('its scrub patterns do not fit this vault'))
-  }
-  const newTemplates = plain.templates.filter((t) => !vault.getTemplate(t.name))
-  if (vault.listTemplates().length + newTemplates.length > 64) throw refused(formatError('its templates do not fit this vault'))
-
-  const restored = []
-  for (const c of plan) {
-    vault.addCredential({
-      slug: c.slug, kind: c.kind, connector: c.connector ?? {},
-      fields: Object.fromEntries(c.fields.map((f) => [f.name, f.value])),
-      sites: Object.fromEntries(c.fields.map((f) => [f.name, f.sites ?? []])),
-    })
-    if (c.expires_at != null) vault.setCredentialExpiry(c.slug, c.expires_at)
-    for (const p of c.scrub_patterns ?? []) vault.addScrubPattern(c.slug, p.source)
-    for (const [host, pins] of Object.entries(c.pins ?? {})) if (pins.length) vault.setPins(c.slug, host, pins)
-    restored.push(c.slug)
-  }
-  const templates = { restored: [], skipped: [] }
-  for (const t of plain.templates) {
-    if (vault.getTemplate(t.name)) { templates.skipped.push(t.name); continue }
-    vault.saveTemplate(t.name, t.spec)
-    templates.restored.push(t.name)
-  }
-  // Nothing above writes a factor; this says so, on the state it left.
-  const factorsAfter = { vmk_wraps: vault.db.kv.vmk_wraps, webauthn: vault.db.kv.webauthn ?? null }
-  if (factorsAfter.vmk_wraps !== factorsBefore.vmk_wraps || factorsAfter.webauthn !== factorsBefore.webauthn) {
-    throw deny('AV_INTERNAL', 'a restore changed the vault factors')
-  }
-  assertFactorInvariant(factorsBefore, factorsAfter)
-  vault.audit.write('backup.restored', { restored, skipped, renamed: renames, bundle_sha256: bundleDigest(bundle) })
-  return { restored, skipped, renamed: renames, templates }
+  let out
+  try { out = vault.restoreEntries({ credentials: plan, templates: plain.templates }) } catch (e) { throw refused(e) }
+  vault.audit.write('backup.restored', { restored: out.restored, skipped, renamed: renames, bundle_sha256: bundleDigest(bundle) })
+  return { restored: out.restored, skipped, renamed: renames, templates: out.templates }
 }

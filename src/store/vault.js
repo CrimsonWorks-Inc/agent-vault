@@ -144,12 +144,6 @@ function tripwireProblem(tw) {
   return null
 }
 
-/**
- * A grant's request budget as a number, `Infinity` when it states none, or
- * null when it states one that cannot be read. C4: a canonical decimal string
- * ("50") is that integer; '', '5.5', '-1', '1e3', NaN and a non-request unit
- * are unreadable, and an unreadable budget refuses rather than allows.
- */
 /** The refusal for a quarantined credential (F16), the same wherever it is met. */
 function quarantined(cred) {
   return deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
@@ -157,6 +151,36 @@ function quarantined(cred) {
   })
 }
 
+/**
+ * The grant's own budget, for a placeholder's issue and use. A budget layer
+ * that names no limit constrains nothing at this layer: the gateway takes the
+ * limit from the session's layer when it intersects them, so reading it as
+ * unreadable here refused requests the gateway had counted. Otherwise as
+ * budgetLimit reads it.
+ */
+function grantBudgetLimit(policy) {
+  const b = policy?.budget
+  if (b && typeof b === 'object' && !b.invalid && (b.limit === undefined || b.limit === null || b.limit === '')) return Infinity
+  return budgetLimit(policy)
+}
+
+/** The refusal for a grant whose budget is spent, or cannot be read: the gateway's rule. */
+function budgetSpent(limit) {
+  return deny('AV_POLICY_DENIED', limit === null
+    ? 'this grant has a budget that cannot be read, so no request can be counted against it'
+    : `grant budget of ${limit} requests is spent`, { rule: 'budget', hint: 'A human must widen the grant or start a new session.' })
+}
+
+function scrubRefusal(why) {
+  return deny('AV_POLICY_DENIED', `scrub pattern refused: ${why}`, { rule: 'scrub_pattern' })
+}
+
+/**
+ * A grant's request budget as a number, `Infinity` when it states none, or
+ * null when it states one that cannot be read. C4: a canonical decimal string
+ * ("50") is that integer; '', '5.5', '-1', '1e3', NaN and a non-request unit
+ * are unreadable, and an unreadable budget refuses rather than allows.
+ */
 function budgetLimit(policy) {
   const b = policy?.budget
   if (b === undefined || b === null) return Infinity
@@ -792,9 +816,17 @@ export class Vault {
    */
   addCredential({ slug, kind, connector = {}, fields = {}, sites = {} }) {
     this.#requireUnlocked()
-    if (!ph.isValidSlug(slug)) throw deny('AV_NOT_FOUND', `invalid slug "${slug}": use [a-z0-9-], 1-24 characters`)
     if (this.findCredential(slug)) throw deny('AV_NOT_FOUND', `credential ${slug} already exists`)
+    const cred = this.#sealCredential({ slug, kind, connector, fields, sites })
+    this.db.credentials[cred.id] = cred
+    this.#persist()
+    this.audit.write('cred.added', { credential_slug: slug, connector: kind, fields: cred.fields.map((f) => f.name) })
+    return this.publicCredential(cred)
+  }
 
+  /** A new credential record, every value sealed, checked and not yet stored. Writes nothing. */
+  #sealCredential({ slug, kind, connector = {}, fields = {}, sites = {} }) {
+    if (!ph.isValidSlug(slug)) throw deny('AV_NOT_FOUND', `invalid slug "${slug}": use [a-z0-9-], 1-24 characters`)
     const credId = id.credential()
     const key = crypt.dek(this.vmk, credId)
     const stored = []
@@ -808,14 +840,10 @@ export class Vault {
         length: value.length,
       })
     }
-    const cred = {
+    return {
       id: credId, slug, connector_kind: kind, connector, fields: stored,
       created_at: new Date().toISOString(),
     }
-    this.db.credentials[credId] = cred
-    this.#persist()
-    this.audit.write('cred.added', { credential_slug: slug, connector: kind, fields: stored.map((f) => f.name) })
-    return this.publicCredential(cred)
   }
 
   findCredential(slug) {
@@ -848,15 +876,30 @@ export class Vault {
 
   listCredentials() { return Object.values(this.db.credentials).map((c) => this.publicCredential(c)) }
 
-  /** Decrypt one field. The only path to a plaintext value, used by the pipeline. */
+  /**
+   * Decrypt one field for a request: the pipeline's only path to a plaintext
+   * value. A quarantined credential is refused here (F16), not just where the
+   * gateway looks, so a placeholder issued before the quarantine reaches
+   * nothing either.
+   */
   revealField(credId, fieldName) {
     this.#requireUnlocked()
     const cred = this.db.credentials[credId]
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${credId}`)
+    if (cred.quarantine) throw quarantined(cred)
+    return this.#unseal(cred, fieldName)
+  }
+
+  /**
+   * A field's plaintext, quarantined or not. For the vault's own readers —
+   * the scrubber's match set, rotation, a backup — and never for a request:
+   * a quarantined value still has to be scrubbed, rotated and kept.
+   */
+  #unseal(cred, fieldName) {
     const field = cred.fields.find((f) => f.name === fieldName)
     if (!field) throw deny('AV_NOT_FOUND', `credential ${cred.slug} has no field ${fieldName}`)
-    const key = crypt.dek(this.vmk, credId)
-    return crypt.open(key, field, `${credId}|${fieldName}|${field.key_version}`)
+    const key = crypt.dek(this.vmk, cred.id)
+    return crypt.open(key, field, `${cred.id}|${fieldName}|${field.key_version}`)
   }
 
   /**
@@ -872,7 +915,7 @@ export class Vault {
     for (const cred of Object.values(this.db.credentials)) {
       const key = crypt.dek(this.vmk, cred.id)
       for (const f of cred.fields) {
-        try { out.push({ secret: this.revealField(cred.id, f.name), label: cred.slug, field: f.name }) } catch { /* skip */ }
+        try { out.push({ secret: this.#unseal(cred, f.name), label: cred.slug, field: f.name }) } catch { /* skip */ }
         for (const r of f.retired || []) {
           if (!(expiryMs(r.retire_until) > now)) continue
           try {
@@ -1021,15 +1064,8 @@ export class Vault {
     this.#requireUnlocked()
     const cred = this.findCredential(slug)
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
-    const refuse = (why) => deny('AV_POLICY_DENIED', `scrub pattern refused: ${why}`, { rule: 'scrub_pattern' })
-    // 3 characters (F4) up to 256 (C5, which revised F4's 200).
-    if (typeof source !== 'string' || source.length < 3 || source.length > MAX_SCRUB_SOURCE) {
-      throw refuse(`a pattern is 3 to ${MAX_SCRUB_SOURCE} characters`)
-    }
-    if (ph.findAll(source).length) throw refuse('it contains a placeholder')
-    for (const { secret } of this.allSecrets()) {
-      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')
-    }
+    const refuse = scrubRefusal
+    this.#checkScrubSource(source, this.allSecrets().map((s) => s.secret))
     const mine = cred.scrub_patterns || []
     if (mine.length >= MAX_SCRUB_PER_CRED) throw refuse(`at most ${MAX_SCRUB_PER_CRED} patterns per credential`)
     const total = Object.values(this.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
@@ -1037,11 +1073,28 @@ export class Vault {
     const pattern = { id: id.scrubPattern(), source, added_at: new Date().toISOString() }
     cred.scrub_patterns = [...mine, pattern]
     this.#persist()
+    this.#auditScrubPattern(cred, pattern)
+    return { ...pattern }
+  }
+
+  /** The source rules, shared with a restore so both refuse the same patterns. Writes nothing. */
+  #checkScrubSource(source, secrets) {
+    const refuse = scrubRefusal
+    // 3 characters (F4) up to 256 (C5, which revised F4's 200).
+    if (typeof source !== 'string' || source.length < 3 || source.length > MAX_SCRUB_SOURCE) {
+      throw refuse(`a pattern is 3 to ${MAX_SCRUB_SOURCE} characters`)
+    }
+    if (ph.findAll(source).length) throw refuse('it contains a placeholder')
+    for (const secret of secrets) {
+      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')
+    }
+  }
+
+  #auditScrubPattern(cred, pattern) {
     this.audit.write('cred.scrub_pattern_added', {
       credential_slug: cred.slug, pattern_id: pattern.id,
-      pattern_sha256: createHash('sha256').update(source).digest('hex'), length: source.length,
+      pattern_sha256: createHash('sha256').update(pattern.source).digest('hex'), length: pattern.source.length,
     })
-    return { ...pattern }
   }
 
   /** Remove one scrub pattern. False, and nothing recorded, when there was none. */
@@ -1087,7 +1140,7 @@ export class Vault {
     // Undefined clears it: the old expiry described the old token.
     const expires = expiresAt === undefined || expiresAt === null ? null : isoOrUndefined(expiresAt)
     if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null', { rule: 'expires_at' })
-    const current = this.revealField(cred.id, f.name)
+    const current = this.#unseal(cred, f.name)
     if (crypt.constantTimeEqual(current, value)) {
       throw deny('AV_POLICY_DENIED', 'that is the value already stored', { rule: 'rotate_same_value' })
     }
@@ -1184,6 +1237,21 @@ export class Vault {
    */
   saveTemplate(name, spec) {
     this.#requireUnlocked()
+    const text = this.#checkTemplate(name, spec)
+    const templates = this.db.templates || {}
+    const old = Object.hasOwn(templates, name) ? templates[name] : null
+    if (!old && Object.keys(templates).length >= MAX_TEMPLATES) {
+      throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
+    }
+    const template = this.#templateRecord(name, text, old)
+    this.db.templates = { ...templates, [name]: template }
+    this.#persist()
+    this.audit.write('template.saved', { name, version: template.version, template_hash: template.hash })
+    return structuredClone(template)
+  }
+
+  /** A template's name and spec, checked; returns the spec's JSON. Shared with a restore. Writes nothing. */
+  #checkTemplate(name, spec) {
     if (typeof name !== 'string' || !TEMPLATE_NAME.test(name)) {
       throw deny('AV_POLICY_DENIED', 'a template name is 1-32 characters of [a-z0-9-], starting with a letter or digit', { rule: 'template_name' })
     }
@@ -1198,24 +1266,19 @@ export class Vault {
     if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {
       throw deny('AV_POLICY_DENIED', `a template spec is at most ${MAX_TEMPLATE_BYTES} bytes of JSON`, { rule: 'template_size' })
     }
-    const templates = this.db.templates || {}
-    const old = Object.hasOwn(templates, name) ? templates[name] : null
-    if (!old && Object.keys(templates).length >= MAX_TEMPLATES) {
-      throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
-    }
+    return text
+  }
+
+  #templateRecord(name, text, old) {
     // Stored as the JSON it will be read back as, so the hash describes
     // exactly what a later read returns.
     const stored = JSON.parse(text)
     const now = new Date().toISOString()
-    const template = {
+    return {
       name, version: old ? old.version + 1 : 1, spec: stored,
       hash: createHash('sha256').update(canonicalOperation(stored)).digest('hex'),
       created_at: old?.created_at ?? now, updated_at: now,
     }
-    this.db.templates = { ...templates, [name]: template }
-    this.#persist()
-    this.audit.write('template.saved', { name, version: template.version, template_hash: template.hash })
-    return structuredClone(template)
   }
 
   getTemplate(name) {
@@ -1238,6 +1301,122 @@ export class Vault {
     this.#persist()
     this.audit.write('template.deleted', { name, version })
     return true
+  }
+
+  // ------------------------------------------------------- F8: backup
+
+  /**
+   * Every credential as a backup carries it (F8): current values, sites,
+   * scrub patterns, pins and expiry. Quarantined ones too, because a backup
+   * that left them out would lose them. Only the export reads this, behind a
+   * fresh proof of presence.
+   */
+  backupCredentials() {
+    this.#requireUnlocked()
+    return Object.values(this.db.credentials).map((c) => ({
+      slug: c.slug, kind: c.connector_kind, connector: c.connector ?? null, created_at: c.created_at,
+      fields: c.fields.map((f) => ({ name: f.name, value: this.#unseal(c, f.name), sites: f.sites || [] })),
+      scrub_patterns: (c.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
+      pins: c.pins ?? {},
+      expires_at: c.expires_at ?? null,
+    }))
+  }
+
+  /**
+   * Put a backup's credentials and templates back (F8), all or nothing. Every
+   * rule addCredential, setCredentialExpiry, addScrubPattern and saveTemplate
+   * apply is checked over the whole set first, writing nothing, and then all
+   * of it is stored in one write. A restore that stored its first credential
+   * and then threw on that credential's scrub pattern was a refusal that had
+   * changed the vault; now a refusal anywhere, or a write that fails, leaves
+   * the vault as it was.
+   *
+   * `credentials` are in bundle form with conflicts already resolved: a slug
+   * that is taken is refused. A template whose name is taken is skipped, the
+   * way the restore has always treated one. Pins are refused until this vault
+   * can store them (F11): dropping them would restore a credential with less
+   * protection than the human gave it.
+   */
+  restoreEntries({ credentials = [], templates = [] } = {}) {
+    this.#requireUnlocked()
+    const format = (why) => deny('AV_POLICY_DENIED', `not a usable backup: ${why}`, { rule: 'backup_format' })
+    if (!Array.isArray(credentials) || !Array.isArray(templates)) throw format('credentials and templates are lists')
+    const now = new Date().toISOString()
+    const taken = new Set(Object.values(this.db.credentials).map((c) => c.slug))
+    // A pattern may carry no value this vault will hold: the ones it has, and every one being restored.
+    const secrets = [
+      ...this.allSecrets().map((s) => s.secret),
+      ...credentials.flatMap((c) => (Array.isArray(c?.fields) ? c.fields.map((f) => f?.value) : [])),
+    ]
+    let patternTotal = Object.values(this.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
+    const staged = []
+    for (const c of credentials) {
+      if (!c || typeof c !== 'object' || !Array.isArray(c.fields) || !c.fields.length) throw format('a credential entry is malformed')
+      if (taken.has(c.slug)) throw deny('AV_NOT_FOUND', `credential ${c.slug} already exists`)
+      taken.add(c.slug)
+      if (c.fields.some((f) => typeof f?.value !== 'string' || !f.value) || new Set(c.fields.map((f) => f.name)).size !== c.fields.length) {
+        throw format(`the fields of ${c.slug} are malformed`)
+      }
+      if (Object.values(c.pins ?? {}).some((l) => l.length) && typeof this.setPins !== 'function') {
+        throw format('it carries certificate pins, which this vault cannot restore yet')
+      }
+      const cred = this.#sealCredential({
+        slug: c.slug, kind: c.kind, connector: c.connector ?? {},
+        fields: Object.fromEntries(c.fields.map((f) => [f.name, f.value])),
+        sites: Object.fromEntries(c.fields.map((f) => [f.name, f.sites ?? []])),
+      })
+      if (c.expires_at != null) {
+        const expires = isoOrUndefined(c.expires_at)
+        if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null to clear it', { rule: 'expires_at' })
+        cred.expires_at = expires
+      }
+      const patterns = c.scrub_patterns ?? []
+      if (!Array.isArray(patterns)) throw format(`the scrub patterns of ${c.slug} are malformed`)
+      if (patterns.length > MAX_SCRUB_PER_CRED) throw scrubRefusal(`at most ${MAX_SCRUB_PER_CRED} patterns per credential`)
+      patternTotal += patterns.length
+      if (patternTotal > MAX_SCRUB_TOTAL) throw scrubRefusal(`at most ${MAX_SCRUB_TOTAL} patterns in the vault`)
+      for (const p of patterns) this.#checkScrubSource(p?.source, secrets)
+      if (patterns.length) cred.scrub_patterns = patterns.map((p) => ({ id: id.scrubPattern(), source: p.source, added_at: now }))
+      staged.push(cred)
+    }
+    const before = this.db.templates
+    const nextTemplates = { ...(before || {}) }
+    const restoredTemplates = []
+    const skippedTemplates = []
+    for (const t of templates) {
+      const text = this.#checkTemplate(t?.name, t?.spec)
+      if (Object.hasOwn(nextTemplates, t.name)) { skippedTemplates.push(t.name); continue }
+      if (Object.keys(nextTemplates).length >= MAX_TEMPLATES) {
+        throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
+      }
+      nextTemplates[t.name] = this.#templateRecord(t.name, text, null)
+      restoredTemplates.push(t.name)
+    }
+    // Nothing above can reach a factor. Said, on the state about to be stored.
+    const factors = { vmk_wraps: this.db.kv.vmk_wraps, webauthn: this.db.kv.webauthn ?? null }
+    assertFactorInvariant(factors, factors)
+
+    // One write. Undone in memory if it fails, so the vault is what it was.
+    for (const cred of staged) this.db.credentials[cred.id] = cred
+    if (restoredTemplates.length) this.db.templates = nextTemplates
+    try {
+      this.#persist()
+    } catch {
+      for (const cred of staged) delete this.db.credentials[cred.id]
+      if (before === undefined) delete this.db.templates
+      else this.db.templates = before
+      throw deny('AV_INTERNAL', 'the restore could not be written, so nothing was restored', { rule: 'backup_persist' })
+    }
+    for (const cred of staged) {
+      this.audit.write('cred.added', { credential_slug: cred.slug, connector: cred.connector_kind, fields: cred.fields.map((f) => f.name) })
+      if (cred.expires_at !== undefined) this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: cred.expires_at })
+      for (const p of cred.scrub_patterns ?? []) this.#auditScrubPattern(cred, p)
+    }
+    for (const name of restoredTemplates) {
+      const t = this.db.templates[name]
+      this.audit.write('template.saved', { name, version: t.version, template_hash: t.hash })
+    }
+    return { restored: staged.map((c) => c.slug), templates: { restored: restoredTemplates, skipped: skippedTemplates } }
   }
 
   deleteCredential(slug) {
@@ -1371,6 +1550,9 @@ export class Vault {
       next: { cli: ['agent-vault session create --cred <slug>'], mcp: { tool: 'vault_request_session' } },
     })
     if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
+    // Ended is final: nothing moves a session back to active, so a date that
+    // was later pushed out does not bring one back.
+    if (session.state !== 'active') throw deny('AV_SESSION_EXPIRED', `session ${session.id} has ended`)
     if (!(sessionExpiryMs(session) > Date.now())) {
       if (session.state !== 'expired') {
         session.state = 'expired'
@@ -1387,15 +1569,24 @@ export class Vault {
     return session
   }
 
-  /** Idle extension. Never widens capability, so it needs no presence. */
+  /**
+   * Idle extension. Never widens capability, so it needs no presence. Only a
+   * live session is extended: one that is revoked, marked ended, or past its
+   * date though nothing has noticed yet stays ended, whoever calls this and
+   * in whatever order. The pipeline asserts liveness first; this does not
+   * rely on it. Never earlier than it was, never past its ceiling. False
+   * when nothing was touched.
+   */
   touchSession(session) {
     const now = Date.now()
+    if (!session || session.state !== 'active' || !(sessionExpiryMs(session) > now)) return false
     // An infinite session has nothing to extend; only its last-seen moves.
     if (session.infinite !== true) {
-      const extended = Math.min(now + session.idle_timeout_ms, Date.parse(session.max_expires_at))
-      if (extended > Date.parse(session.expires_at)) session.expires_at = new Date(extended).toISOString()
+      const extended = Math.min(now + session.idle_timeout_ms, sessionCeilingMs(session))
+      if (extended > sessionExpiryMs(session)) session.expires_at = new Date(extended).toISOString()
     }
     session.last_seen_at = new Date(now).toISOString()
+    return true
   }
 
   /**
@@ -1468,7 +1659,13 @@ export class Vault {
     session.parent_sid = parentSid
     for (const g of Object.values(this.db.grants)) {
       if (g.session_id !== parentSid || g.state !== 'active') continue
-      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow })
+      // The child's grant ends no later than the one it copies (F18). Null is
+      // "as long as the session", which the child's own session bounds; a
+      // parent grant that has ended, or whose end cannot be read, is not copied.
+      const ends = expiryMs(g.expires_at)
+      if (!(ends > Date.now())) continue
+      const ttlMs = ends === Infinity ? null : ends - Date.now()
+      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow, ttlMs })
     }
     this.#persist()
     this.audit.write('session.forked', { session_id: session.id, parent_session_id: parentSid })
@@ -1672,8 +1869,11 @@ export class Vault {
     // `?? 1000` does not catch NaN, only null and undefined, so a malformed
     // budget propagated straight into the placeholder's use ceiling — and
     // `Math.min(asked, NaN)` is NaN, which no `uses >= max_uses` ever stops.
-    const stated = Number(grant.policy?.budget?.limit)
-    const budgetLimit = Number.isFinite(stated) && stated > 0 ? stated : 1000
+    // A budget of 0 is no uses, not a thousand: it issues nothing. One that
+    // cannot be read is refused when it is used, here and at the gateway.
+    const limit = grantBudgetLimit(grant.policy)
+    if (limit === 0) throw budgetSpent(limit)
+    const useLimit = limit === null || limit === Infinity ? 1000 : limit
     const phPolicy = grant.policy?.placeholder_policy || {}
     // Validated, not `?? 8`: a string or NaN made `length >= max_active`
     // false for good, which is no bound at all.
@@ -1701,7 +1901,7 @@ export class Vault {
     // sit on the right of a `??`, so a caller asking for a million uses got a
     // million even where the human had configured one-time placeholders.
     // Enforced here so no call site can forget it.
-    const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : budgetLimit
+    const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : useLimit
     // Floored to an integer. A fractional `uses` reached the audit record as a
     // float, and canonicalize refuses floats — so write() threw AFTER the
     // ledger had already been persisted, leaving a placeholder that existed
@@ -1781,7 +1981,12 @@ export class Vault {
     this.assertSessionLive(this.db.sessions[row.sid])
     // The grant's own lifetime (F18), asked of the one function that decides
     // it, so a placeholder minted before the grant ended dies with it.
-    this.assertGrantLive(this.db.grants[row.grant_id])
+    const grant = this.assertGrantLive(this.db.grants[row.grant_id])
+    // A quarantine stops a placeholder issued before it, too (F16). Paused,
+    // not killed: the row works again when a human releases the credential.
+    const cred = this.db.credentials[row.credential_id]
+    if (!cred) throw deny('AV_NO_GRANT', `no credential ${row.credential_id}`)
+    if (cred.quarantine) throw quarantined(cred)
     if (!(rowExpiryMs(row) > Date.now())) {
       row.state = 'dead'; row.dead_reason = 'expired'; this.#persist({ durable: false })
       throw deny('AV_PH_STALE', 'placeholder expired', {
@@ -1794,11 +1999,23 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
+    // The grant as it is now, not as it was at issue: a narrowed placeholder
+    // ceiling, and the budget other placeholders and redirect hops spent.
+    const phMax = grant.policy?.placeholder_policy?.max_uses
+    if (Number.isFinite(phMax) && row.uses >= phMax) {
+      row.state = 'dead'; row.dead_reason = 'exhausted'; this.#persist({ durable: false })
+      throw deny('AV_PH_EXHAUSTED', `placeholder used ${row.uses}/${phMax} times`, {
+        next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
+      })
+    }
+    const limit = grantBudgetLimit(grant.policy)
+    if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used + 1 > limit) throw budgetSpent(limit)
     row.uses += 1
     row.last_used_at = new Date().toISOString()
     if (row.uses >= row.max_uses) { row.state = 'dead'; row.dead_reason = 'exhausted' }
-    const grant = this.db.grants[row.grant_id]
-    if (grant) { grant.budget_used += 1; grant.counters.requests += 1 }
+    grant.budget_used += 1
+    grant.counters = grant.counters || { requests: 0, denials: 0 }
+    grant.counters.requests = (Number.isSafeInteger(grant.counters.requests) ? grant.counters.requests : 0) + 1
     this.#persist()
     return row
   }

@@ -1202,8 +1202,8 @@ const MUTATIONS = [
     // F18's own mutation: the test uses a placeholder minted before the end.
     what: 'consumePlaceholder does not ask whether the grant has ended',
     file: 'src/store/vault.js',
-    from: '    this.assertGrantLive(this.db.grants[row.grant_id])\n',
-    to: '',
+    from: '    const grant = this.assertGrantLive(this.db.grants[row.grant_id])\n',
+    to: '    const grant = this.db.grants[row.grant_id]\n',
     tests: ['test/security/store-slice-a.test.js'],
   },
   {
@@ -1488,9 +1488,9 @@ const MUTATIONS = [
     // Dropping the pins restores a credential with less protection than the
     // human gave it.
     what: "a restore goes ahead when it cannot restore a bundle's pins",
-    file: 'src/store/backup.js',
-    from: "  if (hasPins && typeof vault.setPins !== 'function') {",
-    to: '  if (false) {',
+    file: 'src/store/vault.js',
+    from: "      if (Object.values(c.pins ?? {}).some((l) => l.length) && typeof this.setPins !== 'function') {",
+    to: '      if (false) {',
     tests: ['test/security/store-backup.test.js'],
   },
   // ---- store F19: activity ----
@@ -1549,6 +1549,126 @@ const MUTATIONS = [
     from: "  return (r) => r.decision === 'held' || ids.has(r.request_id)",
     to: '  return (r) => ids.has(r.request_id)',
     tests: ['test/security/store-activity.test.js'],
+  },
+  // ---- store: round-2 review of the wave-2 store ----
+  {
+    // Finding 1: a pattern the restore did not check stopped it halfway.
+    what: "a restore does not check a credential's scrub patterns before it writes",
+    file: 'src/store/vault.js',
+    from: '      for (const p of patterns) this.#checkScrubSource(p?.source, secrets)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a restore whose write fails keeps its credentials in memory',
+    file: 'src/store/vault.js',
+    from: '      for (const cred of staged) delete this.db.credentials[cred.id]\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a restore writes each credential as it goes',
+    file: 'src/store/vault.js',
+    from: '    for (const cred of staged) this.db.credentials[cred.id] = cred\n',
+    to: '    for (const cred of staged) { this.db.credentials[cred.id] = cred; this.#persist() }\n',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: "a restore the vault refuses is not recorded as a refusal",
+    file: 'src/store/backup.js',
+    from: '  try { out = vault.restoreEntries({ credentials: plan, templates: plain.templates }) } catch (e) { throw refused(e) }',
+    to: '  out = vault.restoreEntries({ credentials: plan, templates: plain.templates })',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 2.
+    what: 'touchSession extends a session that has ended',
+    file: 'src/store/vault.js',
+    from: "    if (!session || session.state !== 'active' || !(sessionExpiryMs(session) > now)) return false\n",
+    to: '    if (!session) return false\n',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a session marked ended is live again once its date is later',
+    file: 'src/store/vault.js',
+    from: "    if (session.state !== 'active') throw deny('AV_SESSION_EXPIRED', `session ${session.id} has ended`)\n",
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'touchSession extends past the ceiling',
+    file: 'src/store/vault.js',
+    from: '      const extended = Math.min(now + session.idle_timeout_ms, sessionCeilingMs(session))',
+    to: '      const extended = now + session.idle_timeout_ms',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 3.
+    what: 'a quarantined credential is consumed through a placeholder issued before it',
+    file: 'src/store/vault.js',
+    from: '    if (cred.quarantine) throw quarantined(cred)\n    if (!(rowExpiryMs(row) > Date.now())) {',
+    to: '    if (!(rowExpiryMs(row) > Date.now())) {',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a quarantined credential is revealed',
+    file: 'src/store/vault.js',
+    from: '    if (cred.quarantine) throw quarantined(cred)\n    return this.#unseal(cred, fieldName)',
+    to: '    return this.#unseal(cred, fieldName)',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 4.
+    what: 'a budget of 0 issues a placeholder',
+    file: 'src/store/vault.js',
+    from: '    if (limit === 0) throw budgetSpent(limit)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'consume does not re-check the grant budget',
+    file: 'src/store/vault.js',
+    from: '    if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used + 1 > limit) throw budgetSpent(limit)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: "consume does not re-check a placeholder ceiling narrowed after issue",
+    file: 'src/store/vault.js',
+    from: '    if (Number.isFinite(phMax) && row.uses >= phMax) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 5.
+    what: 'a rotation is written without an fsync',
+    file: 'src/store/vault.js',
+    from: '    this.#persist()\n    const rotated = {',
+    to: '    this.#persist({ durable: false })\n    const rotated = {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    what: 'a restore is written without an fsync',
+    file: 'src/store/vault.js',
+    from: '    try {\n      this.#persist()\n    } catch {',
+    to: '    try {\n      this.#persist({ durable: false })\n    } catch {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    // A writer the lists do not name: the classification test must see it.
+    what: 'a vault writer is on neither durability list',
+    file: 'src/store/vault.js',
+    from: '  removeScrubPattern(slug, patternId) {',
+    to: '  dropScrubPattern(slug, patternId) {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    // Finding 6.
+    what: "a forked grant drops the lifetime of the grant it copies",
+    file: 'src/store/vault.js',
+    from: '      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow, ttlMs })',
+    to: '      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow })',
+    tests: ['test/security/store-review-r2.test.js'],
   },
 ]
 

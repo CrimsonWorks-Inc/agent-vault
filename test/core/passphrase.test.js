@@ -327,6 +327,24 @@ function vaultMethods(src) {
 // (F10), both coordinator-approved. Nothing that records a security decision.
 const NON_DURABLE_ALLOWED = new Set(['issuePlaceholder', 'consumePlaceholder', 'refundPlaceholder', 'chargeGrant', 'recordHealth'])
 
+// Every other method that writes the vault, each of which must write durably.
+// A method that writes and is on neither list fails the test below, so a new
+// writer is classified when it is added, not when someone notices.
+const DURABLE = new Set([
+  // key material and the factors
+  'create', '#anchorStamp', '#openWith', 'setPassphrase', '#commitFactors', 'addWebauthnUnlock', 'removeWebauthnUnlock',
+  'setPresenceKey', 'prfSalt', 'removePassphrase', 'lock', 'startInRecordedState',
+  // credentials and their settings
+  'addCredential', 'deleteCredential', 'setCredentialExpiry', 'setQuarantine', 'clearQuarantine', 'updateSettings',
+  // sessions, grants and the placeholders a human acts on
+  'addWorkspace', 'createSession', 'assertSessionLive', 'shortenSession', 'revokeSession', 'forkSession',
+  'createGrant', 'assertGrantLive', 'revokeGrant', 'shortenGrant', 'narrowGrant', 'burnPlaceholder', 'nextPlaceholder',
+  'addListener', 'removeListener',
+  // slice B: scrub patterns (F4), rotation (F7), the webhook (F14), templates (F17), restore (F8)
+  'addScrubPattern', 'removeScrubPattern', 'rotateCredential', 'setNotifyWebhook', 'clearNotifyWebhook',
+  'saveTemplate', 'deleteTemplate', 'restoreEntries',
+])
+
 test('key material and security decisions are written durably, whatever the ledger does', () => {
   // The fsync split is only safe if the half that matters keeps it. A lost
   // placeholder is one the agent asks for again; a lost credential is gone,
@@ -353,16 +371,36 @@ test('key material and security decisions are written durably, whatever the ledg
 
   // The credential and factor paths, and every write that records a security
   // decision, persist durably: they write, and never with the option.
-  for (const fn of [
-    'addCredential', 'setPassphrase', 'removePassphrase', 'addWebauthnUnlock', 'removeWebauthnUnlock', '#commitFactors',
-    'createSession', 'revokeSession', 'shortenSession', 'assertSessionLive',
-    'createGrant', 'revokeGrant', 'shortenGrant', 'narrowGrant', 'assertGrantLive',
-    'setQuarantine', 'clearQuarantine', 'updateSettings', 'setCredentialExpiry',
-  ]) {
+  for (const fn of DURABLE) {
     const body = methods.get(fn)
     assert.ok(body, `${fn} is not in vault.js any more; update this list`)
     // The factor paths write through #commitFactors, which is on this list.
     assert.ok(body.includes('#persist(') || body.includes('#commitFactors('), `${fn} no longer writes through #persist`)
     assert.ok(!/durable/.test(body), `${fn} writes without an fsync`)
+  }
+})
+
+test('every method that writes the vault is classified as durable or as allowed to skip the fsync', () => {
+  // The list above used to name only the methods someone thought of. The
+  // slice B writers (rotation, scrub patterns, the webhook, templates) were
+  // durable, and on no list, so a `durable: false` planted in one of them was
+  // caught only by the general scan. Now every write site is on a list.
+  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
+  const methods = vaultMethods(src)
+  const writers = [...methods].filter(([name, body]) => name !== '#persist' && /#persist\(|#commitFactors\(/.test(body)).map(([name]) => name)
+  assert.ok(writers.length > 40 && writers.includes('rotateCredential') && writers.includes('restoreEntries'),
+    `the scan found ${writers.length} writers; it has stopped reading vault.js`)
+  const unclassified = writers.filter((n) => !DURABLE.has(n) && !NON_DURABLE_ALLOWED.has(n))
+  assert.deepEqual(unclassified, [], `these write the vault and are on no list: ${unclassified.join(', ')}`)
+  for (const name of [...DURABLE, ...NON_DURABLE_ALLOWED]) {
+    assert.ok(writers.includes(name), `${name} is listed but does not write the vault; update the list`)
+    assert.ok(!(DURABLE.has(name) && NON_DURABLE_ALLOWED.has(name)), `${name} is on both lists`)
+  }
+  // A durable method writes only as `#persist()`: no option, in any spelling.
+  for (const name of DURABLE) {
+    const body = methods.get(name)
+    const calls = body.match(/#persist\(/g)?.length ?? 0
+    const plain = body.match(/#persist\(\)/g)?.length ?? 0
+    assert.equal(calls, plain, `${name} passes an option to #persist`)
   }
 })

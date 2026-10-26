@@ -120,8 +120,10 @@ test('a finite session is unchanged: it expires, and idle activity extends it on
     // Seven hours in, a request moves the end out by the idle timeout.
     at(created + 7 * HOUR, () => v.vault.touchSession(session))
     assert.equal(Date.parse(session.expires_at), created + 9 * HOUR)
-    // But never past the 24-hour ceiling.
-    at(created + 23.5 * HOUR, () => v.vault.touchSession(session))
+    // But never past the 24-hour ceiling, however long it is kept busy. (A
+    // single touch at 23.5 hours used to do this, on a session that had been
+    // idle-expired since hour 9: finding 2 of the round-1 review.)
+    for (let t = 8.5; t <= 23.5; t += 1.5) at(created + t * HOUR, () => v.vault.touchSession(session))
     assert.equal(Date.parse(session.expires_at), Date.parse(session.max_expires_at))
     assert.equal(at(created + 25 * HOUR, () => code(() => v.vault.assertSessionLive(session))).code, 'AV_SESSION_EXPIRED')
 
