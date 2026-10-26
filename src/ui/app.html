@@ -684,6 +684,17 @@ ${c.cli} unlock`)}
         confirmed passphrase opens a five-minute window so you are not asked on every call.</p></div>`,
     },
     {
+      id: 'safety',
+      title: 'Containment and recovery',
+      body: (c) => `<div class="prose">
+        <p>What to do when an agent does something you did not expect, and how to get your
+        vault back if this machine does not come back.</p>
+        <h3>End a session now</h3>
+        <p>Revoking a session ends it and every placeholder it handed out, at once, whatever
+        lifetime it was given.</p></div>
+        ${code(`${c.cli} session revoke <sid>`)}`,
+    },
+    {
       id: 'refused',
       title: 'When a request is refused',
       body: (c) => `<div class="prose">
@@ -716,6 +727,10 @@ ${c.cli} audit verify`, 'The log is hash-chained; verify proves nothing was edit
             ['AV_BROWSER_ORIGIN', 'The request carried Origin or Sec-Fetch-Site.', 'The proxy is not for browsers. Call it from your agent or your code.'],
             ['AV_REMOTE_FORBIDDEN', 'A remote session attempted something allowed only from this machine.', 'Do it locally.'],
             ['AV_UPSTREAM_UNREACHABLE', 'The upstream did not answer.', 'Not your policy’s fault; the placeholder use was refunded. Retry.'],
+            ['AV_QUOTA_EXCEEDED', 'A rate, concurrency or quota limit on the grant was reached.', 'Wait the seconds in <code>retry_after</code>, then retry. If it keeps happening, the limit is too low for the task.'],
+            ['AV_GRANT_EXPIRED', 'This grant’s own lifetime ran out, though the session may still be live.', 'Ask for a new grant with <code>vault_request_session</code>, or create a new session.'],
+            ['AV_QUARANTINED', 'You quarantined this credential.', `Nothing can use it until you release it: <code>${esc(c.cli)} cred release &lt;slug&gt;</code>`],
+            ['AV_PIN_MISMATCH', 'The upstream’s TLS key matched none of the pins for that host, so nothing was sent.', `Something may be intercepting TLS on this machine, or the provider changed keys. Compare: <code>${esc(c.cli)} cred pin &lt;slug&gt; --host &lt;host&gt; --live</code>`],
           ].map(([codeName, what, fix]) =>
             `<tr><td>${esc(codeName)}</td><td>${what}</td><td>${fix}</td></tr>`).join('')}
         </table></div></div>

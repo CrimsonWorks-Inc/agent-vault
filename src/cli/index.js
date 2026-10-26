@@ -1210,7 +1210,7 @@ const COMMANDS = {
    * install. This is the same page, opened on the right section.
    */
   async docs(args) {
-    const sections = ['how', 'start', 'connect', 'models', 'locking', 'refused', 'commands']
+    const sections = ['how', 'start', 'connect', 'models', 'locking', 'safety', 'refused', 'commands']
     const asked = args._[0]
     if (asked && !sections.includes(asked)) {
       return fail(`no docs section named ${asked}`, EXIT.USAGE, {
@@ -1568,7 +1568,7 @@ ${C.bold('mcp')}
 ${C.bold('docs')}
   docs [section]                       open the docs, written against this install
                                        how | start | connect | models | locking
-                                       | refused | commands
+                                       | safety | refused | commands
 
 ${C.dim('--json on any command prints a machine-readable envelope.')}`)
 }

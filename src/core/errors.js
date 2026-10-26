@@ -71,6 +71,14 @@ export const CODES = {
     hint: 'Too many failed attempts. Wait for the backoff to expire and try again.' },
   AV_UPSTREAM_UNREACHABLE: { http: 502, exit: EXIT.UPSTREAM, audit: 'request.upstream_failed', consumes: false,
     hint: 'The upstream could not be reached. If the failure happened before a connection existed, the placeholder use was refunded; the `refunded` field says which.' },
+  AV_QUOTA_EXCEEDED: { http: 429, exit: EXIT.POLICY_DENIED, audit: 'request.throttled', consumes: false,
+    hint: 'A rate, concurrency or quota limit on this grant was reached. Wait retry_after seconds and try again.' },
+  AV_GRANT_EXPIRED: { http: 401, exit: EXIT.SESSION, audit: 'request.denied', consumes: false,
+    hint: "This grant's lifetime ran out; the session may still hold others. Ask a human for a new grant." },
+  AV_QUARANTINED: { http: 403, exit: EXIT.POLICY_DENIED, audit: 'request.denied', consumes: false,
+    hint: 'A human quarantined this credential. Nothing can use it until they release it.' },
+  AV_PIN_MISMATCH: { http: 502, exit: EXIT.UPSTREAM, audit: 'request.pin_mismatch', consumes: false,
+    hint: 'The upstream presented a certificate that matches none of the pins for this host. Nothing was sent.' },
   AV_MCP_PROTOCOL: { http: 400, exit: EXIT.FAILURE, audit: 'mcp.protocol_rejected', consumes: false,
     hint: 'Unsupported or missing MCP-Protocol-Version.' },
   AV_MCP_SESSION_UNKNOWN: { http: 404, exit: EXIT.FAILURE, audit: 'mcp.protocol_rejected', consumes: false,
@@ -108,6 +116,10 @@ export class VaultError extends Error {
     // Whether a placeholder use was given back. The hint used to assert that
     // it always was, while the refund was in fact unreachable.
     this.refunded = extra.refunded
+    // Seconds until a refused request is worth retrying. The passphrase throttle
+    // has always passed `retry_after_s`, and nothing read it.
+    const wait = extra.retryAfter ?? extra.retry_after_s
+    this.retryAfter = Number.isInteger(wait) ? wait : undefined
   }
 
   /** RFC 9457 problem+json, the shape every denied HTTP request returns. */
@@ -124,6 +136,7 @@ export class VaultError extends Error {
     if (this.factors) body.factors = this.factors
     if (this.refunded !== undefined) body.refunded = this.refunded
     if (this.nextPlaceholder) body.next_placeholder = this.nextPlaceholder
+    if (this.retryAfter !== undefined) body.retry_after = this.retryAfter
     return body
   }
 }
