@@ -1323,7 +1323,7 @@ const MUTATIONS = [
   {
     // A capability that never ends must not be reachable from the network.
     // Checked before the gate, so it is refused before anyone is asked.
-    what: 'an infinite session may be remote',
+    what: 'the daemon lets an infinite session be remote',
     file: 'src/daemon/server.js',
     from: '    if (infinite && remote) {',
     to: '    if (false) {',
@@ -1337,6 +1337,146 @@ const MUTATIONS = [
     from: "      if (typeof input.ttl_hours !== 'number' || !Number.isFinite(input.ttl_hours) || !(input.ttl_hours > 0)) {",
     to: '      if (false) {',
     tests: ['test/security/requested-r3.test.js'],
+  },
+  // ---- store slice A (R3, F6, F10, F15, F16, F18, C3) ----
+  {
+    // R3 mutation 1: a null expiry read as "never" without asking whether the
+    // session is infinite. A legacy or corrupted row then lives forever.
+    what: 'sessionExpiryMs treats any null expiry as infinite',
+    file: 'src/store/vault.js',
+    from: 'return s.infinite === true && s.expires_at === null ? Infinity : -Infinity',
+    to: 'return Infinity',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // `Date.parse('garbage')` is NaN, and `NaN <= now` is false.
+    what: 'an unparseable expiry is NaN instead of already past',
+    file: 'src/store/vault.js',
+    from: '  return Number.isNaN(ms) ? -Infinity : ms\n}',
+    to: '  return ms\n}',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // R3 mutation 2.
+    what: 'an infinite session may be remote',
+    file: 'src/store/vault.js',
+    from: '    if (infinite && remote) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'a session lifetime that is not a positive number is accepted',
+    file: 'src/store/vault.js',
+    from: "if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {\n      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })",
+    to: "if (false) {\n      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })",
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // C3: the audit record would carry whatever the caller put there.
+    what: 'an unrecognised elevation is recorded instead of refused',
+    file: 'src/store/vault.js',
+    from: 'if (!Array.isArray(elevated) || elevated.length > ELEVATIONS.size || !elevated.every((e) => ELEVATIONS.has(e))) {',
+    to: 'if (false) {',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // F18's own mutation: the test uses a placeholder minted before the end.
+    what: 'consumePlaceholder does not ask whether the grant has ended',
+    file: 'src/store/vault.js',
+    from: '    this.assertGrantLive(this.db.grants[row.grant_id])\n',
+    to: '',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: "assertGrantLive never notices a grant's lifetime",
+    file: 'src/store/vault.js',
+    from: '    if (!(expiryMs(grant.expires_at) > Date.now())) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'a grant lifetime is not clamped to its session',
+    file: 'src/store/vault.js',
+    from: 'new Date(Math.min(Date.now() + ttlMs, sessionExpiryMs(session))).toISOString()',
+    to: 'new Date(Date.now() + ttlMs).toISOString()',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // `used + NaN > limit` is false forever: no budget at all.
+    what: 'chargeGrant takes any n, NaN included',
+    file: 'src/store/vault.js',
+    from: '    if (!Number.isSafeInteger(n) || n < 1) return false\n',
+    to: '',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'chargeGrant charges past the budget',
+    file: 'src/store/vault.js',
+    from: '    if (limit === null || used + n > limit) return false',
+    to: '    if (limit === null) return false',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // Fail-open: a budget nobody can read becomes no budget.
+    what: 'an unreadable grant budget means no limit',
+    file: 'src/store/vault.js',
+    from: '  return Number.isSafeInteger(n) && n >= 0 ? n : null\n}',
+    to: '  return Number.isSafeInteger(n) && n >= 0 ? n : Infinity\n}',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // F10's own mutation: caught by the flood test.
+    what: 'cred.health_recorded is written on every observation',
+    file: 'src/store/vault.js',
+    from: 'if (health.status !== before.status || health.observed_expires_at !== (before.observed_expires_at ?? null)) {',
+    to: 'if (true) {',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'a credential expiry that is not a date is stored',
+    file: 'src/store/vault.js',
+    from: '    if (expires === undefined) {\n      throw deny',
+    to: '    if (false) {\n      throw deny',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'a quarantined credential still issues placeholders',
+    file: 'src/store/vault.js',
+    from: "    if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)\n    if (cred.quarantine) throw quarantined(cred)\n",
+    to: "    if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)\n",
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: 'a tripwire rule set is stored without being checked',
+    file: 'src/store/vault.js',
+    from: "      if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'tripwire_rule' })",
+    to: '      if (false) throw new Error(problem)',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // F15: "shorten" that can lengthen is an extension anyone can ask for.
+    what: 'shortening can push an end later',
+    file: 'src/store/vault.js',
+    from: '  const at = Math.min(current, now + ttlMs)',
+    to: '  const at = now + ttlMs',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // 0.6: a grant that never stated redirects follows none.
+    what: 'a narrow may raise redirects above zero',
+    file: 'src/store/vault.js',
+    from: "    if (Object.hasOwn(narrow, 'redirects') && narrow.redirects?.max !== 0) {",
+    to: '    if (false) {',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    // The durability guard is itself a protection: a revocation a power cut
+    // forgets is access a human took away coming back.
+    what: 'a revocation is written without an fsync',
+    file: 'src/store/vault.js',
+    from: "    this.#persist()\n    this.audit.write('session.revoked', { session_id: sid, reason })",
+    to: "    this.#persist({ durable: false })\n    this.audit.write('session.revoked', { session_id: sid, reason })",
+    tests: ['test/core/passphrase.test.js'],
   },
 ]
 
