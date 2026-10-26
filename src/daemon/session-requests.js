@@ -17,7 +17,7 @@
 // and the policy intersection, which can only narrow. A human approving a
 // greedy proposal cannot widen it past what the credential allows.
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { id } from '../store/ids.js'
 
 // An agent can ask as often as it likes, so the store is bounded the way the
@@ -25,6 +25,14 @@ import { id } from '../store/ids.js'
 const MAX_PENDING = 64
 const PENDING_TTL_MS = 30 * 60_000
 const COLLECT_TTL_MS = 5 * 60_000
+// How long a settled request is kept so its asker can poll the outcome. Past
+// this it is forgotten: a finished request is history, and history belongs in
+// the audit log, not in the waiting room.
+const SETTLED_TTL_MS = 30 * 60_000
+// Everything held, pending or settled. Settled ones are evicted first.
+const MAX_ITEMS = MAX_PENDING * 4
+
+const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex')
 
 /** The fields a proposal may name. Anything else is not part of the offer. */
 const FIELDS = ['cred', 'methods', 'paths', 'budget', 'uses', 'ttl_minutes']
@@ -133,6 +141,10 @@ export class SessionRequests {
     for (const [key, r] of this.items) {
       const age = now - Date.parse(r.created_at)
       if (r.state === 'pending' && age > PENDING_TTL_MS) { this.items.delete(key); continue }
+      // Settled and seen out. Nothing deleted these, and denied ones are
+      // persisted, so they piled up for the life of the vault.
+      const settledFor = now - Date.parse(r.decided_at || r.created_at)
+      if (r.state !== 'pending' && !r.result && settledFor > SETTLED_TTL_MS) { this.items.delete(key); continue }
       // An approved request holds a live token until the agent collects it.
       // Uncollected, that is a capability sitting in memory with nobody
       // waiting for it, so it does not sit there indefinitely.
@@ -152,15 +164,31 @@ export class SessionRequests {
    */
   propose({ proposal, reason }) {
     this.#sweep()
-    if (this.items.size >= MAX_PENDING) {
+    // Only what is actually waiting counts. This counted every record in
+    // every state, and settled ones were never removed, so after 64 decisions
+    // in a vault's life — denials survive restarts — no agent could ask for a
+    // session again: a bound on the wrong thing.
+    const waiting = [...this.items.values()].filter((r) => r.state === 'pending').length
+    if (waiting >= MAX_PENDING) {
       // Refuse rather than evict, so a flood cannot push out the request a
       // human is in the middle of reading.
       const err = new Error('too many session requests are already waiting')
       err.code = 'AV_TOO_MANY_REQUESTS'
       throw err
     }
+    // Memory stays bounded by forgetting the oldest SETTLED requests, never a
+    // pending one.
+    for (const [key, r] of this.items) {
+      if (this.items.size < MAX_ITEMS) break
+      if (r.state !== 'pending') this.items.delete(key)
+    }
+    // Handed to the asker once and stored only as a hash. The request id is
+    // listed to anyone on the socket, so the id alone let one agent collect
+    // the session a human had granted to another.
+    const collectSecret = randomBytes(24).toString('base64url')
     const record = {
       id: id.sessionRequest(),
+      collect_hash: sha256(collectSecret),
       proposal,
       fingerprint: fingerprint(proposal),
       summary: summarize(proposal),
@@ -178,7 +206,20 @@ export class SessionRequests {
       request_id: record.id, summary: record.summary, fingerprint: record.fingerprint,
       agent_reason_untrusted: record.reason_untrusted,
     })
-    return record
+    return { record, collectSecret }
+  }
+
+  /**
+   * Whether `secret` is the one this request was opened with. Compared in
+   * constant time over digests; a request with no stored hash — one opened
+   * before secrets existed — can be collected by nobody but the human's own
+   * decision.
+   */
+  static mayCollect(record, secret) {
+    if (!record?.collect_hash || typeof secret !== 'string' || !secret) return false
+    const want = Buffer.from(record.collect_hash, 'hex')
+    const got = Buffer.from(sha256(secret), 'hex')
+    return want.length === got.length && timingSafeEqual(want, got)
   }
 
   get(id_) { this.#sweep(); return this.items.get(id_) || null }
@@ -206,4 +247,4 @@ export class SessionRequests {
   }
 }
 
-export { MAX_PENDING, PENDING_TTL_MS, COLLECT_TTL_MS }
+export { MAX_PENDING, PENDING_TTL_MS, COLLECT_TTL_MS, SETTLED_TTL_MS }

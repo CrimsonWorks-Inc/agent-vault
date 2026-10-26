@@ -10,11 +10,12 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, chmodSync, openSync, closeSync, fsyncSync, fchmodSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import * as crypt from './crypto.js'
 import { id } from './ids.js'
 import { AuditLog } from './audit.js'
 import * as ph from '../core/placeholder.js'
+import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
 
@@ -37,6 +38,124 @@ const EMPTY = {
   listeners: {},
 }
 
+// The unlock factors a vault can be created with. A Touch ID (PRF) wrap is
+// not one of them on its own: it needs the passphrase beside it, so it is
+// added afterwards, by addWebauthnUnlock, and the factor invariant holds it
+// to that.
+const FACTOR_CLASSES = new Set(['none', 'passphrase', 'webauthn-prf'])
+
+/**
+ * A presence authenticator as the vault stores it, or a refusal.
+ *
+ * Whatever is stored here becomes the key every presence gate checks against,
+ * and the gate counts it as a human factor for as long as it is there. A record
+ * that cannot verify an assertion therefore still closes the gate — to
+ * everyone, the owner included. So nothing is stored that the daemon could not
+ * verify a signature against: a credential id the authenticator could have
+ * produced, an ES256 public key (the only algorithm verifyAssertion accepts)
+ * that actually parses as one, and a counter the authenticator could report.
+ * Only those fields are kept; nothing else the caller sent is.
+ */
+export function presenceKeyRecord(input) {
+  const refuse = (why) => deny('AV_POLICY_DENIED', `not a usable presence authenticator: ${why}`, {
+    rule: 'presence_key',
+    hint: 'Nothing was changed, and the authenticator already enrolled (if any) still works. Enrol the new one from the web UI: agent-vault ui',
+    next: 'agent-vault ui',
+  })
+  if (!input || typeof input !== 'object') throw refuse('no credential was given')
+  const { credentialId, publicKeySpki, signCount = 0 } = input
+  if (typeof credentialId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(credentialId)) {
+    throw refuse('credentialId must be a base64url string')
+  }
+  const rawId = Buffer.from(credentialId, 'base64url')
+  // WebAuthn credential ids are 16 to 1023 bytes. The round trip refuses an
+  // id that only decodes by being read leniently.
+  if (rawId.length < 16 || rawId.length > 1023 || rawId.toString('base64url') !== credentialId) {
+    throw refuse('credentialId is not a WebAuthn credential id')
+  }
+  if (typeof publicKeySpki !== 'string' || !publicKeySpki) throw refuse('publicKeySpki is missing')
+  const der = Buffer.from(publicKeySpki, 'base64')
+  if (der.toString('base64') !== publicKeySpki) throw refuse('publicKeySpki is not base64')
+  let key
+  try {
+    key = createPublicKey({ key: der, format: 'der', type: 'spki' })
+  } catch {
+    throw refuse('publicKeySpki is not a public key')
+  }
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw refuse('only ES256 (P-256) authenticators can be verified')
+  }
+  if (!Number.isSafeInteger(signCount) || signCount < 0 || signCount > 0xffffffff) {
+    throw refuse('signCount must be a 32-bit counter')
+  }
+  return { credentialId, publicKeySpki, signCount, enrolledAt: new Date().toISOString() }
+}
+
+function usablePresenceKey(record) {
+  try { presenceKeyRecord(record); return true } catch { return false }
+}
+
+/** The human factors a factor state holds: what the presence gates can check. */
+function humanFactors({ vmk_wraps: wraps, webauthn }) {
+  const factors = []
+  if (wraps.some((w) => w.class === 'passphrase')) factors.push('passphrase')
+  if (webauthn && usablePresenceKey(webauthn)) factors.push('authenticator')
+  return factors
+}
+
+function recoveryRefusal() {
+  return deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost', {
+    rule: 'factor_order',
+    hint: 'Touch ID unlock needs a passphrase to fall back on if the authenticator is lost. Set one, then enable Touch ID unlock again: agent-vault passphrase set',
+    next: 'agent-vault passphrase set',
+  })
+}
+
+/**
+ * The factor invariant, owner-decided, and the one place it is enforced:
+ *
+ *   1. A vault that has a usable human factor is never left without one. With
+ *      neither a passphrase nor an authenticator the control socket is open
+ *      to whoever reaches it, which is the fresh-install state, and nothing
+ *      may put a vault back into it.
+ *   2. A Touch ID (PRF) unlock wrap never exists without the passphrase
+ *      wrap. The passphrase is its recovery: without it, losing the
+ *      authenticator loses every credential in the vault.
+ *   3. A presence authenticator is only ever replaced by one the daemon can
+ *      verify signatures from (presenceKeyRecord).
+ *
+ * `prev` and `next` are factor states: `{ vmk_wraps, webauthn }`. Every
+ * construction and every factor change calls this on the state it is about to
+ * commit, before anything is written, so a refusal leaves memory and disk as
+ * they were. A vault that never had a human factor (a fresh one, on the
+ * 'none' wrap) is allowed to stay that way; it just cannot be returned there.
+ */
+export function assertFactorInvariant(prev, next) {
+  // Not a policy, a precondition: with no wrap at all nothing opens the vault.
+  if (!next.vmk_wraps.length) throw new Error('a factor change must leave at least one way to open the vault')
+  if (next.webauthn && next.webauthn !== prev.webauthn) presenceKeyRecord(next.webauthn)
+  const hasPassphrase = (s) => s.vmk_wraps.some((w) => w.class === 'passphrase')
+  if (next.vmk_wraps.some((w) => w.class === 'webauthn-prf') && !hasPassphrase(next)) {
+    if (!hasPassphrase(prev)) throw recoveryRefusal()
+    throw deny('AV_POLICY_DENIED', 'remove Touch ID unlock first; the passphrase is its recovery factor', {
+      rule: 'last_factor',
+      hint: 'Touch ID unlock needs the passphrase to recover the vault if the authenticator is lost. Turn off Touch ID unlock in the web UI first (agent-vault ui), then remove the passphrase.',
+      next: 'agent-vault ui',
+    })
+  }
+  const had = humanFactors(prev)
+  if (had.length && !humanFactors(next).length) {
+    const losing = had.join(' and ')
+    throw deny('AV_POLICY_DENIED', `the ${losing} is this vault's last human factor; enrol another before removing it`, {
+      rule: 'last_factor',
+      hint: had.includes('passphrase')
+        ? 'Without a passphrase or an authenticator, anyone who reaches the control socket could widen access. Enrol a presence authenticator in the web UI first (agent-vault ui), then remove the passphrase.'
+        : 'Without an authenticator or a passphrase, anyone who reaches the control socket could widen access. Set a passphrase first: agent-vault passphrase set',
+      next: had.includes('passphrase') ? 'agent-vault ui' : 'agent-vault passphrase set',
+    })
+  }
+}
+
 export class Vault {
   constructor(dir) {
     this.dir = dir
@@ -54,13 +173,24 @@ export class Vault {
 
   /** Create the vault directory and its root key material. */
   static create(dir, { factor = 'none', passphrase = null } = {}) {
+    if (!FACTOR_CLASSES.has(factor)) throw new Error(`unknown unlock factor ${JSON.stringify(factor)}`)
+    // Checked before anything touches the disk. The only class this can refuse
+    // is a Touch ID wrap, which on its own would be a vault with no recovery.
+    assertFactorInvariant({ vmk_wraps: [], webauthn: null }, { vmk_wraps: [{ class: factor }], webauthn: null })
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     chmodSync(dir, 0o700)
     const v = new Vault(dir)
     if (existsSync(v.dbPath)) throw new Error(`a vault already exists at ${dir}`)
 
     const deviceKey = crypt.randomKey()
-    writeFileSync(v.deviceKeyPath, deviceKey, { mode: 0o600 })
+    // Flushed before vault.json, which #persist flushes: every wrap in it is
+    // sealed under a key derived from this one, so vault.json surviving a
+    // power cut that this did not would leave a vault nothing can open.
+    const keyFd = openSync(v.deviceKeyPath, 'w', 0o600)
+    try {
+      writeFileSync(keyFd, deviceKey)
+      fsyncSync(keyFd)
+    } finally { closeSync(keyFd) }
 
     const vmk = crypt.randomKey()
     const db = structuredClone(EMPTY)
@@ -85,8 +215,11 @@ export class Vault {
    * deleting the anchor as well.
    */
   #anchorStamp() {
+    const vaultDb = () => this.db
     return {
-      anchored: !!this.db?.kv?.audit_anchored,
+      // Read live, not captured: a log opened before the stamp was set must
+      // still see it when the log goes missing later in the same run.
+      get anchored() { return !!vaultDb()?.kv?.audit_anchored },
       markAnchored: () => {
         if (this.db?.kv && !this.db.kv.audit_anchored) {
           this.db.kv.audit_anchored = true
@@ -141,7 +274,15 @@ export class Vault {
   }
 
   /** Unlock with whatever material a caller has: {passphrase} or {prfSecret}. */
-  unlockWith(material = {}) {
+  unlockWith(material = {}) { return this.#openWith(material, { unlock: true }) }
+
+  /**
+   * Open the master key with whatever material was supplied. With `unlock`,
+   * the vault is left unlocked and that is recorded; without it, the key is
+   * held only long enough for the caller to write to the audit log, and
+   * nothing about the lock changes — on disk or in the log.
+   */
+  #openWith(material, { unlock }) {
     const deviceKey = readFileSync(this.deviceKeyPath)
     for (const wrap of this.db.kv.vmk_wraps) {
       try {
@@ -159,8 +300,10 @@ export class Vault {
         const audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
         this.vmk = vmk
         this.audit = audit
-        if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
-        this.audit.write('vault.unlock', { factor: wrap.class })
+        if (unlock) {
+          if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
+          this.audit.write('vault.unlock', { factor: wrap.class })
+        }
         crypt.wipe(deviceKey)
         return wrap.class
       } catch {
@@ -205,10 +348,9 @@ export class Vault {
     const wrap = this.#wrapVmk(deviceKey, this.vmk, 'passphrase', newPassphrase)
     // Additive: keep any Touch-ID (webauthn-prf) wrap so both factors work.
     // Drop the 'none' fallback so the lock has teeth.
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase' && w.class !== 'none')
-    this.db.kv.vmk_wraps.push(wrap)
-    this.#syncFactors()
-    this.#persist()
+    this.#commitFactors({
+      vmk_wraps: [...this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase' && w.class !== 'none'), wrap],
+    })
     this.audit.write('presence.factor_added', { class: 'passphrase', replaced: hasPassphrase })
     crypt.wipe(deviceKey)
   }
@@ -222,30 +364,61 @@ export class Vault {
   }
 
   /**
+   * Commit a change to the factors: the wraps, the presence authenticator, or
+   * both. The factor invariant is checked on the whole new state first, and
+   * the change lands in memory only as part of a write that succeeded, so a
+   * refusal or a failed write leaves the old factors in place.
+   */
+  #commitFactors({ vmk_wraps = this.db.kv.vmk_wraps, webauthn = this.db.kv.webauthn ?? null }) {
+    const kv = this.db.kv
+    assertFactorInvariant({ vmk_wraps: kv.vmk_wraps, webauthn: kv.webauthn ?? null }, { vmk_wraps, webauthn })
+    const before = { vmk_wraps: kv.vmk_wraps, presence_factors: kv.presence_factors, webauthn: kv.webauthn }
+    kv.vmk_wraps = vmk_wraps
+    if (webauthn !== (kv.webauthn ?? null)) kv.webauthn = webauthn
+    this.#syncFactors()
+    try {
+      this.#persist()
+    } catch (e) {
+      Object.assign(kv, before)
+      if (before.webauthn === undefined) delete kv.webauthn
+      throw e
+    }
+  }
+
+  /**
+   * Refuse, unless a passphrase is set, anything that would make Touch ID an
+   * unlock factor. The passphrase is the recovery factor: without it, losing
+   * the authenticator would lose every credential in the vault. The daemon
+   * calls this before asking for a tap, so the owner is told what to do
+   * instead of tapping for a refusal. The store's own enforcement is the factor
+   * invariant, which gives the same answer from addWebauthnUnlock.
+   */
+  requireRecoveryFactor() {
+    if (this.hasPassphrase) return
+    throw recoveryRefusal()
+  }
+
+  /**
    * Add Touch ID (or any WebAuthn PRF authenticator) as an unlock factor. A
    * passphrase must already be set, so losing the authenticator can never lock
    * you out: the passphrase is always the recovery path.
    */
   addWebauthnUnlock(credentialId, prfSecret) {
     this.#requireUnlocked()
-    if (!this.hasPassphrase) {
-      throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost')
-    }
     const deviceKey = readFileSync(this.deviceKeyPath)
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf' && w.class !== 'none')
-    const wrap = this.#wrapVmk(deviceKey, this.vmk, 'webauthn-prf', prfSecret)
+    let wrap
+    try { wrap = this.#wrapVmk(deviceKey, this.vmk, 'webauthn-prf', prfSecret) } finally { crypt.wipe(deviceKey) }
     wrap.credential_id = credentialId
-    this.db.kv.vmk_wraps.push(wrap)
-    this.#syncFactors()
-    this.#persist()
+    this.#commitFactors({
+      vmk_wraps: [...this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf' && w.class !== 'none'), wrap],
+    })
     this.audit.write('presence.factor_added', { class: 'webauthn-prf', credential_id: credentialId })
-    crypt.wipe(deviceKey)
   }
 
   removeWebauthnUnlock() {
     this.#requireUnlocked()
     const had = this.hasWebauthnUnlock
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf')
+    let wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf')
     // Every wrap is a way back to the master key. Remove the last one and the
     // vault is not locked, it is destroyed: no factor opens it, and no factor
     // can be added, because adding one needs the key that is now unreachable.
@@ -254,16 +427,18 @@ export class Vault {
     // being wrong here is every credential in the vault, permanently.
     // removePassphrase has had this guard since the beginning; this is the
     // same guard, for the same reason.
-    if (!this.db.kv.vmk_wraps.length) {
+    const downgraded = !wraps.length
+    if (downgraded) {
       const deviceKey = readFileSync(this.deviceKeyPath)
-      this.db.kv.vmk_wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
+      wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
       crypt.wipe(deviceKey)
+    }
+    this.#commitFactors({ vmk_wraps: wraps })
+    if (downgraded) {
       this.audit.write('presence.factor_downgraded', {
         class: 'none', reason: 'removing the last wrap would have made the vault unopenable',
       })
     }
-    this.#syncFactors()
-    this.#persist()
     if (had) this.audit.write('presence.factor_removed', { class: 'webauthn-prf' })
     return had
   }
@@ -271,6 +446,24 @@ export class Vault {
   get hasWebauthnUnlock() { return (this.db?.kv?.vmk_wraps || []).some((w) => w.class === 'webauthn-prf') }
   get webauthnUnlockCredentialId() {
     return (this.db?.kv?.vmk_wraps || []).find((w) => w.class === 'webauthn-prf')?.credential_id || null
+  }
+
+  /**
+   * Enrol or replace the presence authenticator: the key every presence gate
+   * verifies signatures from. Who may do this is the daemon's to decide (a
+   * first enrolment needs a passphrase, a replacement a fresh proof); what may
+   * be stored is decided here. The candidate is validated completely before
+   * the old key is touched, and on any refusal the old key stays.
+   */
+  setPresenceKey(input) {
+    this.#requireUnlocked()
+    const record = presenceKeyRecord(input)
+    const replaced = !!this.db.kv.webauthn
+    this.#commitFactors({ webauthn: record })
+    this.audit.write('presence.factor_added', {
+      class: 'webauthn-platform', credential_id: record.credentialId, replaced_existing: replaced,
+    })
+    return { replaced }
   }
 
   /** The stable salt the PRF is evaluated against; created on first enroll. */
@@ -282,9 +475,6 @@ export class Vault {
   /** Drop the passphrase, back to the UID-boundary-only 'none' factor. */
   removePassphrase(currentPassphrase) {
     this.#requireUnlocked()
-    if (this.hasWebauthnUnlock) {
-      throw deny('AV_POLICY_DENIED', 'remove Touch ID unlock first; the passphrase is its recovery factor')
-    }
     const wrap = this.db.kv.vmk_wraps.find((w) => w.class === 'passphrase')
     if (!wrap) return false
     try {
@@ -295,13 +485,18 @@ export class Vault {
     } catch {
       throw deny('AV_LOCKED', 'the current passphrase is required to remove it')
     }
-    const deviceKey = readFileSync(this.deviceKeyPath)
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase')
-    if (!this.db.kv.vmk_wraps.length) this.db.kv.vmk_wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
-    this.#syncFactors()
-    this.#persist()
+    // The invariant refuses this while Touch ID unlock depends on the
+    // passphrase for recovery, and when the passphrase is the last human
+    // factor: with no authenticator to take over, removing it would reopen
+    // the control socket to whoever reaches it.
+    let wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase')
+    if (!wraps.length) {
+      const deviceKey = readFileSync(this.deviceKeyPath)
+      wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
+      crypt.wipe(deviceKey)
+    }
+    this.#commitFactors({ vmk_wraps: wraps })
     this.audit.write('presence.factor_removed', { class: 'passphrase' })
-    crypt.wipe(deviceKey)
     return true
   }
 
@@ -350,20 +545,32 @@ export class Vault {
     // A vault whose only factors need a secret (passphrase, Touch ID) cannot
     // be auto-unlocked at boot: the secret is not on disk. Come up locked in
     // that case rather than crashing, and let the human unlock.
-    let unlocked = false
+    //
+    // A vault recorded as locked is opened WITHOUT unlocking it. It used to go
+    // through the full unlock, which cleared the flag on disk (a crash right
+    // there brought it up unlocked: a lock the restart forgot) and wrote a
+    // `vault.unlock` that nobody performed into the log on every boot.
+    let opened = false
     try {
-      this.unlockWith({ passphrase })
-      unlocked = true
-    } catch { unlocked = false }
+      this.#openWith({ passphrase }, { unlock: !wasLocked })
+      opened = true
+    } catch { opened = false }
 
-    if (!unlocked || wasLocked) {
+    if (!opened || wasLocked) {
       if (this.vmk) crypt.wipe(this.vmk)
       this.vmk = null
       // The audit log needs a key. Without one (a passphrase/Touch-ID vault we
       // could not open) it stays silent until the human unlocks; that is the
       // honest consequence of a cryptographic lock.
       if (this.db.kv.locked !== true) { this.db.kv.locked = true; this.#persist() }
-      if (this.audit) this.audit.write('vault.started_locked', {})
+      if (this.audit) {
+        this.audit.write('vault.started_locked', {})
+        // And then let go of the key, as lock() does. Keeping it meant a vault
+        // locked before a reboot answered audit reads that one locked
+        // explicitly refuses.
+        crypt.wipe(this.audit.key)
+        this.audit = null
+      }
       return false
     }
     return true
@@ -601,7 +808,16 @@ export class Vault {
     })
     if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
     if (Date.parse(session.expires_at) <= Date.now()) {
-      if (session.state !== 'expired') { session.state = 'expired'; this.#persist() }
+      if (session.state !== 'expired') {
+        session.state = 'expired'
+        // Its placeholders die with it, as they do on revocation. Left
+        // active, they were exempt from the ledger bound forever and counted
+        // as live in every status report.
+        for (const p of Object.values(this.db.placeholders)) {
+          if (p.sid === session.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'session_ended' }
+        }
+        this.#persist()
+      }
       throw deny('AV_SESSION_EXPIRED', `session ${session.id} expired at ${session.expires_at}`)
     }
     return session
@@ -673,7 +889,10 @@ export class Vault {
     const grant = {
       id: grantId, session_id: sessionId, credential_id: credentialId,
       fields: fields || cred.fields.map((f) => f.name),
-      policy: narrow && Object.keys(narrow).length ? { ...policy, ...narrow } : policy,
+      // Intersected, never spread. `{ ...policy, ...narrow }` let a
+      // "narrowing" replace any dimension outright — methods: ['DELETE'],
+      // approval: 'auto' — so a fork could widen the grant it came from.
+      policy: narrow && Object.keys(narrow).length ? policyMod.intersect([policy, narrow]) : policy,
       budget_used: 0, counters: { requests: 0, denials: 0 }, state: 'active',
       created_at: new Date().toISOString(),
     }
@@ -710,7 +929,11 @@ export class Vault {
     this.#requireUnlocked()
     const g = this.db.grants[grantId]
     if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
-    g.policy = { ...g.policy, ...narrow }
+    // The same intersection every request is checked against, so this can
+    // only ever remove capability. It was an object spread, which replaced
+    // whatever `narrow` named: a "narrowing" to DELETE on /admin/** with
+    // approval: 'auto' widened every one of them.
+    g.policy = policyMod.intersect([g.policy, narrow])
     this.#persist()
     this.audit.write('grant.narrowed', { grant_id: grantId, narrow })
     return g
@@ -739,14 +962,26 @@ export class Vault {
     const stated = Number(grant.policy?.budget?.limit)
     const budgetLimit = Number.isFinite(stated) && stated > 0 ? stated : 1000
     const phPolicy = grant.policy?.placeholder_policy || {}
-    const maxActive = phPolicy.max_active ?? 8
+    // Validated, not `?? 8`: a string or NaN made `length >= max_active`
+    // false for good, which is no bound at all.
+    const maxActive = Number.isSafeInteger(phPolicy.max_active) && phPolicy.max_active >= 1 ? phPolicy.max_active : 8
     const active = Object.values(this.db.placeholders)
       .filter((p) => p.grant_id === grantId && p.field === fieldName && p.state === 'active')
-    if (active.length >= maxActive) {
-      // Evict the oldest unused rather than refusing: an agent that asks twice
-      // should get a working placeholder, not an error it cannot act on.
-      const oldest = active.filter((p) => p.uses === 0).sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-      if (oldest) { oldest.state = 'dead'; oldest.dead_reason = 'rotated' }
+    // Rotate rather than refuse: an agent that asks twice should get a working
+    // placeholder, not an error it cannot act on. Unused ones go first, oldest
+    // first; then the least recently used. Only unused ones used to be
+    // eligible, so once every live row had been used once the bound stopped
+    // applying — ask, use, ask again, and the live rows grew without limit.
+    // A rotated placeholder answers AV_PH_STALE, which says to ask again.
+    const order = (p) => [p.uses === 0 ? 0 : 1, p.last_used_at || p.created_at]
+    active.sort((a, b) => {
+      const [ua, ta] = order(a)
+      const [ub, tb] = order(b)
+      return ua - ub || String(ta).localeCompare(String(tb))
+    })
+    for (const p of active.slice(0, Math.max(0, active.length - maxActive + 1))) {
+      p.state = 'dead'
+      p.dead_reason = 'rotated'
     }
 
     // The grant's placeholder_policy is a ceiling, not a default. It used to
@@ -762,10 +997,20 @@ export class Vault {
     const maxUses = uses == null || !Number.isFinite(asked) || asked < 1
       ? ceiling
       : Math.min(asked, ceiling)
-    const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
+    // The grant's ttl is a ceiling too. An explicit ttlMs replaced it, so a
+    // caller asking for an hour got an hour on a grant that said one second.
+    // Either one that is not a positive number is no limit, not a zero.
+    const positive = (n) => (Number.isFinite(n) && n > 0 ? n : Infinity)
+    const ttl = Math.min(positive(Number(ttlMs ?? NaN)), positive(Number(phPolicy.ttl) * 1000))
+    // Bounded by how long the session can possibly last, not by when it would
+    // expire today. Idle activity moves `expires_at` out towards
+    // `max_expires_at`, and a placeholder pinned to the first value died hours
+    // before the session it belongs to — the one `session create` hands out
+    // included. The session's own liveness is checked on every use anyway
+    // (#authenticate asserts it for token and carrier alike).
     const expires = Math.min(
-      ttl ? Date.now() + ttl : Infinity,
-      Date.parse(session.expires_at),
+      Date.now() + ttl,
+      Date.parse(session.max_expires_at ?? session.expires_at),
     )
     this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
@@ -931,8 +1176,12 @@ export class Vault {
   #collectDeadPlaceholders() {
     const rows = Object.entries(this.db.placeholders)
     if (rows.length <= MAX_PLACEHOLDER_ROWS) return
+    // A row whose time has passed is dead whatever its state says. Rows of a
+    // session nobody touched again stay 'active' — expiry is noticed lazily —
+    // and they were exempt from this bound, so it bounded nothing.
+    const now = Date.now()
     const dead = rows
-      .filter(([, p]) => p.state !== 'active')
+      .filter(([, p]) => p.state !== 'active' || Date.parse(p.expires_at) <= now)
       .sort((a, b) => String(a[1].created_at).localeCompare(String(b[1].created_at)))
     const overBy = rows.length - MAX_PLACEHOLDER_ROWS
     for (const [id] of dead.slice(0, overBy)) delete this.db.placeholders[id]

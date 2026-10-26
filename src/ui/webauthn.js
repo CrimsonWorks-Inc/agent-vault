@@ -21,6 +21,7 @@
 // RS256 is rejected rather than half-supported.
 
 import { createHash, createPublicKey, createVerify, randomBytes, timingSafeEqual } from 'node:crypto'
+import { deny } from '../core/errors.js'
 
 export const ES256 = -7
 
@@ -261,19 +262,36 @@ export function verifyAssertion({
  * its digest: the signature must cover which secret is being stored, but the
  * secret itself has no business in a structure that gets canonicalised,
  * compared and logged.
+ *
+ * The names this function writes itself are refused as request fields. They
+ * used to be copied in like any other, after `op` and after the digest, so a
+ * body carrying `op: 'session.create'` turned a placeholder request into the
+ * operation a human had signed for a narrow session, and one carrying
+ * `prf_secret_sha256` swapped the digest of the human's secret for the
+ * agent's. What is signed has to be what this function computed, so nothing
+ * the caller sends may overwrite it.
  */
 export function operationFor(op, params = {}) {
-  const out = { op }
+  const out = {}
   for (const key of Object.keys(params).sort()) {
     if (key === 'presence') continue          // the proof is not part of what it proves
     const v = params[key]
     if (v === undefined) continue
+    // A body that repeats the route's own op says nothing new; one naming a
+    // different op is the swap.
+    if (key === 'op' && v === op) continue
+    if (key === 'op' || key.endsWith('_sha256')) {
+      throw deny('AV_POLICY_DENIED', `a request cannot carry a field named ${JSON.stringify(key)}`, {
+        rule: 'reserved_operation_field',
+      })
+    }
     if (key === 'value' || key === 'prf_secret') {
       out[`${key}_sha256`] = createHash('sha256').update(String(v)).digest('hex')
       continue
     }
     out[key] = v
   }
+  out.op = op
   return out
 }
 

@@ -99,12 +99,19 @@ test('an agent cannot approve its own held request', async () => {
   assert.deepEqual(seen, [], 'the credential must not have reached the upstream')
 })
 
-test('denying is left open, because it only narrows', async () => {
-  // An agent abandoning its own request gains nothing, and refusing to let it
-  // would be gating something that fails safe.
+test('denying needs a human too, because it did not only narrow', async () => {
+  // Denying was left open on the theory that it fails safe. It did not: a
+  // deny of an approval that had already run returned its cached response,
+  // av-placeholder-next included. An answer of either kind is the human's.
   const held = await gateway('/p/prod/y', { authorization: `Bearer ${placeholder}` })
   const { approval_id: id } = JSON.parse(held.text)
+  const refused = await ctl('POST', '/v1/approvals', { id, granted: false })
+  assert.equal(refused.status, 401)
+  assert.equal(refused.body.code, 'AV_PRESENCE_REQUIRED')
+
+  assert.equal((await ctl('POST', '/v1/presence/window', { passphrase: PASS })).status, 200)
   const denied = await ctl('POST', '/v1/approvals', { id, granted: false })
+  daemon.presenceGraceUntil = 0
   assert.equal(denied.status, 200)
   assert.equal(denied.body.state, 'denied')
 })

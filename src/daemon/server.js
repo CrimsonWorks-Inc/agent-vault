@@ -8,6 +8,7 @@
 //     that keeps a remote peer from growing its own grants.
 
 import { createServer } from 'node:http'
+import { BlockList, isIP } from 'node:net'
 import { unlinkSync, existsSync, chmodSync, chownSync, statSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { Pipeline } from './pipeline.js'
@@ -36,6 +37,13 @@ const VERSION = (() => {
 
 const MAX_BODY = 16 * 1024 * 1024
 
+// Where `agent-vault ui` listens unless told otherwise, and so the one web UI
+// origin the daemon trusts without being told. WebAuthn's relying party is
+// `localhost`, which every port on the machine shares, so the ORIGIN is what
+// tells the real page from a look-alike an agent serves on another port.
+export const DEFAULT_UI_PORT = 7412
+const UI_ORIGIN_SHAPE = /^http:\/\/localhost:(\d{1,5})$/
+
 // Bounds on the pending-confirmation map. Both are reachable from the control
 // socket, which an agent running as the human can reach.
 const MAX_OPEN_CHALLENGES = 64
@@ -54,9 +62,59 @@ const PASSPHRASE_FREE_ATTEMPTS = 5
 // the person who owns the vault.
 const PASSPHRASE_MAX_BACKOFF_MS = 30_000
 
+// Daemons running in this process, for the process-level guard below.
+const RUNNING = new Set()
+
+/**
+ * The last line of defence against a fault nothing else caught.
+ *
+ * #guard covers a request handler's own promise, and nothing else. An error
+ * emitted on a stream with no listener — an upstream connection reset under a
+ * compressed SSE response did it — is an uncaught EXCEPTION, thrown out of an
+ * event emit, and with no handler in the process Node ends it: every agent's
+ * session, every held approval, gone, because of one bad upstream.
+ *
+ * So while a daemon runs it keeps a handler. It does not swallow anything: the
+ * fault goes to the audit log, where the owner looks for what happened, and to
+ * stderr, where the service manager keeps it.
+ */
+function onProcessFault(kind) {
+  return (err) => {
+    const detail = String(err?.stack ?? err?.message ?? err).slice(0, 400)
+    try { console.error(`agent-vault: ${kind}: ${detail}`) } catch { /* nothing better to do */ }
+    for (const daemon of RUNNING) {
+      // Never throw from here: an exception inside this handler is the one
+      // thing that still ends the process.
+      try {
+        daemon.vault.audit?.write('daemon.uncaught', { fault: kind, detail: String(err?.message ?? err).slice(0, 200) })
+      } catch { /* the stderr line above is the record */ }
+    }
+  }
+}
+const PROCESS_GUARDS = {
+  uncaughtException: onProcessFault('uncaught exception'),
+  unhandledRejection: onProcessFault('unhandled rejection'),
+}
+
+function guardProcess(daemon) {
+  if (!RUNNING.size) for (const [event, fn] of Object.entries(PROCESS_GUARDS)) process.on(event, fn)
+  RUNNING.add(daemon)
+}
+
+function unguardProcess(daemon) {
+  if (!RUNNING.delete(daemon) || RUNNING.size) return
+  for (const [event, fn] of Object.entries(PROCESS_GUARDS)) process.removeListener(event, fn)
+}
+
 export class Daemon {
-  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null } = {}) {
+  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null, uiPort = DEFAULT_UI_PORT, uiOrigins = [] } = {}) {
     this.vault = vault
+    // The web UI origins whose assertions count, decided here. They used to be
+    // whatever the caller minting a challenge named, so a page an agent served
+    // on any localhost port could collect a signature the daemon accepted.
+    this.uiPort = uiPort
+    this.configuredUiOrigins = new Set()
+    for (const o of uiOrigins) this.allowUiOrigin(o)
     this.port = port
     this.host = host
     this.socketPath = socketPath
@@ -92,6 +150,8 @@ export class Daemon {
     // vault as well as free online guessing, since nothing counted attempts.
     this.passphraseFailures = 0
     this.passphraseLockedUntil = 0
+    // Refused listener peers already recorded, so a flood is one record.
+    this.refusedPeers = new Map()
   }
 
   /**
@@ -149,7 +209,7 @@ export class Daemon {
       const final = proposalOf({ ...record.proposal, ...proposalOf(d.overrides || {}) })
       return this.#settleSessionRequest(record, d.granted, final)
     }
-    return this.pipeline.decideApproval(d.id, d.granted)
+    return approvalView(this.pipeline.decideApproval(d.id, d.granted))
   }
 
   /** The decision itself, after the gate has let it through. */
@@ -181,6 +241,19 @@ export class Daemon {
       edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
     })
     return { ...SessionRequests.redact(record), granted: final }
+  }
+
+  /**
+   * Hand an approved request's session over, once: whoever gets it here is
+   * the only one who ever will.
+   */
+  #handOver(record, via) {
+    const result = record.result
+    record.result = null
+    record.state = 'collected'
+    this.sessionRequests.persist()
+    this.vault.audit?.write('session_request.collected', { request_id: record.id, via })
+    return result
   }
 
   #createSession(input) {
@@ -234,7 +307,14 @@ export class Daemon {
    * documented state of a vault with no human secret.
    */
   #requireHumanForWidening(op, operation = null, presence = null) {
-    if (Date.now() < this.presenceGraceUntil) return
+    if (Date.now() < this.presenceGraceUntil) {
+      // The window is daemon-wide: it admits whoever calls while it is open,
+      // not only the command the human typed the passphrase for. So every
+      // operation it admits is named in the log, where it used to show only
+      // that a window had opened.
+      this.vault.audit?.write('presence.window_used', { op })
+      return
+    }
     if (presence && this.#verifyOpAssertion(operation, presence)) {
       this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform' })
       return
@@ -263,6 +343,78 @@ export class Daemon {
   }
 
   /**
+   * The `fresh` presence level: proof that a human is here for THIS operation.
+   *
+   * Used by the operations that change who can prove presence at all —
+   * enrolling or replacing the presence authenticator, wrapping the master key
+   * to a Touch ID secret or removing that wrap, trusting another UI origin —
+   * and by anything else that must not ride on someone else's window.
+   *
+   * The shared passphrase window is never consulted. It admits every caller on
+   * the socket while it is open, so five minutes of a human's presence for an
+   * ordinary command let an agent wrap the master key to a PRF secret of its
+   * own, or install its own authenticator, and keep that after the window
+   * closed. The proof travels with the request: an assertion from the enrolled
+   * authenticator over this exact operation, or `presence.passphrase`, checked
+   * and throttled like every other attempt. A successful proof opens no window.
+   * `operationFor` drops `presence`, so the passphrase is never bound into a
+   * signed operation.
+   */
+  #requireFreshPresence(op, operation, presence) {
+    if (presence?.challengeId && this.#verifyOpAssertion(operation, presence)) {
+      this.vault.audit?.write('presence.verified', { op, factor: 'webauthn-platform', fresh: true })
+      return
+    }
+    if (typeof presence?.passphrase === 'string' && this.vault.hasPassphrase) {
+      this.#throttlePassphrase()
+      const ok = this.vault.verifyPassphrase(presence.passphrase)
+      this.#recordPassphraseAttempt(ok)
+      if (!ok) throw deny('AV_PRESENCE_DENIED', 'passphrase did not verify', { rule: 'fresh_presence' })
+      this.vault.audit?.write('presence.verified', { op, factor: 'passphrase', fresh: true })
+      return
+    }
+    const factors = []
+    if (this.vault.hasPassphrase) factors.push('passphrase')
+    if (this.vault.db?.kv?.webauthn) factors.push('authenticator')
+    // Unlike the widening gate, no factor is not a pass: there is nothing a
+    // human could have proved, so nothing that needs a fresh proof can happen.
+    if (!factors.length) {
+      throw deny('AV_PRESENCE_REQUIRED', `${op} needs a human factor, and none is enrolled`, {
+        rule: 'factor_required',
+        factors: [],
+        hint: 'This change needs a human factor and none is enrolled. Set one first: agent-vault passphrase set',
+      })
+    }
+    throw deny('AV_PRESENCE_REQUIRED', `${op} needs your ${factors.join(' or ')} for this one operation`, {
+      rule: 'fresh_presence',
+      factors,
+      hint: factors.includes('passphrase')
+        ? 'This change needs your passphrase for this one operation, even inside a confirmation window. Run the command again; agent-vault will ask.'
+        : 'Confirm it in the web UI with your authenticator: agent-vault ui',
+    })
+  }
+
+  /** The web UI origins whose assertions this daemon accepts. */
+  uiOrigins() {
+    return [...new Set([
+      `http://localhost:${this.uiPort}`,
+      ...this.configuredUiOrigins,
+      ...(this.vault.db?.kv?.ui_origins || []),
+    ])]
+  }
+
+  /**
+   * Trust another web UI origin, in process. This is configuration by whoever
+   * runs the daemon; nothing on the socket reaches it. Over the socket the
+   * same change is POST /v1/ui/origins, which needs the owner's proof.
+   */
+  allowUiOrigin(origin) {
+    const o = String(origin || '')
+    if (!uiOriginOk(o)) throw new Error(`not a web UI origin: ${JSON.stringify(origin)} (http://localhost:<port>)`)
+    this.configuredUiOrigins.add(o)
+  }
+
+  /**
    * Verify an assertion against the challenge this daemon minted, and against
    * the operation actually being performed. The comparison happens here, not
    * in the UI, so a hostile page cannot show one operation and submit another.
@@ -284,9 +436,10 @@ export class Daemon {
         clientDataJSON: presence.clientDataJSON,
         signature: presence.signature,
         expectedChallenge: pending.challenge,
-        // The page can only be served from loopback, and the relying party id
-        // pins the domain; the port is whichever one `agent-vault ui` got.
-        expectedOrigins: pending.origins,
+        // The relying party id pins the domain and nothing more: every port
+        // on localhost shares it. Which ports are the real UI is the daemon's
+        // list, never the one the challenge's minter supplied.
+        expectedOrigins: this.uiOrigins(),
         rpId: 'localhost',
         enrolled,
       })
@@ -314,18 +467,28 @@ export class Daemon {
       case 'DELETE /v1/credentials': return of('cred.remove', { slug: url.searchParams.get('slug') })
       case 'POST /v1/sessions': return of('session.create', input)
       case 'POST /v1/placeholders': return of('placeholder.issue', input)
-      case 'POST /v1/approvals': return of('approval.approve', input)
+      // The verdict picks the op name, the same way the UI's builder does, so
+      // the human is shown which answer they are giving.
+      case 'POST /v1/approvals': return of(input?.granted === false ? 'approval.deny' : 'approval.approve', input)
       // Bound to the list exactly as it was sent. Normalising here would mean
       // the human signed one thing and the daemon executed another.
       case 'POST /v1/pending/decide-many': return of('pending.decide_many', { decisions: input?.decisions })
       case 'POST /v1/listeners': return of('listener.add', input)
-      // One route, two opposite actions. `action` is part of the bound
-      // operation either way, but the op NAME is what the UI shows the human,
-      // and asking someone to confirm "touchid.enroll" for a removal is
-      // asking them to approve something they were not shown.
-      case 'POST /v1/factors/webauthn':
-        return of(input?.action === 'remove' ? 'touchid.remove' : 'touchid.enroll', input)
+      // One route, two opposite actions. The op NAME is what the UI shows the
+      // human, and asking someone to confirm "touchid.enroll" for a removal is
+      // asking them to approve something they were not shown. `action` is
+      // carried by that name rather than repeated as a field: the handler
+      // reads nothing from it but "remove or not", which the name already
+      // states, and repeating it made the daemon's operation differ from the
+      // one the page signs, so no enrol or removal from the UI ever verified.
+      case 'POST /v1/factors/webauthn': {
+        const { action, ...rest } = input || {}
+        return of(action === 'remove' ? 'touchid.remove' : 'touchid.enroll', action === 'remove' ? {} : rest)
+      }
+      // A fresh passphrase travels inside `presence`, which operationFor
+      // drops, so it is never bound into the signed operation.
       case 'POST /v1/presence': return of('presence.enroll', input)
+      case 'POST /v1/ui/origins': return of('ui.origin_add', input)
       default: return null
     }
   }
@@ -387,6 +550,7 @@ export class Daemon {
       }
     }
 
+    guardProcess(this)
     this.vault.audit?.write('daemon.start', {
       port: this.gatewayPort, socket: this.socketPath, listeners: this.listeners.map((l) => l.id),
     })
@@ -408,8 +572,16 @@ export class Daemon {
     const { host, port } = parseAddress(entry.address)
     const surfaces = new Set(entry.surfaces || [])
     const remote = !isLoopbackHost(host)
+    // Parsed before anything binds, so a list that cannot be read stops the
+    // listener rather than leaving it open to everyone.
+    const allow = parseAllowCidr(entry.allow_cidr)
 
-    const handler = (req, res) => this.#guard(req, res, async () => {
+    // Set when the listener is removed. A connection accepted before that can
+    // still deliver a request after it — a TLS peer that held its handshake
+    // open across `listen rm` was served by the removed listener — so the
+    // handler itself refuses once revoked, whatever the socket's history.
+    let revoked = false
+    const handler = (req, res) => revoked ? req.socket.destroy() : this.#guard(req, res, async () => {
       // What the pipeline uses to decide whether this request came from the
       // machine or from the network.
       req.listener = {
@@ -450,6 +622,33 @@ export class Daemon {
       server = createServer(handler)
     }
 
+    // Every raw connection, so revoking can drop them all. closeAllConnections()
+    // only knows the sockets HTTP has seen; a TLS peer still mid-handshake is
+    // invisible to it, finished the handshake after removal, and kept the
+    // removal itself waiting for as long as it liked.
+    const sockets = new Set()
+    server.on('connection', (socket) => {
+      sockets.add(socket)
+      socket.once('close', () => sockets.delete(socket))
+    })
+    const revoke = () => {
+      revoked = true
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
+    }
+
+    // `--allow-cidr` was stored and never read, so a listener its operator
+    // believed was limited to the tailnet answered anyone who could reach the
+    // port. Checked on the raw connection, before TLS or HTTP see a byte, so a
+    // peer outside the list gets nothing to talk to at all.
+    if (allow) {
+      server.on('connection', (socket) => {
+        if (peerAllowed(allow, socket.remoteAddress)) return
+        this.#peerRefused(entry.id, socket.remoteAddress)
+        socket.destroy()
+      })
+    }
+
     await new Promise((resolve, reject) => {
       server.once('error', reject)
       server.listen(port, host, () => { server.removeListener('error', reject); resolve() })
@@ -459,7 +658,38 @@ export class Daemon {
     this.vault.audit?.write('listen.bound', {
       listener_id: entry.id, address: `${host}:${bound.port}`, tls: !!entry.tls, surfaces: [...surfaces],
     })
-    return { id: entry.id, host, port: bound.port, tls: !!entry.tls, surfaces: [...surfaces], server }
+    return { id: entry.id, host, port: bound.port, tls: !!entry.tls, surfaces: [...surfaces], server, revoke }
+  }
+
+  /**
+   * Record a refused peer. Once per listener and address per minute: anyone
+   * who can reach the port can connect as often as they like, and a record
+   * per attempt would let them bury the audit log in refusals.
+   */
+  #peerRefused(listenerId, address) {
+    const key = `${listenerId}|${address}`
+    const now = Date.now()
+    if (now - (this.refusedPeers.get(key) || 0) < 60_000) return
+    if (this.refusedPeers.size >= 256) this.refusedPeers.clear()
+    this.refusedPeers.set(key, now)
+    this.vault.audit?.write('listen.peer_refused', { listener_id: listenerId, peer: String(address || 'unknown') })
+  }
+
+  /**
+   * Stop serving a listener that has been removed. Deleting the record alone
+   * left the bound server answering the network until the next restart, while
+   * `listen list` and the CLI both said it was gone.
+   */
+  async #unbindListener(lid) {
+    const bound = (this.listeners || []).find((l) => l.id === lid)
+    if (!bound) return false
+    this.listeners = this.listeners.filter((l) => l !== bound)
+    this.servers = this.servers.filter((sv) => sv !== bound.server)
+    const closed = new Promise((resolve) => bound.server.close(resolve))
+    bound.revoke()
+    await closed
+    this.vault.audit?.write('listen.unbound', { listener_id: lid })
+    return true
   }
 
   /**
@@ -525,6 +755,7 @@ export class Daemon {
   }
 
   async stop() {
+    unguardProcess(this)
     for (const s of this.servers) await new Promise((r) => s.close(r))
     if (this.socketPath && existsSync(this.socketPath)) unlinkSync(this.socketPath)
     this.vault.audit?.write('daemon.stop', {})
@@ -627,8 +858,9 @@ export class Daemon {
 
   /** Streamable HTTP MCP. Same handler as stdio; only the framing differs. */
   async #onMcpHttp(req, res, body, url) {
+    let sessionHeader = {}
     const send = (status, obj, headers = {}) => {
-      res.writeHead(status, { 'content-type': 'application/json', ...headers })
+      res.writeHead(status, { 'content-type': 'application/json', ...sessionHeader, ...headers })
       res.end(obj === null ? '' : JSON.stringify(obj))
     }
 
@@ -662,11 +894,15 @@ export class Daemon {
       try { this.vault.assertSessionLive(session) } catch { session = null }
     }
     this.currentMcpSession = session
+    // A token that was sent and is dead says so, on every answer. The
+    // handshake no longer fails with 401 for it, and 401 was the only signal
+    // the stdio bridge had to switch to a session a human has since made.
+    sessionHeader = token && !session ? { 'av-session-invalid': '1' } : {}
     // Not stored on the server object: it is passed with each message below.
 
     if (req.method === 'DELETE') {
       const sid = req.headers['mcp-session-id']
-      if (sid) this.mcp.closeSession(sid)
+      if (sid) this.mcp.closeSession(sid, { record: !!session })
       return send(204, null)
     }
 
@@ -712,7 +948,11 @@ export class Daemon {
     let mcpSessionId = req.headers['mcp-session-id']
     const extra = {}
     if (isInitialize) {
-      mcpSessionId = this.mcp.openSession()
+      // Recorded only for a caller with a live session. The handshake needs
+      // no session — on purpose — so a record per anonymous initialize let any
+      // local process, or any peer of an mcp listener, write the audit log as
+      // fast as it could send.
+      mcpSessionId = this.mcp.openSession({ record: !!session })
       extra['mcp-session-id'] = mcpSessionId
       extra['mcp-protocol-version'] = LATEST_PROTOCOL
     } else if (mcpSessionId && !this.mcp.hasSession(mcpSessionId)) {
@@ -815,11 +1055,13 @@ export class Daemon {
             throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
           }
           try {
-            const record = this.sessionRequests.propose({ proposal, reason: input.reason })
+            const { record, collectSecret } = this.sessionRequests.propose({ proposal, reason: input.reason })
             return json(200, {
               ...SessionRequests.redact(record),
+              // Shown once, here, to the asker. Only its hash is kept.
+              collect_secret: collectSecret,
               next: {
-                agent: 'poll GET /v1/session-requests/collect?id=<id> until a human answers',
+                agent: 'poll GET /v1/session-requests/collect?id=<id>&secret=<collect_secret> until a human answers',
                 human: [`agent-vault approvals`, `agent-vault approve ${record.id}`],
               },
             })
@@ -837,18 +1079,25 @@ export class Daemon {
         // The agent collects its own token, exactly once. Reading is not
         // widening: the token was authorised by the human who approved it, and
         // handing it over twice would leave a second live copy in memory.
+        //
+        // "Its own" is now something this route checks. It handed the token to
+        // whoever presented the id first, and every pending id is listed on
+        // this socket, so another agent could poll the request and take the
+        // session a human granted to someone else. The asker was given a
+        // secret when it asked; nobody else has it.
         case 'GET /v1/session-requests/collect': {
           const record = this.sessionRequests.get(url.searchParams.get('id'))
           if (!record) throw deny('AV_NOT_FOUND', 'no such session request')
+          if (!SessionRequests.mayCollect(record, url.searchParams.get('secret'))) {
+            throw deny('AV_POLICY_DENIED', 'that is not the secret this request was opened with', {
+              rule: 'collect_secret',
+              hint: 'Only the agent that asked can collect: pass the collect_secret it was given as &secret=.',
+            })
+          }
           if (record.state === 'pending') return json(200, { state: 'pending' })
           if (record.state === 'denied') return json(200, { state: 'denied' })
           if (!record.result) return json(200, { state: record.state, detail: 'the answer is no longer available; ask again' })
-          const result = record.result
-          record.result = null
-          record.state = 'collected'
-          this.sessionRequests.persist()
-          this.vault.audit?.write('session_request.collected', { request_id: record.id })
-          return json(200, { state: 'approved', ...result })
+          return json(200, { state: 'approved', ...this.#handOver(record, 'collect') })
         }
 
         case 'POST /v1/session-requests/decide': {
@@ -876,7 +1125,13 @@ export class Daemon {
             }),
             input.presence,
           )
-          return json(200, this.#settleSessionRequest(record, input.granted, final))
+          const settled = this.#settleSessionRequest(record, input.granted, final)
+          // The approving human's client records the session where local
+          // clients look; the daemon cannot, it runs as its own uid. It gets it
+          // here, from the decision it just proved presence for, which counts
+          // as the one collection.
+          if (input.granted && record.result) settled.session = this.#handOver(record, 'decide')
+          return json(200, settled)
         }
 
         // Several decisions, one act of presence.
@@ -909,6 +1164,18 @@ export class Daemon {
               decided.push({ id: d.id, kind: d.kind, outcome: 'skipped', reason: e.detail || e.message })
             }
           }
+          // A client can record one session, so the approving client gets the
+          // session only when the batch granted exactly one. With several,
+          // each asker collects its own with its secret; handing them all to
+          // one client would spend every agent's single collection on a store
+          // that keeps the last.
+          const grantedSessions = decided.filter(
+            (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
+          )
+          if (grantedSessions.length === 1) {
+            const record = this.sessionRequests.get(grantedSessions[0].id)
+            if (record?.result) grantedSessions[0].result.session = this.#handOver(record, 'decide')
+          }
           this.vault.audit?.write('pending.decided_many', {
             granted: input.decisions.filter((d) => d.granted).map((d) => d.id),
             denied: input.decisions.filter((d) => !d.granted).map((d) => d.id),
@@ -939,7 +1206,11 @@ export class Daemon {
           if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.cred}`)
           // Never silently borrow. Defaulting to whichever session happened to
           // be active is how one agent's request spends another's grant.
-          const active = Object.values(this.vault.db.sessions).filter((s) => s.state === 'active')
+          // Live, not merely marked active: expiry is noticed lazily, so a
+          // session nobody has touched since it ran out still says 'active'.
+          const now = Date.now()
+          const active = Object.values(this.vault.db.sessions)
+            .filter((s) => s.state === 'active' && Date.parse(s.expires_at) > now)
           if (!input.sid && active.length > 1) {
             throw deny('AV_SESSION_REQUIRED', `${active.length} sessions are active; name the one to issue for`, {
               rule: 'explicit_session',
@@ -947,6 +1218,15 @@ export class Daemon {
             })
           }
           const session = input.sid ? this.vault.db.sessions[input.sid] : active[0]
+          // Both of these used to fall through to `session.id` and answer with
+          // a TypeError.
+          if (input.sid && !session) throw deny('AV_NOT_FOUND', `no session ${input.sid}`)
+          if (!session) {
+            throw deny('AV_SESSION_REQUIRED', 'no session is active to issue a placeholder for', {
+              next: { cli: [`agent-vault session create --cred ${cred.slug}`] },
+            })
+          }
+          this.vault.assertSessionLive(session)
           const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
           if (!grant) throw deny('AV_NO_GRANT', `no grant for ${input.cred} in session ${session.id}`)
           const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: cred.fields[0].name, uses: input.uses ?? null })
@@ -954,18 +1234,25 @@ export class Daemon {
         }
 
         case 'GET /v1/approvals':
-          return json(200, this.pipeline.pendingApprovals())
+          return json(200, this.pipeline.pendingApprovals().map(approvalView))
         case 'POST /v1/approvals': {
           // Granting is the entire point of the approval: an agent that could
           // approve its own held request would have defeated the one control
-          // that exists to put a human in the loop. Denying is left open —
-          // it only ever narrows, and an agent abandoning its own request is
-          // a legitimate thing to want.
+          // that exists to put a human in the loop.
+          //
+          // Denying used to be left open on the theory that it only narrows.
+          // It did not: an approval that had already run kept the response
+          // the agent's request got, and denying it returned that response —
+          // `av-placeholder-next` included, a successor that works as a
+          // carrier on its own. Every answer is a human's answer now, bound to
+          // which answer it is, so a signature for "approve" cannot be spent on
+          // "deny" or the other way round.
           const granted = input.granted !== false
-          if (granted) {
-            this.#requireHumanForWidening('approval grant', this.#wideningOperation(route, url, input), input.presence)
-          }
-          return json(200, this.pipeline.decideApproval(input.id, granted))
+          this.#requireHumanForWidening(
+            granted ? 'approval grant' : 'approval deny',
+            this.#wideningOperation(route, url, input), input.presence,
+          )
+          return json(200, approvalView(this.pipeline.decideApproval(input.id, granted)))
         }
 
         // The audit log is keyed from the vault master key, so a locked vault
@@ -996,6 +1283,16 @@ export class Daemon {
               hint: 'An address is <host>:<port>, for example 127.0.0.1:7443.',
             })
           }
+          // Never accepted and ignored: a list that cannot be read is refused
+          // here, where the person who typed it is still looking.
+          try {
+            parseAllowCidr(input.allow_cidr)
+          } catch (e) {
+            throw deny('AV_POLICY_DENIED', e.message, {
+              rule: 'listener_allow_cidr',
+              hint: 'Each entry is <address>/<prefix>, for example 100.64.0.0/10 or fd7a:115c:a1e0::/48.',
+            })
+          }
           if (!isLoopbackHost(host) && !input.tls) {
             throw deny('AV_REMOTE_FORBIDDEN', `listener ${input.id} is on a network address and has no TLS`, {
               rule: 'listener_tls',
@@ -1004,9 +1301,12 @@ export class Daemon {
           }
           return json(200, this.vault.addListener(input))
         }
-        case 'DELETE /v1/listeners':
-          this.vault.removeListener(url.searchParams.get('id'))
-          return json(200, { ok: true })
+        case 'DELETE /v1/listeners': {
+          const lid = url.searchParams.get('id')
+          this.vault.removeListener(lid)
+          const unbound = await this.#unbindListener(lid)
+          return json(200, { ok: true, unbound })
+        }
 
         case 'GET /v1/presence':
           return json(200, this.vault.db.kv.webauthn || null)
@@ -1029,10 +1329,16 @@ export class Daemon {
           // Requiring the passphrase first makes that impossible and matches
           // the unlock factor, which has always refused to enrol before one
           // exists for the same reason.
-          if (!this.vault.hasPassphrase) {
+          // A REPLACEMENT is proved by the authenticator being replaced (see
+          // below), so a vault whose passphrase was later removed can still
+          // rotate its key. Only a first enrolment needs the passphrase to
+          // exist.
+          const existed = !!this.vault.db.kv.webauthn
+          if (!existed && !this.vault.hasPassphrase) {
             throw deny('AV_POLICY_DENIED', 'set a passphrase before enrolling an authenticator', {
               rule: 'factor_order',
               hint: 'agent-vault passphrase set. The passphrase is the recovery factor, and enrolling first would let whoever enrolled lock everyone else out.',
+              next: 'agent-vault passphrase set',
             })
           }
           // The operation and the assertion are passed through, so a human
@@ -1043,16 +1349,15 @@ export class Daemon {
           // from the key being replaced is the strongest proof there is that
           // the human holds it. Without this, a vault whose passphrase had
           // since been removed could never rotate its authenticator at all.
-          this.#requireHumanForWidening('presence enroll', this.#wideningOperation(route, url, input), input.presence)
+          this.#requireFreshPresence('presence enroll', this.#wideningOperation(route, url, input), input.presence)
           // Re-enrolling replaces the only thing standing between an agent and
-          // the approve button, so it is audited loudly either way.
-          const existed = !!this.vault.db.kv.webauthn
-          this.vault.db.kv.webauthn = input
-          this.vault.save()
-          this.vault.audit.write('presence.factor_added', {
-            class: 'webauthn-platform', credential_id: input.credentialId, replaced_existing: existed,
-          })
-          return json(200, { ok: true, replaced: existed })
+          // the approve button, so it is audited loudly either way. The proof
+          // that came with the request is not part of the key, and a
+          // passphrase must never be written into the vault in clear. The
+          // store decides what may be stored: a replacement the daemon could
+          // not verify a signature from is refused, and the old key stays.
+          const { replaced } = this.vault.setPresenceKey(withoutProof(input))
+          return json(200, { ok: true, replaced })
         }
         case 'PATCH /v1/presence': {
           // Gone, deliberately, and kept as an explicit refusal so an older UI
@@ -1080,7 +1385,33 @@ export class Daemon {
 
         case 'POST /v1/lock':
           this.vault.lock()
+          // A lock that leaves the passphrase window open is not one: the
+          // window survived lock and unlock, still admitting every caller.
+          this.presenceGraceUntil = 0
           return json(200, { ok: true, locked: true })
+
+        // Which web UI origins this daemon accepts assertions from.
+        case 'GET /v1/ui':
+          return json(200, { port: this.uiPort, origins: this.uiOrigins() })
+        case 'POST /v1/ui/origins': {
+          const origin = String(input.origin || '')
+          if (!uiOriginOk(origin)) {
+            throw deny('AV_POLICY_DENIED', `not a web UI origin: ${JSON.stringify(input.origin)}`, {
+              rule: 'ui_origin',
+              hint: 'The UI is served on loopback under the name the authenticator is bound to: http://localhost:<port>.',
+            })
+          }
+          // Trusting an origin is trusting every page served there to ask for
+          // your fingerprint, so it needs fresh presence like a factor
+          // change: a shared window is not enough.
+          this.#requireFreshPresence('ui origin add', this.#wideningOperation(route, url, input), input.presence)
+          const list = new Set(this.vault.db.kv.ui_origins || [])
+          list.add(origin)
+          this.vault.db.kv.ui_origins = [...list]
+          this.vault.save()
+          this.vault.audit?.write('ui.origin_added', { origin })
+          return json(200, { ok: true, origins: this.uiOrigins() })
+        }
 
         case 'POST /v1/unlock': {
           if (!this.vault.locked) return json(200, { ok: true, locked: false, already: true })
@@ -1126,15 +1457,19 @@ export class Daemon {
           // This comment used to say the route required a presence window. It
           // did not; nothing here called the gate. Now it does.
           if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault first')
-          this.#requireHumanForWidening(
+          // Without a passphrase, enrolling is refused whoever asks: the
+          // passphrase is the recovery factor, and a vault must never be left
+          // with the authenticator as its only way in. Said before the gate,
+          // so the owner learns what to do instead of tapping for a refusal.
+          // The refusal widens nothing, and enroll-params already says
+          // whether a passphrase exists.
+          if (input.action !== 'remove') this.vault.requireRecoveryFactor()
+          this.#requireFreshPresence(
             input.action === 'remove' ? 'touch id removal' : 'touch id enrollment',
             this.#wideningOperation(route, url, input), input.presence,
           )
           if (input.action === 'remove') {
             return json(200, { ok: true, removed: this.vault.removeWebauthnUnlock() })
-          }
-          if (!this.vault.hasPassphrase) {
-            throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor')
           }
           this.vault.addWebauthnUnlock(input.credential_id, input.prf_secret)
           return json(200, { ok: true, enrolled: true })
@@ -1178,9 +1513,9 @@ export class Daemon {
             if (oldest === undefined) break
             this.opChallenges.delete(oldest)
           }
-          this.opChallenges.set(id, {
-            challenge, operation, origins: input.origins || [], expires: Date.now() + 60_000,
-          })
+          // `input.origins` is not read. The caller used to name which origins
+          // the assertion could come from, so an agent named its own page.
+          this.opChallenges.set(id, { challenge, operation, expires: Date.now() + 60_000 })
           return json(200, {
             challengeId: id,
             challenge: webauthn.b64url(challenge),
@@ -1293,6 +1628,66 @@ export class Daemon {
       return json(err.http, err.toProblem())
     }
   }
+}
+
+/** The shape of a web UI origin this daemon will consider trusting. */
+function uiOriginOk(origin) {
+  const m = UI_ORIGIN_SHAPE.exec(String(origin))
+  return !!m && Number(m[1]) > 0 && Number(m[1]) <= 65535
+}
+
+/**
+ * A request body without the proof that rode along with it, for storing. A
+ * stray top-level `passphrase` is dropped too: whatever else happens, one is
+ * never written into the vault in clear.
+ */
+function withoutProof(input) {
+  const { presence, passphrase, ...rest } = input || {}
+  return rest
+}
+
+/**
+ * An approval as the control API reports it: what it is and how it stands,
+ * never the response the agent's request got. That response is the agent's,
+ * and it carries headers — `av-placeholder-next` among them — that work as a
+ * capability on their own.
+ */
+function approvalView(approval) {
+  if (!approval || typeof approval !== 'object') return approval
+  const { result, ...rest } = approval
+  return rest
+}
+
+/**
+ * A listener's `allow_cidr`, as something that can answer "may this peer
+ * connect". Null means no restriction. Anything that is not a list of
+ * <address>/<prefix> blocks throws: a restriction that cannot be read must not
+ * quietly become no restriction.
+ */
+export function parseAllowCidr(list) {
+  if (list == null) return null
+  if (!Array.isArray(list)) throw new Error('allow_cidr must be a list of CIDR blocks')
+  if (!list.length) return null
+  const allow = new BlockList()
+  for (const raw of list) {
+    const m = /^([^/\s]+)\/(\d{1,3})$/.exec(String(raw).trim())
+    const family = m ? isIP(m[1]) : 0
+    const prefix = m ? Number(m[2]) : NaN
+    if (!family || prefix > (family === 4 ? 32 : 128)) {
+      throw new Error(`${JSON.stringify(raw)} is not a CIDR block`)
+    }
+    allow.addSubnet(m[1], prefix, family === 4 ? 'ipv4' : 'ipv6')
+  }
+  return allow
+}
+
+/** Whether a peer address falls inside an allow list. An unreadable one does not. */
+function peerAllowed(allow, address) {
+  // An IPv4 peer on a dual-stack socket arrives as ::ffff:a.b.c.d.
+  const a = String(address || '').replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, '')
+  const family = isIP(a)
+  if (!family) return false
+  return allow.check(a, family === 4 ? 'ipv4' : 'ipv6')
 }
 
 /** `iface:port`, where iface may be a name, an IPv4 literal, or [v6]. */

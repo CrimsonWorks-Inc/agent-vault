@@ -19,11 +19,27 @@
 // it had been used on — the first question anyone asks it. The query string
 // still stays out: that is where a credential actually appears in a URL.
 
-import { appendFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, writeFileSync, openSync, writeSync, closeSync, renameSync, truncateSync } from 'node:fs'
 import { createHmac } from 'node:crypto'
 import * as canon from '../core/canon.js'
 
 const CHECKPOINT_EVERY = 1000
+const HEX64 = /^[0-9a-f]{64}$/
+
+/**
+ * Whether a parsed line has the shape of a record. Parsing is not enough: a
+ * line of `{}` parses, recovery then resumed from `seq: undefined`, and the
+ * next write inside unlock threw — AV_LOCKED for the right factor, every
+ * time. A line without the chain fields is as unreadable as one that does
+ * not parse, and is reported the same way.
+ */
+function isRecord(row) {
+  return !!row && typeof row === 'object' && !Array.isArray(row)
+    && Number.isSafeInteger(row.seq) && row.seq >= 1
+    && typeof row.ts === 'string' && typeof row.kind === 'string'
+    && typeof row.hash === 'string' && HEX64.test(row.hash)
+    && typeof row.prev_hash === 'string' && HEX64.test(row.prev_hash)
+}
 
 export class AuditLog {
   /**
@@ -57,25 +73,55 @@ export class AuditLog {
     this.truncation = null
     /** Set when a non-empty log had no authentic anchor beside it. */
     this.anchorMissing = null
-    if (existsSync(path)) this.#recover()
-    else writeFileSync(path, '', { mode: 0o600 })
+    /** Set when lines in the log could not be read at all. */
+    this.corruption = null
+    // A missing log goes through recovery like any other, rather than being
+    // re-created and re-anchored on the spot. Skipping it meant `rm
+    // audit.jsonl` while the daemon was stopped wrote a fresh anchor at seq 0
+    // over the old one, and verify reported a one-record log as intact.
+    if (!existsSync(path)) writeFileSync(path, '', { mode: 0o600 })
+    this.#recover()
     // Recorded into the chain itself, immediately, because the very next write
     // moves the anchor to the current length and would otherwise destroy the
     // only evidence that anything was missing.
+    if (this.corruption) this.write('audit.corruption_detected', this.corruption)
     if (this.truncation) this.write('audit.truncation_detected', this.truncation)
     else if (this.anchorMissing) this.write('audit.anchor_missing', this.anchorMissing)
-    else this.#anchor()
+    else if (!this.corruption) this.#anchor()
     // From here this vault is known to keep an anchor, so a later absence is
     // tampering rather than an upgrade. Written after the first anchor exists,
     // so a crash in between leaves the weaker claim rather than a false one.
     this.stamp?.markAnchored?.()
   }
 
-  /** The (seq, hash) the log should end at, authenticated under K_audit. */
+  /**
+   * The (seq, hash) the log should end at, authenticated under K_audit.
+   *
+   * Written to a temp file and renamed over the old one. It was rewritten in
+   * place — truncate, then write — so a crash between the two left an empty
+   * anchor, which an anchored vault reads as somebody having removed it: a
+   * permanent, false finding of tampering. A rename is atomic, so a crashed
+   * process leaves the old anchor or the new one.
+   *
+   * Not fsynced, and neither is the log line before it: this runs several
+   * times per proxied request, and two flushes per record made every request
+   * several times slower. The cost of that is a power cut, not a crash — the
+   * OS may then persist the anchor ahead of the line it covers, which reads
+   * as truncation. The README states it under the honest limits.
+   */
   #anchor() {
     const body = { seq: this.seq, hash: this.prevHash }
     body.mac = createHmac('sha256', this.key).update(`${body.seq}|${body.hash}`).digest('hex')
-    writeFileSync(this.anchorPath, JSON.stringify(body), { mode: 0o600 })
+    const tmp = `${this.anchorPath}.tmp`
+    const fd = openSync(tmp, 'w', 0o600)
+    try { writeSync(fd, JSON.stringify(body)) } finally { closeSync(fd) }
+    renameSync(tmp, this.anchorPath)
+  }
+
+  /** Append one line. */
+  #append(line) {
+    const fd = openSync(this.path, 'a', 0o600)
+    try { writeSync(fd, line) } finally { closeSync(fd) }
   }
 
   /** Read the anchor, or null if it is absent or not authentic. */
@@ -105,22 +151,46 @@ export class AuditLog {
    * Only the last line. A bad line anywhere else is corruption the chain
    * should report, not something to quietly skip past.
    */
-  /** Rewrite the file without a half-written final line, if there is one. */
+  /**
+   * Repair the end of the file: drop a half-written final line, and finish a
+   * complete one that lost only its newline.
+   *
+   * The newline case used to pass as complete, so the next append joined onto
+   * it and produced one corrupt line in the middle of the log. The repair is a
+   * truncate at the last newline, never a rewrite of the whole file: a crash
+   * during a rewrite could take the entire history with it.
+   */
   #dropTornTail() {
     const text = readFileSync(this.path, 'utf8')
-    const lines = text.split('\n').filter(Boolean)
-    if (!lines.length) return
-    try { JSON.parse(lines[lines.length - 1]); return } catch { /* torn */ }
-    lines.pop()
-    writeFileSync(this.path, lines.length ? `${lines.join('\n')}\n` : '', { mode: 0o600 })
+    if (!text || text.endsWith('\n')) return
+    const cut = text.lastIndexOf('\n') + 1
+    try {
+      JSON.parse(text.slice(cut))
+      this.#append('\n')
+    } catch {
+      truncateSync(this.path, Buffer.byteLength(text.slice(0, cut)))
+    }
   }
 
+  /**
+   * Every line in the file, as records. A line that cannot be read comes back
+   * as `{ unreadable: true, line }` rather than throwing: this runs inside
+   * unlock, where a throw looked exactly like a wrong passphrase, so one bad
+   * sector in the middle of the log locked the owner out of every credential.
+   * The chain reports the break instead, which is what it exists to do.
+   */
   #rows() {
     const lines = readFileSync(this.path, 'utf8').split('\n').filter(Boolean)
     if (lines.length) {
       try { JSON.parse(lines[lines.length - 1]) } catch { lines.pop() }
     }
-    return lines.map((l) => JSON.parse(l))
+    return lines.map((l, i) => {
+      try {
+        const row = JSON.parse(l)
+        if (isRecord(row)) return row
+      } catch { /* reported below */ }
+      return { unreadable: true, line: i + 1 }
+    })
   }
 
   #recover() {
@@ -130,12 +200,18 @@ export class AuditLog {
     // genuinely broken chain, one record further in, every time.
     this.#dropTornTail()
     const rows = this.#rows()
-    const lines = rows
+    const unreadable = rows.filter((r) => r.unreadable).map((r) => r.line)
+    if (unreadable.length) this.corruption = { lines: unreadable.slice(0, 20), count: unreadable.length }
+    const lines = rows.filter((r) => !r.unreadable)
     const anchor = this.#readAnchor()
     if (!lines.length) {
       // An emptied log with a live anchor is the loudest version of the same
       // attack, and the one a chain walk can say nothing about at all.
       if (anchor && anchor.seq > 0) this.truncation = { expected_seq: anchor.seq, found_seq: 0 }
+      // And with the anchor gone as well, the stamp is the only witness. An
+      // empty or deleted log on a vault known to keep an anchor is the whole
+      // history erased, not a vault that has never written anything.
+      else if (!anchor && this.stamp?.anchored) this.anchorMissing = { found_seq: 0, was_anchored: true }
       return
     }
     const last = lines[lines.length - 1]
@@ -172,9 +248,13 @@ export class AuditLog {
    * shape; the chain fields are added here.
    */
   write(kind, fields = {}) {
-    const record = { seq: this.seq + 1, ts: new Date().toISOString(), kind, ...fields, prev_hash: this.prevHash }
+    // Made recordable first. The canonical form refuses floats, and fields
+    // carry agent-written values (a `reason` of 1.5), so write() threw AFTER
+    // the change it was recording had been made: a stored session request,
+    // a minted placeholder, and no record of either.
+    const record = { seq: this.seq + 1, ts: new Date().toISOString(), kind, ...recordable(fields), prev_hash: this.prevHash }
     record.hash = this.#hash(record)
-    appendFileSync(this.path, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    this.#append(`${JSON.stringify(record)}\n`)
     this.seq = record.seq
     this.prevHash = record.hash
     if (++this.sinceCheckpoint >= CHECKPOINT_EVERY) {
@@ -197,7 +277,7 @@ export class AuditLog {
       prev_hash: this.prevHash,
     }
     record.hash = this.#hash(record)
-    appendFileSync(this.path, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    this.#append(`${JSON.stringify(record)}\n`)
     this.seq = record.seq
     this.prevHash = record.hash
   }
@@ -205,7 +285,7 @@ export class AuditLog {
   /** Read records, newest last. */
   read({ limit = 100, kind, sessionId, since } = {}) {
     if (!existsSync(this.path)) return []
-    let rows = this.#rows()
+    let rows = this.#rows().filter((r) => !r.unreadable)
     if (kind) rows = rows.filter((r) => r.kind === kind || r.kind.startsWith(`${kind}.`))
     if (sessionId) rows = rows.filter((r) => r.session_id === sessionId)
     if (since) rows = rows.filter((r) => r.ts >= since)
@@ -217,11 +297,18 @@ export class AuditLog {
    * can name the first record that does not match.
    */
   verify() {
-    if (!existsSync(this.path)) return { ok: true, count: 0 }
+    if (!existsSync(this.path)) {
+      // Gone from under a running daemon. On a vault known to keep an anchor
+      // that is the whole log removed, not an empty one.
+      return this.stamp?.anchored
+        ? { ok: false, count: 0, reason: 'the audit log is missing from a vault that keeps one' }
+        : { ok: true, count: 0 }
+    }
     const rows = this.#rows()
     let prev = '0'.repeat(64)
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i]
+      if (row.unreadable) return { ok: false, count: rows.length, brokenAt: i + 1, reason: 'unreadable record' }
       if (row.prev_hash !== prev) return { ok: false, count: rows.length, brokenAt: row.seq, reason: 'prev_hash mismatch' }
       const { hash, ...rest } = row
       const expected = createHmac('sha256', this.key)
@@ -313,4 +400,22 @@ export class AuditLog {
   }
 
   get head() { return this.prevHash }
+}
+
+/**
+ * Fields as the chain can hold them. A number that is not an integer becomes
+ * its decimal string; so does anything else the canonical form has no
+ * encoding for. Integers, strings, booleans and null pass unchanged.
+ */
+function recordable(value) {
+  if (value === null || value === undefined) return value
+  if (typeof value === 'number') return Number.isInteger(value) ? value : String(value)
+  if (typeof value === 'string' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) return value.map((v) => (v === undefined ? null : recordable(v)))
+  if (typeof value === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(value)) if (v !== undefined) out[k] = recordable(v)
+    return out
+  }
+  return String(value)
 }

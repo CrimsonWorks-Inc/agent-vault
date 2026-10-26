@@ -7,7 +7,7 @@
 
 import { request } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, constants as osConstants } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { createInterface } from 'node:readline'
 import { createHash } from 'node:crypto'
@@ -125,6 +125,12 @@ async function controlWithPresence(method, path, body) {
         exit: EXIT.LOCKED, next: 'agent-vault unlock',
       })
     }
+    // No factor at all, and the change needs a fresh one: nothing to ask for.
+    if (e.problem?.rule === 'factor_required') {
+      throw Object.assign(new Error(e.problem.detail || 'this change needs a human factor, and none is enrolled'), {
+        exit: EXIT.PRESENCE, next: 'agent-vault passphrase set',
+      })
+    }
     // Work out what would actually satisfy this before deciding how to ask.
     // Checking the terminal first meant a vault whose only factor is an
     // authenticator reported "needs your passphrase" — naming a secret that
@@ -140,6 +146,12 @@ async function controlWithPresence(method, path, body) {
       throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
         exit: EXIT.PRESENCE,
       })
+    }
+    // Fresh presence: the passphrase goes with this one request and opens no
+    // window. The routes that need it do not accept a window at all.
+    if (e.problem?.rule === 'fresh_presence') {
+      const passphrase = await readSecret('passphrase (for this change only): ')
+      return control(method, path, { ...body, presence: { passphrase } })
     }
     console.error(`${C.dim('This change needs a human.')}`)
     const passphrase = await readSecret('passphrase: ')
@@ -620,7 +632,11 @@ const COMMANDS = {
     console.log()
     console.log(C.dim('  try:'))
     console.log(C.dim(`    curl "${s.base_url}${s.probe_path || '/'}" \\`))
-    console.log(C.dim(`      -H "Authorization: Bearer ${s.token}" \\`))
+    // The token rides in AV-Session, not Authorization. For every Bearer-site
+    // credential the placeholder goes in Authorization too, and a server keeps
+    // only the first of two — so this example dropped the placeholder and
+    // failed for the most common credential there is.
+    console.log(C.dim(`      -H "AV-Session: ${s.token}" \\`))
     if (asHeader) console.log(C.dim(`      -H "${asHeader}"`))
     else console.log(C.dim(`      # then put the placeholder at: ${site}`))
   },
@@ -671,13 +687,23 @@ const COMMANDS = {
   async env() {
     const st = loadState()
     if (!st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
-    const lines = [
-      `export AGENT_VAULT=1`,
-      `export AGENT_VAULT_URL=http://127.0.0.1:${st.gateway_port || 7411}`,
-      `export AGENT_VAULT_SESSION=${st.token}`,
-      `export AGENT_VAULT_PLACEHOLDER=${st.placeholder}`,
-      `export AGENT_VAULT_HINT="Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>"`,
+    // Every value single-quoted. This output is meant for `eval`, and the state
+    // file it reads is writable by anything running as the human — an agent
+    // included — so an unquoted `token` of `x; <command> #` ran that command
+    // in the human's shell every time they evaluated it. loadState also
+    // refuses values that are not shaped like a token or a placeholder.
+    const vars = [
+      ['AGENT_VAULT', '1'],
+      ['AGENT_VAULT_URL', `http://127.0.0.1:${gatewayPortOf(st)}`],
+      ['AGENT_VAULT_SESSION', st.token],
+      // Absent rather than the word "undefined".
+      ...(st.placeholder ? [['AGENT_VAULT_PLACEHOLDER', st.placeholder]] : []),
+      ['AGENT_VAULT_HINT', 'Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>'],
     ]
+    const lines = vars.map(([k, v]) => `export ${k}=${shellQuote(v)}`)
+    // Evaluated into a shell that may already hold one from an earlier
+    // session, which would then ride along with this session's token.
+    if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')
     out(lines.join('\n'), { env: lines })
   },
 
@@ -687,20 +713,28 @@ const COMMANDS = {
     const { spawn } = await import('node:child_process')
     const argv = args._
     if (!argv.length) return fail('usage: agent-vault exec -- <command>', EXIT.USAGE)
-    // The child gets a scrubbed environment: known credential variables are
-    // dropped so a stale real token cannot shadow the vault.
-    const env = { ...process.env }
-    for (const k of Object.keys(env)) {
-      if (/_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)$/.test(k)) delete env[k]
+    // The child gets a scrubbed environment: credential variables are dropped
+    // so a stale real token cannot shadow the vault. The list used to be five
+    // exact uppercase suffixes, which kept AWS_SECRET_ACCESS_KEY, STRIPE_KEY,
+    // any lowercase name and every DATABASE_URL with a password in it — the
+    // AWS SDK then used the real key directly, past the vault.
+    const env = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!VAULT_GENERATED.includes(k) && !looksLikeCredential(k, v)) env[k] = v
     }
     Object.assign(env, {
       AGENT_VAULT: '1',
-      AGENT_VAULT_URL: `http://127.0.0.1:${st.gateway_port || 7411}`,
+      AGENT_VAULT_URL: `http://127.0.0.1:${gatewayPortOf(st)}`,
       AGENT_VAULT_SESSION: st.token,
-      AGENT_VAULT_PLACEHOLDER: st.placeholder,
+      ...(st.placeholder ? { AGENT_VAULT_PLACEHOLDER: st.placeholder } : {}),
     })
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env })
-    child.on('exit', (code) => process.exit(code ?? 0))
+    // A missing binary is an 'error' event, and with no listener it crashed
+    // the CLI with a stack trace instead of saying what was not found.
+    child.on('error', (e) => fail(`could not run ${argv[0]}: ${e.message}`, EXIT.FAILURE))
+    // A child killed by a signal has no exit code, and `code ?? 0` reported
+    // that as success. The shell convention is 128 + the signal number.
+    child.on('exit', (code, signal) => process.exit(code ?? 128 + (osConstants.signals[signal] || 0)))
   },
 
   async approvals() {
@@ -786,8 +820,12 @@ const COMMANDS = {
       entry.tls = { cert: resolvePath(args['tls-cert']), key: resolvePath(args['tls-key']) }
     }
     if (!entry.id || !entry.address) return fail('usage: agent-vault listen add <id> --address <iface:port|ip:port>', EXIT.USAGE)
-    const r = await control('POST', '/v1/listeners', entry)
+    // Gated like every other widening, so it asks for the passphrase the way
+    // they do. Plain control() could only fail, and the daemon's hint told
+    // the reader to run it again when running it again failed the same way.
+    const r = await controlWithPresence('POST', '/v1/listeners', entry)
     out(`${C.green('listener')} ${r.id} ${r.address} ${C.dim(`surfaces: ${r.surfaces.join(',')}`)}`, r)
+    if (!JSON_OUT) console.log(C.dim('  it binds when the daemon next starts; listen rm stops it at once'))
   },
 
   /**
@@ -909,7 +947,7 @@ const COMMANDS = {
       // TLS listener instead of the plain gateway.
       url: args.tls
         ? `https://localhost:${port}/mcp`
-        : `http://127.0.0.1:${loadState().gateway_port || 7411}/mcp`,
+        : `http://127.0.0.1:${gatewayPortOf(loadState())}/mcp`,
     })
 
     const result = install({
@@ -954,7 +992,7 @@ const COMMANDS = {
 
   async 'mcp:url'() {
     const st = loadState()
-    const url = `http://127.0.0.1:${st.gateway_port || 7411}/mcp`
+    const url = `http://127.0.0.1:${gatewayPortOf(st)}/mcp`
     if (JSON_OUT) return out(null, { url, header: `Authorization: Bearer ${st.token}` })
     console.log(url)
     console.error(C.dim(`header: Authorization: Bearer ${st.token || '<session token>'}`))
@@ -1027,7 +1065,7 @@ const COMMANDS = {
         buffer = buffer.slice(nl + 1)
         if (!line) continue
         try {
-          const send = (tok) => fetch(endpoint, {
+          const send = (tok, body = line) => fetch(endpoint, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
@@ -1035,18 +1073,41 @@ const COMMANDS = {
               authorization: `Bearer ${tok}`,
               ...(mcpSessionId ? { 'mcp-session-id': mcpSessionId } : {}),
             },
-            body: line,
+            body,
           })
           let res = await send(currentToken())
-          if (res.status === 401) {
-            // The session ended mid-flight. If a human has since created a new
-            // one, pick it up and retry rather than making them restart the
-            // client to collect a token that is already sitting on disk.
+          // The body, once something has had to read it before it is written.
+          let answer = null
+          // The session ended mid-flight. If a human has since created a new
+          // one, pick it up rather than making them restart the client to
+          // collect a token that is already sitting on disk.
+          //
+          // The daemon stopped answering 401 for a dead token (the handshake
+          // has to work without a session), so it says so in a header instead;
+          // waiting for a 401 left an agent launched with AGENT_VAULT_SESSION
+          // on the dead session for good.
+          if (res.status === 401 || res.headers.get('av-session-invalid')) {
             const fresh = (loadState().token || null)
             if (fresh && fresh !== currentToken()) {
               delete process.env.AGENT_VAULT_SESSION
-              mcpSessionId = null
-              res = await send(fresh)
+              if (res.status === 401) {
+                // Refused before anything ran.
+                mcpSessionId = null
+                res = await send(fresh)
+              } else {
+                // Resent only what was refused for want of a session. A tool
+                // that runs without one — asking for a session — has already
+                // happened, and the whole line used to go again whenever the
+                // answer CONTAINED that phrase: a batch of a request and a
+                // refusal asked the human twice, and lost the first answer.
+                answer = await res.text()
+                const redo = sessionRetry(line, answer)
+                if (redo) {
+                  mcpSessionId = null
+                  res = await send(fresh, redo.line)
+                  answer = redo.merge(await res.text())
+                }
+              }
             }
           }
           if (res.status === 404 && mcpSessionId) {
@@ -1058,15 +1119,16 @@ const COMMANDS = {
             // the same papercut the per-request token lookup exists to avoid,
             // one layer up. Drop the id and let the next request open a new
             // one.
-            const body = await res.clone().text().catch(() => '')
+            const body = answer ?? await res.clone().text().catch(() => '')
             if (body.includes('AV_MCP_SESSION_UNKNOWN')) {
               mcpSessionId = null
               res = await send(currentToken())
+              answer = null
             }
           }
           const sid = res.headers.get('mcp-session-id')
           if (sid) mcpSessionId = sid
-          const text = await res.text()
+          const text = answer ?? await res.text()
           if (text) process.stdout.write(`${asRpc(text, line, res.status)}\n`)
         } catch (e) {
           const parsed = (() => { try { return JSON.parse(line) } catch { return {} } })()
@@ -1087,15 +1149,37 @@ const COMMANDS = {
   async ui(args, { hash = '' } = {}) {
     const { UiServer } = await import('../ui/server.js')
     await control('GET', '/v1/status') // fail fast if the daemon is not up
+    // The daemon only accepts fingerprints from UI origins it trusts, and by
+    // default that is one port. Listen there unless told otherwise. An older
+    // daemon has no such list, and any port works with it.
+    const trusted = await control('GET', '/v1/ui').catch(() => null)
     const ui = new UiServer(SOCKET, {
       // Explicit: in a system install the socket is under run/ and the state
       // belongs beside the human, so the socket's directory is the wrong guess.
       statePath: STATE,
-      port: Number(args.port || 0),
+      port: Number(args.port || trusted?.port || 0),
       idleMs: (Number(args.idle) || 30) * 60_000,
       cli: cliInvocation(),
     })
-    await ui.start()
+    try {
+      await ui.start()
+    } catch (e) {
+      if (e.code !== 'EADDRINUSE') throw e
+      return fail(`port ${ui.port} is in use; is another agent-vault ui running?`, EXIT.FAILURE, {
+        next: 'agent-vault ui --port <free port> --allow-origin',
+      })
+    }
+    if (trusted && !trusted.origins.includes(ui.origin)) {
+      if (args['allow-origin']) {
+        // Owner-proved, with the passphrase in the request: trusting an
+        // origin is trusting every page served there to ask for a fingerprint.
+        await controlWithPresence('POST', '/v1/ui/origins', { origin: ui.origin })
+        if (!JSON_OUT) console.log(C.dim(`  trusted ${ui.origin} for Touch ID confirmations`))
+      } else if (!JSON_OUT) {
+        console.log(C.yellow(`  ${ui.origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page.`))
+        console.log(C.dim(`  Run without --port, or add --allow-origin to trust it (asks for your passphrase).`))
+      }
+    }
     // A fragment survives the redirect that burns the launch token, so it is
     // how we open the page on something other than Overview.
     const url = `${ui.url}${hash}`
@@ -1156,7 +1240,7 @@ const COMMANDS = {
     if (!state.has_passphrase) return out(`${C.green('ok')} no passphrase is set`, { removed: false })
     const current = await readSecret('current passphrase: ')
     await control('POST', '/v1/passphrase', { action: 'remove', current })
-    console.log(`${C.yellow('passphrase removed')} ${C.dim('the vault is back to UID-boundary-only protection')}`)
+    console.log(`${C.yellow('passphrase removed')} ${C.dim('unlocking needs no secret now; your authenticator still confirms changes')}`)
   },
 
   async lock() {
@@ -1331,11 +1415,107 @@ async function decide(args, granted) {
   // state file belongs to you. The MCP bridge re-reads that file per request,
   // so a session recorded now reaches a RUNNING agent on its next call — no
   // restart, nothing pasted by hand.
-  const collected = await collectApproved(item, {
-    get: (p) => control('GET', p),
+  const collected = collectApproved(item, {
+    answered,
     remember: (s) => rememberSession(s, STATE),
   })
-  return collected ? { ...answered, collected } : answered
+  const { session, ...rest } = answered
+  return collected ? { ...rest, collected } : rest
+}
+
+/**
+ * The gateway port for printed and exported URLs. `gateway_port` is written
+ * only by the dev daemon; a system install's service never records it, so
+ * the session's own base_url — which has the right port — comes next, and the
+ * default only after that.
+ */
+function gatewayPortOf(st) {
+  if (st.gateway_port) return st.gateway_port
+  const m = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(st.base_url || '')
+  return m ? Number(m[1]) : 7411
+}
+
+/**
+ * What to resend once a dead session has been replaced: only the requests
+ * whose answers are refusals for want of a session, found by id in the
+ * parsed answers — never by searching the text, which a successful result
+ * can contain. Returns null when there is nothing to resend, or
+ * `{ line, merge }`, where merge(text) puts the new answers in place of the
+ * refusals and keeps every other answer as it came.
+ */
+export function sessionRetry(line, text) {
+  let request
+  let answers
+  try {
+    request = JSON.parse(line)
+    answers = JSON.parse(text)
+  } catch { return null }
+  const refused = (a) => {
+    if (!a || typeof a !== 'object' || a.result?.isError !== true) return false
+    try { return JSON.parse(a.result.content?.[0]?.text).error === NEEDS_SESSION } catch { return false }
+  }
+  if (!Array.isArray(request)) {
+    return !Array.isArray(answers) && refused(answers) ? { line, merge: (again) => again } : null
+  }
+  if (!Array.isArray(answers)) return null
+  const key = (id) => JSON.stringify(id)
+  const ids = new Set(answers.filter((a) => refused(a) && a.id !== undefined && a.id !== null).map((a) => key(a.id)))
+  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))
+  if (!redo.length) return null
+  return {
+    line: JSON.stringify(redo),
+    merge(again) {
+      let fresh
+      try { fresh = JSON.parse(again) } catch { return text }
+      if (!Array.isArray(fresh)) return text
+      const byId = new Map(fresh.filter((a) => a && a.id !== undefined).map((a) => [key(a.id), a]))
+      return JSON.stringify(answers.map((a) => (refused(a) && byId.has(key(a.id)) ? byId.get(key(a.id)) : a)))
+    },
+  }
+}
+
+/** The tool error the daemon gives for a call that needs a live session. */
+const NEEDS_SESSION = 'this tool needs a live session'
+
+/** A value as one single-quoted shell word. */
+function shellQuote(v) {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Whether an environment variable carries a credential the vault should
+ * stand in for. Name-based (case-insensitive), plus any URL with a password
+ * in it, whatever it is called.
+ */
+function looksLikeCredential(name, value) {
+  // The vault's own configuration, by name. The whole AGENT_VAULT prefix used
+  // to be exempt, so AGENT_VAULT_SECRET or AGENT_VAULT_PASSWORD reached the
+  // child untouched. The variables exec generates are not here: they are
+  // rebuilt from the state file, never inherited (see VAULT_GENERATED).
+  if (VAULT_CONFIG.has(name)) return false
+  if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET_?KEY|CLIENT_?SECRET|CREDENTIALS?)(_|$)/i.test(name)) return true
+  if (/(^|_)(KEY|DSN)$/i.test(name)) return true
+  return urlHasPassword(String(value))
+}
+
+/** The vault settings a child may inherit as they are. */
+const VAULT_CONFIG = new Set(['AGENT_VAULT_DIR', 'AGENT_VAULT_PORT', 'AGENT_VAULT_ALLOW_ROOT'])
+
+/**
+ * What `env` and `exec` write. Never inherited: a value left over from an
+ * earlier session would sit beside this one's token — an old placeholder
+ * from another session or credential, used by whatever reads the carrier.
+ */
+const VAULT_GENERATED = ['AGENT_VAULT', 'AGENT_VAULT_URL', 'AGENT_VAULT_SESSION', 'AGENT_VAULT_PLACEHOLDER', 'AGENT_VAULT_HINT']
+
+/**
+ * Whether a value carries a URL with a password in it, anywhere. The user
+ * part may be empty: `redis://:hunter2@cache:6379` is the usual Redis form,
+ * and requiring a username let every one of them through.
+ */
+function urlHasPassword(value) {
+  if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(value)) return true
+  try { return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) && new URL(value).password !== '' } catch { return false }
 }
 
 function printHelp() {
@@ -1371,7 +1551,7 @@ ${C.bold('approvals, audit, listeners')}
   listen add <id> --address <iface:port> [--surfaces gateway,mcp]
                  [--tls managed | --tls-cert F --tls-key F]
   listen list | listen rm <id>
-  tls setup [--port 7449]              certificate for the loopback MCP listener
+  tls setup [--port 7443]              certificate for the loopback MCP listener
   tls status                           fingerprint and expiry
 
 ${C.bold('ui')}

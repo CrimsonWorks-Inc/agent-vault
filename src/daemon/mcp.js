@@ -11,12 +11,16 @@ import { randomUUID } from 'node:crypto'
 import { getProfile } from '../connectors/profiles.js'
 import * as sitesMod from '../core/sites.js'
 import { VaultError } from '../core/errors.js'
-import { proposalOf as srProposal } from './session-requests.js'
+import { proposalOf as srProposal, SessionRequests } from './session-requests.js'
 
 export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26']
 export const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
 
 const SERVER_INFO = { name: 'agent-vault', version: '0.1.0' }
+
+// Transport sessions held at once. Each is a few bytes; the bound is what
+// matters, not the number.
+const MAX_MCP_SESSIONS = 256
 
 const INSTRUCTIONS = [
   'Credentials are placeholders, never real secrets. Never ask the user for a real secret.',
@@ -42,16 +46,38 @@ export class McpServer {
     this.sessions = new Map() // Mcp-Session-Id -> { created, lastEventId, events: [] }
   }
 
-  /** Create an MCP transport session. It is a routing key, never a credential. */
-  openSession() {
+  /**
+   * Create an MCP transport session. It is a routing key, never a credential.
+   *
+   * Bounded, oldest first: `initialize` needs no session token, so nothing
+   * else limits how many of these a caller can open, and the map had no size
+   * limit and no expiry. An evicted client gets AV_MCP_SESSION_UNKNOWN and
+   * initializes again, which is what the protocol expects.
+   */
+  openSession({ record = true } = {}) {
+    while (this.sessions.size >= MAX_MCP_SESSIONS) {
+      const oldest = this.sessions.keys().next().value
+      if (oldest === undefined) break
+      this.sessions.delete(oldest)
+    }
     const sid = randomUUID()
-    this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1 })
-    this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
+    // Whether it was recorded is kept with it, so the close can match.
+    this.sessions.set(sid, { created: Date.now(), events: [], nextEventId: 1, recorded: !!record })
+    if (record) this.vault.audit?.write('mcp.session_opened', { mcp_session_id: sid })
     return sid
   }
 
-  closeSession(sid) {
-    if (this.sessions.delete(sid)) this.vault.audit?.write('mcp.session_closed', { mcp_session_id: sid })
+  /**
+   * Forget a transport session. Recorded when its opening was, or when the
+   * caller closing it has a live session. Always recording it undid the quiet
+   * anonymous initialize: closing needs no token either, so initialize and
+   * DELETE in a loop wrote a record per cycle while holding no memory at all.
+   */
+  closeSession(sid, { record = false } = {}) {
+    const entry = this.sessions.get(sid)
+    if (!entry) return
+    this.sessions.delete(sid)
+    if (entry.recorded || record) this.vault.audit?.write('mcp.session_closed', { mcp_session_id: sid })
   }
 
   hasSession(sid) { return this.sessions.has(sid) }
@@ -97,6 +123,7 @@ export class McpServer {
             // the human was shown no lifetime at all to narrow.
             ttl_minutes: { type: 'number', description: 'how long you need it for; ask for the least you need' },
             poll_id: { type: 'string', description: 'an id from an earlier call: check whether it has been answered' },
+            poll_secret: { type: 'string', description: 'the poll_secret that earlier call returned; only the asker can poll' },
           },
           required: ['reason'],
         },
@@ -277,6 +304,12 @@ export class McpServer {
         if (args.poll_id) {
           const record = this.daemon?.sessionRequests?.get(args.poll_id)
           if (!record) return text({ error: `no session request ${args.poll_id}` })
+          // The id is listed to anyone on the control socket; the secret went
+          // only to whoever asked. Without this check another agent could poll
+          // the request and collect the session meant for the asker.
+          if (!SessionRequests.mayCollect(record, args.poll_secret)) {
+            return text({ error: 'poll_secret does not match this request; only the agent that asked can poll it' })
+          }
           if (record.state === 'pending') {
             return text({ state: 'pending', detail: 'a human has not answered yet; poll again or carry on without it' })
           }
@@ -309,15 +342,22 @@ export class McpServer {
         if (!this.daemon?.sessionRequests) return text({ error: 'session requests are not available on this daemon' })
         if (!args.cred) return text({ error: 'name the credential you need', known: this.vault.listCredentials().map((c) => c.slug) })
         try {
-          const record = this.daemon.sessionRequests.propose({
-            proposal: srProposal({ cred: args.cred, methods: args.methods, paths: args.paths, budget: args.budget }),
+          const { record, collectSecret } = this.daemon.sessionRequests.propose({
+            // Every field the schema offers. ttl_minutes and uses were dropped
+            // here, so an agent asking for fifteen minutes got eight hours and
+            // the human was shown a lifetime nobody had asked for.
+            proposal: srProposal({
+              cred: args.cred, methods: args.methods, paths: args.paths, budget: args.budget,
+              uses: args.uses, ttl_minutes: args.ttl_minutes,
+            }),
             reason: args.reason,
           })
           return text({
             state: 'pending',
             request_id: record.id,
+            poll_secret: collectSecret,
             asked_for: record.summary,
-            detail: 'a human must approve this. Poll with vault_request_session { poll_id }. They may narrow it.',
+            detail: 'a human must approve this. Poll with vault_request_session { poll_id: request_id, poll_secret }. They may narrow it.',
           })
         } catch (e) {
           return text({ error: e.message })
@@ -361,11 +401,14 @@ export class McpServer {
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
         if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
         const field = cred.fields[0]
-        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
+        const site = sitesMod.parseSite(field.sites[0])
+        // Minted for this one call and burned after it. Each call used to
+        // leave its placeholder active, and a used one is never evicted, so
+        // the ledger grew by a live row per request.
+        const { placeholder, row } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
 
         // The MCP path runs the identical pipeline: same policy, same site
         // check, same scrubber, same audit. Only the framing differs.
-        const site = sitesMod.parseSite(field.sites[0])
         const headers = [['host', '127.0.0.1']]
         for (const [k, v] of Object.entries(args.headers || {})) {
           // The daemon sets its own av-* headers below. Letting the caller
@@ -375,10 +418,18 @@ export class McpServer {
           if (/^av-/i.test(k) || k.toLowerCase() === 'host') continue
           headers.push([k, v])
         }
+        let query = args.query || ''
         if (site.kind === 'header') {
           headers.push([site.name, site.scheme ? `${site.scheme} ${placeholder}` : placeholder])
+        } else if (site.kind === 'query') {
+          // The placeholder grammar is URL-safe, so it needs no encoding.
+          query = `${query ? `${query}&` : ''}${encodeURIComponent(site.key)}=${placeholder}`
         }
-        headers.push(['av-session', this.#tokenFor(session)])
+        // The token this call arrived with. `#tokenFor` was called without it,
+        // and nothing ever sets `session.__token`, so this header was always
+        // empty: every call authenticated by falling back on the placeholder
+        // as carrier, which only a header site allows.
+        headers.push(['av-session', this.#tokenFor(session, token)])
         if (args.reason) headers.push(['av-reason', args.reason])
         // The caller's own content-type was already forwarded above, in
         // whatever case they wrote it. Adding a default alongside a
@@ -387,16 +438,31 @@ export class McpServer {
         const callerSetType = Object.keys(args.headers || {}).some((k) => k.toLowerCase() === 'content-type')
         if (args.body && !callerSetType) headers.push(['content-type', 'application/json'])
 
-        const res = await this.pipeline.handle({
-          method: args.method, path: `/p/${cred.slug}${args.path}`, query: args.query || '',
-          headers, body: args.body ? Buffer.from(args.body) : null,
-        })
+        let res
+        let body
+        try {
+          res = await this.pipeline.handle({
+            method: args.method, path: `/p/${cred.slug}${args.path}`, query,
+            headers, body: args.body ? Buffer.from(args.body) : null,
+          })
+          // A streamed (text/event-stream) response has no `body`, only a
+          // `stream`, and reading `body` threw after the request had run and
+          // been charged — leaving the upstream connection open, and an agent
+          // retrying an "internal error" that had in fact succeeded.
+          body = res.stream ? await readBounded(res.stream, MAX_TOOL_BODY) : res.body.toString('utf8').slice(0, MAX_TOOL_BODY)
+        } finally {
+          // A vault locked mid-call cannot record the burn, and the lock
+          // already stops the row from being used; the call's own outcome is
+          // what the agent needs to see.
+          const live = this.vault.db.placeholders[row.id]
+          if (live?.state === 'active' && !this.vault.locked) this.vault.burnPlaceholder(row.id, 'spent')
+        }
         return text({
           status: res.status,
           request_id: res.requestId,
           decision: res.headers['av-decision'],
           headers: res.headers,
-          body: res.body.toString('utf8').slice(0, 256 * 1024),
+          body,
         })
       }
 
@@ -421,6 +487,22 @@ export class McpServer {
 
   /** The MCP process holds the session token it was started with. */
   #tokenFor(session, token) { return token || session?.__token || '' }
+}
+
+/** How much of a response body a tool result carries. */
+const MAX_TOOL_BODY = 256 * 1024
+
+/**
+ * Read a streamed response to its end, keeping at most `limit` characters.
+ * Read to the end, not to the limit: stopping early leaves the upstream
+ * connection open, and the events are already scrubbed one by one.
+ */
+async function readBounded(stream, limit) {
+  let out = ''
+  for await (const chunk of stream) {
+    if (out.length < limit) out += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+  }
+  return out.slice(0, limit)
 }
 
 /** Frame the MCP server onto stdio: newline-delimited JSON-RPC. */

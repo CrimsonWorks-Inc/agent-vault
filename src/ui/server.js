@@ -75,7 +75,12 @@ export class UiServer {
 
   async start() {
     this.server = createServer((req, res) => this.#handle(req, res))
-    await new Promise((resolve) => this.server.listen(this.port, '127.0.0.1', resolve))
+    // Rejected, not thrown from an event: the UI now has a fixed default port,
+    // so "already in use" is an ordinary answer the caller can explain.
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject)
+      this.server.listen(this.port, '127.0.0.1', () => { this.server.removeListener('error', reject); resolve() })
+    })
     this.boundPort = this.server.address().port
     this.origin = `http://localhost:${this.boundPort}`
 
@@ -105,7 +110,9 @@ export class UiServer {
   // ------------------------------------------------------------------ routing
 
   async #handle(req, res) {
-    this.lastSeen = Date.now()
+    // Not marked as activity here. Counting every request kept the server up
+    // on the strength of the page's own refused polls once its cookie had
+    // expired; only a caller holding the session counts (see #touch).
     const url = new URL(req.url, this.origin)
 
     // Arriving by IP would put the page on an origin whose domain cannot be a
@@ -140,13 +147,14 @@ export class UiServer {
     const cookie = this.#cookieFrom(req)
 
     if (cookie && this.sessionCookie && safeEqual(cookie, this.sessionCookie)) {
+      this.#touch(res)
       return this.#sendHtml(res, this.html)
     }
 
     if (offered && !this.sessionCookie && safeEqual(offered, this.launchToken)) {
       this.sessionCookie = randomBytes(32).toString('base64url')
       this.claimedAt = new Date().toISOString()
-      res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+      this.#touch(res)
       // Redirect so the token leaves the address bar, browser history and any
       // Referer header the page might later send.
       res.writeHead(302, { Location: '/' })
@@ -192,6 +200,7 @@ export class UiServer {
     }
     // Requiring a header a form post cannot set is the CSRF defence.
     if (req.headers['x-av-ui'] !== '1') return this.#send(res, 403, { error: 'missing X-AV-UI header' })
+    this.#touch(res)
 
     const body = await readBody(req)
     const route = url.pathname.slice('/api/'.length)
@@ -280,7 +289,14 @@ export class UiServer {
           expectedOrigins: [this.origin],
           rpId: this.rpId,
         })
-        await this.#control('POST', '/v1/presence', credential)
+        // The passphrase goes with the enrolment itself, as fresh presence.
+        // The daemon no longer accepts a passphrase window for this, because a
+        // window admits every caller on the socket while it is open, not only
+        // this page.
+        await this.#control('POST', '/v1/presence', {
+          ...credential,
+          ...(typeof body?.passphrase === 'string' ? { presence: { passphrase: body.passphrase } } : {}),
+        })
         return this.#send(res, 200, { ok: true, credentialId: credential.credentialId })
       }
       if (key === 'POST presence/challenge') {
@@ -307,13 +323,18 @@ export class UiServer {
         await this.#requirePresence(key, url, body, req)
       }
 
+      // The proof is forwarded, because the daemon checks it again for itself.
+      // It used to be dropped here, so a vault with any factor refused every
+      // Touch ID change made from this page as having no human behind it.
       if (key === 'POST touchid/enroll') {
         return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', {
-          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret,
+          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret, presence: body?.presence,
         }))
       }
       if (key === 'POST touchid/remove') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', { action: 'remove' }))
+        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', {
+          action: 'remove', presence: body?.presence,
+        }))
       }
 
       switch (key) {
@@ -387,13 +408,20 @@ export class UiServer {
           const grantedSessions = (answered?.decided || []).filter(
             (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
           )
-          if (grantedSessions.length === 1) {
-            await collectApproved(
-              { id: grantedSessions[0].id, kind: 'session' },
-              { get: (p) => this.#control('GET', p), remember: (sn) => rememberSession(sn, this.statePath) },
-            ).catch(() => null)
-            answered.recorded = grantedSessions[0].id
-          } else if (grantedSessions.length > 1) {
+          // The daemon hands the session to the approving client only when the
+          // batch granted exactly one. It never goes on to the page.
+          for (const r of answered?.decided || []) {
+            const session = r.result?.session
+            if (!session) continue
+            delete r.result.session
+            try {
+              collectApproved({ id: r.id, kind: 'session' }, {
+                answered: { session }, remember: (sn) => rememberSession(sn, this.statePath),
+              })
+              answered.recorded = r.id
+            } catch (e) { this.lastStateError = String(e?.message ?? e) }
+          }
+          if (grantedSessions.length > 1) {
             answered.recorded = null
             answered.note = 'several sessions were approved, so each agent collects its own; this page records one at a time'
           }
@@ -407,24 +435,24 @@ export class UiServer {
             overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
             presence: body?.presence,
           })
-          if (!body?.granted) return this.#send(res, 200, answered)
+          const { session, ...decision } = answered || {}
+          if (!body?.granted) return this.#send(res, 200, decision)
           // Recorded here for the same reason the CLI does it: the daemon runs
           // as its own uid and cannot write the human's state file. This process
           // can, and the MCP bridge re-reads that file per request — so a
           // session approved in this page reaches a running agent on its next
           // call without anyone copying a token.
-          const collected = await collectApproved(
-            { id: body.id, kind: 'session' },
-            {
-              get: (p) => this.#control('GET', p),
-              remember: (s) => rememberSession(s, this.statePath),
-            },
-          ).catch(() => null)
+          let collected = null
+          try {
+            collected = collectApproved({ id: body.id, kind: 'session' }, {
+              answered: { session }, remember: (s) => rememberSession(s, this.statePath),
+            })
+          } catch (e) { this.lastStateError = String(e?.message ?? e) }
           // The token itself never goes to the page. It went to the state file,
           // which is where local clients look; showing it here would put a live
           // capability in a browser for no reason.
           return this.#send(res, 200, {
-            ...answered,
+            ...decision,
             recorded: collected ? { session_id: collected.session_id, expires_at: collected.expires_at } : null,
           })
         }
@@ -521,7 +549,8 @@ export class UiServer {
           id: body?.id, granted: !!body?.granted, ...parseOverrides(body?.overrides || {}),
         })
       case 'POST lock': return of('vault.lock', {})
-      case 'POST touchid/enroll': return of('touchid.enroll', body)
+      // Only the fields that are forwarded, which is what the daemon binds.
+      case 'POST touchid/enroll': return of('touchid.enroll', { credential_id: body?.credential_id, prf_secret: body?.prf_secret })
       case 'POST touchid/remove': return of('touchid.remove', {})
       default: return { op: key }
     }
@@ -529,6 +558,17 @@ export class UiServer {
 
 
   // ------------------------------------------------------------------ helpers
+
+  /**
+   * Activity by the holder of the session: it keeps the server up, and it
+   * slides the cookie. The cookie was set once at claim with Max-Age equal to
+   * the IDLE timeout and never refreshed, so it expired thirty minutes into
+   * active use and the page could not get back in — the launch link was spent.
+   */
+  #touch(res) {
+    this.lastSeen = Date.now()
+    res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+  }
 
   #cookieFrom(req) {
     const raw = req.headers.cookie || ''
