@@ -1306,8 +1306,8 @@ const MUTATIONS = [
   {
     what: 'redirects are followed for every method',
     file: 'src/daemon/pipeline.js',
-    from: "      if (!['GET', 'HEAD'].includes(method) || policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'",
-    to: "      if (policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'",
+    from: "      const asked = [decision.method, ...overrides, method]",
+    to: '      const asked = [method]',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   {
@@ -1450,6 +1450,41 @@ const MUTATIONS = [
     file: 'src/daemon/pipeline.js',
     from: "    if (/[#\\t\\n\\r]|[\\x00-\\x20]$/.test(String(req.query ?? ''))) {",
     to: '    if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },  {
+    // Round 3: a redirect hop sends only what it was checked as.
+    what: 'a request a method override made a DELETE has its redirect followed',
+    file: 'src/daemon/pipeline.js',
+    from: '      const asked = [decision.method, ...overrides, method]',
+    to: '      const asked = [decision.method, method]',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a redirect hop copies the request\'s headers, method overrides included',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (HOP_FORWARDED.has(lower) || credentialHeaders.has(lower)) out[name] = value',
+    to: "      if (!['content-type', 'content-length'].includes(lower)) out[name] = value",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a redirect hop sends a method-override header the credential happens to use',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (HOP_NEVER.has(lower)) continue',
+    to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a redirect hop follows a Location carrying _method',
+    file: 'src/daemon/pipeline.js',
+    from: "        if ([...next.searchParams.keys()].some((k) => k.toLowerCase() === '_method')) reason = 'path'",
+    to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a 307 or 308 hop is sent as a GET whatever the request was',
+    file: 'src/daemon/pipeline.js',
+    from: "      const method = [307, 308].includes(res.status) || decision.method === 'HEAD' ? decision.method : 'GET'",
+    to: "      const method = 'GET'",
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
 ]

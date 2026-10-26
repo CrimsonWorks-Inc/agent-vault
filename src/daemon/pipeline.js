@@ -658,14 +658,26 @@ export class Pipeline {
    * the agent gets the last 3xx, with `av-redirect-stopped` saying why.
    * Never for a method other than GET and HEAD, and never where the method
    * needs a human: each hop would need its own decision.
+   *
+   * A request with a method-override header is, to the upstream, a request
+   * of each method it names, so it is followed only if each of those could
+   * be. A GET carrying X-HTTP-Method-Override: DELETE was a DELETE upstream,
+   * and its redirect is not followed.
+   *
+   * A hop is checked as the method it is sent with: 307 and 308 keep the
+   * request's method, so a POST stays a POST and is not followed, and 301,
+   * 302 and 303 send a GET (a HEAD stays a HEAD). It carries only the
+   * headers in `#hopHeaders`, so nothing the agent sent can make the
+   * upstream run anything but that method.
    */
-  async #redirects(response, { route, effective, decision, headers, upstreamUrl, requestId }) {
+  async #redirects(response, { route, effective, decision, overrides, headers, credentialHeaders, upstreamUrl, requestId }) {
     let res = response, current = upstreamUrl, hops = 0
-    const method = decision.method
     while ([301, 302, 303, 307, 308].includes(res.status)) {
       let reason = null, next = null
       const max = effective.redirects?.max
-      if (!['GET', 'HEAD'].includes(method) || policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'
+      const method = [307, 308].includes(res.status) || decision.method === 'HEAD' ? decision.method : 'GET'
+      const asked = [decision.method, ...overrides, method]
+      if (asked.some((m) => !['GET', 'HEAD'].includes(m) || policyMod.needsApproval(effective, { method: m, firstUse: false }))) reason = 'approval'
       else if (!Number.isInteger(max) || max < 0 || max > 5 || hops >= max) reason = 'max'
       if (!reason) {
         try { if (typeof res.headers.location !== 'string') throw new Error('missing location'); next = new URL(res.headers.location, current) } catch { reason = 'host' }
@@ -693,6 +705,10 @@ export class Pipeline {
         // grant denies. The body rules see no body, exactly as a direct GET
         // does: a body field the grant requires is missing, so the hop stops.
         try { evaluatePayload(effective.payload_sets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }
+        // `_method` in a query is a method override too, for the frameworks
+        // that read one there. The hop is checked as one method and sent as
+        // that method, so a Location asking for another is not followed.
+        if ([...next.searchParams.keys()].some((k) => k.toLowerCase() === '_method')) reason = 'path'
       }
       if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
       if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
@@ -704,8 +720,7 @@ export class Pipeline {
         return { ...res, redirectStopped: reason }
       }
       if (quota) { quota.count += 1; route.grant.quota_state = quota; this.vault.save({ durable: false }) }
-      const hopHeaders = Object.fromEntries(Object.entries(headers).filter(([name]) => !['content-type', 'content-length', 'host'].includes(name.toLowerCase())))
-      hopHeaders.host = next.host
+      const hopHeaders = this.#hopHeaders(headers, credentialHeaders, next.host)
       next.pathname = policyMod.encodePathForWire(hop.path)
       let following
       try { following = await this.upstream({ url: next.href, method, headers: hopHeaders, body: null, pins: route.cred.pins?.[hop.host] ?? null }) }
@@ -725,6 +740,25 @@ export class Pipeline {
       current = next.href
     }
     return res
+  }
+
+  /**
+   * The headers a redirect hop sends: an allowlist, not the request's headers
+   * minus a few. The hop was checked as a body-less GET or HEAD, and a copied
+   * X-HTTP-Method-Override made it a DELETE upstream after the check had
+   * passed it as a GET. Any header the agent chose could do the same (a
+   * framing header, a conditional on a write, a framework's own override),
+   * so the hop carries the credential at its declared header, Accept and
+   * User-Agent, and nothing else.
+   */
+  #hopHeaders(headers, credentialHeaders, host) {
+    const out = { host, 'accept-encoding': 'identity' }
+    for (const [name, value] of Object.entries(headers)) {
+      const lower = name.toLowerCase()
+      if (HOP_NEVER.has(lower)) continue
+      if (HOP_FORWARDED.has(lower) || credentialHeaders.has(lower)) out[name] = value
+    }
+    return out
   }
 
   /** F13: what a held request would send, safe for the human to read. */
@@ -1402,7 +1436,10 @@ export class Pipeline {
       })
     }
 
-    res = await this.#redirects(res, { route, effective, decision, headers, upstreamUrl, requestId })
+    // The headers a credential was substituted into, at its declared sites.
+    // They are the only headers of the agent's a redirect hop sends.
+    const credentialHeaders = new Set(substitutions.flatMap(({ occ: { location } }) => location.region === 'header' ? [location.name] : location.region === 'basic' ? ['authorization'] : []))
+    res = await this.#redirects(res, { route, effective, decision, overrides, headers, credentialHeaders, upstreamUrl, requestId })
     // --- scrub -------------------------------------------------------------
     const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))], { ...this.scrubBudget, extraPatterns: this.#extraPatterns() })
     // The path as the audit log may hold it, computed here because this
@@ -1727,6 +1764,15 @@ export class Pipeline {
 
 /** Headers a framework may honour in place of the request-line method. */
 const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override'])
+
+/** The headers a redirect hop forwards besides the credential's (F6). */
+const HOP_FORWARDED = new Set(['accept', 'user-agent'])
+
+/**
+ * Never on a redirect hop, even as a credential's declared site: a hop has no
+ * body, and its method and host are the ones it was checked with.
+ */
+const HOP_NEVER = new Set([...METHOD_OVERRIDE_HEADERS, 'host', 'accept-encoding', 'content-type', 'content-length', 'content-encoding', 'transfer-encoding', 'expect'])
 
 /** Every method a method-override header asks for, uppercased, in order. */
 function methodOverrides(headers) {

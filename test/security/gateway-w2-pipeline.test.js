@@ -495,3 +495,100 @@ test('a query a URL would cut or rewrite is refused before the payload rules rea
   const result = await f.pipeline.handle(f.req({ query: 'dry_run=true&op=a%23b%0A%20' }))
   assert.equal(result.status, 200, result.body.toString()); assert.ok(f.sent[0].url.endsWith('?dry_run=true&op=a%23b%0A%20'))
 })
+
+// ------------------------------------- round 3: a hop sends what it was checked as
+
+// A hop copied the request's headers. It was checked as a GET and sent with
+// X-HTTP-Method-Override: DELETE, which plenty of frameworks run as a DELETE.
+const ROUTES = [{ methods: ['GET', 'DELETE'], paths: ['/public/**'] }, { methods: ['GET'], paths: ['/admin/**'] }]
+const hopFixture = (t, policy, location, status = 302) => {
+  let n = 0
+  return fixture(t, { methods: ['GET', 'HEAD', 'POST', 'DELETE'], redirects: { max: 2 }, ...policy }, { upstream: () => (++n === 1 ? { status, headers: { location }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
+}
+const lowerKeys = headers => Object.keys(headers).map(k => k.toLowerCase()).sort()
+
+test('a request a method override made a write does not have its redirect followed', async t => {
+  // Grok's probe: GET /public/start carrying a DELETE override, sent to
+  // /admin/keys where the grant allows only GET. The upstream ran the first
+  // request as a DELETE, and F6 follows nothing but a GET or HEAD.
+  for (const override of ['X-HTTP-Method-Override', 'x-http-method', 'X-Method-Override']) {
+    const f = hopFixture(t, { routes: ROUTES }, 'https://api.example.test/admin/keys')
+    const result = await f.pipeline.handle(f.req({ path: '/p/test/public/start', headers: [...f.req().headers, [override, 'DELETE']] }))
+    assert.equal(result.status, 302, override); assert.equal(result.headers['av-redirect-stopped'], 'approval', override)
+    assert.equal(f.sent.length, 1, override); assert.equal(f.grant.budget_used, 1)
+  }
+  // Under on-write, the human granted the first request only, not its hop.
+  const held = hopFixture(t, { methods: ['GET', 'DELETE'], approval: 'on-write' }, '/other')
+  const req = () => held.req({ headers: [...held.req().headers, ['X-HTTP-Method-Override', 'DELETE']] })
+  assert.equal((await held.pipeline.handle(req())).status, 202)
+  held.pipeline.decideApproval(held.pipeline.pendingApprovals()[0].id, true)
+  const result = await held.pipeline.handle(req())
+  assert.equal(result.headers['av-redirect-stopped'], 'approval'); assert.equal(held.sent.length, 1)
+})
+
+test('a followed redirect sends nothing of the agent\'s but the credential, Accept and User-Agent', async t => {
+  // An override that names GET leaves the request a GET, so it is followed,
+  // and the override is not carried to the hop either.
+  const f = hopFixture(t, { routes: ROUTES }, 'https://api.example.test/admin/keys')
+  const result = await f.pipeline.handle(f.req({
+    path: '/p/test/public/start',
+    headers: [...f.req().headers, ['X-HTTP-Method-Override', 'GET'], ['content-type', 'application/json'], ['range', 'bytes=0-1'], ['if-match', '"x"'], ['x-custom', 'dropped'], ['accept', 'application/json'], ['user-agent', 'probe/1']],
+  }))
+  assert.equal(result.status, 200); assert.equal(f.sent.length, 2)
+  const hop = f.sent[1]
+  assert.equal(hop.method, 'GET'); assert.equal(hop.body, null); assert.equal(new URL(hop.url).pathname, '/admin/keys')
+  // No override, no body or conditional header, nothing the agent chose
+  // beyond Accept and User-Agent.
+  assert.deepEqual(lowerKeys(hop.headers), ['accept', 'accept-encoding', 'authorization', 'host', 'user-agent'])
+  assert.equal(hop.headers.authorization, `Bearer ${SECRET}`); assert.equal(hop.headers['accept-encoding'], 'identity')
+  assert.equal(hop.headers.host, 'api.example.test'); assert.equal(hop.headers.accept, 'application/json'); assert.equal(hop.headers['user-agent'], 'probe/1')
+})
+
+test('a credential declared at a body or framing header is not sent on a hop', async t => {
+  const f = hopFixture(t, {}, '/next')
+  f.vault.db.credentials[f.cred.id].fields.find(x => x.name === 'token').sites = ['header:content-type']
+  const result = await f.pipeline.handle(f.req({ headers: [['host', 'localhost'], ['av-session', f.token], ['content-type', f.ph]] }))
+  assert.equal(result.status, 200, result.body?.toString()); assert.equal(f.sent[0].headers['content-type'], SECRET)
+  assert.deepEqual(lowerKeys(f.sent[1].headers), ['accept-encoding', 'host'])
+})
+
+test('a Location carrying _method is not followed', async t => {
+  for (const location of ['/next?_method=DELETE', '/next?a=1&%5Fmethod=delete', '/next?_METHOD=PUT']) {
+    const f = hopFixture(t, {}, location)
+    const result = await f.pipeline.handle(f.req())
+    assert.equal(result.status, 302, location); assert.equal(result.headers['av-redirect-stopped'], 'path', location); assert.equal(f.sent.length, 1)
+  }
+})
+
+test('a hop is checked as the method it is sent with: 307 and 308 keep it, 301 to 303 send a GET', async t => {
+  // A POST that gets a 307 or 308 is a POST to the new location, and F6 never
+  // follows one. It is not turned into a GET to slip past that.
+  for (const status of [303, 307, 308]) {
+    const f = hopFixture(t, { routes: [{ methods: ['POST', 'GET'], paths: ['/**'] }] }, '/next', status)
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, ['content-type', 'application/json']], body: Buffer.from('{}') }))
+    assert.equal(result.status, status); assert.equal(result.headers['av-redirect-stopped'], 'approval', String(status)); assert.equal(f.sent.length, 1)
+  }
+  // A HEAD stays a HEAD, and a 307 HEAD is checked as a HEAD: a route that
+  // allows only GET there stops it.
+  for (const status of [302, 303, 307, 308]) {
+    const f = hopFixture(t, {}, '/next', status)
+    assert.equal((await f.pipeline.handle(f.req({ method: 'HEAD' }))).status, 200); assert.equal(f.sent[1].method, 'HEAD', String(status))
+    const g = hopFixture(t, { routes: [{ methods: ['HEAD'], paths: ['/ok'] }, { methods: ['GET'], paths: ['/next'] }] }, '/next', status)
+    const stopped = await g.pipeline.handle(g.req({ method: 'HEAD' }))
+    assert.equal(stopped.headers['av-redirect-stopped'], 'path', String(status)); assert.equal(g.sent.length, 1)
+  }
+  for (const status of [301, 302, 303, 307, 308]) {
+    const f = hopFixture(t, {}, '/next', status)
+    assert.equal((await f.pipeline.handle(f.req())).status, 200); assert.equal(f.sent[1].method, 'GET')
+  }
+})
+
+test('a method override on a direct request is still refused, and an ordinary redirect still follows', async t => {
+  const f = hopFixture(t, { routes: ROUTES }, '/public/next')
+  const denied = await f.pipeline.handle(f.req({ path: '/p/test/admin/keys', headers: [...f.req().headers, ['X-HTTP-Method-Override', 'DELETE']] }))
+  assert.equal(denied.status, 403); assert.equal(problem(denied).rule, 'routes'); assert.equal(f.sent.length, 0)
+  // Control: a redirect within policy, the credential carried to the hop.
+  const result = await f.pipeline.handle(f.req({ path: '/p/test/public/start' }))
+  assert.equal(result.status, 200); assert.equal(result.body.toString(), 'done'); assert.equal(f.sent.length, 2)
+  assert.equal(f.sent[1].url, 'https://api.example.test/public/next'); assert.equal(f.sent[1].headers.authorization, `Bearer ${SECRET}`)
+})
