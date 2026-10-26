@@ -159,3 +159,17 @@ test('the report window, an expired session and a missing creation record are al
     assert.throws(() => accessReport(rows, { sessions: {}, grants: {}, credentials: {}, since }), (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'report_since')
   }
 })
+
+test('a row the gateway marks as held is a hold, whatever else it says', async () => {
+  const s = fixture()
+  const created = rowsOf(s).find((r) => r.kind === 'session.created')
+  const rows = [created, {
+    seq: 900, ts: new Date().toISOString(), kind: 'request.allowed', decision: 'held', session_id: s.session.id,
+    request_id: 'req_x', grant_id: s.grant.id, req: { method: 'DELETE', path: '/repos/one', status: 202 },
+  }]
+  const a = summarizeSession(rows, { session: s.session, grants: [s.grant] })
+  assert.equal(a.requests.allowed, 0)
+  assert.deepEqual(a.paths, [])
+  const r = accessReport(rows, { sessions: s.vault.db.sessions, grants: s.vault.db.grants, credentials: s.vault.db.credentials, since: new Date(0).toISOString() })
+  assert.ok(r.sessions[0].unused_methods.includes('DELETE'))
+})

@@ -32,10 +32,14 @@ const DEFAULT_METHODS = ['GET', 'HEAD']
 const list = (x) => (Array.isArray(x) ? x : Object.values(x || {}))
 const isDenial = (r) => r.decision === 'deny'
 
-/** The request ids of holds, and whether a `request.allowed` row is one. */
+/**
+ * Whether a `request.allowed` row is a hold. The record's own `decision:
+ * 'held'` says so where the gateway writes it; older logs only say it by
+ * sharing a request id with an `approval.requested`, and by a 202 with no path.
+ */
 function holdsOf(rows) {
   const ids = new Set(rows.filter((r) => r.kind === 'approval.requested' && r.request_id != null).map((r) => r.request_id))
-  return (r) => ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)
+  return (r) => r.decision === 'held' || ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)
 }
 const methodOf = (r) => (typeof r.req?.method === 'string' ? r.req.method.toUpperCase() : null)
 

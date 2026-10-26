@@ -727,3 +727,39 @@ test('an elevation the store does not recognise is refused, and nothing is writt
     assert.equal(Object.keys(v.vault.db.sessions).length, 0)
   } finally { v.done() }
 })
+
+// A placeholder lives as long as its session COULD (idle extension included),
+// so a session that went idle and expired early still has placeholders whose
+// own date has not passed. The session is asked at the moment of use.
+test('a placeholder of a session that expired idle is refused at use, though its own date has not passed', () => {
+  const v = fresh()
+  try {
+    const { session } = v.vault.createSession({}) // 8 hours, idle-extensible to 24
+    const { row } = v.vault.issuePlaceholder({ grantId: grantFor(v, session).id })
+    assert.equal(row.expires_at, session.max_expires_at)
+    const idle = Date.parse(session.expires_at) + HOUR
+    assert.ok(idle < Date.parse(row.expires_at), 'the fixture must leave the row itself in date')
+    assert.equal(at(idle, () => code(() => v.vault.consumePlaceholder(row.id))).code, 'AV_SESSION_EXPIRED')
+    assert.equal(row.state, 'dead')
+    // An ordinary use inside the session's life is fine.
+    const live = v.vault.createSession({}).session
+    v.vault.consumePlaceholder(v.vault.issuePlaceholder({ grantId: grantFor(v, live).id }).row.id)
+  } finally { v.done() }
+})
+
+test('settings never carry the webhook URL, locked or unlocked', () => {
+  const v = fresh()
+  try {
+    const url = 'https://hooks.example/services/T0/B0/WEBHOOKSECRETPATH?token=QUERYSECRET'
+    v.vault.setNotifyWebhook({ url })
+    v.vault.updateSettings({ tripwires: { enabled: true, rules: DEFAULT_RULES } })
+    const seen = [JSON.stringify(v.vault.getSettings())]
+    v.vault.lock()
+    seen.push(JSON.stringify(v.vault.getSettings()))
+    for (const text of seen) {
+      for (const part of ['WEBHOOKSECRETPATH', 'QUERYSECRET', 'hooks.example/services', v.vault.db.kv.notify.sealed.ct.slice(0, 24)]) {
+        assert.ok(!text.includes(part), `getSettings carried ${part}`)
+      }
+    }
+  } finally { v.done() }
+})

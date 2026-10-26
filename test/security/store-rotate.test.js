@@ -143,8 +143,8 @@ test('a bad rotation is refused before anything changes, revoke mode included', 
       [{ value: NEW, retireMs: '100' }, { code: 'AV_POLICY_DENIED', rule: 'retire_window' }],
       // Gemini's version checked this after revoking the grants.
       [{ value: NEW, mode: 'revoke', expiresAt: 'garbage' }, { code: 'AV_POLICY_DENIED', rule: 'expires_at' }],
-      [{ value: '' }, { code: 'AV_POLICY_DENIED', rule: undefined }],
-      [{ value: 42 }, { code: 'AV_POLICY_DENIED', rule: undefined }],
+      [{ value: '' }, { code: 'AV_POLICY_DENIED', rule: 'value_empty' }],
+      [{ value: 42 }, { code: 'AV_POLICY_DENIED', rule: 'value_empty' }],
       [{ value: NEW, field: 'nope' }, { code: 'AV_NOT_FOUND', rule: undefined }],
     ]
     for (const [opts, expected] of bad) refusedCleanly(v, () => v.vault.rotateCredential('demo', opts), expected)

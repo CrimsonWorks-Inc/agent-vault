@@ -1078,7 +1078,7 @@ export class Vault {
     const f = field === null ? cred.fields[0] : cred.fields.find((x) => x.name === field)
     if (!f) throw deny('AV_NOT_FOUND', `credential ${slug} has no field ${field}`)
     if (typeof value !== 'string' || value.length === 0) {
-      throw deny('AV_POLICY_DENIED', 'the new value must be a non-empty string')
+      throw deny('AV_POLICY_DENIED', 'the new value must be a non-empty string', { rule: 'value_empty' })
     }
     if (mode !== 'keep' && mode !== 'revoke') throw deny('AV_POLICY_DENIED', 'mode must be keep or revoke', { rule: 'rotate_mode' })
     if (!Number.isSafeInteger(retireMs) || retireMs < 0 || retireMs > 7 * DAY_MS) {
@@ -1774,6 +1774,11 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
+    // The session at the moment of use. A placeholder is bounded by how long
+    // its session COULD live (idle extension included), so a session that
+    // went idle and expired early still has placeholders whose own date has
+    // not passed: they must die with it here, whoever called.
+    this.assertSessionLive(this.db.sessions[row.sid])
     // The grant's own lifetime (F18), asked of the one function that decides
     // it, so a placeholder minted before the grant ended dies with it.
     this.assertGrantLive(this.db.grants[row.grant_id])

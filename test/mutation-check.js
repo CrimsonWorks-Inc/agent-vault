@@ -1525,11 +1525,29 @@ const MUTATIONS = [
     tests: ['test/security/store-activity.test.js'],
   },
   {
-    // A held write counted as a use hides it from unused_methods.
+    // A held write counted as a use hides it from unused_methods. This is
+    // the inference for logs written before the gateway marked holds.
     what: 'a request held for approval counts as a use',
     file: 'src/store/activity.js',
-    from: '  return (r) => ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)',
-    to: '  return (r) => false',
+    from: "  return (r) => r.decision === 'held' || ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)",
+    to: "  return (r) => r.decision === 'held'",
+    tests: ['test/security/store-activity.test.js'],
+  },
+  // ---- store: coordinator conditions on the slice B review ----
+  {
+    // A placeholder is bounded by its session's ceiling, so an idle-expired
+    // session's placeholder is still in date: only the session check stops it.
+    what: 'consumePlaceholder does not ask whether the session is still live',
+    file: 'src/store/vault.js',
+    from: '    this.assertSessionLive(this.db.sessions[row.sid])\n',
+    to: '',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: "a row the gateway marks as held is counted as a use",
+    file: 'src/store/activity.js',
+    from: "  return (r) => r.decision === 'held' || ids.has(r.request_id)",
+    to: '  return (r) => ids.has(r.request_id)',
     tests: ['test/security/store-activity.test.js'],
   },
 ]
