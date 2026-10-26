@@ -1392,6 +1392,14 @@ const MUTATIONS = [
     to: '',
     tests: ['test/security/gateway-w2-seams.test.js'],
   },
+  {
+    // C11: a held request says so in the record, rather than looking allowed.
+    what: 'a request held for approval is recorded as allowed',
+    file: 'src/daemon/pipeline.js',
+    from: "        decision: result.headers?.['av-decision'] === 'pending' ? 'held' : 'allow',",
+    to: "        decision: 'allow',",
+    tests: ['test/security/gateway-w2-seams.test.js'],
+  },
 ]
 
 let survived = 0

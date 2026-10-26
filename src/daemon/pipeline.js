@@ -186,7 +186,10 @@ export class Pipeline {
           redactions: result.redactions,
         },
         spend: result.spend ?? null,
-        decision: 'allow',
+        // A request held for a human also lands here, as a 202. It says so,
+        // so no reader has to infer it from the status (C11). `allow` stays
+        // the word for an allowed one: the CLI and UI read it, beside `deny`.
+        decision: result.headers?.['av-decision'] === 'pending' ? 'held' : 'allow',
         peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         duration_ms: Date.now() - started,
       })
