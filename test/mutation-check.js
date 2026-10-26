@@ -1361,6 +1361,36 @@ const MUTATIONS = [
     to: '    if (false) {',
     tests: ['test/security/store-rotate.test.js'],
   },
+  // ---- store F14: sealed webhook ----
+  {
+    // F14 mutation 2: the URL is a bearer credential.
+    what: 'the webhook URL is stored unsealed beside its sealed copy',
+    file: 'src/store/vault.js',
+    from: '    this.db.kv.notify = { sealed, host: parsed.host, detail,',
+    to: '    this.db.kv.notify = { sealed, url, host: parsed.host, detail,',
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'the webhook URL is audited whole instead of by host',
+    file: 'src/store/vault.js',
+    from: "    this.audit.write('notify.configured', { host: parsed.host, detail })",
+    to: "    this.audit.write('notify.configured', { host: url, detail })",
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'a plaintext http webhook to another machine is accepted',
+    file: 'src/store/vault.js',
+    from: "    if (!(parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback))) throw refuse",
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'a webhook URL with userinfo is accepted',
+    file: 'src/store/vault.js',
+    from: '    if (parsed.username || parsed.password) throw refuse',
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-notify.test.js'],
+  },
 ]
 
 let survived = 0

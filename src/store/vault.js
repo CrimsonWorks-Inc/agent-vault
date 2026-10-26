@@ -87,6 +87,9 @@ function isoOrUndefined(v) {
 
 const DAY_MS = 86_400_000
 
+// Binds the sealed webhook URL to what it is, so no other blob opens as one.
+const NOTIFY_AAD = 'av/notify/webhook'
+
 // F4's bounds on scrub patterns. The grammar is the gateway's (C5).
 const MAX_SCRUB_SOURCE = 256
 const MAX_SCRUB_PER_CRED = 16
@@ -1101,6 +1104,56 @@ export class Vault {
     }
     this.audit.write('cred.rotated', { credential_slug: cred.slug, ...rotated })
     return { credential: this.publicCredential(cred), rotated }
+  }
+
+  // ------------------------------------------------- F14: notify webhook
+
+  /**
+   * The owner's approval-notification webhook (F14). Its URL is a bearer
+   * credential (a Slack webhook URL is one), so it is sealed at rest under its
+   * own key and only its host is ever shown or audited. HTTPS only, or plain
+   * HTTP to this machine; never userinfo.
+   */
+  setNotifyWebhook({ url, detail = 'minimal' } = {}) {
+    this.#requireUnlocked()
+    const refuse = (why) => deny('AV_POLICY_DENIED', `webhook refused: ${why}`, { rule: 'webhook_url' })
+    if (typeof url !== 'string' || !url || url.length > 2048) throw refuse('give an https URL of at most 2048 characters')
+    let parsed
+    try { parsed = new URL(url) } catch { throw refuse('not a URL') }
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+    if (!(parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback))) throw refuse('it must be https (or http to this machine)')
+    if (parsed.username || parsed.password) throw refuse('it must not carry a user name or password')
+    if (detail !== 'minimal' && detail !== 'headline') {
+      throw deny('AV_POLICY_DENIED', 'detail must be minimal or headline', { rule: 'policy_invalid' })
+    }
+    const sealed = crypt.seal(crypt.dek(this.vmk, 'notify'), url, NOTIFY_AAD)
+    this.db.kv.notify = { sealed, host: parsed.host, detail, configured_at: new Date().toISOString() }
+    this.#persist()
+    this.audit.write('notify.configured', { host: parsed.host, detail })
+    return this.notifyConfig()
+  }
+
+  /** The URL itself. Daemon-internal: nothing it returns may reach a response. */
+  getNotifyWebhook() {
+    this.#requireUnlocked()
+    const n = this.db.kv.notify
+    if (!n) return null
+    return { url: crypt.open(crypt.dek(this.vmk, 'notify'), n.sealed, NOTIFY_AAD), host: n.host, detail: n.detail }
+  }
+
+  /** What anyone may see: the host, never the path or query. */
+  notifyConfig() {
+    const n = this.db.kv.notify
+    return n ? { host: n.host, detail: n.detail, configured_at: n.configured_at } : null
+  }
+
+  clearNotifyWebhook() {
+    this.#requireUnlocked()
+    if (!this.db.kv.notify) return false
+    delete this.db.kv.notify
+    this.#persist()
+    this.audit.write('notify.removed', {})
+    return true
   }
 
   deleteCredential(slug) {
