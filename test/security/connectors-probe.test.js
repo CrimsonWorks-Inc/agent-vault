@@ -515,6 +515,38 @@ test('pins under two spellings of the same host are joined, and an empty one doe
 })
 let n2 = 0
 
+test('F-1: pins are looked up by the host of the URL the probe sends to, however the key or the declared host spells it', async () => {
+  const pin = `sha256/${'C'.repeat(43)}=`
+  const cases = [
+    ['[0:0::1]:8443', { '[::1]': [pin] }],
+    ['[::1]:8443', { '[0:0::1]': [pin] }],
+    ['[::1]:8443', { '[0:0:0:0:0:0:0:1]:8443': [pin] }],
+    ['api.github.com', { 'API.GitHub.com.': [pin] }],
+  ]
+  let n = 0
+  for (const [host, pins] of cases) {
+    const sent = []
+    await runProbe({
+      vault: vault(),
+      cred: cred({ id: `cred_pin_url_${n++}`, connector: { host, scheme: 'https' }, pins }),
+      profile: getProfile('github'),
+      upstream: upstreamOf(sent),
+    })
+    assert.equal(sent.length, 1, host)
+    assert.deepEqual(sent[0].pins, [pin], `${host} ${JSON.stringify(pins)}`)
+  }
+  // A key for another host is not this URL's, and the probe sends no Host.
+  const other = []
+  await runProbe({
+    vault: vault(),
+    cred: cred({ id: 'cred_pin_url_other', connector: { host: '[::1]:8443', scheme: 'https' }, pins: { '[::2]': [pin] } }),
+    profile: getProfile('github'),
+    upstream: upstreamOf(other),
+  })
+  assert.equal(other[0].pins, null)
+  assert.equal(Object.keys(other[0].headers).some((k) => k.toLowerCase() === 'host'), false)
+})
+
 const PROBE_CHILD = `
 const { runProbe } = await import(process.env.AV_PROBE_URL)
 const { getProfile } = await import(process.env.AV_PROFILES_URL)

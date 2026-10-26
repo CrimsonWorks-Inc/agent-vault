@@ -23,6 +23,14 @@
 // borrow a real intermediate's name. A pin on a non-leaf certificate never
 // stands in for CA trust.
 //
+// The host is the URL's, everywhere. The TLS server name, Node's certificate
+// check and the one here all name the host the bytes are written to, never a
+// Host header: Node copies a Host header into the server name when none is
+// set, which let a certificate for the header's name pass for the URL host.
+// A Host header that names anything other than the URL's host and port is
+// refused before a connection (AV_POLICY_DENIED, rule 'host_mismatch'); it is
+// not rewritten.
+//
 // Order is the whole protection. Node sends the headers — which carry the
 // substituted secret — on the first write or end. When pins are set, neither
 // happens until `secureConnect` has fired and the decision above has been
@@ -38,7 +46,9 @@
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import tls from 'node:tls'
+import { isIP } from 'node:net'
 import { createHash, X509Certificate } from 'node:crypto'
+import { deny } from '../core/errors.js'
 
 const UPSTREAM_TIMEOUT_MS = 30_000
 const CHAIN_HOPS = 16
@@ -123,6 +133,44 @@ export function verifiedChainPins(tlsSocket) {
   return out
 }
 
+/**
+ * Every value given for a Host header, under any spelling of the name. Node
+ * sends an object's own keys, and a flat array as name, value pairs.
+ */
+function hostHeaderValues(headers) {
+  if (headers == null || typeof headers !== 'object') return []
+  const out = []
+  if (Array.isArray(headers)) {
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      if (String(headers[i]).toLowerCase() === 'host') out.push(headers[i + 1])
+    }
+    return out
+  }
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'host') out.push(headers[key])
+  }
+  return out
+}
+
+/**
+ * Whether a Host header value names the URL's host and port. Case does not
+ * matter, and the scheme's default port may be written or left out. Anything
+ * else, a list or a value that is not a string included, does not.
+ */
+export function hostHeaderMatches(value, parsed) {
+  if (typeof value !== 'string') return false
+  const given = value.toLowerCase()
+  if (given === parsed.host) return true
+  const defaultPort = { 'https:': '443', 'http:': '80' }[parsed.protocol]
+  return parsed.port === '' && !!defaultPort && given === `${parsed.hostname}:${defaultPort}`
+}
+
+/** The URL's host as a certificate names it: no IPv6 brackets. */
+function urlIdentity(parsed) {
+  const host = parsed.hostname
+  return host.startsWith('[') ? host.slice(1, -1) : host
+}
+
 function pinError(presented, reason) {
   const err = Object.assign(new Error('certificate pin mismatch'), {
     code: 'AV_PIN_MISMATCH',
@@ -157,6 +205,13 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
     let parsed
     try { parsed = new URL(url) } catch (e) { fail(e); return }
 
+    // The one name every identity decision uses.
+    const identity = urlIdentity(parsed)
+    if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {
+      fail(deny('AV_POLICY_DENIED', 'the Host header names a different host than the URL', { rule: 'host_mismatch' }))
+      return
+    }
+
     const state = pinListState(pins)
     if (state === 'invalid') {
       fail(pinError([], 'pin_format'))
@@ -178,6 +233,9 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
       method,
       headers,
     }
+    // Set, so Node does not take it from a Host header. An IP is never sent
+    // as SNI; '' tells Node to check the certificate against the URL host.
+    if (!isHttp) opts.servername = isIP(identity) ? '' : identity
     const onResponse = (res) => succeed({ status: res.statusCode, headers: res.headers, res })
     const writeRequest = (req) => {
       if (body) req.write(body)
@@ -221,7 +279,7 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
       }
       const check = () => {
         if (settled) return
-        const verdict = pinVerdict(socket, parsed.hostname, pinList)
+        const verdict = pinVerdict(socket, identity, pinList)
         if (verdict) refuse(verdict)
         else release()
       }
@@ -240,9 +298,9 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
  *
  * The leaf is the handshake's own certificate, chain position 0, and its pin
  * is the only one that can stand in for CA trust. `socket.authorized` is
- * Node's verdict on the chain and, when the chain verified, the host name.
- * With the leaf pinned and the chain unverified, Node never ran the name
- * check, so it runs here.
+ * Node's verdict on the chain and on the server name it was given. That name
+ * is the URL host, but the decision does not rest on it: the name is checked
+ * here against `hostname`, the URL host without brackets, on both paths.
  */
 function pinVerdict(socket, hostname, pinList) {
   const leaf = socket.getPeerCertificate(true)
@@ -251,6 +309,8 @@ function pinVerdict(socket, hostname, pinList) {
   const leafPin = leafX509 ? spkiOf(leafX509) : null
 
   if (socket.authorized) {
+    const wrongName = tls.checkServerIdentity(hostname, leaf)
+    if (wrongName) return wrongName
     if (verifiedChainPins(socket).some((p) => pinList.includes(p))) return null
     return pinError(chainPins(socket))
   }
@@ -258,8 +318,7 @@ function pinVerdict(socket, hostname, pinList) {
   const leafPinned = leafPin !== null && pinList.includes(leafPin)
   if (!leafPinned) return chainError(socket)
 
-  const host = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname
-  const nameError = tls.checkServerIdentity(host, leaf)
+  const nameError = tls.checkServerIdentity(hostname, leaf)
   if (nameError) return nameError
   // Written so that a date that does not parse (NaN) refuses.
   const now = Date.now()

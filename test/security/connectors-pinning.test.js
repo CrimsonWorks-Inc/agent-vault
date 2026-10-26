@@ -5,6 +5,8 @@
 // and name the host, then a pin must match a certificate the peer proved. A
 // mismatch sends nothing and rejects AV_PIN_MISMATCH. A pins value that is not a list of pins is refused
 // before a connection. No pins leaves Node's own verification exactly as is.
+// The host every certificate check names is the URL's: a Host header that
+// names anything else is refused before a connection, pinned or not.
 //
 // Node reads NODE_EXTRA_CA_CERTS once, at start-up, and pinnedRequest takes no
 // trust option. A test that needs the private test root trusted runs the
@@ -24,7 +26,7 @@ import { X509Certificate, createHash } from 'node:crypto'
 import * as pinning from '../../src/connectors/pinning.js'
 import { PROFILES } from '../../src/connectors/profiles.js'
 
-const { spkiOf, chainPins, pinnedRequest, fetchChainPins } = pinning
+const { spkiOf, chainPins, pinnedRequest, fetchChainPins, hostHeaderMatches } = pinning
 const PINNING_URL = new URL('../../src/connectors/pinning.js', import.meta.url).href
 const SECRET = 'ghp_PINSECRET0000111122223333444455556666'
 const WRONG = `sha256/${'A'.repeat(43)}=`
@@ -120,11 +122,12 @@ function listen(server) {
 
 /** A server that counts application bytes and requests, and records them. */
 async function serve(material, handler) {
-  const seen = { bytes: 0, requests: 0, connections: 0, authorization: [], body: [], urls: [], reused: [] }
+  const seen = { bytes: 0, requests: 0, connections: 0, authorization: [], body: [], urls: [], reused: [], servername: [], host: [] }
   const server = material ? https.createServer(material) : http.createServer()
   server.on('request', (req, res) => {
     seen.requests++
     seen.authorization.push(req.headers.authorization)
+    seen.host.push(req.headers.host)
     seen.urls.push(req.url)
     const chunks = []
     req.on('data', (c) => chunks.push(c))
@@ -142,6 +145,7 @@ async function serve(material, handler) {
   })
   server.on('secureConnection', (socket) => {
     seen.reused.push(socket.isSessionReused())
+    seen.servername.push(socket.servername || null)
     socket.on('data', (c) => { seen.bytes += c.length })
   })
   const port = await listen(server)
@@ -155,7 +159,7 @@ function outcome(promise) {
       for await (const c of r.res) chunks.push(c)
       return { ok: true, status: r.status, headers: r.headers, body: Buffer.concat(chunks).toString('utf8') }
     },
-    (e) => ({ ok: false, code: e.code, reason: e.reason, presented: e.presented, message: e.message }),
+    (e) => ({ ok: false, code: e.code, rule: e.rule, reason: e.reason, presented: e.presented, message: e.message }),
   )
 }
 
@@ -169,7 +173,7 @@ for (const call of JSON.parse(process.env.AV_CALLS)) {
     for await (const c of r.res) chunks.push(c)
     out.push({ ok: true, status: r.status, headers: r.headers, body: Buffer.concat(chunks).toString('utf8') })
   } catch (e) {
-    out.push({ ok: false, code: e.code, reason: e.reason, presented: e.presented, message: e.message })
+    out.push({ ok: false, code: e.code, rule: e.rule, reason: e.reason, presented: e.presented, message: e.message })
   }
 }
 process.stdout.write(JSON.stringify(out))
@@ -638,5 +642,182 @@ test('chainPins de-duplicates and stops when the issuer points at itself', () =>
 test('profiles ship no built-in pins', () => {
   for (const [kind, profile] of Object.entries(PROFILES)) {
     assert.equal(Object.hasOwn(profile, 'pins'), false, kind)
+  }
+})
+
+// F-1 (final review). `other.crt` names only elsewhere.test and is signed by
+// the real intermediate; the server holds that leaf's key and nothing else.
+// Node copies a Host header into the TLS server name when none is set, so a
+// Host of elsewhere.test once made Node verify the certificate against that
+// name while the bytes went to the URL host. Each of these delivered the
+// secret before the fix.
+
+// `host` undefined leaves the header out, so Node writes its own.
+const withHost = (port, pins, host, extra = {}) => get(port, pins, {
+  method: 'POST',
+  headers: { authorization: `Bearer ${SECRET}`, ...(host === undefined ? {} : { host }), 'content-type': 'text/plain' },
+  body: 'SENTINEL',
+  ...extra,
+})
+
+function assertHostMismatch(out, label) {
+  assert.equal(out.ok, false, `${label}: ${JSON.stringify(out)}`)
+  assert.equal(out.code, 'AV_POLICY_DENIED', `${label}: ${JSON.stringify(out)}`)
+  assert.equal(out.rule, 'host_mismatch', label)
+}
+
+test('F-1: a Host header the certificate names does not let a leaf, intermediate or root pin accept a server that does not name the URL host', async () => {
+  const s = await serve(chain.material('other'))
+  try {
+    const cases = [
+      ['intermediate pin, URL 127.0.0.1', withHost(s.port, [chain.intPin], 'elsewhere.test')],
+      ['root pin, URL 127.0.0.1', withHost(s.port, [chain.rootPin], 'elsewhere.test')],
+      ['intermediate pin, URL localhost', withHost(s.port, [chain.intPin], 'elsewhere.test', { url: `https://localhost:${s.port}/user` })],
+      ['leaf pin, URL localhost', withHost(s.port, [chain.otherPin], 'elsewhere.test', { url: `https://localhost:${s.port}/user` })],
+      ['leaf pin, URL 127.0.0.1', withHost(s.port, [chain.otherPin], 'elsewhere.test')],
+      ['Host with the port, URL 127.0.0.1', withHost(s.port, [chain.intPin], `elsewhere.test:${s.port}`)],
+    ]
+    const outs = await trusted(...cases.map(([, call]) => call))
+    outs.forEach((out, i) => assertHostMismatch(out, cases[i][0]))
+    // The same in this process, where nothing trusts the root.
+    for (const [label, call] of cases) assertHostMismatch(await outcome(pinnedRequest(call)), `${label} (untrusted)`)
+    await settle()
+    assert.equal(s.seen.connections, 0)
+    assert.equal(s.seen.requests, 0)
+    assert.equal(s.seen.bytes, 0)
+
+    // Without a Host header the certificate is checked against the URL host,
+    // which it does not name.
+    const [bare] = await trusted(get(s.port, [chain.intPin]), get(s.port, [chain.otherPin]))
+    assert.equal(bare.ok, false)
+    assert.equal(bare.code, 'ERR_TLS_CERT_ALTNAME_INVALID')
+    await settle()
+    assert.equal(s.seen.requests, 0)
+    assert.equal(s.seen.bytes, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('F-1: the TLS server name is the URL host, and a Host header naming another host is refused before a connection, pinned or not', async () => {
+  const self = await serve(chain.selfSigned)
+  const genuine = await serve(chain.material('leaf'))
+  const plain = await serve(null)
+  try {
+    // A certificate that names the URL host, a Host header that names another:
+    // this used to be delivered with the server name set to the header.
+    for (const pins of [[chain.selfPin], null]) {
+      assertHostMismatch(await outcome(pinnedRequest(withHost(self.port, pins, 'elsewhere.test'))), `self ${JSON.stringify(pins)}`)
+    }
+    const [trustedOut] = await trusted(withHost(genuine.port, [chain.intPin], 'elsewhere.test'), withHost(genuine.port, null, 'elsewhere.test'))
+    assertHostMismatch(trustedOut, 'trusted chain')
+    assertHostMismatch(await outcome(pinnedRequest(withHost(plain.port, null, 'elsewhere.test', { url: `http://127.0.0.1:${plain.port}/user` }))), 'http')
+    await settle()
+    for (const s of [self, genuine, plain]) {
+      assert.equal(s.seen.connections, 0)
+      assert.equal(s.seen.requests, 0)
+    }
+
+    // Matching Host headers, in another case or with the port written, are
+    // sent. The server name is the URL host, lower case, not the header.
+    const local = (port, pins, host) => withHost(port, pins, host, { url: `https://localhost:${port}/user` })
+    const ok1 = await outcome(pinnedRequest(local(self.port, [chain.selfPin], `LocalHost:${self.port}`)))
+    assert.equal(ok1.ok, true, JSON.stringify(ok1))
+    const ok2 = await outcome(pinnedRequest(local(self.port, [chain.selfPin], undefined)))
+    assert.equal(ok2.ok, true, JSON.stringify(ok2))
+    assert.deepEqual(self.seen.servername, ['localhost', 'localhost'])
+    assert.deepEqual(self.seen.host, [`LocalHost:${self.port}`, `localhost:${self.port}`])
+    // An IP is not sent as a server name.
+    const ok3 = await outcome(pinnedRequest(withHost(self.port, [chain.selfPin], `127.0.0.1:${self.port}`)))
+    assert.equal(ok3.ok, true, JSON.stringify(ok3))
+    assert.equal(self.seen.servername[2], null)
+  } finally {
+    await self.close()
+    await genuine.close()
+    await plain.close()
+  }
+})
+
+test('F-1: a Host header with another port, no port, another case of another name, or a list is refused', async () => {
+  const s = await serve(chain.selfSigned)
+  try {
+    const p = s.port
+    const refusedHosts = [
+      '127.0.0.1',
+      `127.0.0.1:${p + 1 === 65536 ? 1 : p + 1}`,
+      `127.0.0.1:${p}x`,
+      ` 127.0.0.1:${p}`,
+      'Elsewhere.TEST',
+      `localhost:${p}`,
+      [`127.0.0.1:${p}`],
+      42,
+    ]
+    for (const host of refusedHosts) {
+      assertHostMismatch(await outcome(pinnedRequest(withHost(p, [chain.selfPin], host))), JSON.stringify(host))
+    }
+    // Any spelling of the header name, and the raw array form.
+    assertHostMismatch(await outcome(pinnedRequest(get(p, [chain.selfPin], { headers: { HOST: 'elsewhere.test' } }))), 'HOST')
+    assertHostMismatch(await outcome(pinnedRequest(get(p, [chain.selfPin], {
+      headers: { host: `127.0.0.1:${p}`, Host: 'elsewhere.test' },
+    }))), 'two spellings')
+    assertHostMismatch(await outcome(pinnedRequest(get(p, [chain.selfPin], {
+      headers: ['Authorization', `Bearer ${SECRET}`, 'Host', 'elsewhere.test'],
+    }))), 'raw array')
+    await settle()
+    assert.equal(s.seen.connections, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('F-1: hostHeaderMatches allows only the URL host, any case, with or without the scheme\'s default port', () => {
+  const https443 = new URL('https://API.github.com/user')
+  for (const h of ['api.github.com', 'API.GITHUB.COM', 'api.github.com:443']) assert.equal(hostHeaderMatches(h, https443), true, h)
+  for (const h of ['api.github.com:80', 'api.github.com:8443', 'api.github.com.', 'evil.example', 'api.github.com:443:443', '', null, ['api.github.com']]) {
+    assert.equal(hostHeaderMatches(h, https443), false, JSON.stringify(h))
+  }
+  const http80 = new URL('http://example.test/')
+  assert.equal(hostHeaderMatches('example.test:80', http80), true)
+  assert.equal(hostHeaderMatches('example.test:443', http80), false)
+  const odd = new URL('https://example.test:8443/')
+  assert.equal(hostHeaderMatches('example.test:8443', odd), true)
+  assert.equal(hostHeaderMatches('example.test', odd), false)
+  assert.equal(hostHeaderMatches('example.test:443', odd), false)
+  const v6 = new URL('https://[::1]:8443/')
+  assert.equal(hostHeaderMatches('[::1]:8443', v6), true)
+  assert.equal(hostHeaderMatches('::1', v6), false)
+})
+
+test('F-1 controls: a matching or absent Host header is delivered with and without pins', async () => {
+  const genuine = await serve(chain.material('leaf'))
+  const self = await serve(chain.selfSigned)
+  const plain = await serve(null)
+  try {
+    const host = `127.0.0.1:${genuine.port}`
+    const outs = await trusted(
+      withHost(genuine.port, [chain.intPin], host),
+      withHost(genuine.port, [chain.rootPin], undefined),
+      withHost(genuine.port, [chain.leafPin], host),
+      withHost(genuine.port, null, host),
+      withHost(genuine.port, null, undefined),
+    )
+    for (const out of outs) {
+      assert.equal(out.ok, true, JSON.stringify(out))
+      assert.equal(out.body, 'hello')
+    }
+    assert.equal(genuine.seen.requests, 5)
+    assert.equal(genuine.seen.authorization.every((a) => a === `Bearer ${SECRET}`), true)
+    assert.deepEqual(genuine.seen.host, Array(5).fill(host))
+    const selfOut = await outcome(pinnedRequest(withHost(self.port, [chain.selfPin], `127.0.0.1:${self.port}`)))
+    assert.equal(selfOut.ok, true, JSON.stringify(selfOut))
+    for (const h of [`127.0.0.1:${plain.port}`, undefined]) {
+      const out = await outcome(pinnedRequest(withHost(plain.port, null, h, { url: `http://127.0.0.1:${plain.port}/user` })))
+      assert.equal(out.ok, true, JSON.stringify(out))
+    }
+    assert.equal(plain.seen.requests, 2)
+  } finally {
+    await genuine.close()
+    await self.close()
+    await plain.close()
   }
 })

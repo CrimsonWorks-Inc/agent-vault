@@ -1171,8 +1171,41 @@ const MUTATIONS = [
     // completed. Ending before the pin comparison delivers the secret.
     what: 'the request is ended before the certificate pin is checked',
     file: 'src/connectors/pinning.js',
-    from: 'const verdict = pinVerdict(socket, parsed.hostname, pinList)',
-    to: 'req.end(body); const verdict = pinVerdict(socket, parsed.hostname, pinList)',
+    from: 'const verdict = pinVerdict(socket, identity, pinList)',
+    to: 'req.end(body); const verdict = pinVerdict(socket, identity, pinList)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // The bytes go to the URL host, so that is the name a certificate must
+    // carry. Taking the name from the Host header (and so no longer refusing
+    // one that differs) let a certificate for the header's name, chaining to
+    // a pinned intermediate or root, receive the secret. With the refusal in
+    // place a Host header can only name the URL host, so both go together.
+    what: 'the certificate identity check reads the Host header',
+    file: 'src/connectors/pinning.js',
+    from: 'const identity = urlIdentity(parsed)\n    if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {',
+    to: "const identity = String(hostHeaderValues(headers)[0] || urlIdentity(parsed)).replace(/:\\d+$/, '')\n    if (false) {",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a Host header naming another host is sent instead of refused',
+    file: 'src/connectors/pinning.js',
+    from: 'if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {',
+    to: 'if (false) {',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'any Host header value passes as the URL host',
+    file: 'src/connectors/pinning.js',
+    from: "return parsed.port === '' && !!defaultPort",
+    to: "return true || parsed.port === '' && !!defaultPort",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a Host header under another spelling of the name is not checked',
+    file: 'src/connectors/pinning.js',
+    from: "if (key.toLowerCase() === 'host') out.push(headers[key])",
+    to: "if (key === 'host') out.push(headers[key])",
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {
@@ -1181,8 +1214,8 @@ const MUTATIONS = [
     // nothing trusts, or a certificate for another name.
     what: 'a pinned request treats an unverified chain as verified',
     file: 'src/connectors/pinning.js',
-    from: '  if (socket.authorized) {\n    if (verifiedChainPins(socket)',
-    to: '  if (true) {\n    if (verifiedChainPins(socket)',
+    from: '  if (socket.authorized) {\n    const wrongName',
+    to: '  if (true) {\n    const wrongName',
     tests: ['test/security/connectors-pinning.test.js', 'test/security/connectors-probe.test.js'],
   },
   {
@@ -1256,6 +1289,16 @@ const MUTATIONS = [
     from: '// Certificate verification stays at Node\'s default.\n      const req = open(opts, onResponse)',
     to: 'opts.rejectUnauthorized = false\n      const req = open(opts, onResponse)',
     tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // Pins belong to the host the secret is written to. Looking them up by
+    // the declared spelling missed a key written the way the URL reads it,
+    // and the probe went out unpinned.
+    what: 'probe pins are looked up by the declared host, not the URL host',
+    file: 'src/connectors/probe.js',
+    from: 'const pins = pinsFor(cred, new URL(url).hostname)',
+    to: 'const pins = pinsFor(cred, destination.host)',
+    tests: ['test/security/connectors-probe.test.js'],
   },
   {
     // The probe target is the profile constant. A path on the call would aim

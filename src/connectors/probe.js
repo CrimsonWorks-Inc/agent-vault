@@ -72,7 +72,8 @@ export async function runProbe({ vault, cred, profile, upstream, path, method, b
     })
   }
 
-  const pins = pinsFor(cred, destination.host)
+  const url = destination.urlFor(probePath)
+  const pins = pinsFor(cred, new URL(url).hostname)
   if (pinListState(pins) === 'invalid') {
     throw Object.assign(new Error('certificate pin mismatch'), { code: 'AV_PIN_MISMATCH', presented: [], reason: 'pin_format' })
   }
@@ -132,7 +133,7 @@ export async function runProbe({ vault, cred, profile, upstream, path, method, b
   let response
   try {
     response = await send({
-      url: destination.urlFor(probePath),
+      url,
       method: probeMethod,
       headers,
       body: requestBody,
@@ -267,9 +268,12 @@ function firstHeaderSite(cred) {
 }
 
 /**
- * The stored pin list for `host`. Keys that name the same host are joined, so
- * an empty duplicate cannot hide a real list. A table or entry of the wrong
- * shape comes back as `false`, which pinListState refuses; it is never null.
+ * The stored pin list for `host`, the hostname of the URL the probe sends to.
+ * Each key is read the way the URL parser reads a host, so '[0:0::1]' and
+ * '[::1]', or 'API.GitHub.com.' and 'api.github.com', are the same host.
+ * Keys that name the same host are joined, so an empty duplicate cannot hide
+ * a real list. A table or entry of the wrong shape comes back as `false`,
+ * which pinListState refuses; it is never null.
  */
 function pinsFor(cred, host) {
   const table = cred?.pins
@@ -277,11 +281,18 @@ function pinsFor(cred, host) {
   if (typeof table !== 'object' || Array.isArray(table)) return false
   const found = []
   for (const [key, value] of Object.entries(table)) {
-    if (hostOnly(key) !== host || value == null) continue
+    if (urlHostOf(key) !== host || value == null) continue
     if (!Array.isArray(value)) return false
     found.push(...value)
   }
   return found.length > 0 ? found : null
+}
+
+/** The hostname the URL parser gives `key`, or null if it names no host. */
+function urlHostOf(key) {
+  const host = hostOnly(key)
+  if (!host) return null
+  try { return new URL(`https://${host}/`).hostname } catch { return null }
 }
 
 function scrubText(text, scrubber) {
