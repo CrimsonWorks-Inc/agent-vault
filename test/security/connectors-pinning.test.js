@@ -1,7 +1,9 @@
-// F11. A pin adds to Node's certificate verification and never replaces it.
-// The chain must still verify to a trusted root and name the host; then a pin
-// must match a certificate the peer proved. A mismatch sends nothing and
-// rejects AV_PIN_MISMATCH. A pins value that is not a list of pins is refused
+// F11. An exact pin on the leaf, the handshake's own certificate, stands in
+// for CA trust, so a self-signed upstream can be pinned; the leaf must still
+// name the host and be in date. Any other pin adds to Node's certificate
+// verification and never replaces it: the chain must verify to a trusted root
+// and name the host, then a pin must match a certificate the peer proved. A
+// mismatch sends nothing and rejects AV_PIN_MISMATCH. A pins value that is not a list of pins is refused
 // before a connection. No pins leaves Node's own verification exactly as is.
 //
 // Node reads NODE_EXTRA_CA_CERTS once, at start-up, and pinnedRequest takes no
@@ -40,8 +42,10 @@ function writeExt(dir, name, text) {
  * A private root, one intermediate, two leaves (leaf 2 is the rotation) and a
  * leaf for another name. Then what an on-path attacker can build holding only
  * the public intermediate: a throwaway "intermediate" with the same subject
- * and key identifier, and a leaf for this host signed by it. Last, an
- * unrelated self-signed leaf.
+ * and key identifier, and a leaf for this host signed by it. Last, self-signed
+ * leaves: one for this host, one for another name, one expired, one not yet
+ * valid, and one that copies the intermediate's public key into a leaf for
+ * this host (signed by a key the attacker holds, since it has no other).
  */
 function makeChain() {
   const dir = mkdtempSync(join(tmpdir(), 'av-pin-'))
@@ -65,6 +69,14 @@ function makeChain() {
   openssl(dir, ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'evil.key', '-out', 'evil.csr', '-subj', '/CN=localhost'])
   openssl(dir, ['x509', '-req', '-in', 'evil.csr', '-CA', 'fake.crt', '-CAkey', 'fake.key', '-out', 'evil.crt', '-days', '2', '-CAcreateserial', '-extfile', 'leaf.ext'])
   openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'self.key', '-out', 'self.crt', '-days', '2', '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'])
+  openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'selfother.key', '-out', 'selfother.crt', '-days', '2', '-subj', '/CN=elsewhere.test', '-addext', 'subjectAltName=DNS:elsewhere.test'])
+  for (const [name, from, to] of [['expired', '20200101000000Z', '20200102000000Z'], ['future', '20990101000000Z', '20990102000000Z']]) {
+    openssl(dir, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', `${name}.key`, '-out', `${name}.crt`, '-not_before', from, '-not_after', to, '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'])
+  }
+  openssl(dir, ['pkey', '-in', 'int.key', '-pubout', '-out', 'int.pub'])
+  openssl(dir, ['req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'copy.key', '-out', 'copy.csr', '-subj', '/CN=localhost'])
+  openssl(dir, ['x509', '-req', '-in', 'copy.csr', '-signkey', 'copy.key', '-force_pubkey', 'int.pub', '-out', 'copy.crt', '-days', '2', '-extfile', 'leaf.ext'])
+  openssl(dir, ['genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', 'ec.key'])
 
   const read = (file) => readFileSync(join(dir, file))
   const pin = (file) => spkiOf(new X509Certificate(read(file)))
@@ -80,11 +92,21 @@ function makeChain() {
     rootPin: pin('root.crt'),
     evilPin: pin('evil.crt'),
     selfPin: pin('self.crt'),
+    selfOtherPin: pin('selfother.crt'),
+    expiredPin: pin('expired.crt'),
+    futurePin: pin('future.crt'),
+    copyPin: pin('copy.crt'),
     material(which) { return serve(`${which}.key`, `${which}.crt`, 'int.crt') },
     forged: serve('evil.key', 'evil.crt', 'int.crt'),
     forgedWithRoot: serve('evil.key', 'evil.crt', 'int.crt', 'root.crt'),
     unlinked: serve('self.key', 'self.crt', 'int.crt'),
     selfSigned: serve('self.key', 'self.crt'),
+    selfOther: serve('selfother.key', 'selfother.crt'),
+    expired: serve('expired.key', 'expired.crt'),
+    future: serve('future.key', 'future.crt'),
+    // The server holds a key, just not the one in the certificate it sends.
+    copied: serve('ec.key', 'copy.crt'),
+    copiedBehindSelf: serve('self.key', 'self.crt', 'copy.crt'),
     close() { rmSync(dir, { recursive: true, force: true }) },
   }
 }
@@ -243,18 +265,20 @@ test('a rotated leaf still matches a backup pin on the intermediate', async () =
   }
 })
 
-test('a pinned certificate the trust store does not accept is refused by Node, and nothing is sent', async () => {
-  // The pin matches the leaf in both cases. Pinning must not turn that into
-  // trust: an untrusted chain fails the handshake exactly as with no pins.
+test('only non-leaf pins on a chain the trust store does not accept: refused with Node\'s code, and nothing is sent', async () => {
+  // An intermediate or root pin narrows Node's trust and never stands in for
+  // it, even when the chain is genuine and every signature in it checks.
   const self = await serve(chain.selfSigned)
   const priv = await serve(chain.material('leaf'))
   try {
-    const selfOut = await outcome(pinnedRequest(get(self.port, [chain.selfPin], { method: 'POST', body: 'SENTINEL' })))
+    const selfOut = await outcome(pinnedRequest(get(self.port, [WRONG], { method: 'POST', body: 'SENTINEL' })))
     assert.equal(selfOut.ok, false)
     assert.equal(selfOut.code, 'DEPTH_ZERO_SELF_SIGNED_CERT')
-    const privOut = await outcome(pinnedRequest(get(priv.port, [chain.leafPin, chain.intPin, chain.rootPin])))
-    assert.equal(privOut.ok, false)
-    assert.equal(privOut.code, 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY')
+    for (const pins of [[chain.intPin], [chain.rootPin], [WRONG, chain.intPin, chain.rootPin]]) {
+      const privOut = await outcome(pinnedRequest(get(priv.port, pins)))
+      assert.equal(privOut.ok, false, JSON.stringify(pins))
+      assert.equal(privOut.code, 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY')
+    }
     await settle()
     for (const s of [self, priv]) {
       assert.equal(s.seen.requests, 0)
@@ -264,6 +288,117 @@ test('a pinned certificate the trust store does not accept is refused by Node, a
   } finally {
     await self.close()
     await priv.close()
+  }
+})
+
+test('V-L1: an exact leaf pin stands in for CA trust, for a self-signed leaf and an untrusted chain', async () => {
+  const self = await serve(chain.selfSigned)
+  const priv = await serve(chain.material('leaf'))
+  try {
+    const selfOut = await outcome(pinnedRequest(get(self.port, [WRONG, chain.selfPin], { method: 'POST', headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'text/plain' }, body: 'SENTINEL' })))
+    assert.equal(selfOut.ok, true, JSON.stringify(selfOut))
+    assert.equal(selfOut.status, 200)
+    assert.equal(selfOut.body, 'hello')
+    assert.deepEqual(self.seen.authorization, [`Bearer ${SECRET}`])
+    assert.deepEqual(self.seen.body, ['SENTINEL'])
+    const privOut = await outcome(pinnedRequest(get(priv.port, [chain.leafPin])))
+    assert.equal(privOut.ok, true, JSON.stringify(privOut))
+    assert.equal(priv.seen.requests, 1)
+    // The same pin in a child that trusts the root goes the CA way and lands
+    // in the same place.
+    const [inTrusted] = await trusted(get(priv.port, [chain.leafPin]))
+    assert.equal(inTrusted.ok, true)
+    assert.equal(priv.seen.requests, 2)
+  } finally {
+    await self.close()
+    await priv.close()
+  }
+})
+
+test('V-L2: a pinned self-signed leaf for another host name is refused, and nothing is sent', async () => {
+  const s = await serve(chain.selfOther)
+  try {
+    const out = await outcome(pinnedRequest(get(s.port, [chain.selfOtherPin], { method: 'POST', body: 'SENTINEL' })))
+    assert.equal(out.ok, false)
+    assert.equal(out.code, 'ERR_TLS_CERT_ALTNAME_INVALID')
+    const [inTrusted] = await trusted(get(s.port, [chain.selfOtherPin]))
+    assert.equal(inTrusted.code, 'ERR_TLS_CERT_ALTNAME_INVALID')
+    await settle()
+    assert.equal(s.seen.requests, 0)
+    assert.equal(s.seen.bytes, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('V-L3: a self-signed leaf whose pin is not on the list is refused, and nothing is sent', async () => {
+  const s = await serve(chain.selfSigned)
+  try {
+    for (const pins of [[WRONG], [chain.leafPin], [chain.intPin, chain.rootPin]]) {
+      const out = await outcome(pinnedRequest(get(s.port, pins, { method: 'POST', body: 'SENTINEL' })))
+      assert.equal(out.ok, false, JSON.stringify(pins))
+      assert.equal(out.code, 'DEPTH_ZERO_SELF_SIGNED_CERT')
+    }
+    await settle()
+    assert.equal(s.seen.requests, 0)
+    assert.equal(s.seen.bytes, 0)
+  } finally {
+    await s.close()
+  }
+})
+
+test('V-L4: a leaf copying the pinned intermediate\'s key cannot finish a handshake, and the handshake leaf is the one checked', async () => {
+  // The copy carries the intermediate's SPKI, so a check that read pins off
+  // the certificates without the handshake would accept it. The server has
+  // no way to sign for that key: the handshake fails before secureConnect.
+  assert.equal(chain.copyPin, chain.intPin)
+  const copied = await serve(chain.copied)
+  // The same copy, appended behind a self-signed leaf the server does hold.
+  // Only position 0 can stand in for CA trust.
+  const behind = await serve(chain.copiedBehindSelf)
+  try {
+    const plain = await outcome(pinnedRequest(get(copied.port, [chain.intPin], { method: 'POST', body: 'SENTINEL' })))
+    const [inTrusted] = await trusted(get(copied.port, [chain.intPin]))
+    for (const out of [plain, inTrusted]) {
+      assert.equal(out.ok, false, JSON.stringify(out))
+      assert.notEqual(out.code, 'AV_PIN_MISMATCH', 'the handshake should have failed before any pin was read')
+    }
+    const appended = await outcome(pinnedRequest(get(behind.port, [chain.intPin], { method: 'POST', body: 'SENTINEL' })))
+    assert.equal(appended.ok, false)
+    assert.equal(appended.code, 'DEPTH_ZERO_SELF_SIGNED_CERT')
+    await settle()
+    for (const s of [copied, behind]) {
+      assert.equal(s.seen.requests, 0, 'the secret reached a server without the pinned key')
+      assert.equal(s.seen.bytes, 0)
+    }
+  } finally {
+    await copied.close()
+    await behind.close()
+  }
+})
+
+test('V-L5: a pinned self-signed leaf out of date is refused with AV_PIN_MISMATCH, and nothing is sent', async () => {
+  const expired = await serve(chain.expired)
+  const future = await serve(chain.future)
+  try {
+    const old = await outcome(pinnedRequest(get(expired.port, [chain.expiredPin], { method: 'POST', body: 'SENTINEL' })))
+    assert.equal(old.code, 'AV_PIN_MISMATCH')
+    assert.equal(old.reason, 'leaf_expired')
+    assert.ok(old.presented.includes(chain.expiredPin))
+    const early = await outcome(pinnedRequest(get(future.port, [chain.futurePin])))
+    assert.equal(early.code, 'AV_PIN_MISMATCH')
+    assert.equal(early.reason, 'leaf_not_yet_valid')
+    const unpinned = await outcome(pinnedRequest(get(expired.port, [WRONG])))
+    assert.equal(unpinned.ok, false)
+    assert.notEqual(unpinned.code, 'AV_PIN_MISMATCH')
+    await settle()
+    for (const s of [expired, future]) {
+      assert.equal(s.seen.requests, 0)
+      assert.equal(s.seen.bytes, 0)
+    }
+  } finally {
+    await expired.close()
+    await future.close()
   }
 })
 

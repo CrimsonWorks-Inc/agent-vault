@@ -559,7 +559,7 @@ function probeIn(trust, credential) {
   })
 }
 
-test('with the real upstream: pins add to CA verification, a mismatch sends nothing, and a match probes only /user', async () => {
+test('with the real upstream: a root pin adds to CA verification, a mismatch sends nothing, and a match probes only /user', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'av-probe-'))
   const ossl = (args) => execFileSync('openssl', args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] })
   try {
@@ -569,11 +569,13 @@ test('with the real upstream: pins add to CA verification, a mismatch sends noth
     ossl(['x509', '-req', '-in', 'leaf.csr', '-CA', 'root.crt', '-CAkey', 'root.key', '-out', 'cert.pem', '-days', '2', '-CAcreateserial', '-extfile', 'leaf.ext'])
     const cert = readFileSync(join(dir, 'cert.pem'))
     const key = readFileSync(join(dir, 'key.pem'))
-    const pin = spkiOf(new X509Certificate(cert))
+    const root = readFileSync(join(dir, 'root.crt'))
+    const rootPin = spkiOf(new X509Certificate(root))
     let bytes = 0
     let requests = 0
     let seen = null
-    const server = https.createServer({ cert, key }, (req, res) => {
+    // The root rides along, so a check that skipped CA verification would see it.
+    const server = https.createServer({ cert: Buffer.concat([cert, root]), key }, (req, res) => {
       requests++
       const chunks = []
       req.on('data', (c) => chunks.push(c))
@@ -596,14 +598,15 @@ test('with the real upstream: pins add to CA verification, a mismatch sends noth
       assert.equal(bad.health[0].status, 'error')
       assert.equal(bad.health[0].source, 'probe')
 
-      // The pin matches, but nothing trusts the chain: Node refuses it.
-      const untrusted = await runProbe({ vault: vault(), cred: at('cred_pin_untrusted', { '127.0.0.1': [pin] }), profile: getProfile('github') })
+      // The root pin matches, but nothing trusts the chain: a non-leaf pin
+      // never stands in for CA trust.
+      const untrusted = await runProbe({ vault: vault(), cred: at('cred_pin_untrusted', { '127.0.0.1': [rootPin] }), profile: getProfile('github') })
       assert.equal(untrusted.status, 'unreachable')
       await new Promise((r) => setTimeout(r, 200))
       assert.equal(bytes, 0)
       assert.equal(requests, 0)
 
-      const good = await probeIn(join(dir, 'root.crt'), at('cred_pin_ok', { '127.0.0.1': [pin] }))
+      const good = await probeIn(join(dir, 'root.crt'), at('cred_pin_ok', { '127.0.0.1': [rootPin] }))
       assert.equal(good.error, undefined)
       assert.equal(good.result.status, 'ok')
       assert.equal(leaks(good, [SECRET, PLACEHOLDER, BODY]), false)

@@ -4,20 +4,32 @@
 // pin: a hard-coded third-party key breaks every request the day that
 // provider rotates its CA.
 //
-// A pin adds to Node's verification and never replaces it. The chain must
-// still verify to a root Node trusts (its own store plus NODE_EXTRA_CA_CERTS,
-// exactly as with no pins), and the certificate must still name the host.
-// Only then is the pin compared, and only against certificates the peer has
-// proven: the leaf, whose key the handshake proves, and each issuer whose key
-// signed the certificate below it. A certificate the server merely appends
-// proves nothing, so pinning an intermediate or root survives leaf rotation
-// without letting a forged leaf borrow a real intermediate's name.
+// There are two ways a pinned connection is accepted, and only two.
+//
+// An exact leaf pin stands in for CA trust. When the SPKI of the end-entity
+// certificate — the one at chain position 0, whose private key the handshake
+// itself proves — is on the list, the chain need not verify to a trusted
+// root. That is what lets a self-signed internal upstream be pinned. The
+// certificate must still name the host, and must be inside its validity
+// window: an expired pinned leaf is refused with reason 'leaf_expired'.
+//
+// Any other pin adds to Node's verification and never replaces it. The chain
+// must verify to a root Node trusts (its own store plus NODE_EXTRA_CA_CERTS,
+// exactly as with no pins), and the certificate must name the host. Only then
+// is the pin compared, and only against certificates the peer has proven: the
+// leaf, and each issuer whose key signed the certificate below it. A
+// certificate the server merely appends proves nothing, so pinning an
+// intermediate or root survives leaf rotation without letting a forged leaf
+// borrow a real intermediate's name. A pin on a non-leaf certificate never
+// stands in for CA trust.
 //
 // Order is the whole protection. Node sends the headers — which carry the
 // substituted secret — on the first write or end. When pins are set, neither
-// happens until `secureConnect` has fired and the proven chain intersects the
-// list. A mismatch destroys the socket and rejects with AV_PIN_MISMATCH. No
-// byte of the request was written.
+// happens until `secureConnect` has fired and the decision above has been
+// made. A refusal destroys the socket and rejects: AV_PIN_MISMATCH for a pin
+// that matched nothing or a pinned leaf out of date, Node's own TLS error code
+// for a chain or name that does not verify. No byte of the request was
+// written.
 //
 // `pins` is null, undefined or [] for no pins. Anything else that is not an
 // array of well-formed pins is refused before a connection (reason
@@ -123,9 +135,10 @@ function pinError(presented, reason) {
 /**
  * Drop-in for the pipeline's defaultUpstream. Same resolve shape:
  * `{ status, headers, res }`. `pins` null, omitted, or empty leaves
- * verification exactly as Node's client does. A non-empty list keeps that
- * verification and is checked after it, before any application byte is
- * written. Any other value is refused with reason 'pin_format'.
+ * verification exactly as Node's client does. A non-empty list is checked
+ * once the handshake is done and before any application byte is written: an
+ * exact leaf pin stands in for CA trust, any other pin needs a verified chain
+ * as well. Any other value is refused with reason 'pin_format'.
  */
 export function pinnedRequest({ url, method, headers, body, pins = null }) {
   return new Promise((resolve, reject) => {
@@ -181,13 +194,15 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
       return
     }
 
-    // Pins narrow Node's trust; they never stand in for it. A chain that does
-    // not verify, or a certificate for another name, fails the handshake
-    // exactly as it would with no pins, and `secureConnect` never fires. The
-    // socket is not taken from a pool (`agent: false`), so the handshake we
-    // check is the handshake this request uses, and no session is resumed.
+    // Node's verification still runs on every handshake, but the decision is
+    // ours: `rejectUnauthorized` off only stops Node destroying the socket
+    // before an exact leaf pin can be looked at. `check` refuses anything that
+    // neither verified nor has its leaf pinned, with the code Node would have
+    // used. The socket is not taken from a pool (`agent: false`), so the
+    // handshake we check is the handshake this request uses, and no session
+    // is resumed.
     opts.agent = false
-    opts.rejectUnauthorized = true
+    opts.rejectUnauthorized = false
     const req = open(opts, onResponse)
     req.on('error', fail)
     req.setTimeout(UPSTREAM_TIMEOUT_MS, () => req.destroy(new Error('upstream timeout')))
@@ -197,19 +212,18 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
       writeRequest(req)
     }
     req.on('socket', (socket) => {
+      const refuse = (err) => {
+        // Settle first. destroy() emits 'error' synchronously, and that must
+        // not replace the refusal.
+        fail(err)
+        try { socket.destroy() } catch { /* already gone */ }
+        try { req.destroy() } catch { /* already gone */ }
+      }
       const check = () => {
         if (settled) return
-        const proven = verifiedChainPins(socket)
-        if (!proven.some((p) => pinList.includes(p))) {
-          const presented = chainPins(socket)
-          // Settle the pin error before destroy. destroy() emits 'error'
-          // synchronously, and that must not replace AV_PIN_MISMATCH.
-          fail(pinError(presented))
-          try { socket.destroy() } catch { /* already gone */ }
-          try { req.destroy() } catch { /* already gone */ }
-          return
-        }
-        release()
+        const verdict = pinVerdict(socket, parsed.hostname, pinList)
+        if (verdict) refuse(verdict)
+        else release()
       }
       // `encrypted` is already true while the handshake is still running.
       // Waiting on secureConnecting is what keeps the write after the check.
@@ -218,6 +232,48 @@ export function pinnedRequest({ url, method, headers, body, pins = null }) {
       else socket.once('secureConnect', check)
     })
   })
+}
+
+/**
+ * Whether a finished handshake may carry the request: null to send, or the
+ * error to refuse with.
+ *
+ * The leaf is the handshake's own certificate, chain position 0, and its pin
+ * is the only one that can stand in for CA trust. `socket.authorized` is
+ * Node's verdict on the chain and, when the chain verified, the host name.
+ * With the leaf pinned and the chain unverified, Node never ran the name
+ * check, so it runs here.
+ */
+function pinVerdict(socket, hostname, pinList) {
+  const leaf = socket.getPeerCertificate(true)
+  let leafX509 = null
+  try { leafX509 = leaf?.raw ? new X509Certificate(leaf.raw) : null } catch { leafX509 = null }
+  const leafPin = leafX509 ? spkiOf(leafX509) : null
+
+  if (socket.authorized) {
+    if (verifiedChainPins(socket).some((p) => pinList.includes(p))) return null
+    return pinError(chainPins(socket))
+  }
+
+  const leafPinned = leafPin !== null && pinList.includes(leafPin)
+  if (!leafPinned) return chainError(socket)
+
+  const host = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname
+  const nameError = tls.checkServerIdentity(host, leaf)
+  if (nameError) return nameError
+  // Written so that a date that does not parse (NaN) refuses.
+  const now = Date.now()
+  if (!(now <= Date.parse(leafX509.validTo))) return pinError(chainPins(socket), 'leaf_expired')
+  if (!(now >= Date.parse(leafX509.validFrom))) return pinError(chainPins(socket), 'leaf_not_yet_valid')
+  return null
+}
+
+/** The error Node would have destroyed the socket with. */
+function chainError(socket) {
+  const code = typeof socket.authorizationError === 'string' && socket.authorizationError
+    ? socket.authorizationError
+    : (socket.authorizationError?.code || 'UNABLE_TO_VERIFY_LEAF_SIGNATURE')
+  return Object.assign(new Error(`upstream certificate not trusted: ${code}`), { code })
 }
 
 /**

@@ -1171,19 +1171,59 @@ const MUTATIONS = [
     // completed. Ending before the pin comparison delivers the secret.
     what: 'the request is ended before the certificate pin is checked',
     file: 'src/connectors/pinning.js',
-    from: 'const proven = verifiedChainPins(socket)\n        if (!proven.some((p) => pinList.includes(p))) {',
-    to: 'req.end(body); const proven = verifiedChainPins(socket)\n        if (!proven.some((p) => pinList.includes(p))) {',
+    from: 'const verdict = pinVerdict(socket, parsed.hostname, pinList)',
+    to: 'req.end(body); const verdict = pinVerdict(socket, parsed.hostname, pinList)',
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {
-    // A pin narrows Node's trust and never stands in for it. With CA
-    // verification off, a pinned self-signed or wrong-name certificate is
-    // accepted, which the same chain with no pins is not.
-    what: 'a pinned request turns certificate verification off',
+    // Only an exact leaf pin stands in for CA trust. Treating every pinned
+    // handshake as verified lets an intermediate or root pin accept a chain
+    // nothing trusts, or a certificate for another name.
+    what: 'a pinned request treats an unverified chain as verified',
     file: 'src/connectors/pinning.js',
-    from: 'opts.rejectUnauthorized = true',
-    to: 'opts.rejectUnauthorized = false',
+    from: '  if (socket.authorized) {\n    if (verifiedChainPins(socket)',
+    to: '  if (true) {\n    if (verifiedChainPins(socket)',
     tests: ['test/security/connectors-pinning.test.js', 'test/security/connectors-probe.test.js'],
+  },
+  {
+    // The leaf's key is the one the handshake proves. A pin on any other
+    // certificate in the chain, even one whose signature checks, must still
+    // wait for the chain to verify to a trusted root.
+    what: 'a pin on a non-leaf certificate stands in for CA trust',
+    file: 'src/connectors/pinning.js',
+    from: 'const leafPinned = leafPin !== null && pinList.includes(leafPin)',
+    to: 'const leafPinned = verifiedChainPins(socket).some((p) => pinList.includes(p))',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pin on any presented certificate stands in for CA trust',
+    file: 'src/connectors/pinning.js',
+    from: 'const leafPinned = leafPin !== null && pinList.includes(leafPin)',
+    to: 'const leafPinned = chainPins(socket).some((p) => pinList.includes(p))',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // With the chain unverified Node never ran the name check. Skipping it
+    // here lets a pinned leaf for one host answer for another.
+    what: 'a pinned leaf skips the host name check',
+    file: 'src/connectors/pinning.js',
+    from: 'if (nameError) return nameError',
+    to: 'if (false) return nameError',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'an expired pinned leaf is accepted',
+    file: 'src/connectors/pinning.js',
+    from: "if (!(now <= Date.parse(leafX509.validTo))) return",
+    to: "if (false) return",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pinned leaf that is not yet valid is accepted',
+    file: 'src/connectors/pinning.js',
+    from: "if (!(now >= Date.parse(leafX509.validFrom))) return",
+    to: "if (false) return",
+    tests: ['test/security/connectors-pinning.test.js'],
   },
   {
     // Node links issuers by name and key identifier only. Without the
