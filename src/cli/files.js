@@ -8,15 +8,17 @@
 //   - Never followed. O_NOFOLLOW, and O_EXCL refuses a symlink too, so a link
 //     an agent planted at `.env` cannot aim the write at ~/.ssh/config.
 //   - Never readable by anyone else. The mode is set with fchmod after the
-//     write, because the umask only ever removes bits and a umask of 0277
-//     would otherwise leave the owner unable to read their own file.
+//     write, so the file ends up exactly 0600 whatever the umask. open() only
+//     applies the umask, and the umask only removes bits: 0277 would leave
+//     0400, which the owner can read but not write. And open() never changes
+//     the mode of a file that is already there, so a 0644 log stays 0644.
 
 import { openSync, writeSync, fsyncSync, fchmodSync, closeSync, lstatSync, fstatSync, renameSync, unlinkSync, constants } from 'node:fs'
 import { dirname, basename, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import * as ph from '../core/placeholder.js'
 
-const { O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_NOFOLLOW, O_RDONLY } = constants
+const { O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_NOFOLLOW, O_RDONLY, O_NONBLOCK } = constants
 
 const problem = (code, message) => Object.assign(new Error(message), { code })
 
@@ -65,12 +67,24 @@ export function writeFileExclusive(path, text, { force = false, mode = 0o600 } =
   const dir = dirname(path)
   const tmp = join(dir, `.${basename(path)}.av-${randomBytes(4).toString('hex')}`)
   const fd = openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode)
+  let written
   try {
-    try { writeAll(fd, text, mode) } finally { closeSync(fd) }
+    try {
+      writeAll(fd, text, mode)
+      written = fstatSync(fd, { bigint: true })
+    } finally { closeSync(fd) }
     renameSync(tmp, path)
   } catch (e) {
     try { unlinkSync(tmp) } catch { /* already gone */ }
     throw e
+  }
+  // The temporary name sits in the same directory, so it can be swapped too:
+  // for a symlink between close and rename, and rename then moves the link
+  // into place. So check that what landed is the file this wrote, without
+  // following it. If not, remove the entry (a link, not what it points at).
+  if (!isFile(path, written)) {
+    try { unlinkSync(path) } catch { /* already gone */ }
+    throw problem('ENOTREGULAR', `${path} was replaced while it was being written; nothing was left there`)
   }
   // Best effort: the rename is durable once its directory is.
   try {
@@ -81,8 +95,28 @@ export function writeFileExclusive(path, text, { force = false, mode = 0o600 } =
 }
 
 /**
- * Append one line to `path`, creating it 0600 if it is not there. Refuses a
- * symlink (O_NOFOLLOW) and anything that is not a regular file.
+ * Whether `path` is, right now, the regular file `st` describes. Opened with
+ * O_NOFOLLOW, so a symlink is ELOOP, and O_NONBLOCK, so a fifo cannot hang it.
+ */
+function isFile(path, st) {
+  let fd
+  try {
+    fd = openSync(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+  } catch {
+    return false
+  }
+  try {
+    const now = fstatSync(fd, { bigint: true })
+    return now.isFile() && now.dev === st.dev && now.ino === st.ino
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Append one line to `path`, creating it 0600 if it is not there, and making
+ * it 0600 if it is. Refuses a symlink (O_NOFOLLOW) and anything that is not a
+ * regular file.
  */
 export function appendLineExclusive(path, line) {
   let fd
@@ -94,6 +128,8 @@ export function appendLineExclusive(path, line) {
   }
   try {
     if (!fstatSync(fd).isFile()) throw problem('ENOTREGULAR', `${path} is not a regular file`)
+    // Before the line goes in, so it is never in a file someone else can read.
+    fchmodSync(fd, 0o600)
     const text = String(line)
     const buf = Buffer.from(text.endsWith('\n') ? text : `${text}\n`, 'utf8')
     let off = 0

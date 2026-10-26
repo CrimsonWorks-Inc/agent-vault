@@ -107,6 +107,120 @@ test('force replaces a regular file atomically and leaves it 0600', () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+// The temporary file sits in the same directory as the target, which an
+// agent may be able to write, so its name can be swapped for a symlink
+// between close and rename; rename then moves the link into place. The
+// window is a few instructions wide, so the test makes it certain: a child
+// process loads an interposer for rename(3) that does the swap first.
+// files.js binds renameSync from the ESM namespace, so nothing in JS can
+// reach it. macOS only (DYLD_INSERT_LIBRARIES), and it needs a C compiler;
+// each child reports that the hook fired, so it cannot pass by missing.
+const INTERPOSE_C = `
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+static int swapped = 0;
+int av_rename(const char *from, const char *to) {
+  const char *mode = getenv("AV_RACE_SWAP"), *secret = getenv("AV_RACE_SECRET");
+  if (!swapped && mode && secret && from && to && strstr(from, ".av-")) {
+    swapped = 1;
+    fprintf(stderr, "AV_RACE once mode=%s\\n", mode);
+    const char *victim = strcmp(mode, "temp") == 0 ? from : to;
+    unlink(victim);
+    if (symlink(secret, victim) != 0) perror("symlink");
+  }
+  return renameat(AT_FDCWD, from, AT_FDCWD, to);
+}
+__attribute__((used)) static struct { const void *repl; const void *orig; } interpose[]
+  __attribute__((section("__DATA,__interpose"))) = { { (const void *)av_rename, (const void *)rename } };
+`
+let interposer
+/** The interposer's path, built once; null without macOS or a compiler. */
+function buildInterposer() {
+  if (interposer !== undefined) return interposer
+  interposer = null
+  // Without the command line tools, /usr/bin/cc is a stub that offers to install them.
+  if (process.platform !== 'darwin' || spawnSync('xcode-select', ['-p']).status !== 0) return null
+  const dir = scratch()
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
+  writeFileSync(join(dir, 'interpose.c'), INTERPOSE_C)
+  const built = spawnSync('cc', ['-dynamiclib', '-o', join(dir, 'interpose.dylib'), join(dir, 'interpose.c')], { encoding: 'utf8' })
+  if (built.error?.code === 'ENOENT') return null
+  // A compiler that is there and fails is a broken test, not a skipped one.
+  assert.equal(built.status, 0, built.stderr)
+  return (interposer = join(dir, 'interpose.dylib'))
+}
+
+/** Replace `<dir>/.env` with `force` while rename swaps `swap` ('temp' or 'dest') for a link to `<dir>/secret`. */
+function racedWrite(dir, swap) {
+  const script = join(dir, 'race.mjs')
+  writeFileSync(script, `
+import { writeFileExclusive } from ${JSON.stringify(new URL('../../src/cli/files.js', import.meta.url).href)}
+import { lstatSync, readFileSync } from 'node:fs'
+const [dest, secret] = process.argv.slice(2)
+let result = null, err = null
+try { result = writeFileExclusive(dest, 'GH_TOKEN=placeholder\\n', { force: true }) } catch (e) { err = e.code || String(e) }
+let kind = 'missing'
+try { const st = lstatSync(dest); kind = st.isSymbolicLink() ? 'symlink' : st.isFile() ? 'file' : 'other' } catch {}
+let body = null
+try { body = readFileSync(dest, 'utf8') } catch {}
+process.stdout.write(JSON.stringify({ result, err, kind, body, secret: readFileSync(secret, 'utf8') }))
+`)
+  const secret = join(dir, 'secret')
+  writeFileSync(secret, 'SENSITIVE\n', { mode: 0o600 })
+  const env = { ...process.env, DYLD_INSERT_LIBRARIES: interposer, AV_RACE_SWAP: swap, AV_RACE_SECRET: secret }
+  const r = spawnSync(process.execPath, [script, join(dir, '.env'), secret], { env, encoding: 'utf8' })
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stderr, new RegExp(`AV_RACE once mode=${swap}`), 'the swap happened')
+  return JSON.parse(r.stdout)
+}
+
+test('a temporary file swapped for a symlink before the rename is refused, and no link is left', (t) => {
+  if (!buildInterposer()) return t.skip('needs macOS and a C compiler')
+  const dir = scratch()
+  try {
+    writeFileSync(join(dir, '.env'), 'old\n', { mode: 0o600 })
+    const out = racedWrite(dir, 'temp')
+    assert.equal(out.err, 'ENOTREGULAR', JSON.stringify(out))
+    assert.equal(out.result, null, 'it did not report success')
+    assert.equal(out.kind, 'missing', 'the link that landed was removed')
+    assert.equal(out.secret, 'SENSITIVE\n', 'and what it pointed at is untouched')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a destination that becomes a symlink just before the rename is replaced, and the target is untouched', (t) => {
+  if (!buildInterposer()) return t.skip('needs macOS and a C compiler')
+  const dir = scratch()
+  try {
+    writeFileSync(join(dir, '.env'), 'old\n', { mode: 0o600 })
+    const out = racedWrite(dir, 'dest')
+    assert.equal(out.err, null, JSON.stringify(out))
+    assert.deepEqual(out.result, { replaced: true })
+    assert.equal(out.kind, 'file')
+    assert.equal(out.body, 'GH_TOKEN=placeholder\n')
+    assert.equal(out.secret, 'SENSITIVE\n')
+    assert.equal(mode(join(dir, '.env')), 0o600)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('appending makes the file 0600 whatever the umask, and tightens one that was not', () => {
+  const dir = scratch()
+  try {
+    const f = join(dir, 'log')
+    const old = process.umask(0o277)
+    try { appendLineExclusive(f, 'one') } finally { process.umask(old) }
+    assert.equal(mode(f), 0o600, 'a 0277 umask alone would leave 0400')
+    const loose = join(dir, 'loose')
+    writeFileSync(loose, 'zero\n')
+    chmodSync(loose, 0o644)
+    appendLineExclusive(loose, 'one')
+    assert.equal(mode(loose), 0o600)
+    assert.equal(readFileSync(loose, 'utf8'), 'zero\none\n')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('appending creates 0600, appends whole lines, and refuses a symlink', () => {
   const dir = scratch()
   try {

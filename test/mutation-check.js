@@ -1255,6 +1255,23 @@ const MUTATIONS = [
     tests: ['test/security/requested-r2.test.js'],
   },
   {
+    // The temporary name can be swapped for a symlink between close and
+    // rename; without the check the link lands and success is reported.
+    what: 'force does not check that what the rename put in place is the file it wrote',
+    file: 'src/cli/files.js',
+    from: '  if (!isFile(path, written)) {',
+    to: '  if (false) {',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
+    // open() never changes the mode of a file that exists, and the umask can leave 0400.
+    what: 'an appended file keeps whatever mode it had',
+    file: 'src/cli/files.js',
+    from: '    fchmodSync(fd, 0o600)',
+    to: '    void fchmodSync',
+    tests: ['test/security/requested-r2.test.js'],
+  },
+  {
     what: 'the final check accepts a placeholder for another session',
     file: 'src/cli/files.js',
     from: "parsed?.text === v && parsed.sid === sid && parsed.slug === e.cred",
