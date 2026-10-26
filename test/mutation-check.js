@@ -1183,14 +1183,14 @@ const MUTATIONS = [
     // place a Host header can only name the URL host, so both go together.
     what: 'the certificate identity check reads the Host header',
     file: 'src/connectors/pinning.js',
-    from: 'const identity = urlIdentity(parsed)\n    if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {',
-    to: "const identity = String(hostHeaderValues(headers)[0] || urlIdentity(parsed)).replace(/:\\d+$/, '')\n    if (false) {",
+    from: 'const identity = urlIdentity(parsed)\n    if (!hostHeaderValues(sent).every((v) => hostHeaderMatches(v, parsed))) {',
+    to: "const identity = String(hostHeaderValues(sent)[0] || urlIdentity(parsed)).replace(/:\\d+$/, '')\n    if (false) {",
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {
     what: 'a Host header naming another host is sent instead of refused',
     file: 'src/connectors/pinning.js',
-    from: 'if (!hostHeaderValues(headers).every((v) => hostHeaderMatches(v, parsed))) {',
+    from: 'if (!hostHeaderValues(sent).every((v) => hostHeaderMatches(v, parsed))) {',
     to: 'if (false) {',
     tests: ['test/security/connectors-pinning.test.js'],
   },
@@ -1204,8 +1204,8 @@ const MUTATIONS = [
   {
     what: 'a Host header under another spelling of the name is not checked',
     file: 'src/connectors/pinning.js',
-    from: "if (key.toLowerCase() === 'host') out.push(headers[key])",
-    to: "if (key === 'host') out.push(headers[key])",
+    from: "filter((name) => name.toLowerCase() === 'host')",
+    to: "filter((name) => name === 'host')",
     tests: ['test/security/connectors-pinning.test.js'],
   },
   {
