@@ -1184,6 +1184,66 @@ const MUTATIONS = [
     to: 'opts.rejectUnauthorized = false\n      const req = open(opts, onResponse)',
     tests: ['test/security/connectors-pinning.test.js'],
   },
+  {
+    // The probe target is the profile constant. A path on the call would aim
+    // the credential at whatever the caller asked for.
+    what: 'the probe takes its path from the request input',
+    file: 'src/connectors/probe.js',
+    from: 'const probePath = probe.path',
+    to: 'const probePath = path || probe.path',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe takes its method from the request input',
+    file: 'src/connectors/probe.js',
+    from: 'method: probeMethod,',
+    to: 'method: method || probeMethod,',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe sends a body supplied by the caller',
+    file: 'src/connectors/probe.js',
+    from: 'body: requestBody,',
+    to: 'body: body || requestBody,',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a second probe inside a minute is sent anyway',
+    file: 'src/connectors/probe.js',
+    from: 'if (Number.isInteger(prev) && now - prev < PROBE_WINDOW_MS) {',
+    to: 'if (false && Number.isInteger(prev) && now - prev < PROBE_WINDOW_MS) {',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    // Scopes are copied off a response header. Without the scrub, a header
+    // that echoes the secret is returned and stored on the health record.
+    what: 'probe scopes are returned without scrubbing the credential',
+    file: 'src/connectors/probe.js',
+    from: 'const scopes = scrubList(extracted?.scopes, scrubber)',
+    to: 'const scopes = extracted?.scopes ?? null',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe result includes the credential value',
+    file: 'src/connectors/probe.js',
+    from: 'observed_expires_at: observed,\n      checked_at,\n    }',
+    to: 'observed_expires_at: observed,\n      checked_at,\n      secret,\n    }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe host that is not a hostname is used anyway',
+    file: 'src/connectors/probe.js',
+    from: 'const parts = splitHostPort(declared)\n  if (!parts) {\n    throw deny(\'AV_POLICY_DENIED\', \'host is outside what this credential permits\', { rule: \'credential_host\' })\n  }',
+    to: 'const parts = splitHostPort(declared)\n  if (false) {\n    throw deny(\'AV_POLICY_DENIED\', \'host is outside what this credential permits\', { rule: \'credential_host\' })\n  }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe accepts a scheme other than http or https',
+    file: 'src/connectors/probe.js',
+    from: "if (scheme !== 'https' && scheme !== 'http') {",
+    to: "if (false && scheme !== 'https' && scheme !== 'http') {",
+    tests: ['test/security/connectors-probe.test.js'],
+  },
 ]
 
 let survived = 0
