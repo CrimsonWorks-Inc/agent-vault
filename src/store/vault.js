@@ -21,16 +21,132 @@ import { PROFILES } from '../connectors/profiles.js'
 
 export const SCHEMA_VERSION = 1
 
+/**
+ * When something stamped with `iso` stops being valid, as epoch ms. Absent is
+ * "no limit" (Infinity); anything that does not parse counts as already past
+ * (-Infinity), so a corrupted date can only end access early, never extend it.
+ * `Date.parse` alone is NaN for garbage, and `NaN <= now` is false: that is how
+ * an unparseable `expires_at` used to be live forever.
+ */
 export function expiryMs(iso) {
-  if (iso === null || iso === undefined) return Infinity;
-  const ms = Date.parse(iso);
-  return Number.isNaN(ms) ? -Infinity : ms;
+  if (iso === null || iso === undefined) return Infinity
+  if (typeof iso !== 'string') return -Infinity
+  const ms = Date.parse(iso)
+  return Number.isNaN(ms) ? -Infinity : ms
 }
 
+/**
+ * When a session ends. Only a session that says it is infinite with exactly
+ * `infinite === true` and `expires_at === null` never ends. A missing date on
+ * any other session — a legacy row, a truthy-but-not-true flag, a flag with the
+ * date dropped — is expired, never eternal.
+ */
 export function sessionExpiryMs(s) {
-  if (s.infinite === true && s.expires_at === null) return Infinity;
-  if (s.expires_at == null && !s.infinite) return -Infinity;
-  return expiryMs(s.expires_at);
+  if (s.expires_at === null || s.expires_at === undefined) {
+    return s.infinite === true && s.expires_at === null ? Infinity : -Infinity
+  }
+  return expiryMs(s.expires_at)
+}
+
+/** The furthest a session could live, idle extension included. */
+function sessionCeilingMs(s) {
+  const ends = sessionExpiryMs(s)
+  if (ends === Infinity || !(ends > -Infinity)) return ends
+  return s.max_expires_at == null ? ends : Math.max(ends, expiryMs(s.max_expires_at))
+}
+
+/** A ledger row's end. Exactly null never expires; anything else unreadable already has. */
+function rowExpiryMs(row) {
+  return row.expires_at === null ? Infinity : (typeof row.expires_at === 'string' ? expiryMs(row.expires_at) : -Infinity)
+}
+
+/** `min(a, b)` as an ISO date, or `now` when it is already behind us. */
+function shortenedIso(current, now, ttlMs) {
+  const at = Math.min(current, now + ttlMs)
+  return new Date(at > now ? at : now).toISOString()
+}
+
+// How close an expiry has to be before a credential is flagged (F10).
+export const EXPIRY_WARN_DAYS = 7
+
+/** 'expired', 'soon' or null. The sooner of the human's date and the observed one wins. */
+function expiryWarning(cred, now = Date.now()) {
+  const dates = [cred.expires_at, cred.health?.observed_expires_at].filter((d) => d != null)
+  if (!dates.length) return null
+  const ends = Math.min(...dates.map(expiryMs))
+  if (!(ends > now)) return 'expired'
+  return ends < now + EXPIRY_WARN_DAYS * 86_400_000 ? 'soon' : null
+}
+
+/** An ISO date, normalised, or undefined when `v` is not one. */
+function isoOrUndefined(v) {
+  if (typeof v !== 'string') return undefined
+  const ms = Date.parse(v)
+  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString()
+}
+
+// What elevated a session (C3). Recorded, not decided, here: the daemon decides
+// with elevationOf(), and the store refuses anything it does not recognise.
+const ELEVATIONS = new Set(['approval_auto_writes', 'infinite'])
+
+// F10's health record. Only these keys, each only with a value of its type.
+const HEALTH_STATUS = new Set(['ok', 'unauthorized', 'forbidden', 'unreachable', 'error', 'unknown'])
+const HEALTH_SOURCE = new Set(['probe', 'response'])
+
+// F16's tripwire rules. The shape is checked here, where it is stored, so no
+// reader of `settings.tripwires` has to wonder what it might hold.
+const RULE_KEYS = new Set(['id', 'codes', 'rule_prefix', 'threshold', 'window_s', 'action'])
+const RULE_ACTIONS = new Set(['revoke_session', 'quarantine_credential', 'panic'])
+const MAX_TRIPWIRE_RULES = 32
+
+function tripwireProblem(tw) {
+  if (!tw || typeof tw !== 'object' || Array.isArray(tw)) return 'tripwires must be an object'
+  for (const k of Object.keys(tw)) if (k !== 'enabled' && k !== 'rules') return `tripwires has an unknown key ${JSON.stringify(k)}`
+  if (typeof tw.enabled !== 'boolean') return 'tripwires.enabled must be true or false'
+  if (!Array.isArray(tw.rules)) return 'tripwires.rules must be a list'
+  if (tw.rules.length > MAX_TRIPWIRE_RULES) return `at most ${MAX_TRIPWIRE_RULES} tripwire rules`
+  const ids = new Set()
+  for (const r of tw.rules) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return 'a tripwire rule must be an object'
+    for (const k of Object.keys(r)) if (!RULE_KEYS.has(k)) return `a tripwire rule has an unknown key ${JSON.stringify(k)}`
+    if (typeof r.id !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(r.id)) return 'a tripwire rule id must match [a-z0-9_-]{1,32}'
+    if (ids.has(r.id)) return `tripwire rule ${r.id} appears twice`
+    ids.add(r.id)
+    if (r.codes !== undefined && (!Array.isArray(r.codes) || !r.codes.length || r.codes.length > 16 ||
+      !r.codes.every((c) => typeof c === 'string' && /^AV_[A-Z0-9_]{1,40}$/.test(c)))) {
+      return `tripwire rule ${r.id}: codes must be a non-empty list of AV_* codes`
+    }
+    // An empty prefix matches every rule name there is.
+    if (r.rule_prefix !== undefined && (typeof r.rule_prefix !== 'string' || !/^[a-z0-9_:.-]{1,64}$/.test(r.rule_prefix))) {
+      return `tripwire rule ${r.id}: rule_prefix must be 1-64 characters of [a-z0-9_:.-]`
+    }
+    if (r.codes === undefined && r.rule_prefix === undefined) return `tripwire rule ${r.id} matches nothing: give codes or rule_prefix`
+    if (!Number.isInteger(r.threshold) || r.threshold < 1 || r.threshold > 1000) return `tripwire rule ${r.id}: threshold must be an integer 1-1000`
+    if (!Number.isInteger(r.window_s) || r.window_s < 10 || r.window_s > 86_400) return `tripwire rule ${r.id}: window_s must be an integer 10-86400`
+    if (!RULE_ACTIONS.has(r.action)) return `tripwire rule ${r.id}: action must be revoke_session, quarantine_credential or panic`
+  }
+  return null
+}
+
+/**
+ * A grant's request budget as a number, `Infinity` when it states none, or
+ * null when it states one that cannot be read. C4: a canonical decimal string
+ * ("50") is that integer; '', '5.5', '-1', '1e3', NaN and a non-request unit
+ * are unreadable, and an unreadable budget refuses rather than allows.
+ */
+/** The refusal for a quarantined credential (F16), the same wherever it is met. */
+function quarantined(cred) {
+  return deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
+    rule: 'quarantine', hint: `A human can release it: agent-vault cred release ${cred.slug}`,
+  })
+}
+
+function budgetLimit(policy) {
+  const b = policy?.budget
+  if (b === undefined || b === null) return Infinity
+  if (typeof b !== 'object' || b.invalid || (b.unit !== undefined && b.unit !== 'requests')) return null
+  const n = typeof b.limit === 'string' && /^(0|[1-9][0-9]*)$/.test(b.limit) ? Number(b.limit) : b.limit
+  return Number.isSafeInteger(n) && n >= 0 ? n : null
 }
 
 // How many placeholder rows the ledger keeps. Active ones are capped per grant
@@ -681,19 +797,12 @@ export class Vault {
 
   /** The credential as anything outside the daemon may see it: never a value. */
   publicCredential(cred) {
-    const soonThreshold = Date.now() + 7 * 86400000;
-    let expiry_warning = null;
-    let actualExpiry = cred.health?.observed_expires_at || cred.expires_at;
-    if (actualExpiry) {
-      if (!(expiryMs(actualExpiry) > Date.now())) expiry_warning = 'expired';
-      else if (expiryMs(actualExpiry) < soonThreshold) expiry_warning = 'soon';
-    }
     return {
       id: cred.id, slug: cred.slug, kind: cred.connector_kind, connector: cred.connector,
-      expires_at: cred.expires_at || null,
-      health: cred.health || null,
-      expiry_warning,
-      quarantine: cred.quarantine || null,
+      expires_at: cred.expires_at ?? null,
+      health: cred.health ? structuredClone(cred.health) : null,
+      expiry_warning: expiryWarning(cred),
+      quarantine: cred.quarantine ? structuredClone(cred.quarantine) : null,
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
@@ -731,40 +840,90 @@ export class Vault {
     return out
   }
 
+  /**
+   * The human's own note of when a credential stops working (F10). Metadata,
+   * not enforcement: the upstream refuses an expired credential anyway, and
+   * refusing it here would hand an agent a way to deny service. Stored as one
+   * normalised ISO string, so every reader parses the same thing.
+   */
   setCredentialExpiry(slug, isoOrNull) {
     this.#requireUnlocked()
     const cred = this.findCredential(slug)
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
-    if (isoOrNull !== null) {
-      if (Number.isNaN(Date.parse(isoOrNull))) throw deny('AV_POLICY_DENIED', 'expires_at must be a valid ISO date or null', { rule: 'expires_at' })
+    const expires = isoOrNull === null ? null : isoOrUndefined(isoOrNull)
+    if (expires === undefined) {
+      throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null to clear it', { rule: 'expires_at' })
     }
-    cred.expires_at = isoOrNull
+    cred.expires_at = expires
     this.#persist()
-    this.audit.write('cred.expiry_set', { credential_slug: slug, expires_at: isoOrNull })
+    this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: expires })
+    return this.publicCredential(cred)
   }
 
+  /**
+   * Merge what was observed about a credential (F10): from a probe, or from
+   * the headers of a response it was used for. Called on the hot path, so the
+   * write skips the fsync and the log only hears about a change of status or
+   * of the observed expiry: a busy credential must not flood the log.
+   *
+   * Only the record's own keys are taken, each only with a value of its type.
+   * A value that is not one is dropped rather than stored, because it would
+   * reach the audit record (where a float throws) and every reader after it.
+   * A locked vault cannot record, so it changes nothing and returns null.
+   */
   recordHealth(credIdOrSlug, patch) {
-    const cred = this.db.credentials[credIdOrSlug] || this.findCredential(credIdOrSlug)
-    if (!cred) return null
-    const oldStatus = cred.health?.status
-    const oldObserved = cred.health?.observed_expires_at
-    cred.health = { ...(cred.health || {}), ...patch }
-    this.#persist({ durable: false })
-    if (cred.health.status !== oldStatus || cred.health.observed_expires_at !== oldObserved) {
-      this.audit?.write('cred.health_recorded', { credential_slug: cred.slug, status: cred.health.status, observed_expires_at: cred.health.observed_expires_at })
+    if (this.locked) return null
+    const cred = (Object.hasOwn(this.db.credentials, credIdOrSlug) && this.db.credentials[credIdOrSlug]) || this.findCredential(credIdOrSlug)
+    if (!cred || !patch || typeof patch !== 'object') return null
+    const clean = {}
+    if (HEALTH_STATUS.has(patch.status)) clean.status = patch.status
+    if (patch.http_status === null || (Number.isInteger(patch.http_status) && patch.http_status >= 100 && patch.http_status <= 599)) clean.http_status = patch.http_status
+    if (isoOrUndefined(patch.checked_at)) clean.checked_at = isoOrUndefined(patch.checked_at)
+    if (HEALTH_SOURCE.has(patch.source)) clean.source = patch.source
+    if (patch.observed_expires_at === null) clean.observed_expires_at = null
+    else if (isoOrUndefined(patch.observed_expires_at)) clean.observed_expires_at = isoOrUndefined(patch.observed_expires_at)
+    if (patch.scopes === null || (Array.isArray(patch.scopes) && patch.scopes.length <= 64 &&
+      patch.scopes.every((s) => typeof s === 'string' && s.length <= 128))) clean.scopes = patch.scopes && [...patch.scopes]
+    const before = cred.health || {}
+    const health = {
+      status: 'unknown', http_status: null, checked_at: new Date().toISOString(), source: 'response',
+      observed_expires_at: null, scopes: null, ...before, ...clean,
     }
-    return cred.health
+    cred.health = health
+    this.#persist({ durable: false })
+    if (health.status !== before.status || health.observed_expires_at !== (before.observed_expires_at ?? null)) {
+      this.audit.write('cred.health_recorded', {
+        credential_slug: cred.slug, status: health.status, http_status: health.http_status,
+        source: health.source, observed_expires_at: health.observed_expires_at,
+      })
+    }
+    return structuredClone(health)
   }
 
-  setQuarantine(slug, { by, rule_id, reason_untrusted }) {
+  /**
+   * Stop a credential being used at all (F16), until a human releases it. Open
+   * by design: it only narrows, and it has to work in an emergency. A second
+   * quarantine keeps the first record, so who stopped it first, and when, is
+   * not overwritten by whoever repeats it.
+   */
+  setQuarantine(slug, { by = 'control', rule_id = null, reason = null } = {}) {
     this.#requireUnlocked()
     const cred = this.findCredential(slug)
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
-    cred.quarantine = { since: new Date().toISOString(), by, rule_id, reason_untrusted }
+    if (by !== 'control' && by !== 'tripwire') throw deny('AV_POLICY_DENIED', 'a quarantine is set by control or tripwire', { rule: 'quarantine' })
+    if (rule_id !== null && (typeof rule_id !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(rule_id))) {
+      throw deny('AV_POLICY_DENIED', 'a tripwire rule id must match [a-z0-9_-]{1,32}', { rule: 'quarantine' })
+    }
+    if (cred.quarantine) return structuredClone(cred.quarantine)
+    // Written by whoever called the open route, an agent included.
+    const reasonUntrusted = typeof reason === 'string' && reason ? reason.slice(0, 200) : null
+    cred.quarantine = { since: new Date().toISOString(), by, rule_id, reason_untrusted: reasonUntrusted }
     this.#persist()
-    this.audit.write('cred.quarantined', { credential_slug: slug, by, rule_id })
+    this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted: reasonUntrusted })
+    return structuredClone(cred.quarantine)
   }
 
+  /** Release a quarantine. Grants were paused, not revoked, so live ones work again. */
   clearQuarantine(slug) {
     this.#requireUnlocked()
     const cred = this.findCredential(slug)
@@ -772,28 +931,35 @@ export class Vault {
     if (!cred.quarantine) return false
     cred.quarantine = null
     this.#persist()
-    this.audit.write('cred.released', { credential_slug: slug })
+    this.audit.write('cred.released', { credential_slug: cred.slug })
     return true
   }
 
+  /** A deep copy: nothing a caller does to it reaches the vault. Not secret, so open while locked. */
   getSettings() {
-    this.#requireUnlocked()
-    return JSON.parse(JSON.stringify(this.db.kv.settings || {}))
+    return structuredClone(this.db.kv.settings || {})
   }
 
+  /** Shallow merge per top-level key (F16). Tripwire rules are checked whole before anything is kept. */
   updateSettings(patch) {
     this.#requireUnlocked()
-    if (!this.db.kv.settings) this.db.kv.settings = {}
-    if (patch.tripwires) {
-      if (typeof patch.tripwires !== 'object' || !Array.isArray(patch.tripwires.rules)) {
-        throw deny('AV_POLICY_DENIED', 'invalid tripwires shape', { rule: 'tripwire_rule' })
-      }
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw deny('AV_POLICY_DENIED', 'settings must be an object', { rule: 'policy_invalid' })
     }
-    for (const [k, v] of Object.entries(patch)) {
-      this.db.kv.settings[k] = v
+    const keys = Object.keys(patch)
+    for (const k of keys) {
+      // `__proto__` as an own key of parsed JSON would replace the prototype.
+      if (!/^[a-z][a-z0-9_]{0,31}$/.test(k)) throw deny('AV_POLICY_DENIED', 'a setting name must match [a-z][a-z0-9_]{0,31}', { rule: 'policy_invalid' })
     }
+    if (Object.hasOwn(patch, 'tripwires')) {
+      const problem = tripwireProblem(patch.tripwires)
+      if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'tripwire_rule' })
+    }
+    const next = { ...(this.db.kv.settings || {}) }
+    for (const k of keys) next[k] = structuredClone(patch[k])
+    this.db.kv.settings = next
     this.#persist()
-    this.audit.write('settings.changed', { keys: Object.keys(patch) })
+    this.audit.write('settings.changed', { keys })
     return this.getSettings()
   }
 
@@ -853,12 +1019,28 @@ export class Vault {
    * `expires_at`, so asking for 48 hours produced a session that outlived the
    * 24-hour cap by a day. It is now both: what is asked for is clamped down to
    * the cap, and what was asked for caps the idle extension.
+   *
+   * `infinite` (R3) is a session with no lifetime at all: it ends by being
+   * revoked, shortened or panicked, and never from the network. `elevated`
+   * (C3) is what made the daemon ask for a fresh proof, recorded with the
+   * creation. Every argument is checked before anything is written, and a
+   * value that is not exactly what it should be is refused, never coerced:
+   * `infinite: 'false'` is truthy, and `ttlMs: NaN` was a session that
+   * `new Date(NaN)` threw on halfway through.
    */
-  createSession({ workspaceId, label, ttlMs = null, infinite = false, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
     this.#requireUnlocked()
-    if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) throw deny('AV_POLICY_DENIED', 'ttl must be a positive number', { rule: 'ttl' })
-    if (infinite && ttlMs != null) throw deny('AV_POLICY_DENIED', 'an infinite session has no lifetime to set', { rule: 'ttl' })
-    if (infinite && remote) throw deny('AV_REMOTE_FORBIDDEN', 'infinite session cannot be remote', { rule: 'infinite_remote' })
+    if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
+      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
+    }
+    if (typeof infinite !== 'boolean') throw deny('AV_POLICY_DENIED', 'infinite must be true or false', { rule: 'ttl' })
+    if (infinite && ttlMs !== null) throw deny('AV_POLICY_DENIED', 'an infinite session has no lifetime to set', { rule: 'ttl' })
+    if (infinite && remote) {
+      throw deny('AV_REMOTE_FORBIDDEN', 'an infinite session can never be reached from the network', { rule: 'infinite_remote' })
+    }
+    if (!Array.isArray(elevated) || elevated.length > ELEVATIONS.size || !elevated.every((e) => ELEVATIONS.has(e))) {
+      throw deny('AV_POLICY_DENIED', 'elevated must list only approval_auto_writes and infinite', { rule: 'elevation_invalid' })
+    }
     const sid = ph.newSid()
     const secret = randomBytes(33).toString('base64url')
     const token = `avs1.${sid}.${secret}`
@@ -883,7 +1065,10 @@ export class Vault {
     }
     this.db.sessions[sid] = session
     this.#persist()
-    this.audit.write('session.created', { session_id: sid, workspace_id: workspaceId, label, remote, infinite, expires_at: session.expires_at })
+    this.audit.write('session.created', {
+      session_id: sid, workspace_id: workspaceId, label, remote,
+      infinite, expires_at: session.expires_at, elevated: [...new Set(elevated)],
+    })
     return { session, token }
   }
 
@@ -919,30 +1104,43 @@ export class Vault {
   /** Idle extension. Never widens capability, so it needs no presence. */
   touchSession(session) {
     const now = Date.now()
-    if (!session.infinite) {
+    // An infinite session has nothing to extend; only its last-seen moves.
+    if (session.infinite !== true) {
       const extended = Math.min(now + session.idle_timeout_ms, Date.parse(session.max_expires_at))
       if (extended > Date.parse(session.expires_at)) session.expires_at = new Date(extended).toISOString()
     }
     session.last_seen_at = new Date(now).toISOString()
   }
 
+  /**
+   * Bring a session's end closer (R3, F15): never later than it already was,
+   * and an infinite session becomes finite. The ceiling idle activity may
+   * extend to comes down with it, and so do its live placeholders, so neither
+   * an agent that keeps working nor a placeholder minted earlier outlives it.
+   */
   shortenSession(sid, ttlMs) {
     this.#requireUnlocked()
-    const s = this.db.sessions[sid]
+    const s = Object.hasOwn(this.db.sessions, sid) ? this.db.sessions[sid] : null
     if (!s) throw deny('AV_NOT_FOUND', `no session ${sid}`)
-    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw deny('AV_POLICY_DENIED', 'ttlMs must be finite and positive', { rule: 'ttl' })
+    if (s.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${s.id} was revoked`)
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
+    }
     const now = Date.now()
-    const currentExpiry = s.infinite ? Infinity : Date.parse(s.expires_at)
-    const newExpiry = Math.min(currentExpiry, now + ttlMs)
-    s.expires_at = new Date(newExpiry).toISOString()
-    const currentMax = s.infinite ? Infinity : Date.parse(s.max_expires_at)
-    const newMax = Math.min(currentMax, now + ttlMs)
-    s.max_expires_at = new Date(newMax).toISOString()
-    const was_infinite = s.infinite
+    const wasInfinite = s.infinite === true && s.expires_at === null
+    const ceiling = sessionCeilingMs(s)
+    const expiresAt = shortenedIso(sessionExpiryMs(s), now, ttlMs)
+    const maxExpiresAt = shortenedIso(ceiling, now, ttlMs)
+    s.expires_at = expiresAt
+    s.max_expires_at = maxExpiresAt
     s.infinite = false
     s.idle_timeout_ms = (s.remote ? 1 : 2) * 3600_000
+    const bound = Date.parse(maxExpiresAt)
+    for (const p of Object.values(this.db.placeholders)) {
+      if (p.sid === s.id && p.state === 'active' && !(rowExpiryMs(p) <= bound)) p.expires_at = maxExpiresAt
+    }
     this.#persist()
-    this.audit.write('session.shortened', { session_id: sid, expires_at: s.expires_at, was_infinite })
+    this.audit.write('session.shortened', { session_id: s.id, expires_at: expiresAt, was_infinite: wasInfinite })
     return s
   }
 
@@ -969,11 +1167,13 @@ export class Vault {
     // nothing while locked rather than persisting unrecorded.
     this.#requireUnlocked()
     const parent = this.assertSessionLive(this.db.sessions[parentSid])
-    const parentTtl = Date.parse(parent.expires_at) - Date.now()
+    // Never infinite: a fork of an infinite parent takes the default lifetime.
+    const parentEnds = sessionExpiryMs(parent)
+    const parentTtl = parentEnds === Infinity ? null : parentEnds - Date.now()
     const { session, token } = this.createSession({
       workspaceId: parent.workspace_id,
       label: label || `${parent.label} (fork)`,
-      ttlMs: Math.min(ttlMs ?? parentTtl, parentTtl),
+      ttlMs: parentTtl === null ? (ttlMs ?? null) : Math.min(ttlMs ?? parentTtl, parentTtl),
       policy: parent.policy,
       peerUid: parent.owner_uid,
       remote: parent.remote,
@@ -991,17 +1191,28 @@ export class Vault {
 
   // ----------------------------------------------------------------- grants
 
+  /**
+   * `ttlMs` (F18) gives the grant a lifetime of its own, never longer than the
+   * session's: a grant of an infinite session still ends. Absent, the grant
+   * lives as long as its session, as before.
+   */
   createGrant({ sessionId, credentialId, fields, policy, narrow = null, ttlMs = null }) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
     // nothing while locked rather than persisting unrecorded.
     this.#requireUnlocked()
-    const session = this.db.sessions[sessionId]
+    const session = Object.hasOwn(this.db.sessions, sessionId) ? this.db.sessions[sessionId] : null
     if (!session) throw deny('AV_NOT_FOUND', `no session ${sessionId}`)
-    const cred = this.db.credentials[credentialId]
+    const cred = Object.hasOwn(this.db.credentials, credentialId) ? this.db.credentials[credentialId] : null
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${credentialId}`)
-    if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) throw deny('AV_POLICY_DENIED', 'grant ttl must be positive', { rule: 'grant_ttl' })
-    const expires_at = ttlMs !== null ? new Date(Math.min(Date.now() + ttlMs, sessionExpiryMs(session))).toISOString() : null
+    if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
+      throw deny('AV_POLICY_DENIED', 'a grant lifetime must be a positive number', { rule: 'grant_ttl' })
+    }
+    // Capability is never added to a session that has ended, or for a
+    // credential a human has stopped.
+    this.assertSessionLive(session)
+    if (cred.quarantine) throw quarantined(cred)
+    const expires_at = ttlMs === null ? null : new Date(Math.min(Date.now() + ttlMs, sessionExpiryMs(session))).toISOString()
     const grantId = id.grant()
     const grant = {
       id: grantId, session_id: sessionId, credential_id: credentialId,
@@ -1020,45 +1231,71 @@ export class Vault {
     return grant
   }
 
+  /**
+   * The newest grant for a session and credential, in any state (F18), so a
+   * caller that finds no active one can say it expired rather than that it
+   * never existed. Ties on the timestamp go to the later id (ids are ULIDs).
+   */
   findGrant(sid, credId) {
-    let newest = null;
+    let newest = null
     for (const g of Object.values(this.db.grants)) {
-      if (g.session_id === sid && g.credential_id === credId) {
-        if (!newest || String(g.created_at).localeCompare(String(newest.created_at)) > 0) {
-          newest = g;
-        }
-      }
+      if (g.session_id !== sid || g.credential_id !== credId) continue
+      if (!newest || String(g.created_at).localeCompare(String(newest.created_at)) > 0 ||
+        (g.created_at === newest.created_at && String(g.id) > String(newest.id))) newest = g
     }
-    return newest;
+    return newest
   }
 
+  /**
+   * The one place a grant's lifetime is decided (F18). Every path that uses a
+   * grant — issuing, consuming, the gateway's route — asks this, so no two
+   * readers can disagree about whether it is over. Noticing the end is a
+   * change (the grant and its placeholders die), and a change that cannot be
+   * audited must not happen: a locked vault refuses without recording.
+   */
   assertGrantLive(grant) {
-    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grant?.id}`);
+    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grant?.id ?? ''}`.trim())
     if (!(expiryMs(grant.expires_at) > Date.now())) {
-      grant.state = 'expired';
+      const expired = deny('AV_GRANT_EXPIRED', `grant ${grant.id} expired at ${grant.expires_at}`, {
+        next: { mcp: { tool: 'vault_request_session' } },
+      })
+      if (this.locked) throw expired
+      grant.state = 'expired'
       for (const p of Object.values(this.db.placeholders)) {
-        if (p.grant_id === grant.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'expired'; }
+        if (p.grant_id === grant.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'expired' }
       }
-      this.#persist();
-      this.audit.write('grant.expired', { grant_id: grant.id, session_id: grant.session_id });
-      throw deny('AV_GRANT_EXPIRED', `grant ${grant.id} has expired`, { next: { mcp: { tool: 'vault_request_session' } } });
+      this.#persist()
+      this.audit.write('grant.expired', { grant_id: grant.id, session_id: grant.session_id })
+      throw expired
     }
-    return grant;
+    return grant
   }
 
   grantsForSession(sid) {
     return Object.values(this.db.grants).filter((g) => g.session_id === sid && g.state === 'active')
   }
 
+  /**
+   * Charge a grant for a request that spends no placeholder use (F6: each
+   * redirect hop). False, and nothing charged, when it would exceed the
+   * budget — or when the budget, the count or the grant cannot be read, since
+   * `used + NaN > limit` is false forever and that is no budget at all.
+   * Ledger churn like a placeholder use, so the write skips the fsync.
+   */
   chargeGrant(grantId, n = 1) {
-    const grant = this.db.grants[grantId];
-    if (!grant) return false;
-    const limit = grant.policy?.budget?.limit;
-    if (limit !== undefined && Number.isFinite(limit) && grant.budget_used + n > limit) return false;
-    grant.budget_used += n;
-    grant.counters.requests += n;
-    this.#persist({ durable: false });
-    return true;
+    if (this.locked) return false
+    const grant = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
+    if (!grant || grant.state !== 'active' || !(expiryMs(grant.expires_at) > Date.now())) return false
+    if (!Number.isSafeInteger(n) || n < 1) return false
+    const used = grant.budget_used
+    if (!Number.isSafeInteger(used) || used < 0) return false
+    const limit = budgetLimit(grant.policy)
+    if (limit === null || used + n > limit) return false
+    grant.budget_used = used + n
+    grant.counters = grant.counters || { requests: 0, denials: 0 }
+    grant.counters.requests = (Number.isSafeInteger(grant.counters.requests) ? grant.counters.requests : 0) + n
+    this.#persist({ durable: false })
+    return true
   }
 
   revokeGrant(grantId, reason = 'revoked') {
@@ -1076,26 +1313,30 @@ export class Vault {
     this.audit.write('grant.revoked', { grant_id: grantId, reason })
   }
 
-  /** Narrow an existing grant. Reducing capability never needs presence. */
+  /**
+   * Bring a grant's end closer (F15): `min(current, now + ttlMs)`, never later.
+   * Its live placeholders come down with it, so none outlives it.
+   */
   shortenGrant(grantId, ttlMs) {
     this.#requireUnlocked()
-    const g = this.db.grants[grantId]
+    const g = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
     if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
-    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw deny('AV_POLICY_DENIED', 'ttlMs must be finite and positive', { rule: 'grant_ttl' })
-    const now = Date.now()
-    const currentExpiry = g.expires_at ? Date.parse(g.expires_at) : Infinity
-    g.expires_at = new Date(Math.min(currentExpiry, now + ttlMs)).toISOString()
+    if (g.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grantId}`)
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw deny('AV_POLICY_DENIED', 'a grant lifetime must be a positive number', { rule: 'grant_ttl' })
+    }
+    const expiresAt = shortenedIso(expiryMs(g.expires_at), Date.now(), ttlMs)
+    const bound = Date.parse(expiresAt)
+    g.expires_at = expiresAt
     for (const p of Object.values(this.db.placeholders)) {
-      if (p.grant_id === grantId && p.state === 'active') {
-        const theirExpiry = p.expires_at ? Date.parse(p.expires_at) : Infinity
-        p.expires_at = new Date(Math.min(theirExpiry, Date.parse(g.expires_at))).toISOString()
-      }
+      if (p.grant_id === g.id && p.state === 'active' && !(rowExpiryMs(p) <= bound)) p.expires_at = expiresAt
     }
     this.#persist()
-    this.audit.write('grant.shortened', { grant_id: grantId, expires_at: g.expires_at })
+    this.audit.write('grant.shortened', { grant_id: g.id, expires_at: expiresAt })
     return g
   }
 
+  /** Narrow an existing grant. Reducing capability never needs presence. */
   narrowGrant(grantId, narrow) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
@@ -1103,13 +1344,23 @@ export class Vault {
     this.#requireUnlocked()
     const g = this.db.grants[grantId]
     if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
+    if (!narrow || typeof narrow !== 'object' || Array.isArray(narrow)) {
+      throw deny('AV_POLICY_DENIED', 'a narrowing must be a policy layer', { rule: 'policy_invalid' })
+    }
+    // `redirects` is the one field whose absence means "off" (0.6). A grant
+    // that never stated it follows none, and intersecting it with a narrow
+    // that states 5 would follow five. So a narrow may only say 0.
+    if (Object.hasOwn(narrow, 'redirects') && narrow.redirects?.max !== 0) {
+      throw deny('AV_POLICY_DENIED', 'a narrowing can only turn redirect following off', { rule: 'narrow_widens' })
+    }
     // The same intersection every request is checked against, so this can
     // only ever remove capability. It was an object spread, which replaced
     // whatever `narrow` named: a "narrowing" to DELETE on /admin/** with
     // approval: 'auto' widened every one of them.
     g.policy = policyMod.intersect([g.policy, narrow])
     this.#persist()
-    this.audit.write('grant.narrowed', { grant_id: grantId, narrow })
+    // The names, not the values: a narrow can carry floats and long lists.
+    this.audit.write('grant.narrowed', { grant_id: grantId, session_id: g.session_id, fields: Object.keys(narrow) })
     return g
   }
 
@@ -1123,13 +1374,14 @@ export class Vault {
    */
   issuePlaceholder({ grantId, field, uses = null, ttlMs = null }) {
     this.#requireUnlocked()
-    const grant = this.db.grants[grantId]
+    const grant = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
+    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grantId}`)
     this.assertGrantLive(grant)
     const session = this.assertSessionLive(this.db.sessions[grant.session_id])
     const cred = this.db.credentials[grant.credential_id]
     const fieldName = field || grant.fields[0]
     if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)
-    if (cred.quarantine) throw deny('AV_QUARANTINED', `credential ${cred.slug} is quarantined`, { rule: 'quarantined' })
+    if (cred.quarantine) throw quarantined(cred)
 
     // `?? 1000` does not catch NaN, only null and undefined, so a malformed
     // budget propagated straight into the placeholder's use ceiling — and
@@ -1182,12 +1434,9 @@ export class Vault {
     // `max_expires_at`, and a placeholder pinned to the first value died hours
     // before the session it belongs to — the one `session create` hands out
     // included. The session's own liveness is checked on every use anyway
-    // (#authenticate asserts it for token and carrier alike).
-    const expires = Math.min(
-      ttl ? Date.now() + ttl : Infinity,
-      session.infinite ? Infinity : Date.parse(session.max_expires_at ?? session.expires_at),
-      expiryMs(grant.expires_at)
-    )
+    // (#authenticate asserts it for token and carrier alike). An infinite
+    // session sets no bound, and a grant with a lifetime of its own (F18) does.
+    const expires = Math.min(Date.now() + ttl, sessionCeilingMs(session), expiryMs(grant.expires_at))
     this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
     const row = {
@@ -1239,8 +1488,10 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
+    // The grant's own lifetime (F18), asked of the one function that decides
+    // it, so a placeholder minted before the grant ended dies with it.
     this.assertGrantLive(this.db.grants[row.grant_id])
-    if (row.expires_at !== null && !(expiryMs(row.expires_at) > Date.now())) {
+    if (!(rowExpiryMs(row) > Date.now())) {
       row.state = 'dead'; row.dead_reason = 'expired'; this.#persist({ durable: false })
       throw deny('AV_PH_STALE', 'placeholder expired', {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
@@ -1358,7 +1609,7 @@ export class Vault {
     // and they were exempt from this bound, so it bounded nothing.
     const now = Date.now()
     const dead = rows
-      .filter(([, p]) => p.state !== 'active' || Date.parse(p.expires_at) <= now)
+      .filter(([, p]) => p.state !== 'active' || !(rowExpiryMs(p) > now))
       .sort((a, b) => String(a[1].created_at).localeCompare(String(b[1].created_at)))
     const overBy = rows.length - MAX_PLACEHOLDER_ROWS
     for (const [id] of dead.slice(0, overBy)) delete this.db.placeholders[id]
@@ -1424,10 +1675,7 @@ export class Vault {
     return {
       credentials: Object.keys(this.db.credentials).length,
       workspaces: Object.keys(this.db.workspaces).length,
-      credentials_expiring: Object.values(this.db.credentials).filter(c => {
-        const actualExpiry = c.health?.observed_expires_at || c.expires_at;
-        return actualExpiry && expiryMs(actualExpiry) < Date.now() + 7 * 86400000;
-      }).length,
+      credentials_expiring: Object.values(this.db.credentials).filter((c) => expiryWarning(c) !== null).length,
       sessions_active: live(this.db.sessions, (s) => s.state === 'active' && sessionExpiryMs(s) > Date.now()),
       grants_active: live(this.db.grants, (g) => g.state === 'active'),
       placeholders_live: live(this.db.placeholders, (p) => p.state === 'active'),

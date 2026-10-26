@@ -302,17 +302,67 @@ test('the placeholder ledger does not grow without bound', () => {
   }
 })
 
-test('key material is still written durably, whatever the ledger does', () => {
-  // The fsync split is only safe if the half that matters keeps it. A lost
-  // placeholder is one the agent asks for again; a lost credential is gone.
-  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
-  const nonDurable = [...src.matchAll(/#persist\(\{ durable: false \}\)/g)].length
-  assert.ok(nonDurable > 0 && nonDurable <= 6,
-    `${nonDurable} non-durable writes: this should be the placeholder ledger and nothing else`)
+/**
+ * Every method of the Vault class, by name, with its source. A method starts
+ * at a two-space-indented header and ends at the first line that is exactly
+ * two spaces and a closing brace.
+ */
+function vaultMethods(src) {
+  const methods = new Map()
+  const lines = src.split('\n')
+  const header = /^  (?:static |async |get |set )*(#?[A-Za-z_$][\w$]*)\s*\(.*\{\s*$/
+  for (let i = 0; i < lines.length; i++) {
+    const m = header.exec(lines[i])
+    if (!m || ['if', 'for', 'while', 'switch', 'catch'].includes(m[1])) continue
+    let j = i + 1
+    while (j < lines.length && lines[j] !== '  }') j++
+    methods.set(m[1], lines.slice(i, j + 1).join('\n'))
+    i = j
+  }
+  return methods
+}
 
-  // The credential and factor paths must not be among them.
-  for (const fn of ['addCredential', 'setPassphrase', 'removePassphrase', 'addWebauthnUnlock', 'removeWebauthnUnlock']) {
-    const body = new RegExp(`${fn}\\\\([^)]*\\\\) \\\\{[\\\\s\\\\S]*?\\\\n  \\\\}`).exec(src)?.[0] || ''
-    assert.ok(!body.includes('durable: false'), `${fn} writes key material without an fsync`)
+// The writes allowed to skip the fsync: ledger churn an agent can simply ask
+// for again, a redirect hop's budget charge (F6) and a health observation
+// (F10), both coordinator-approved. Nothing that records a security decision.
+const NON_DURABLE_ALLOWED = new Set(['issuePlaceholder', 'consumePlaceholder', 'refundPlaceholder', 'chargeGrant', 'recordHealth'])
+
+test('key material and security decisions are written durably, whatever the ledger does', () => {
+  // The fsync split is only safe if the half that matters keeps it. A lost
+  // placeholder is one the agent asks for again; a lost credential is gone,
+  // and a lost revocation, shortening or quarantine is access a human took
+  // away coming back after a power cut.
+  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
+  const methods = vaultMethods(src)
+  assert.ok(methods.size > 40 && methods.has('createSession') && methods.has('consumePlaceholder'),
+    `the method scan found ${methods.size} methods; it has stopped reading vault.js`)
+
+  // Every non-durable write sits in an allowed method, and only there. Any
+  // spelling of the option counts, not just the one this file uses today.
+  const nonDurable = /#persist\(\s*\{[^}]*durable[^}]*\}\s*\)/
+  let found = 0
+  for (const [name, body] of methods) {
+    if (!nonDurable.test(body)) continue
+    found++
+    assert.ok(NON_DURABLE_ALLOWED.has(name), `${name} writes without an fsync; only ${[...NON_DURABLE_ALLOWED].join(', ')} may`)
+  }
+  assert.ok(found > 0, 'the ledger is expected to skip the fsync; finding none means this scan is broken')
+  // And none outside a method, where the scan above would not see it.
+  const inMethods = [...methods.values()].reduce((n, body) => n + (body.match(new RegExp(nonDurable, 'g'))?.length ?? 0), 0)
+  assert.equal([...src.matchAll(new RegExp(nonDurable, 'g'))].length, inMethods, 'a non-durable write outside any method')
+
+  // The credential and factor paths, and every write that records a security
+  // decision, persist durably: they write, and never with the option.
+  for (const fn of [
+    'addCredential', 'setPassphrase', 'removePassphrase', 'addWebauthnUnlock', 'removeWebauthnUnlock', '#commitFactors',
+    'createSession', 'revokeSession', 'shortenSession', 'assertSessionLive',
+    'createGrant', 'revokeGrant', 'shortenGrant', 'narrowGrant', 'assertGrantLive',
+    'setQuarantine', 'clearQuarantine', 'updateSettings', 'setCredentialExpiry',
+  ]) {
+    const body = methods.get(fn)
+    assert.ok(body, `${fn} is not in vault.js any more; update this list`)
+    // The factor paths write through #commitFactors, which is on this list.
+    assert.ok(body.includes('#persist(') || body.includes('#commitFactors('), `${fn} no longer writes through #persist`)
+    assert.ok(!/durable/.test(body), `${fn} writes without an fsync`)
   }
 })
