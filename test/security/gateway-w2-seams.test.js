@@ -388,3 +388,11 @@ test('an extra pattern scrubs an error detail, is redacted within an event, and 
   f.pipeline.upstream = async () => ({ status: 200, headers: { 'content-type': 'text/event-stream' }, res: Readable.from([Buffer.from('data: {"text":"we use acme_ tooling"}\n\n')]) })
   assert.equal(await streamText((await f.pipeline.handle(f.req())).stream), 'data: {"text":"we use acme_ tooling"}\n\n')
 })
+
+test('a method-override header is held to the route pairs as well as the methods list', async (t) => {
+  const f = fixture(t, { methods: ['GET', 'POST', 'DELETE'], routes: [{ methods: ['GET', 'POST'], paths: ['/**'] }, { methods: ['DELETE'], paths: ['/tmp/**'] }] })
+  const override = (path) => f.req({ method: 'POST', path, headers: [...f.req().headers, ['x-http-method-override', 'DELETE']] })
+  assert.equal(problem(await f.pipeline.handle(override('/p/test/repos/x'))).rule, 'routes')
+  assert.equal((await f.pipeline.handle(override('/p/test/tmp/x'))).status, 200)
+  assert.equal(f.sent.length, 1)
+})

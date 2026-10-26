@@ -1156,13 +1156,15 @@ export class Pipeline {
     // might act on is held to the same allowlist and the same approval rule.
     const overrides = methodOverrides(req.headers)
     for (const m of overrides) {
-      policyMod.evaluateHttp(effective, { method: m, host: route.host, path: route.path })
       if (effective.methods && !effective.methods.includes(m)) {
         throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
           rule: 'methods',
           hint: `Allowed methods: ${effective.methods.join(', ') || 'none'}.`,
         })
       }
+      // And the method-bound routes (F3), which bind a method to its paths.
+      // The methods allowlist is the check above, so it is left out here.
+      policyMod.evaluateHttp({ ...effective, methods: null }, { method: m, host: route.host, path: route.path })
     }
 
     // --- approval ----------------------------------------------------------

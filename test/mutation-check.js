@@ -1385,6 +1385,13 @@ const MUTATIONS = [
     to: "      code = err.code; rule = err.rule ?? null; would = 'deny'; this.tripwires.observe({ sessionId: session.id, credentialId: route?.cred?.id ?? null, code, rule })",
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
+  {
+    what: 'a method-override header is not held to the route pairs',
+    file: 'src/daemon/pipeline.js',
+    from: '      policyMod.evaluateHttp({ ...effective, methods: null }, { method: m, host: route.host, path: route.path })',
+    to: '',
+    tests: ['test/security/gateway-w2-seams.test.js'],
+  },
 ]
 
 let survived = 0

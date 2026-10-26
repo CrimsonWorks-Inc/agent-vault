@@ -121,13 +121,18 @@ test('custom patterns from every credential scrub bodies, headers and errors; co
 
 test('token reservations block concurrent overspend and settle buffered usage', async t => {
   const reserve = reservationFor('openai', meterRequest('openai', { method: 'POST', path: '/v1/chat/completions', contentType: 'application/json', body: modelBody })).tokens
-  let complete
-  const f = fixture(t, { spend: { tokens: reserve + 1 } }, { kind: 'openai', upstream: () => new Promise(resolve => { complete = () => resolve({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"usage":{"prompt_tokens":5,"completion_tokens":7}}') }) }) })
+  // Every upstream call is held until released, and none waits on another,
+  // so a second call that wrongly got through shows up as a send, not a hang.
+  const held = []
+  const f = fixture(t, { spend: { tokens: reserve + 1 } }, { kind: 'openai', upstream: () => new Promise(resolve => { held.push(() => resolve({ status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"usage":{"prompt_tokens":5,"completion_tokens":7}}') })) }) })
   const first = f.pipeline.handle(modelReq(f))
   assert.equal(f.pipeline.spendFor(f.grant.id).reserved_tokens, reserve)
-  const result = await f.pipeline.handle(modelReq(f))
-  assert.equal(problem(result).rule, 'spend'); assert.equal(f.sent.length, 1)
-  complete(); assert.equal((await first).status, 200)
+  const second = f.pipeline.handle(modelReq(f))
+  const outcome = await Promise.race([second, new Promise((resolve) => setTimeout(() => resolve('sent'), 500))])
+  for (const release of held) release()
+  assert.notEqual(outcome, 'sent', 'the second call reached the upstream')
+  assert.equal(problem(outcome).rule, 'spend'); assert.equal(f.sent.length, 1)
+  assert.equal((await first).status, 200)
   assert.equal(f.grant.spend.tokens_used, 12)
   assert.equal(f.pipeline.spendFor(f.grant.id).reserved_tokens, 0)
 })
