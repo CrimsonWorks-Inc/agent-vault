@@ -19,6 +19,8 @@
 // re-encoded in a scheme not listed, or transformed by the upstream is not
 // caught. That is stated as a non-guarantee rather than papered over.
 
+import { deny } from './errors.js'
+
 export const MIN_SECRET_LEN = 8
 
 /**
@@ -48,6 +50,114 @@ export const DERIVED_PATTERNS = [
   { name: 'openai', re: new RegExp(`${BOUNDARY}sk-(?:proj-)?[A-Za-z0-9_-]{20,}`, 'g') },
   { name: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
 ]
+
+export const SCRUB_PATTERN_CORPUS = Object.freeze([
+  'The quick brown fox jumps over the lazy dog.',
+  'Please read the repository and return the result of the task.',
+  'disk-usage_by_repository_over_time',
+  'task-oriented_approach_to_the_problem',
+  'This is an ordinary response with no credentials or secrets.',
+])
+
+// What compileScrubPattern learned about each pattern it accepted: the
+// longest text it can match, which is what the stream scrubber holds back.
+const scrubMeta = new WeakMap()
+
+const SCRUB_ESCAPES = 'dwsDWS\\.[]{}()*+?|^$-/'
+
+/**
+ * A human's extra scrub pattern, compiled, or a refusal naming the first rule
+ * it breaks.
+ *
+ * JavaScript has no regex timeout and the gateway is one thread, so the
+ * grammar is what keeps a pattern from backtracking catastrophically (C5):
+ * every repetition is bounded, and each alternation branch has at most ONE
+ * variable quantifier (`?`, or `{n,m}` with n < m). Exact counts `{n}` are
+ * free. Groups, backreferences, lookarounds, anchors and `.` are refused, and
+ * each branch starts with three literal characters so it cannot match
+ * ordinary text by shape alone.
+ *
+ * Two more rules, because one variable quantifier was not enough on its own:
+ * `abc[^Q]{0,256}[^Q]{256}Q` is legal under it and took 2.4 seconds on 64 KiB
+ * of " abc" repeated, which an upstream chooses. Each extra length the
+ * variable quantifier tries is re-checked against everything after it, so
+ * only literal characters may follow it, and a branch's longest match is at
+ * most 512 characters. The longest match also bounds what the stream
+ * scrubber holds back.
+ */
+export function compileScrubPattern(source) {
+  const bad = (message) => { throw deny('AV_POLICY_DENIED', `scrub pattern refused: ${message}`, { rule: 'scrub_pattern' }) }
+  if (typeof source !== 'string' || source.length < 3 || source.length > 256) bad('it must be 3 to 256 characters')
+  // A control character survives in a pattern but not in RegExp#source,
+  // which writes it as an escape this grammar refuses, so it is refused here.
+  if (/[\u0000-\u001f\u007f]/.test(source)) bad('control characters are not allowed')
+  let i = 0, branches = 0, maxLen = 0
+  while (i <= source.length) {
+    if (++branches > 16) bad('it has more than sixteen branches')
+    let literals = 0, variables = 0, length = 0, atoms = 0
+    while (i < source.length && source[i] !== '|') {
+      const c = source[i++]
+      const afterVariable = variables > 0
+      let literal = true
+      if (c === '\\') {
+        const e = source[i++]
+        if (!e || !SCRUB_ESCAPES.includes(e)) bad('it uses an escape outside \\d \\w \\s \\D \\W \\S and escaped punctuation')
+        literal = !'dwsDWS'.includes(e)
+      } else if (c === '[') {
+        literal = false
+        if (source[i] === '^') i++
+        let members = 0, closed = false
+        while (i < source.length) {
+          const x = source[i++]
+          if (x === ']') { closed = true; break }
+          if (x === '[') bad('a class may not contain another')
+          if (x === '\\') { const e = source[i++]; if (!e || !SCRUB_ESCAPES.includes(e)) bad('a class uses an unsupported escape') }
+          members++
+        }
+        if (!closed || !members) bad('a class must be closed and not empty')
+      } else if ('()^$.*+?{}]'.includes(c)) {
+        bad('groups, anchors, `.` and stray operators are not allowed')
+      }
+      atoms++
+      let upper = 1, quantified = false
+      if (source[i] === '*' || source[i] === '+') bad('unbounded repetition is not allowed; use {n,m}')
+      if (source[i] === '?') { quantified = true; upper = 1; i++; if (++variables > 1) bad('a branch may have only one variable quantifier') }
+      else if (source[i] === '{') {
+        const m = /^\{(\d{1,3})(?:,(\d{0,3}))?\}/.exec(source.slice(i))
+        if (!m) bad('a quantifier must be {n} or {n,m}')
+        if (m[2] === '') bad('unbounded repetition is not allowed; use {n,m}')
+        const n = Number(m[1]), max = m[2] === undefined ? n : Number(m[2])
+        if (n > 256 || max > 256) bad('a repetition bound is over 256')
+        if (max < n) bad('a quantifier is out of order')
+        if (max > n && ++variables > 1) bad('a branch may have only one variable quantifier')
+        quantified = true; upper = max; i += m[0].length
+      }
+      if (source[i] === '?' && quantified) bad('lazy and possessive quantifiers are not allowed')
+      if (afterVariable && (!literal || quantified)) bad('only literal characters may follow the variable quantifier')
+      if (literals < 3) {
+        if (!literal || quantified) bad('each branch must start with three literal characters')
+        literals++
+      }
+      length += upper
+    }
+    if (!atoms) bad('a branch is empty')
+    if (literals < 3) bad('each branch must start with three literal characters')
+    if (length > 512) bad('a branch can match more than 512 characters')
+    maxLen = Math.max(maxLen, length)
+    if (i >= source.length) break
+    i++ // past the `|`
+    if (i === source.length) bad('a branch is empty')
+  }
+  let re
+  try { re = new RegExp(BOUNDARY + '(?:' + source + ')', 'g') } catch { bad('it is not a valid expression') }
+  for (const line of ['', ...SCRUB_PATTERN_CORPUS]) {
+    re.lastIndex = 0
+    if (re.test(line)) bad('it matches ordinary text')
+  }
+  re.lastIndex = 0
+  scrubMeta.set(re, { maxLen })
+  return { re }
+}
 
 // Where a token of one of the shapes above can begin, and what it is made of.
 // The stream scrubber uses these to keep a token that is still arriving in one
@@ -265,6 +375,23 @@ export class Scrubber {
    *   (the placeholder it used, for this request's own secret).
    */
   constructor(entries = [], opts = {}) {
+    // Extra patterns are compiled again from their source here, so nothing
+    // reaches the response path that the bounded grammar did not accept,
+    // whoever built the RegExp. One that does not compile withholds the
+    // response: a pattern the human added and the gateway silently skipped
+    // would be a protection that is not there.
+    const withheld = () => deny('AV_UNSCANNABLE', 'a stored scrub pattern is not valid, so the response could not be scrubbed', { rule: 'scrub_pattern_invalid' })
+    const prefix = BOUNDARY + '(?:'
+    this.extraPatterns = (opts.extraPatterns ?? []).map(({ name, re }) => {
+      if (!(re instanceof RegExp) || re.flags !== 'g' || !re.source.startsWith(prefix) || !re.source.endsWith(')')) throw withheld()
+      let checked
+      try { checked = compileScrubPattern(re.source.slice(prefix.length, -1)).re } catch { throw withheld() }
+      return { name, re: checked, maxLen: scrubMeta.get(checked).maxLen }
+    })
+    // The stream holds back at least this much, so any match of an extra
+    // pattern that starts before the cut is already here in full.
+    this.extraHold = Math.max(0, ...this.extraPatterns.map((p) => p.maxLen))
+    this.derivedPatterns = [...DERIVED_PATTERNS, ...this.extraPatterns]
     this.patterns = []
     // What the decoded view and the unwrapped view are searched for: the
     // secret itself, and its hex and base64 forms. The decoded view is
@@ -352,7 +479,7 @@ export class Scrubber {
       out = spliced.text
       redactions += spliced.count
     }
-    for (const { name, re } of DERIVED_PATTERNS) {
+    for (const { name, re } of this.derivedPatterns) {
       re.lastIndex = 0
       const matches = out.match(re)
       if (matches) {
@@ -505,7 +632,7 @@ export class Scrubber {
     return {
       push(chunk) {
         const combined = held + chunk
-        const keep = Math.min(self.overlap, combined.length)
+        const keep = Math.min(Math.max(self.overlap, self.extraHold), combined.length)
         let cut = combined.length - keep
         if (cut <= 0) { held = combined; return '' }
 
@@ -525,6 +652,17 @@ export class Scrubber {
           let end = m.index
           while (end < cut && TOKEN_CHAR.test(combined[end])) end++
           if (end >= cut) { cut = m.index; break }
+        }
+
+        // An extra pattern's longest match is bounded, and `keep` is at least
+        // that long, so a match that starts before the cut is already here in
+        // full. One running across the cut moves the cut past it, as an exact
+        // needle does; one starting after the cut is held back whole.
+        for (const { re } of self.extraPatterns) {
+          re.lastIndex = 0
+          for (let m; (m = re.exec(combined)) !== null && m.index < cut;) {
+            if (m.index + m[0].length > cut) cut = m.index + m[0].length
+          }
         }
 
         // Exact ones are already here in full, so the cut moves past them.
