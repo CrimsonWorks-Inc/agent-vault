@@ -159,10 +159,42 @@ function hostAllows(outer, inner) {
   return false
 }
 
+/**
+ * Two rate limits as one that allows no more than either.
+ *
+ * This kept the smaller count and `a.per` whatever the units, so 10 a minute
+ * against 100 an hour came out as 10 a minute: 600 an hour, six times what the
+ * inner layer allowed. Exactly "both at once" is not one count over one window,
+ * so this takes the smaller count over the LONGER window, which is inside both.
+ * Narrower than strictly necessary, which is the safe direction. A window this
+ * cannot compare is refused rather than guessed at.
+ */
 function intersectRate(a, b) {
   if (!a) return b
   if (!b) return a
-  return { count: Math.min(a.count, b.count), per: a.per }
+  const count = Math.min(a.count, b.count)
+  if (a.per === b.per) return { count, per: a.per }
+  const pa = windowMs(a.per)
+  const pb = windowMs(b.per)
+  if (pa === null || pb === null) {
+    throw deny('AV_POLICY_DENIED', `cannot compare rate windows ${a.per} and ${b.per}`, { rule: 'rate' })
+  }
+  return { count, per: pa >= pb ? a.per : b.per }
+}
+
+const WINDOW_UNITS = {
+  ms: 1, s: 1000, sec: 1000, second: 1000, m: 60_000, min: 60_000, minute: 60_000,
+  h: 3_600_000, hr: 3_600_000, hour: 3_600_000, d: 86_400_000, day: 86_400_000,
+}
+
+/** A rate window — milliseconds, or `minute`, `15m`, `2 hours` — in milliseconds, or null. */
+function windowMs(per) {
+  if (typeof per === 'number') return Number.isFinite(per) && per > 0 ? per : null
+  const m = /^\s*(\d+(?:\.\d+)?)?\s*([a-z]+)\s*$/i.exec(String(per ?? ''))
+  if (!m) return null
+  const word = m[2].toLowerCase()
+  const unit = WINDOW_UNITS[word] ?? (word.endsWith('s') ? WINDOW_UNITS[word.slice(0, -1)] : undefined)
+  return unit ? unit * (m[1] ? Number(m[1]) : 1) : null
 }
 
 function intersectBudget(a, b) {
@@ -252,53 +284,69 @@ export function encodePathForWire(path) {
   return String(path).split('/').map(encodePathSegment).join('/')
 }
 
+/**
+ * The path a request names, decoded once — which is what goes on the wire,
+ * re-encoded — or a refusal.
+ *
+ * A path is decoded exactly once, and refused if decoding it again would
+ * change it. This used to decode to a fixed point and check two readings,
+ * once and fully decoded, but an upstream may decode any number of times in
+ * between: `/a/b%252520c` was allowed on both readings and an upstream that
+ * decodes twice served `/a/b%20c`, which neither reading was. No count of
+ * readings closes that, so an escape that is itself encoded is refused.
+ */
 export function normalizePath(path) {
-  let p = String(path || '/')
+  const raw = String(path || '/')
 
-  // Decode to a fixed point, not a fixed number of rounds. Two rounds left a
-  // live escape in the output at three levels of encoding, and the forwarded
-  // path was the un-normalized original, so the upstream resolved something
-  // the policy never saw.
-  let decoded = p
-  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
-    let next
-    try { next = decodeURIComponent(decoded) } catch {
-      throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
-    }
-    if (next === decoded) break
-    decoded = next
-    if (i === MAX_DECODE_ROUNDS - 1) {
-      throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times to resolve')
-    }
+  // The request itself must be well-formed.
+  let p
+  try { p = decodeURIComponent(raw) } catch {
+    throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
   }
 
   // Everything below decides what resource this names. A URL parser answers
   // the same question differently, and where the two disagree the request
   // goes somewhere the policy did not authorise.
   //
-  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
-  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
-  //   "/user/keys".
-  const cut = decoded.search(/[?#]/)
-  if (cut !== -1) decoded = decoded.slice(0, cut)
-
   //   An encoded slash is genuinely ambiguous: to this function it is a
   //   separator, to some upstreams a literal character in one segment. Two
   //   readings means two different resources, so it is refused rather than
   //   guessed. The same goes for a backslash, which several servers fold to
   //   a separator.
-  if (/%2f|%5c|\\/i.test(String(path || ''))) {
+  //
+  //   Both are looked for in the decoded path as well, so a backslash encoded
+  //   twice (`%255c`) is named for what it is rather than only as the double
+  //   encoding below.
+  if (/%2f|%5c|\\/i.test(raw) || /%2f|%5c|\\/i.test(p)) {
     throw deny('AV_POLICY_DENIED', 'path contains an encoded slash or a backslash', {
       rule: 'path_ambiguous_separator',
       hint: 'Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.',
     })
   }
 
+  //   Decoded once, nothing may still decode. `%25` followed by hex is an
+  //   escape that was itself encoded, and an upstream that decodes again
+  //   serves another path. A `%` that starts no escape is a literal percent
+  //   sign, as in `/files/100%25`, and is sent as one. `%u` and four hex
+  //   digits counts as an escape too: IIS decodes it.
+  if (/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i.test(p)) {
+    throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times: decoding it again would change it', {
+      rule: 'path_ambiguous_encoding',
+      hint: 'An upstream that decodes the path twice would serve a different path from the one checked here. Encode the path once.',
+    })
+  }
+
+  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
+  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
+  //   "/user/keys".
+  const cut = p.search(/[?#]/)
+  if (cut !== -1) p = p.slice(0, cut)
+
   //   TAB, LF and CR are deleted outright by the WHATWG URL parser, so
   //   "/repos/o/r/hooks\t" matched no deny glob and arrived as
   //   "/repos/o/r/hooks". Every C0 control and DEL is refused: none of them
   //   belongs in a path, and each is a chance for two parsers to disagree.
-  const control = /[\u0000-\u001f\u007f]/.exec(decoded)
+  const control = /[\u0000-\u001f\u007f]/.exec(p)
   if (control) {
     const code = control[0].charCodeAt(0).toString(16).padStart(2, '0')
     throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {
@@ -308,7 +356,7 @@ export function normalizePath(path) {
   }
 
   const segments = []
-  for (const seg of decoded.split('/')) {
+  for (const seg of p.split('/')) {
     if (seg === '' || seg === '.') continue
     if (seg === '..') {
       if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
@@ -319,9 +367,6 @@ export function normalizePath(path) {
   }
   return `/${segments.join('/')}`
 }
-
-// Enough for any legitimate double-encoding, far short of a decode bomb.
-const MAX_DECODE_ROUNDS = 5
 
 /**
  * Glob matching, done segment by segment rather than by compiling to a regex.
@@ -545,6 +590,15 @@ export function lint(policy, { kind } = {}) {
   }
   if ((policy.methods || []).some((m) => !SAFE_METHODS.has(m)) && (policy.approval || 'auto') === 'auto') {
     problems.push({ level: 'warn', rule: 'approval', message: 'write methods with approval: auto; on-write is the default for a reason' })
+  }
+  // Both are intersected like every other limit, and nothing counts against
+  // either: the gateway has no in-flight counter and no rate limiter. Saying so
+  // is better than a field that looks like a control and is not.
+  if (policy.max_concurrent != null) {
+    problems.push({ level: 'warn', rule: 'max_concurrent', message: 'max_concurrent is not enforced by the gateway; use budget to bound use' })
+  }
+  if (policy.rate != null) {
+    problems.push({ level: 'warn', rule: 'rate', message: 'rate is not enforced by the gateway; use budget to bound use' })
   }
   return problems
 }

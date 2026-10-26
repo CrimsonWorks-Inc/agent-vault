@@ -72,9 +72,15 @@ export function requestHash({ method, host, path, query, bodySha256, credentials
     // version — plenty of frameworks honour it, so the approved POST reaches
     // the upstream as a delete. The human was shown method, host and path,
     // and a header can change what all three mean.
+    //
+    // Sorted by NAME only. Sorting the values too made two repeats of one
+    // header hash the same in either order, while the pipeline forwards them
+    // in the order sent — and an upstream that reads the last
+    // X-HTTP-Method-Override sees POST one way round and DELETE the other.
+    // The sort is stable, so values keep the order they will go out in.
     headers: [...(headers || [])]
       .map(([n, v]) => [String(n).toLowerCase(), String(v)])
-      .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : (a[0] < b[0] ? -1 : 1))),
+      .sort((a, b) => (a[0] === b[0] ? 0 : (a[0] < b[0] ? -1 : 1))),
   })
 }
 

@@ -8,6 +8,13 @@
 // replaced. Derived-token regexes catch minted credentials the vault never
 // stored, such as an installation token in a response body.
 //
+// Beyond the fixed needles, three views of the text are searched: one with
+// every `\uXXXX`, `%XX` and two-character JSON escape decoded, which catches a
+// secret, or its base64, escaped one character at a time, only in part, or
+// in more than one way at once, one with line breaks taken out of hex
+// and base64 runs, which catches a blob wrapped at any width, and one with hex
+// runs folded to lowercase, which catches hex in mixed case.
+//
 // Honest limit: this is byte-and-encoding based. A secret split across markup,
 // re-encoded in a scheme not listed, or transformed by the upstream is not
 // caught. That is stated as a non-guarantee rather than papered over.
@@ -42,6 +49,158 @@ export const DERIVED_PATTERNS = [
   { name: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/g },
 ]
 
+// Where a token of one of the shapes above can begin, and what it is made of.
+// The stream scrubber uses these to keep a token that is still arriving in one
+// piece (see push()).
+const DERIVED_START = new RegExp(`${BOUNDARY}(?:gh[pousr]_|github_pat_|xox[abpors]-|AKIA|ya29\\.|AIza|sk-)`, 'g')
+const TOKEN_CHAR = /[A-Za-z0-9_.-]/
+// How far before the cut a token may begin and still be held back for. A run
+// longer than this is emitted, and the pattern redacts what it can of it.
+const MAX_DERIVED_HOLD = 512
+
+// --- The layered decoder -------------------------------------------------
+//
+// A response can wrap a secret in more than one encoding: base64 inside
+// percent-encoding inside a JSON string. An agent's client peels those in
+// turn, so the scrubber peels them too. Each encoding it understands —
+//   * JSON string escapes, \uXXXX and the two-character ones (\/, \" ...),
+//   * percent-encoding (%2F),
+//   * base64 and base64url runs,
+//   * hex runs in either case —
+// is applied, in ANY order, up to DECODE_DEPTH layers deep, and every view
+// the peeling produces is searched for the secret and its base64/hex forms.
+// A single escape written one way at a time, or two ways side by side, falls
+// out of this as a one- or two-layer case; so does base64 that was then
+// percent-encoded and JSON-escaped on top.
+//
+// It is BOUNDED. The same decoder is never applied twice on one path (a
+// backslash produced by \\ must not then be read as an escape — that would
+// turn the literal \\u0053ECRET into SECRET and redact ordinary text), which
+// caps a path at the four decoders. Nested decoding (depth >= 2) is charged
+// against a budget of views and of bytes; a single first-layer decode is
+// not, so an ordinary large response — which has at most one layer to peel —
+// stays well inside it. When the budget is spent while a secret-bearing
+// candidate is still undecoded, the decoder stops and reports the response
+// UNSCANNABLE: the caller fails closed (AV_UNSCANNABLE for a buffered body, a
+// cut for a stream) rather than pass bytes it could not finish scanning.
+//
+// Honest limit: this undoes the listed encodings, nested up to DECODE_DEPTH.
+// It does NOT undo encryption, a scheme it does not list, or deeper nesting.
+const JSON_ESCAPE = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+const jsonUnescape = (_, u, c) => (c ? JSON_ESCAPE[c] : String.fromCharCode(parseInt(u, 16)))
+const percentUnescape = (_, h) => String.fromCharCode(parseInt(h, 16))
+
+// How deep a stack of distinct encodings is peeled, and the ceilings on the
+// nested (depth >= 2) work one response may cause. The byte ceiling is well
+// above what a legitimate response of the largest allowed size decodes to;
+// the view ceiling is below the 40 a fully adversarial four-decoder stack
+// would reach, so such a stack trips it and fails closed.
+const DECODE_DEPTH = 3
+const NESTED_VIEW_BUDGET = 32
+const NESTED_BYTE_BUDGET = 32 * 1024 * 1024
+
+// A base64/url or hex run decoded back to bytes. Padding and the url-safe
+// alphabet are normalised first; trailing junk is dropped by the decoder.
+const b64Decode = (run) => Buffer.from(run.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, ''), 'base64').toString('latin1')
+const hexDecode = (run) => {
+  let out = ''
+  for (let i = 0; i + 1 < run.length; i += 2) out += String.fromCharCode(parseInt(run.slice(i, i + 2), 16))
+  return out
+}
+
+// The four decoders. `applies` is a cheap test for whether a view has
+// anything this decoder would change; `re(s)` is a fresh global RegExp for
+// the spans it rewrites, and `fn` turns one match into its decoded text.
+// base64 and hex only touch runs long enough to possibly hold the secret, so
+// they depend on the scrubber's shortest needle (s.b64Min, s.hexMin).
+const DECODERS = [
+  { id: 'json', applies: (t) => /\\u[0-9a-fA-F]{4}|\\["\\/bfnrt]/.test(t), re: () => /\\u([0-9a-fA-F]{4})|\\(["\\/bfnrt])/g, fn: () => jsonUnescape },
+  { id: 'percent', applies: (t) => /%[0-9a-fA-F]{2}/.test(t), re: () => /%([0-9a-fA-F]{2})/g, fn: () => percentUnescape },
+  { id: 'base64', applies: (t, s) => new RegExp(`[A-Za-z0-9+/=_-]{${s.b64Min},}`).test(t), re: (s) => new RegExp(`[A-Za-z0-9+/=_-]{${s.b64Min},}`, 'g'), fn: () => (m) => b64Decode(m) },
+  { id: 'hex', applies: (t, s) => new RegExp(`[0-9A-Fa-f]{${s.hexMin},}`).test(t), re: (s) => new RegExp(`[0-9A-Fa-f]{${s.hexMin},}`, 'g'), fn: () => (m) => hexDecode(m) },
+]
+
+/**
+ * The raw span [start, end) that a decoded hit [lo, hi) came from.
+ *
+ * A view knows the decoder (`re`, `decode`) that produced it from its
+ * `parent`. Mapping a hit back one layer is the same walk `find` does: text
+ * between matches is 1:1, and a position inside a decoded match maps to the
+ * whole of that match. Chained up the parents it reaches the raw text, so a
+ * position inside a base64 or hex run redacts the whole run — the encoded
+ * secret in full.
+ */
+function mapToRaw(view, lo, hi) {
+  while (view.parent) {
+    const re = view.re
+    re.lastIndex = 0
+    let rawPos = 0; let outPos = 0; let rs = null; let re2 = null
+    const mark = (outStart, outLen, rawStart, rawLen, block) => {
+      if (rs === null && lo >= outStart && lo < outStart + outLen) rs = block ? rawStart : rawStart + (lo - outStart)
+      if (re2 === null && hi > outStart && hi <= outStart + outLen) re2 = block ? rawStart + rawLen : rawStart + (hi - outStart)
+    }
+    for (const m of view.parent.text.matchAll(re)) {
+      const plainLen = m.index - rawPos
+      mark(outPos, plainLen, rawPos, plainLen, false)
+      outPos += plainLen; rawPos = m.index
+      const decLen = view.decode(...m).length
+      mark(outPos, decLen, rawPos, m[0].length, true)
+      outPos += decLen; rawPos += m[0].length
+    }
+    mark(outPos, view.parent.text.length - rawPos, rawPos, view.parent.text.length - rawPos, false)
+    lo = rs === null ? rawPos + (lo - outPos) : rs
+    hi = re2 === null ? rawPos + (hi - outPos) : re2
+    view = view.parent
+  }
+  return [lo, hi]
+}
+// A hex or base64 run broken over lines, by real line breaks or JSON-escaped
+// ones, with any indentation either side of the break.
+const LINE_BREAK = '[ \\t]*(?:\\r\\n|\\r|\\n|\\\\r\\\\n|\\\\n|\\\\r)[ \\t]*'
+const BREAK = new RegExp(LINE_BREAK, 'g')
+const HAS_BREAK = /[\r\n]|\\[rn]/
+// Two tests, not one `[a-f][^]*[A-F]`: that backtracks from every lowercase
+// letter to the end of the run, which is quadratic in a long lowercase one.
+const mixedCase = (t) => /[a-f]/.test(t) && /[A-F]/.test(t)
+
+const charClass = (re) => {
+  const table = new Uint8Array(128)
+  for (let c = 0; c < 128; c++) table[c] = re.test(String.fromCharCode(c)) ? 1 : 0
+  return table
+}
+const BLOB_CHAR = charClass(/[A-Za-z0-9+/=_-]/)
+const HEX_CHAR = charClass(/[0-9A-Fa-f]/)
+const isHex = (c) => c < 128 && HEX_CHAR[c] === 1
+
+/**
+ * Every run of `table` characters that crosses a line break, as
+ * { index, text }. It starts from the breaks and walks out from each, rather
+ * than being one regex: a repeated group recurses once per line, and a body
+ * of a few million short lines overflowed the stack. Prose costs the last
+ * word of each line and the first of the next.
+ */
+function* wrappedRuns(text, table) {
+  const is = (i) => { const c = text.charCodeAt(i); return c < 128 && table[c] === 1 }
+  // Its own copy: the caller runs `view()` with BREAK between yields, and
+  // that resets the shared one's lastIndex under this loop.
+  const re = new RegExp(BREAK.source, 'g')
+  let start = -1
+  let end = -1
+  for (let m; (m = re.exec(text)) !== null;) {
+    const after = m.index + m[0].length
+    if (!is(m.index - 1) || !is(after)) continue
+    // A line made only of run characters chains this break to the last one.
+    if (end !== m.index) {
+      if (start !== -1) yield { index: start, text: text.slice(start, end) }
+      start = m.index
+      while (start > 0 && is(start - 1)) start--
+    }
+    end = after
+    while (end < text.length && is(end)) end++
+  }
+  if (start !== -1) yield { index: start, text: text.slice(start, end) }
+}
+
 /** Every encoding of `secret` a response might carry. */
 export function encodings(secret, minLen = MIN_SECRET_LEN) {
   const out = new Set()
@@ -59,8 +218,21 @@ export function encodings(secret, minLen = MIN_SECRET_LEN) {
   add(secret.replace(/\//g, '\\/'))
   add(JSON.stringify(secret).slice(1, -1))
   add([...secret].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join(''))
-  add(Buffer.from(secret, 'utf8').toString('hex'))
   add(secret.replace(/[<>&"']/g, (c) => `&#${c.charCodeAt(0)};`))
+  for (const blob of blobEncodings(secret)) add(blob)
+  return [...out]
+}
+
+/**
+ * The forms of `secret` that are runs of hex or base64 characters, which is
+ * what a long blob gets wrapped over lines in.
+ */
+export function blobEncodings(secret) {
+  const out = new Set()
+  const hex = Buffer.from(secret, 'utf8').toString('hex')
+  out.add(hex)
+  // Uppercase hex is as common as lowercase, and was not caught at all.
+  out.add(hex.toUpperCase())
 
   // Base64 at three alignments, standard and URL-safe. A secret embedded in a
   // larger base64 blob is offset by however many bytes precede it, so the
@@ -80,8 +252,8 @@ export function encodings(secret, minLen = MIN_SECRET_LEN) {
     const start = Math.ceil((pad * 4) / 3)
     const end = Math.floor((4 * (pad + bytes.length)) / 3)
     const core = std.slice(start, end)
-    add(core)
-    add(core.replace(/\+/g, '-').replace(/\//g, '_'))
+    out.add(core)
+    out.add(core.replace(/\+/g, '-').replace(/\//g, '_'))
   }
   return [...out]
 }
@@ -92,8 +264,15 @@ export class Scrubber {
    *   label is the credential name; replacement is what the agent sees instead
    *   (the placeholder it used, for this request's own secret).
    */
-  constructor(entries = []) {
+  constructor(entries = [], opts = {}) {
     this.patterns = []
+    // What the decoded view and the unwrapped view are searched for: the
+    // secret itself, and its hex and base64 forms. The decoded view is
+    // searched for both (`decoded`, below), the unwrapped one for the forms.
+    this.plain = []
+    this.blobs = []
+    // Lowercase hex of each secret, for the case-folded view.
+    this.hex = []
     this.maxLen = 0
     for (const e of entries) {
       if (!e.secret) continue
@@ -102,20 +281,62 @@ export class Scrubber {
       // of other vault secrets keeps the length floor.
       const floor = e.always ? 1 : MIN_SECRET_LEN
       if (e.secret.length < floor) continue
+      const replacement = e.replacement ?? `[[av:redacted:${e.label}]]`
       for (const enc of encodings(e.secret, floor)) {
-        this.patterns.push({ needle: enc, replacement: e.replacement ?? `[[av:redacted:${e.label}]]` })
+        this.patterns.push({ needle: enc, replacement })
         if (enc.length > this.maxLen) this.maxLen = enc.length
       }
+      for (const needle of new Set([e.secret, Buffer.from(e.secret, 'utf8').toString('latin1')])) {
+        if (needle.length >= floor) this.plain.push({ needle, replacement })
+      }
+      for (const needle of blobEncodings(e.secret)) {
+        if (needle.length >= floor) this.blobs.push({ needle, replacement })
+      }
+      this.hex.push({ needle: Buffer.from(e.secret, 'utf8').toString('hex'), replacement })
     }
     // Longest first, so an encoding that contains another is replaced whole.
-    this.patterns.sort((a, b) => b.needle.length - a.needle.length)
+    for (const list of [this.patterns, this.plain, this.blobs, this.hex]) list.sort((a, b) => b.needle.length - a.needle.length)
+    this.decoded = [...this.plain, ...this.blobs]
+    // A joined-up run shorter than every needle cannot hold one.
+    this.minBlob = Math.min(...this.blobs.map((b) => b.needle.length))
+    this.minHex = Math.min(...this.hex.map((b) => b.needle.length))
+    // The layered decoder only decodes base64/hex runs long enough to still
+    // hold the shortest secret it searches for: a secret of m plaintext bytes
+    // is ceil(4m/3) base64 characters and 2m hex, never fewer than 8 of
+    // either. Below that a run cannot carry one, so there is no reason to
+    // spend the decode on it.
+    const minPlain = this.plain.length ? Math.min(...this.plain.map((p) => p.needle.length)) : Infinity
+    this.b64Min = Number.isFinite(minPlain) ? Math.max(8, Math.ceil((4 * minPlain) / 3)) : Infinity
+    this.hexMin = Number.isFinite(minPlain) ? Math.max(8, 2 * minPlain) : Infinity
+    // Ceilings on nested (depth >= 2) decode work, overridable for a test
+    // that must drive the budget-exceeded path without a multi-megabyte body.
+    this.nestedViewBudget = opts.nestedViews ?? NESTED_VIEW_BUDGET
+    this.nestedByteBudget = opts.nestedBytes ?? NESTED_BYTE_BUDGET
     this.derivedSeen = new Set()
+  }
+
+  /**
+   * True when any encoding of any secret appears in `text` with case ignored.
+   * For text whose case has already been lost, such as an HTTP header name.
+   */
+  containsIgnoringCase(text) {
+    const t = String(text).toLowerCase()
+    // At the bulk floor even for a secret this request injected: dropping a
+    // header because a four-character secret matched part of its name would
+    // break ordinary responses, and a short secret is not much of a leak.
+    this.folded ??= [...new Set(this.patterns.filter((p) => p.needle.length >= MIN_SECRET_LEN).map((p) => p.needle.toLowerCase()))]
+    return this.folded.some((needle) => t.includes(needle))
   }
 
   /** Lookbehind a streaming caller must retain between chunks. */
   get overlap() { return Math.max(this.maxLen, 64) - 1 }
 
-  /** Scrub a complete string. Returns { text, redactions }. */
+  /**
+   * Scrub a complete string. Returns { text, redactions, unscannable }.
+   * `unscannable` is true when the layered decoder ran out of budget with a
+   * secret-bearing candidate still undecoded: the caller must fail closed and
+   * not forward `text`, which was scanned only as far as the budget allowed.
+   */
   scrub(text) {
     let out = text
     let redactions = 0
@@ -124,6 +345,12 @@ export class Scrubber {
       const parts = out.split(needle)
       redactions += parts.length - 1
       out = parts.join(replacement)
+    }
+    const { spans, unscannable } = this.collectSpans(out)
+    if (spans.length) {
+      const spliced = splice(out, spans)
+      out = spliced.text
+      redactions += spliced.count
     }
     for (const { name, re } of DERIVED_PATTERNS) {
       re.lastIndex = 0
@@ -134,7 +361,136 @@ export class Scrubber {
         redactions += matches.length
       }
     }
-    return { text: out, redactions }
+    // `unscannable` is present only when it is true, so an ordinary scrub
+    // returns the same { text, redactions } it always has.
+    return unscannable ? { text: out, redactions, unscannable: true } : { text: out, redactions }
+  }
+
+  /**
+   * The raw spans a secret occupies in `text`, discarding the fail-closed
+   * flag. The streaming scrubber uses this to keep a decoded hit that
+   * straddles a chunk boundary whole.
+   */
+  viewSpans(text) {
+    return this.collectSpans(text).spans
+  }
+
+  /**
+   * Where the secret appears in `text` once escapes are decoded or a wrapped
+   * blob is joined up: { spans, unscannable }. Each span is [rawStart,
+   * rawEnd, replacement]. These are the forms no fixed needle can list — one
+   * character escaped and the rest plain, every byte percent-encoded, base64
+   * broken every 64 columns, and any stack of the listed encodings up to
+   * DECODE_DEPTH deep. `unscannable` is true when the layered decoder spent
+   * its budget with a secret-bearing candidate still undecoded.
+   */
+  collectSpans(text) {
+    const spans = []
+    // The layered decoder: peel the encodings this scrubber understands, in
+    // any order up to DECODE_DEPTH deep, and search every view for the secret
+    // and its base64/hex forms. Everything below searches the raw text only,
+    // for shapes the peeling does not produce (wrapped and mixed-case blobs).
+    const unscannable = this.decoded.length ? this.#layeredSpans(text, spans) : false
+    // Hex in mixed case, on one line or wrapped. All in one case is a needle
+    // already. Lowercasing keeps every position, so a hit maps straight back.
+    const folded = (run) => {
+      if (run.text.length >= this.minHex && mixedCase(run.text)) {
+        find(view(run.text.toLowerCase(), BREAK, () => ''), this.hex, spans, run.index)
+      }
+    }
+    // Any run of blob characters that crosses a line break, at any width.
+    // This used to want a first line of at least 16, so base64 wrapped at
+    // eight columns was never joined up at all. In prose such a run is the
+    // last word of one line and the first of the next, and one shorter than
+    // the shortest needle is not searched.
+    if (this.blobs.length && HAS_BREAK.test(text)) {
+      for (const run of wrappedRuns(text, BLOB_CHAR)) {
+        if (run.text.length < this.minBlob) continue
+        const v = view(run.text, BREAK, () => '')
+        if (v.text.length >= this.minBlob) find(v, this.blobs, spans, run.index)
+        // Hex characters are blob characters, so wrapped hex is in here too.
+        folded(run)
+      }
+    }
+    if (this.hex.length) {
+      // Found by their first `minHex` characters and walked out by hand, not
+      // as `[0-9A-Fa-f]{n,}`: V8 keeps a backtrack entry per character of
+      // that and runs out of stack on a long run.
+      const long = new RegExp(`(?<![0-9A-Fa-f])[0-9A-Fa-f]{${this.minHex}}`, 'g')
+      for (let m; (m = long.exec(text)) !== null;) {
+        let end = long.lastIndex
+        while (end < text.length && isHex(text.charCodeAt(end))) end++
+        folded({ index: m.index, text: text.slice(m.index, end) })
+        long.lastIndex = end
+      }
+    }
+    return { spans, unscannable }
+  }
+
+  /**
+   * Peel the listed encodings off `text` and push a raw span for every hit.
+   * Returns whether the response is unscannable (budget spent with a
+   * candidate still undecoded).
+   *
+   * A view is a decoded string, the decoder that produced it, and its parent.
+   * Breadth-first from the raw text: each view is searched for `this.decoded`
+   * (the secret plus its base64/hex forms) once it is at least one layer deep,
+   * then each decoder that both applies and was not already used on this path
+   * produces a child. The same decoder is never used twice on one path, so a
+   * literal backslash from `\\` is never re-read as an escape. Identical
+   * decoded texts are visited once. Nested (depth >= 2) views are charged
+   * against the view and byte budgets; the single first-layer decode is free,
+   * so an ordinary one-layer response never approaches the budget. When a
+   * child would exceed a budget, it is left undecoded and the response is
+   * reported unscannable.
+   */
+  #layeredSpans(text, spans) {
+    const root = { text, parent: null }
+    const seen = new Set([text])
+    const queue = [{ view: root, depth: 0, used: 0 }]
+    let nestedViews = 0
+    let nestedBytes = 0
+    // DECODERS order is json, percent, base64, hex, so these are the paths of
+    // a single base64 decode and a single hex decode. A view reached by one of
+    // those alone is left to the fixed needle and the wrapped/mixed-case
+    // folding, which already cover single-layer base64 and hex; searching it
+    // here would only duplicate them. Every deeper view, and every view a JSON
+    // or percent decode took part in, is searched — that is where the nesting
+    // this decoder exists for shows up.
+    const BASE64_ONLY = 1 << 2
+    const HEX_ONLY = 1 << 3
+    while (queue.length) {
+      const { view, depth, used } = queue.shift()
+      if (depth >= 1 && used !== BASE64_ONLY && used !== HEX_ONLY) {
+        for (const { needle, replacement } of this.decoded) {
+          for (let i = view.text.indexOf(needle); i !== -1; i = view.text.indexOf(needle, i + needle.length)) {
+            const [rs, re] = mapToRaw(view, i, i + needle.length)
+            spans.push([rs, re, replacement])
+          }
+        }
+      }
+      if (depth >= DECODE_DEPTH) continue
+      for (let d = 0; d < DECODERS.length; d++) {
+        if (used & (1 << d)) continue
+        const dec = DECODERS[d]
+        if (!dec.applies(view.text, this)) continue
+        // Decoding shrinks or keeps length, so the parent's length bounds the
+        // child's: gate on that before spending the decode. A nested view we
+        // cannot afford means the response cannot be finished within budget.
+        if (depth + 1 >= 2 && (nestedViews + 1 > this.nestedViewBudget || nestedBytes + view.text.length > this.nestedByteBudget)) {
+          return true
+        }
+        const re = dec.re(this)
+        const decode = dec.fn(this)
+        const decoded = view.text.replace(re, decode)
+        if (decoded === view.text || seen.has(decoded)) continue
+        seen.add(decoded)
+        if (depth + 1 >= 2) { nestedViews++; nestedBytes += decoded.length }
+        re.lastIndex = 0
+        queue.push({ view: { text: decoded, parent: view, re, decode }, depth: depth + 1, used: used | (1 << d) })
+      }
+    }
+    return false
   }
 
   /**
@@ -159,15 +515,29 @@ export class Scrubber {
         // \u-escaped form is six times the secret's length, so any streamed
         // response could carry one across the boundary.
         //
-        // The cut is never pulled back for the shape patterns, only pushed
-        // forward for exact ones: a `ghp_...` near the end may still be
-        // growing, and redacting the part we have would emit the rest raw.
+        // A token of one of the derived shapes that runs across the cut is
+        // held back whole instead, cut moved to where it starts: it may still
+        // be growing. Scrubbing the head alone either found too few of its
+        // characters to match, so both halves went out raw and the agent had
+        // the whole token, or matched them and sent the rest raw after it.
+        DERIVED_START.lastIndex = Math.max(0, cut - MAX_DERIVED_HOLD)
+        for (let m; (m = DERIVED_START.exec(combined)) !== null && m.index < cut;) {
+          let end = m.index
+          while (end < cut && TOKEN_CHAR.test(combined[end])) end++
+          if (end >= cut) { cut = m.index; break }
+        }
+
+        // Exact ones are already here in full, so the cut moves past them.
         for (const { needle } of self.patterns) {
           let i = combined.indexOf(needle)
           while (i !== -1 && i < cut) {
             if (i + needle.length > cut) cut = i + needle.length
             i = combined.indexOf(needle, i + 1)
           }
+        }
+        // And the same for one found only once escapes are decoded.
+        for (const [start, end] of self.viewSpans(combined)) {
+          if (start < cut && end > cut) cut = end
         }
 
         const { text, redactions: r } = self.scrub(combined.slice(0, cut))
@@ -184,4 +554,81 @@ export class Scrubber {
       get redactions() { return redactions },
     }
   }
+}
+
+/**
+ * `text` with every match of `re` replaced by `decode(match)`, and a way back
+ * from positions in the result to the span of `text` they came from.
+ *
+ * The way back is worked out only for the hits there are, in one more pass
+ * over the matches. Keeping a position for every escape up front cost memory
+ * in proportion to how many escapes a body had — which an upstream chooses —
+ * for a map that is almost never read.
+ */
+function view(text, re, decode) {
+  return { text: text.replace(re, decode), raw: text, re, decode }
+}
+
+/**
+ * Every occurrence of every needle in a view, as [rawStart, rawEnd,
+ * replacement] spans of the raw text, offset by `base`.
+ */
+function find(v, needles, spans, base = 0) {
+  const hits = []
+  for (const { needle, replacement } of needles) {
+    for (let i = v.text.indexOf(needle); i !== -1; i = v.text.indexOf(needle, i + needle.length)) {
+      hits.push({ start: i, last: i + needle.length - 1, replacement })
+    }
+  }
+  if (!hits.length) return
+  // Each hit needs two positions mapped back: its first character's start and
+  // its last character's end. Sorted, so one walk over the matches does both.
+  const points = []
+  for (const h of hits) points.push({ p: h.start, hit: h, end: false }, { p: h.last, hit: h, end: true })
+  points.sort((a, b) => a.p - b.p)
+  let k = 0
+  let vi = 0 // where the current raw position lands in the view
+  let ri = 0
+  const resolve = (pt, raw) => { if (pt.end) pt.hit.rawEnd = raw; else pt.hit.rawStart = raw }
+  for (const m of v.raw.matchAll(v.re)) {
+    // Text before the match is the same in both.
+    const plainEnd = vi + (m.index - ri)
+    for (; k < points.length && points[k].p < plainEnd; k++) {
+      const raw = ri + (points[k].p - vi)
+      resolve(points[k], points[k].end ? raw + 1 : raw)
+    }
+    vi = plainEnd
+    ri = m.index
+    // A decoded character stands for the whole escape. A removed line break
+    // stands for nothing, so no position can land in it.
+    const width = v.decode(...m).length
+    for (; k < points.length && points[k].p < vi + width; k++) {
+      resolve(points[k], points[k].end ? ri + m[0].length : ri)
+    }
+    vi += width
+    ri += m[0].length
+  }
+  for (; k < points.length; k++) {
+    const raw = ri + (points[k].p - vi)
+    resolve(points[k], points[k].end ? raw + 1 : raw)
+  }
+  for (const h of hits) spans.push([base + h.rawStart, base + h.rawEnd, h.replacement])
+}
+
+/** Replace raw spans, merging any that overlap. Returns the text and how many. */
+function splice(text, spans) {
+  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1])
+  const merged = []
+  for (const s of spans) {
+    const prev = merged[merged.length - 1]
+    if (prev && s[0] < prev[1]) { prev[1] = Math.max(prev[1], s[1]); continue }
+    merged.push([...s])
+  }
+  let out = ''
+  let last = 0
+  for (const [s, e, replacement] of merged) {
+    out += text.slice(last, s) + replacement
+    last = e
+  }
+  return { text: out + text.slice(last), count: merged.length }
 }

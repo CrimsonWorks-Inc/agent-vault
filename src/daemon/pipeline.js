@@ -12,6 +12,7 @@
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import * as zlib from 'node:zlib'
+import { pipeline as streamPipeline, PassThrough } from 'node:stream'
 import * as sub from '../core/substitute.js'
 import * as sitesMod from '../core/sites.js'
 import * as policyMod from '../core/policy.js'
@@ -58,6 +59,23 @@ const MAX_DECOMPRESSED = 64 * 1024 * 1024
 // larger cannot be scrubbed, and a body that cannot be scrubbed is refused.
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
+// The most of one server-sent event the daemon will hold while waiting for it
+// to end. An event is held whole so it can be scanned whole, and a stream that
+// never sends a blank line would otherwise be held whole, forever.
+const MAX_EVENT_BYTES = 16 * 1024 * 1024
+
+// How many runs an event stream's reassembly tracks at once: one per JSON key
+// path, and one per path and combination of the indexes above it. A model
+// stream uses a few per content block; this bounds what a hostile one can make
+// us keep, at most `keep` characters and a short key each. A stream that uses
+// more is cut: forgetting a run forgets the first half of whatever secret its
+// next value finishes.
+const MAX_SSE_PATHS = 1024
+
+// The most index fields above one JSON string whose combinations are each
+// tracked. Every combination is a run, so this is 2^4 runs at most per string.
+const MAX_SSE_INDEXES = 4
+
 // Failures that happen before any byte could have reached the server, so the
 // placeholder use is refunded. A timeout or a reset is deliberately not here:
 // the request may have been delivered and acted on, and refunding a write that
@@ -79,6 +97,9 @@ export class Pipeline {
     this.allowedHosts = opts.allowedHosts || ALLOWED_HOSTS
     this.upstream = opts.fetchImpl || defaultUpstream
     this.approvalHoldMs = opts.approvalHoldMs ?? 0
+    // Optional override for the response scrubber's layered-decode budget, so
+    // a test can drive the fail-closed path without a multi-megabyte body.
+    this.scrubBudget = opts.scrubBudget
   }
 
   /**
@@ -89,7 +110,11 @@ export class Pipeline {
   async handle(req) {
     const requestId = id.request()
     const started = Date.now()
-    let consumed = null
+    // Every placeholder row this request spent. It was one variable that each
+    // consume overwrote, so a request carrying two placeholders that failed
+    // before connecting refunded only the last and kept charging for the
+    // first, while the error told the agent its use had been refunded.
+    const consumed = []
     let upstreamOpened = false
     let spentApproval = null
     // Declared out here so a DENIAL can say who was denied. Both were `const`
@@ -108,7 +133,7 @@ export class Pipeline {
       route = this.#route(req, session)
       const result = await this.#proxy({
         req, session, route, requestId,
-        onConsume: (r) => { consumed = r },
+        onConsume: (r) => { consumed.push(r) },
         onApprovalSpent: (a) => { spentApproval = a },
         markUpstream: () => { upstreamOpened = true },
       })
@@ -150,7 +175,7 @@ export class Pipeline {
       if (err.hint) err.hint = this.#safeMessage({ message: err.hint }, scrubber)
       // A failure before the first upstream byte refunds the use: the agent
       // should not lose budget because DNS was down.
-      if (consumed && !upstreamOpened) this.vault.refundPlaceholder(consumed.id)
+      if (!upstreamOpened) for (const row of consumed) this.vault.refundPlaceholder(row.id)
       // And give the human's approval back, for the same reason. It moves to
       // `consumed` before the upstream call — which is what makes a resend
       // execute exactly once — so a failure in between left it consumed with
@@ -163,6 +188,12 @@ export class Pipeline {
         this.vault.audit?.write('approval.returned', {
           approval_id: spentApproval.id, request_id: requestId, reason: 'the request never reached the upstream',
         })
+      }
+      // The other side of the same line: once the upstream may have acted, the
+      // approval is spent even though there is no response to replay, and a
+      // resend must ask a human again rather than wait on it forever.
+      if (spentApproval && upstreamOpened && spentApproval.state === 'consumed' && !spentApproval.result) {
+        spentApproval.executed_at = new Date().toISOString()
       }
       err.requestId = requestId
       if (this.vault.audit) {
@@ -245,8 +276,26 @@ export class Pipeline {
           hint: 'Send the session token in Authorization: Bearer as well as the placeholder.',
         })
       }
+      // Checked before the session it names is touched. The sid is the first
+      // group of every placeholder, and the keyed checksum was only verified
+      // later, in #proxy — so anything on loopback that knew a session id
+      // could keep that session alive past its idle timeout with requests
+      // that were then refused as malformed. The same checks, the same codes,
+      // just early enough to matter.
       const session = this.vault.db.sessions[carrier.parsed.sid]
       if (!session) throw deny('AV_PH_CROSS_SESSION', 'the placeholder names a session that does not exist')
+      if (!ph.verify(this.vault.kPh, carrier.parsed)) {
+        throw deny('AV_PH_MALFORMED', `that placeholder was not minted by this vault (${sub.describeLocation(carrier.location)})`, {
+          rule: 'checksum',
+          hint: 'Ask for a placeholder with vault_get_placeholder, or agent-vault ph next.',
+        })
+      }
+      if (!this.vault.resolvePlaceholder(carrier.parsed)) {
+        throw deny('AV_PH_REPLAY', `unknown placeholder at ${sub.describeLocation(carrier.location)}`, {
+          rule: 'placeholder_unknown',
+          hint: 'This placeholder was never issued by this vault, or it was garbage-collected.',
+        })
+      }
       this.vault.assertSessionLive(session)
       this.vault.touchSession(session)
       return session
@@ -383,7 +432,12 @@ export class Pipeline {
               hint: `Use /t/https/${host}/... or the credential's own route, /p/${cred.slug}/...`,
             })
           }
-          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme: credScheme, profile }
+          // The other direction: an agent that asked for /t/https/ gets TLS,
+          // even for a credential that declares http. It was silently sent in
+          // the clear, because the credential's scheme won whatever the URL
+          // said. The stronger of the two is used.
+          const useScheme = scheme === 'https' ? 'https' : credScheme
+          return { mode: 'target', slug: cred.slug, cred, grant: g, grantId: g.id, host, port: credPort, path: upstreamPath, scheme: useScheme, profile }
         }
       }
       throw deny('AV_NO_GRANT', `no grant in this session allows host ${policyMod.hostOnly(rawHost)}`)
@@ -509,19 +563,58 @@ export class Pipeline {
       })
     }
 
+    // --- method override --------------------------------------------------
+    // Plenty of frameworks run a POST carrying X-HTTP-Method-Override: DELETE
+    // as a DELETE. Only the request-line method was checked, so a grant of
+    // GET and POST reached DELETE behaviour, and under on-write a GET that the
+    // upstream runs as a DELETE was never held. Every method the upstream
+    // might act on is held to the same allowlist and the same approval rule.
+    const overrides = methodOverrides(req.headers)
+    for (const m of overrides) {
+      if (effective.methods && !effective.methods.includes(m)) {
+        throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
+          rule: 'methods',
+          hint: `Allowed methods: ${effective.methods.join(', ') || 'none'}.`,
+        })
+      }
+    }
+
     // --- approval ----------------------------------------------------------
     // The placeholder's TEXT is in the headers and may be in the body, so
     // swapping the id out of the hash is not enough on its own — the value
     // churns wherever it appears. Each occurrence is replaced by what it
     // stands for, exactly as substitution finds it, leaving a hash over what
     // the human was actually shown.
+    //
+    // A `<` already in the request is doubled first, so the marker cannot be
+    // forged. Without that, a request carrying the marker's text literally
+    // hashed the same as one carrying the placeholder there: the placeholder
+    // in a header and the marker in the body collided with the two swapped,
+    // and the second ran under the first one's approval with the secret in
+    // the body. Placeholders never contain `<`, so this is a one-to-one map.
     const canonical = new Map(
       substitutions.map((s) => [s.occ.text, `<av:${s.row.grant_id}:${s.row.field}>`]),
     )
     const stable = (value) => {
-      let out = String(value)
+      let out = String(value).split('<').join('<<')
       for (const [text, marker] of canonical) out = out.split(text).join(marker)
       return out
+    }
+    // A Basic header carries its placeholder inside base64, where the text
+    // above is never found: renewing the placeholder in `user:<ph>` changed
+    // the hash and held the same request for a second approval. The decoded
+    // pair is made stable and encoded again — only when the header decodes
+    // and encodes back to exactly itself, so two spellings the upstream may
+    // read differently can never share an approval.
+    const stableHeader = (name, value) => {
+      const basic = String(name).toLowerCase() === 'authorization' && /^(basic\s+)(\S+)(\s*)$/i.exec(String(value))
+      if (basic) {
+        const decoded = Buffer.from(basic[2], 'base64').toString('utf8')
+        if (Buffer.from(decoded, 'utf8').toString('base64') === basic[2]) {
+          return `${basic[1]}${Buffer.from(stable(decoded), 'utf8').toString('base64')}${basic[3]}`
+        }
+      }
+      return stable(value)
     }
     // Read and rebuilt through latin1 so a binary body survives byte-for-byte.
     const bodySha = req.body ? canon.sha256(Buffer.from(stable(req.body.toString('latin1')), 'latin1')) : ''
@@ -535,10 +628,11 @@ export class Pipeline {
       headers: req.headers.filter(([n]) => {
         const lower = String(n).toLowerCase()
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
-      }).map(([n, v]) => [n, stable(v)]),
+      }).map(([n, v]) => [n, stableHeader(n, v)]),
     })
-    if (policyMod.needsApproval(effective, { method: decision.method, firstUse: grant.counters.requests === 0 })) {
-      const verdict = this.#approval(requestHash, { grant, decision, requestId, reason: sub.getHeader(req, 'av-reason') })
+    const firstUse = grant.counters.requests === 0
+    if ([decision.method, ...overrides].some((method) => policyMod.needsApproval(effective, { method, firstUse }))) {
+      const verdict = this.#approval(requestHash, { grant, decision, overrides, requestId, reason: sub.getHeader(req, 'av-reason') })
       if (verdict.status === 'pending') {
         return {
           status: 202,
@@ -591,6 +685,17 @@ export class Pipeline {
         uses: row.uses, max_uses: row.max_uses,
       })
     }
+    // Every placeholder the agent sent was replaced, wherever it was. Checked
+    // on what will actually be sent rather than trusted from the substitution
+    // above: a duplicate JSON key once left the first copy of a placeholder in
+    // the body while the second was replaced, and the upstream got both.
+    const left = sub.unsubstituted(outgoing, substitutions.map((s) => s.occ.parsed.nonce))
+    if (left) {
+      throw deny('AV_BAD_LOCATION', `a placeholder would have reached the upstream unsubstituted, in ${sub.describeLocation(left.location)}`, {
+        rule: 'injection_site',
+        hint: 'Put each placeholder once, at a declared injection site, and nowhere a parser could read it twice.',
+      })
+    }
 
     // --- forward -----------------------------------------------------------
     const headers = {}
@@ -612,6 +717,12 @@ export class Pipeline {
     }
     headers.host = route.port ? `${decision.host}:${route.port}` : decision.host
     headers['accept-encoding'] = 'identity'
+    // Content-Length is hop-by-hop above, so the agent's never goes out —
+    // and nothing put one back, including the one substitution recomputes.
+    // Node then chunked a POST, which upstreams that need a length refuse,
+    // and sent a GET or DELETE body with no framing at all, so the upstream
+    // could not tell where the request ended on a kept-alive connection.
+    if (outgoing.body) headers['content-length'] = String(outgoing.body.length)
 
     const authority = route.port ? `${decision.host}:${route.port}` : decision.host
     // Re-encode each segment of the path policy actually approved. The
@@ -644,7 +755,7 @@ export class Pipeline {
     }
 
     // --- scrub -------------------------------------------------------------
-    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))])
+    const scrubber = new Scrubber([...injected, ...this.vault.allSecrets().filter((s) => !injected.some((i) => i.secret === s.secret))], this.scrubBudget ?? {})
     // The path as the audit log may hold it, computed here because this
     // scrubber already exists. Doing it in handle() meant #safeMessage, which
     // calls allSecrets() — decrypting every credential in the vault — on every
@@ -653,6 +764,7 @@ export class Pipeline {
     const auditPath = this.#redactPlaceholders(scrubber.scrub(String(decision.path ?? '').split('?')[0]).text)
 
     const outHeaders = {}
+    let headerRedactions = 0
     for (const [n, v] of Object.entries(res.headers)) {
       const lower = n.toLowerCase()
       if (lower.startsWith('av-')) continue // an upstream must not be able to fake our decisions
@@ -661,7 +773,19 @@ export class Pipeline {
       // leaves here is decompressed and re-lengthed; forwarding the originals
       // would describe bytes the agent never receives.
       if (HOP_BY_HOP.has(lower) || lower === 'content-encoding' || lower === 'content-length') continue
-      outHeaders[lower] = scrubber.scrub(String(v)).text
+      // The NAME is upstream text too. Only values were scrubbed, so an
+      // upstream that reflects input returned `x-leak-<hex of the secret>: 1`
+      // and the agent decoded the credential out of the header name. A name
+      // cannot be redacted in place, so a header whose name carries a secret
+      // is dropped. Names arrive lowercased, so the check ignores case: a
+      // secret with its case folded away is still most of a secret.
+      if (scrubber.scrub(lower).redactions || scrubber.containsIgnoringCase(lower)) {
+        headerRedactions += 1
+        continue
+      }
+      const scrubbed = scrubber.scrub(String(v))
+      headerRedactions += scrubbed.redactions
+      outHeaders[lower] = scrubbed.text
     }
 
     const contentType = String(res.headers['content-type'] || '')
@@ -679,31 +803,59 @@ export class Pipeline {
       // scrubbed zero times, audited as `response.streamed`, and trivially
       // readable with one gunzip. Any upstream that compresses a stream, and
       // any upstream that wants to, defeated the scrubber completely.
-      let source = res.res
-      if (contentEncoding && contentEncoding !== 'identity') {
-        const gunzip = decompressStream(contentEncoding)
-        if (!gunzip) {
-          throw deny('AV_UNSCANNABLE', `upstream sent a ${contentEncoding} event stream that could not be decoded, so it could not be scrubbed`, {
-            rule: 'content_encoding', hint: 'The response was discarded rather than passed through unread.',
-          })
-        }
-        source = res.res.pipe(gunzip)
+      const compressed = !!contentEncoding && contentEncoding !== 'identity'
+      const decoder = compressed ? decompressStream(contentEncoding) : new PassThrough()
+      if (!decoder) {
+        throw deny('AV_UNSCANNABLE', `upstream sent a ${contentEncoding} event stream that could not be decoded, so it could not be scrubbed`, {
+          rule: 'content_encoding', hint: 'The response was discarded rather than passed through unread.',
+        })
       }
+      // stream.pipeline, not .pipe(). `.pipe()` forwards neither errors nor a
+      // premature close: an upstream reset with no listener on the source was
+      // an uncaught exception that took the daemon down with everyone's
+      // sessions, and a reset that emitted no error left the decoder open, so
+      // the agent's response hung for good. pipeline() listens on every stage
+      // from the start — even before anyone reads — and ends the last one with
+      // the error, which scrubEventStream turns into a closing error event.
+      const source = streamPipeline(res.res, decoder, () => {})
       this.vault.audit.write('response.streamed', {
         request_id: requestId, content_type: contentType, content_encoding: contentEncoding || null,
       })
+      // The request has run. There is nothing to store for a replay, but the
+      // approval is spent, and a resend has to know that (see #approval).
+      if (approvedRequestHash) {
+        const approval = this.approvals.get(approvedRequestHash)
+        if (approval) approval.executed_at = new Date().toISOString()
+      }
       return {
-        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: 0,
-        stream: scrubEventStream(source, scrubber, () => {
-          this.vault.audit?.write('response.stream_cut', {
-            request_id: requestId, reason: 'credential_split_across_events',
-          })
+        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: headerRedactions,
+        stream: scrubEventStream(source, scrubber, {
+          // A compressed stream is an amplifier, and zlib's maxOutputLength
+          // bounds one chunk, not the stream: 71 KB of gzip streamed out 70
+          // MiB. The bound is counted here, over everything decoded.
+          maxBytes: compressed ? MAX_DECOMPRESSED : Infinity,
+          onCut: (reason) => {
+            this.vault.audit?.write('response.stream_cut', { request_id: requestId, reason })
+          },
         }),
       }
     }
 
     // Everything else is buffered, decompressed and scrubbed whole.
-    let raw = res.body ?? (await collect(res.res))
+    let raw
+    try {
+      raw = res.body ?? (await collect(res.res))
+    } catch (e) {
+      // A body too large to scan is refused as such. Anything else is the
+      // upstream failing part way — a reset mid-body came back as an
+      // internal daemon error. The request was delivered, so nothing is
+      // refunded.
+      if (e instanceof VaultError) throw e
+      throw deny('AV_UPSTREAM_UNREACHABLE', `${decision.host} failed while sending its response: ${e.message}`, {
+        rule: 'upstream',
+        refunded: false,
+      })
+    }
     const encoding = contentEncoding
     if (encoding && encoding !== 'identity') {
       try {
@@ -720,7 +872,18 @@ export class Pipeline {
     // latin1 is a byte-for-byte round trip, so a binary body (an image, a
     // tarball, protobuf) survives unchanged while ASCII secrets still match.
     // Decoding as utf8 here silently corrupted every non-text response.
-    const { text, redactions } = scrubber.scrub(raw.toString('latin1'))
+    const scrubbedBody = scrubber.scrub(raw.toString('latin1'))
+    // The scrubber ran out of its layered-decode budget with a secret-bearing
+    // candidate still wrapped: it could not finish scanning this body, so it
+    // is refused rather than forwarded part-scanned. Same answer as a body too
+    // large to buffer or an encoding we cannot decode — bytes we cannot scan.
+    if (scrubbedBody.unscannable) {
+      throw deny('AV_UNSCANNABLE', 'the response nested encodings deeper than could be decoded within budget, so it could not be fully scrubbed', {
+        rule: 'scrub_budget', hint: 'The response was discarded rather than passed through part-scanned.',
+      })
+    }
+    const text = scrubbedBody.text
+    const redactions = scrubbedBody.redactions + headerRedactions
     outHeaders['av-request-id'] = requestId
     outHeaders['av-decision'] = 'allow'
     outHeaders['av-grant'] = grant.id
@@ -748,7 +911,10 @@ export class Pipeline {
     // replays it rather than hitting the upstream a second time.
     if (approvedRequestHash) {
       const approval = this.approvals.get(approvedRequestHash)
-      if (approval) approval.result = result
+      if (approval) {
+        approval.result = result
+        approval.executed_at = new Date().toISOString()
+      }
     }
     return result
   }
@@ -777,7 +943,7 @@ export class Pipeline {
   }
 
   /** Approval state machine, keyed by the request hash so retries are safe. */
-  #approval(requestHash, { grant, decision, requestId, reason }) {
+  #approval(requestHash, { grant, decision, overrides = [], requestId, reason }) {
     const existing = this.approvals.get(requestHash)
     if (existing) {
       if (existing.state === 'granted') {
@@ -787,12 +953,23 @@ export class Pipeline {
       if (existing.state === 'consumed') {
         // Already executed. Replay the stored response so a retrying SDK gets a
         // coherent answer without a second upstream side effect.
-        return existing.result
-          ? { status: 'replay', approval: existing }
-          : { status: 'pending', approval: existing }
+        if (existing.result) return { status: 'replay', approval: existing }
+        // Still in flight: the resend waits on the same approval.
+        if (!existing.executed_at) return { status: 'pending', approval: existing }
+        // It ran and there is nothing to replay: the response was streamed, the
+        // replay window closed, or the request failed after reaching the
+        // upstream. This answered 202 under the spent approval, which is not
+        // pending, so no human could approve it again and the resend waited
+        // until the entry expired an hour later. The spent one is kept, under
+        // a key no request hashes to, so its status can still be read; the
+        // resend is a new request and asks a human again.
+        this.approvals.delete(requestHash)
+        this.approvals.set(`${requestHash}:${existing.id}`, existing)
+      } else if (existing.state === 'denied') {
+        return { status: 'denied', approval: existing }
+      } else {
+        return { status: 'pending', approval: existing }
       }
-      if (existing.state === 'denied') return { status: 'denied', approval: existing }
-      return { status: 'pending', approval: existing }
     }
 
     this.#sweepApprovals()
@@ -810,7 +987,11 @@ export class Pipeline {
       id: id.approval(),
       request_hash: requestHash,
       grant_id: grant.id,
-      summary: `${decision.method} ${decision.host}${decision.path}`,
+      // A method-override header is shown, because it is what the upstream
+      // may actually run. The summary is all the human sees.
+      summary: overrides.length
+        ? `${decision.method} (overridden to ${overrides.join(', ')}) ${decision.host}${decision.path}`
+        : `${decision.method} ${decision.host}${decision.path}`,
       reason: reason || null,
       state: 'pending',
       created_at: new Date().toISOString(),
@@ -852,9 +1033,24 @@ export class Pipeline {
     return null
   }
 
+  /**
+   * A human's answer to a pending approval.
+   *
+   * Only a PENDING one. This used to set the state whatever it was, so
+   * granting an approval that had already run armed it again and the next
+   * resend executed the write a second time, and denying one handed back the
+   * whole approval — its cached response included, with the successor
+   * placeholder in `av-placeholder-next` — to anything on the control socket,
+   * where deny is ungated. The session-request path already refused anything
+   * no longer pending; this is the same rule, and a pending approval has no
+   * response stored on it to hand back.
+   */
   decideApproval(approvalId, granted) {
     for (const approval of this.approvals.values()) {
       if (approval.id !== approvalId) continue
+      if (approval.state !== 'pending') {
+        throw deny('AV_POLICY_DENIED', `already ${approval.state}`, { rule: 'approval' })
+      }
       approval.state = granted ? 'granted' : 'denied'
       approval.decided_at = new Date().toISOString()
       this.vault.audit.write(granted ? 'approval.granted' : 'approval.denied', { approval_id: approvalId })
@@ -866,6 +1062,24 @@ export class Pipeline {
   pendingApprovals() {
     return [...this.approvals.values()].filter((a) => a.state === 'pending')
   }
+}
+
+/** Headers a framework may honour in place of the request-line method. */
+const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override'])
+
+/** Every method a method-override header asks for, uppercased, in order. */
+function methodOverrides(headers) {
+  const out = []
+  for (const [n, v] of headers) {
+    if (!METHOD_OVERRIDE_HEADERS.has(String(n).toLowerCase())) continue
+    for (const one of [v].flat()) {
+      for (const m of String(one).split(',')) {
+        const method = m.trim().toUpperCase()
+        if (method && !out.includes(method)) out.push(method)
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -972,23 +1186,54 @@ function decompress(buf, encoding) {
  * contiguous in the bytes anywhere. So the `data:` payloads are concatenated
  * and watched separately. That catches a raw-text stream split across events.
  *
- * What neither catches is a secret split across *application* fields, as in
- * `{"delta":"ghp_REAL"}` then `{"delta":"SECRET"}`: reassembling that means
- * knowing the upstream's JSON shape, which a byte proxy does not. For that
- * case the stream is cut rather than continued — the agent may have received
- * a fragment, and it will not receive the rest. It requires a hostile upstream,
- * which already holds the credential; what it buys is teaching the agent a
- * secret it was never given, and that is worth failing closed over.
+ * A secret split across *application* fields, as in `{"delta":"ghp_REAL"}`
+ * then `{"delta":"SECRET"}`, is caught by reading each JSON payload and
+ * concatenating the values found at the same key path — `delta.text`,
+ * `choices.0.delta.content` — at the same path and indexes, wherever in an
+ * array the element sits, and where an SDK continues one path at another
+ * (eventRuns), which is how a client puts the text back together. When any of
+ * these finds a secret the stream is cut rather than continued — the agent may
+ * have received a fragment, and it will not receive the rest. It requires a
+ * hostile upstream, which already holds the credential; what it buys is
+ * teaching the agent a secret it was never given, and that is worth failing
+ * closed over.
+ *
+ * The stream is also cut, never left hanging or thrown, when the upstream
+ * fails part way, when one event grows past MAX_EVENT_BYTES without ending,
+ * and when more than `maxBytes` has been decoded.
  */
-async function* scrubEventStream(source, scrubber, onLeak) {
+async function* scrubEventStream(source, scrubber, { maxBytes = Infinity, onCut } = {}) {
   const frame = scrubber.stream()
   let pending = ''
+  let scanned = 0
+  let carry = ''
   let assembled = ''
+  let total = 0
+  const keep = scrubber.overlap * 4
+  const runs = eventRuns(scrubber, keep)
+
+  const cut = (reason, detail) => {
+    onCut?.(reason)
+    return Buffer.from(`event: error\ndata: ${JSON.stringify({ code: 'AV_UNSCANNABLE', detail })}\n\n`, 'latin1')
+  }
+
+  /**
+   * Line endings as LF. The spec allows CRLF and a bare CR as well, and
+   * framing only on `\n\n` meant a CRLF stream was never split at all: the
+   * agent got nothing until the upstream closed, and every byte sat in
+   * `pending` until then. A CR at the very end is held back, since it may be
+   * the first half of a CRLF still in flight.
+   */
+  const lf = (text) => {
+    let t = carry + text
+    carry = ''
+    if (t.endsWith('\r')) { carry = '\r'; t = t.slice(0, -1) }
+    return t.replace(/\r\n?/g, '\n')
+  }
 
   const dataOf = (event) => event.split('\n')
     .filter((l) => l.startsWith('data:'))
     .map((l) => l.slice(5).replace(/^ /, ''))
-    .join('')
 
   /**
    * The payload so far, as a client would actually put it back together.
@@ -996,13 +1241,18 @@ async function* scrubEventStream(source, scrubber, onLeak) {
    * An LLM token stream is `{"delta":"ghp_SSE"}` then `{"delta":"CRET"}`, and
    * every client concatenates the VALUES. So this pulls out the JSON string
    * literals that are not object keys — a literal followed by `:` is a key —
-   * and joins them. That reconstructs exactly what the reader ends up with.
+   * and joins them.
    *
    * It used to strip all punctuation instead, which is wrong in both
    * directions: it glued the key text onto the value (`delta` + `ghp_...`),
    * so an exact secret could only be caught by the loose shape patterns, and
    * those then had to match without a leading boundary — which is what made
    * them fire on ordinary English like `disk-usage_by_repository`.
+   *
+   * Joining every value is still not what a client does, which is why the
+   * per-path view below exists: the metadata values of a real Anthropic
+   * stream (`content_block_delta`, `text_delta`) land between the halves of
+   * the text here, and neither half matches.
    */
   const jsonValues = (text) => {
     let out = ''
@@ -1015,46 +1265,335 @@ async function* scrubEventStream(source, scrubber, onLeak) {
     return out
   }
 
-  /** True when the payload so far, however reassembled, contains a secret. */
+  /**
+   * The reason to cut because of the payload so far, however reassembled, or
+   * null. A secret found in any reassembly cuts; so does a reassembly the
+   * scrubber could not finish decoding within its budget, which is refused
+   * rather than forwarded part-scanned.
+   */
   const leaked = (text) => {
-    if (scrubber.scrub(text).redactions > 0) return true
-    // As a JSON client reassembles it: values only, concatenated.
-    const values = jsonValues(text)
-    if (values && scrubber.scrub(values).redactions > 0) return true
-    // And a last, cruder pass for framing that is not JSON at all.
-    const bare = text.replace(/[^A-Za-z0-9_\-+/=]/g, '')
-    return scrubber.scrub(bare).redactions > 0
+    // As a JSON client reassembles it (values only, concatenated), and a
+    // last cruder pass for framing that is not JSON at all.
+    for (const v of [text, jsonValues(text), text.replace(/[^A-Za-z0-9_\-+/=]/g, '')]) {
+      if (!v) continue
+      const r = scrubber.scrub(v)
+      if (r.redactions > 0) return 'credential_split_across_events'
+      if (r.unscannable) return 'response_unscannable'
+    }
+    return null
   }
 
-  for await (const chunk of source) {
-    pending += frame.push(chunk.toString('latin1'))
+  /** Append each string in one JSON payload to its runs; the reason to cut, or null. */
+  const leakedByPath = (payload) => {
+    const parsed = parseEventJson(payload)
+    return parsed === undefined ? null : runs.add(parsed)
+  }
+
+  /** Every complete event now in `pending`, taken out of it. */
+  const events = () => {
+    const out = []
     let boundary
-    while ((boundary = pending.indexOf('\n\n')) !== -1) {
-      const event = pending.slice(0, boundary + 2)
+    // From where the last search stopped: searching the whole of a growing
+    // `pending` on every chunk is quadratic in the size of one event.
+    while ((boundary = pending.indexOf('\n\n', scanned)) !== -1) {
+      out.push(pending.slice(0, boundary + 2))
       pending = pending.slice(boundary + 2)
-      assembled += dataOf(event)
-      // Keep only enough to span a split; an LLM response is unbounded.
-      if (assembled.length > scrubber.overlap * 4) {
-        assembled = assembled.slice(-scrubber.overlap * 4)
-      }
-      if (leaked(assembled)) {
-        onLeak?.()
-        yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
+      scanned = 0
+    }
+    scanned = Math.max(0, pending.length - 1)
+    return out
+  }
+
+  /** Add one event to every reassembly; the reason to cut, or null. */
+  const leaks = (event) => {
+    const data = dataOf(event)
+    // Searched with all of this event on, then trimmed: the same order as
+    // the per-path runs, for the same reason.
+    const joined = assembled + data.join('')
+    // Keep only enough to span a split; an LLM response is unbounded.
+    assembled = joined.length > keep ? joined.slice(-keep) : joined
+    const reason = leaked(joined)
+    if (reason) return reason
+    return data.length > 0 ? leakedByPath(data.join('\n')) : null
+  }
+
+  const WHY = {
+    credential_split_across_events: 'the upstream split a credential across events; the stream was cut',
+    too_many_paths: `the upstream stream used more than ${MAX_SSE_PATHS} JSON key paths, more than can be tracked for a credential split across events; the stream was cut`,
+    too_many_indexes: `the upstream stream put more than ${MAX_SSE_INDEXES} index fields over one value, more than can be tracked for a credential split across events; the stream was cut`,
+    response_unscannable: 'the upstream nested encodings deeper than could be decoded within budget, so an event could not be fully scrubbed; the stream was cut',
+  }
+
+  try {
+    for await (const chunk of source) {
+      total += chunk.length
+      if (total > maxBytes) {
+        yield cut('stream_too_large', `the upstream stream decoded to more than ${Math.round(maxBytes / 1024 / 1024)} MiB; the stream was cut`)
         return
       }
-      yield Buffer.from(event, 'latin1')
+      pending += lf(frame.push(chunk.toString('latin1')))
+      for (const event of events()) {
+        const reason = leaks(event)
+        if (reason) { yield cut(reason, WHY[reason]); return }
+        yield Buffer.from(event, 'latin1')
+      }
+      if (pending.length > MAX_EVENT_BYTES) {
+        yield cut('event_too_large', `one event grew past ${Math.round(MAX_EVENT_BYTES / 1024 / 1024)} MiB without ending; the stream was cut`)
+        return
+      }
     }
+  } catch {
+    // The upstream failed part way. What is held back is an unfinished event
+    // and is dropped with it; the agent is told the stream ended badly
+    // rather than left waiting, and nothing is thrown at the code writing
+    // the response.
+    yield cut('upstream_failed', 'the upstream stream failed before it finished; the stream was cut')
+    return
   }
-  const tail = pending + frame.flush()
-  if (tail) {
-    assembled += dataOf(tail)
-    if (leaked(assembled)) {
-      onLeak?.()
-      yield Buffer.from('event: error\ndata: {"code":"AV_UNSCANNABLE","detail":"the upstream split a credential across events; the stream was cut"}\n\n', 'latin1')
-      return
-    }
-    yield Buffer.from(tail, 'latin1')
+  // What the scrubber held back can be several events, not one.
+  pending += lf(frame.flush()) + (carry ? '\n' : '')
+  for (const event of [...events(), pending].filter(Boolean)) {
+    const reason = leaks(event)
+    if (reason) { yield cut(reason, WHY[reason]); return }
+    yield Buffer.from(event, 'latin1')
   }
 }
 
+/**
+ * An event's `data:` as JSON, or undefined if it is not JSON.
+ *
+ * Python's json.loads also takes NaN, Infinity and -Infinity, and the Python
+ * SDKs read events with it. JSON.parse refused such a payload, so it was never
+ * reassembled by path, and an upstream that put `"p":NaN` in every event had
+ * only the joined view to beat.
+ */
+function parseEventJson(payload) {
+  try { return JSON.parse(payload) } catch { /* try it as Python would */ }
+  // A scan rather than a regex: a regex over a string literal of several
+  // megabytes overflows the stack.
+  let swapped = ''
+  let from = 0
+  let inString = false
+  for (let i = 0; i < payload.length; i++) {
+    const c = payload[i]
+    if (inString) {
+      if (c === '\\') i++
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') { inString = true; continue }
+    const word = payload.startsWith('NaN', i) ? 3 : payload.startsWith('Infinity', i) ? 8 : 0
+    if (!word) continue
+    swapped += payload.slice(from, payload[i - 1] === '-' ? i - 1 : i) + 'null'
+    i += word - 1
+    from = i + 1
+  }
+  if (from === 0) return undefined
+  try { return JSON.parse(swapped + payload.slice(from)) } catch { return undefined }
+}
 
+// A field a client may gather a stream by: `index`, `output_index`, ...
+//
+// Not `start_index` or `end_index`. Those are character offsets into the
+// text, which no client groups by, and the Responses API puts both inside an
+// annotation that already sits under three index fields: every ordinary
+// `url_citation` event was cut for having more than MAX_SSE_INDEXES.
+const INDEX_FIELD = /^(?:index|(?!start_|end_).+_index)$/
+
+/**
+ * Every string in a parsed JSON value, with its key path (`["delta","text"]`)
+ * and the index fields of every object above it.
+ *
+ * The path is the list of segments as JSON, an array index as a number and a
+ * key as a string, so no two places share one. It was the keys joined with
+ * `.`, and a key may contain a dot: {"a":{"b":…}} and {"a.b":…} were both
+ * `a.b`, so a value at one was appended between the halves of a secret at the
+ * other and no run ever held it whole.
+ */
+function* jsonStringsByPath(value, path = [], indexes = []) {
+  if (typeof value === 'string') { yield { path, indexes, value }; return }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) yield* jsonStringsByPath(value[i], [...path, i], indexes)
+  } else if (value && typeof value === 'object') {
+    const here = Object.entries(value)
+      .filter(([k, v]) => INDEX_FIELD.test(k) && (typeof v === 'number' || typeof v === 'string'))
+      .map(([k, v]) => [path.length, k, v])
+    const inner = here.length ? [...indexes, ...here] : indexes
+    for (const [k, v] of Object.entries(value)) yield* jsonStringsByPath(v, [...path, k], inner)
+  }
+}
+
+// The fields a client appends from one event to the next.
+const APPENDED = new Set(['text', 'content', 'delta', 'arguments', 'partial_json', 'thinking', 'refusal', 'reasoning', 'reasoning_content'])
+
+// What a missing index field is read as: zero, as a typed client's zero value
+// does (Go, Rust, C#), and a group of its own, as a client that keys a map by
+// it does.
+const MISSING = [0, null]
+
+/**
+ * Values an SDK continues at another key path: a block or a part starts with
+ * its text, and each delta appends to it. [event type, path, what is being
+ * continued]. `{ at }` is an array position the SDK reads as that index field.
+ *
+ * A secret that began in a `content_block_start` and ended in the deltas
+ * after it was in two runs that never met: `content_block.text` and
+ * `delta.text`. The Anthropic SDK puts them in one block.
+ */
+const CONTINUES = [
+  ['content_block_start', ['content_block', 'text'], 'text'],
+  ['content_block_start', ['content_block', 'thinking'], 'thinking'],
+  ['content_block_delta', ['delta', 'text'], 'text'],
+  ['content_block_delta', ['delta', 'thinking'], 'thinking'],
+  ['response.output_item.added', ['item', 'content', { at: 'content_index' }, 'text'], 'output_text'],
+  ['response.content_part.added', ['part', 'text'], 'output_text'],
+  ['response.output_text.delta', ['delta'], 'output_text'],
+  ['response.output_item.added', ['item', 'content', { at: 'content_index' }, 'refusal'], 'refusal'],
+  ['response.content_part.added', ['part', 'refusal'], 'refusal'],
+  ['response.refusal.delta', ['delta'], 'refusal'],
+  ['response.output_item.added', ['item', 'arguments'], 'arguments'],
+  ['response.function_call_arguments.delta', ['delta'], 'arguments'],
+  ['response.output_item.added', ['item', 'summary', { at: 'summary_index' }, 'text'], 'summary'],
+  ['response.reasoning_summary_part.added', ['part', 'text'], 'summary'],
+  ['response.reasoning_summary_text.delta', ['delta'], 'summary'],
+]
+
+/**
+ * The ways a client may gather one string: { gathering, indexes, appended }.
+ *
+ * By its key path as written. By the same path with array positions left
+ * out, because OpenAI's SDKs gather `choices[]` and `tool_calls[]` by their
+ * `index` and not by where the element sits: a choice that moved to another
+ * position between events started a new run, and the SDK still joined it to
+ * the old one. And as the value an SDK continues, from CONTINUES.
+ */
+function* gatheringsOf({ path, indexes }, type) {
+  const appended = APPENDED.has(path[path.length - 1])
+  yield { gathering: JSON.stringify(path), indexes, appended }
+  if (path.some((s) => typeof s === 'number')) {
+    yield { gathering: JSON.stringify(path.map((s) => (typeof s === 'number' ? null : s))), indexes, appended }
+  }
+  for (const [eventType, pattern, continued] of CONTINUES) {
+    if (eventType !== type || pattern.length !== path.length) continue
+    const positions = []
+    const matches = pattern.every((p, i) => {
+      if (typeof p === 'string') return p === path[i]
+      if (typeof path[i] !== 'number') return false
+      positions.push([0, p.at, path[i]])
+      return true
+    })
+    if (!matches) continue
+    const own = indexes.filter(([depth, key]) => !positions.some((p) => depth === 0 && p[1] === key))
+    yield { gathering: `#${continued}`, indexes: [...own, ...positions], appended: true }
+  }
+}
+
+/**
+ * The runs an event stream's strings are gathered into. `add(payload)`
+ * appends every string in one parsed payload and returns the reason to cut,
+ * or null.
+ *
+ * A run is a gathering and a choice of the index fields above the string:
+ * each one either left out or given one of its values. A client gathers text
+ * by key path and, usually, by an index: the Anthropic SDK by the event's
+ * `index`, OpenAI's by `choices[].index` and `tool_calls[].index`, the
+ * Responses API by `output_index` and `content_index`. Keyed by path alone,
+ * an event at another index between the halves of a secret landed in the
+ * same run and hid it. Keyed by every index, an upstream varies one the
+ * client ignores. So every combination is a run.
+ *
+ * An index written as a string is also its number, because a JavaScript SDK
+ * that indexes an array with "0" reads the element at 0. And on an appended
+ * field, an index field seen anywhere at that gathering but missing from this
+ * object is read as each of MISSING. A missing index that came before the
+ * field was first seen cannot be filed then, so when it is first seen, every
+ * run there is copied into its MISSING runs: until now, everything gathered
+ * there lacked it.
+ *
+ * Each run is searched with ALL of the new value on it and only then
+ * trimmed. Trimming first threw away the start of a long value, so the second
+ * half of a secret followed by 2,000 ordinary characters was never searched
+ * next to its first half.
+ *
+ * A run is never forgotten to make room for another. This used to evict the
+ * least recently used one, and an event with 65 metadata keys between the two
+ * halves of a secret evicted `delta.text`: its next value started a fresh
+ * run, and the client put the secret back together. Past MAX_SSE_PATHS the
+ * stream is cut. A long key is hashed, so a hostile key costs a digest, not
+ * its length.
+ */
+function eventRuns(scrubber, keep) {
+  const runs = new Map()
+  // For each appended gathering: the index fields seen there, and its runs
+  // with the choice each one is.
+  const seen = new Map()
+
+  const keyOf = (gathering, chosen) => {
+    const key = JSON.stringify([gathering, chosen])
+    return key.length > 256 ? `#${canon.sha256(key)}` : key
+  }
+  const bySlot = (a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+  const valuesOf = (v) => (typeof v === 'string' && /^(?:0|[1-9][0-9]{0,15})$/.test(v) ? [v, Number(v)] : [v])
+
+  /** The new run's key, or the reason to cut. */
+  const room = (key) => (runs.has(key) || runs.size < MAX_SSE_PATHS ? null : 'too_many_paths')
+
+  function gather({ gathering, indexes, appended }, value) {
+    let here = null
+    if (appended) {
+      if (!seen.has(gathering)) seen.set(gathering, { fields: new Map(), runs: new Map() })
+      here = seen.get(gathering)
+      for (const [depth, key] of indexes) {
+        const id = JSON.stringify([depth, key])
+        if (here.fields.has(id)) continue
+        for (const [from, chosen] of [...here.runs]) {
+          for (const missing of MISSING) {
+            const choice = [...chosen, [depth, key, missing]].sort(bySlot)
+            const to = keyOf(gathering, choice)
+            if (runs.has(to)) continue
+            const full = room(to)
+            if (full) return full
+            runs.set(to, runs.get(from))
+            here.runs.set(to, choice)
+          }
+        }
+        here.fields.set(id, [depth, key])
+      }
+    }
+    const slots = indexes.map(([depth, key, v]) => [depth, key, valuesOf(v)])
+    for (const [depth, key] of here?.fields.values() ?? []) {
+      if (!indexes.some(([d, k]) => d === depth && k === key)) slots.push([depth, key, MISSING])
+    }
+    if (slots.length > MAX_SSE_INDEXES) return 'too_many_indexes'
+    slots.sort(bySlot)
+    let choices = [[]]
+    for (const [depth, key, values] of slots) {
+      choices = choices.flatMap((c) => [c, ...values.map((v) => [...c, [depth, key, v]])])
+    }
+    for (const chosen of choices) {
+      const key = keyOf(gathering, chosen)
+      const full = room(key)
+      if (full) return full
+      const run = (runs.get(key) ?? '') + value
+      const r = scrubber.scrub(run)
+      if (r.redactions > 0) return 'credential_split_across_events'
+      if (r.unscannable) return 'response_unscannable'
+      runs.set(key, run.length > keep ? run.slice(-keep) : run)
+      here?.runs.set(key, chosen)
+    }
+    return null
+  }
+
+  return {
+    add(payload) {
+      const type = payload && typeof payload === 'object' && typeof payload.type === 'string' ? payload.type : null
+      for (const string of jsonStringsByPath(payload)) {
+        for (const way of gatheringsOf(string, type)) {
+          const reason = gather(way, string.value)
+          if (reason) return reason
+        }
+      }
+      return null
+    },
+  }
+}
