@@ -85,6 +85,11 @@ function isoOrUndefined(v) {
   return Number.isNaN(ms) ? undefined : new Date(ms).toISOString()
 }
 
+// F4's bounds on scrub patterns. The grammar is the gateway's (C5).
+const MAX_SCRUB_SOURCE = 256
+const MAX_SCRUB_PER_CRED = 16
+const MAX_SCRUB_TOTAL = 64
+
 // What elevated a session (C3). Recorded, not decided, here: the daemon decides
 // with elevationOf(), and the store refuses anything it does not recognise.
 const ELEVATIONS = new Set(['approval_auto_writes', 'infinite'])
@@ -803,6 +808,7 @@ export class Vault {
       health: cred.health ? structuredClone(cred.health) : null,
       expiry_warning: expiryWarning(cred),
       quarantine: cred.quarantine ? structuredClone(cred.quarantine) : null,
+      scrub_patterns: (cred.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
@@ -961,6 +967,56 @@ export class Vault {
     this.#persist()
     this.audit.write('settings.changed', { keys })
     return this.getSettings()
+  }
+
+  // ---------------------------------------------------- F4: scrub patterns
+
+  /**
+   * Add a scrub pattern to a credential (F4): a raw store write. The route
+   * compiles the pattern first (the gateway's compileScrubPattern decides the
+   * grammar); this checks the bounds, and that the source carries no secret.
+   * A pattern is stored in clear and shown to whoever lists credentials, so a
+   * source that contains a stored credential value, or a placeholder, would
+   * publish it. The log keeps only its digest and length.
+   */
+  addScrubPattern(slug, source) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const refuse = (why) => deny('AV_POLICY_DENIED', `scrub pattern refused: ${why}`, { rule: 'scrub_pattern' })
+    // 3 characters (F4) up to 256 (C5, which revised F4's 200).
+    if (typeof source !== 'string' || source.length < 3 || source.length > MAX_SCRUB_SOURCE) {
+      throw refuse(`a pattern is 3 to ${MAX_SCRUB_SOURCE} characters`)
+    }
+    if (ph.findAll(source).length) throw refuse('it contains a placeholder')
+    for (const { secret } of this.allSecrets()) {
+      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')
+    }
+    const mine = cred.scrub_patterns || []
+    if (mine.length >= MAX_SCRUB_PER_CRED) throw refuse(`at most ${MAX_SCRUB_PER_CRED} patterns per credential`)
+    const total = Object.values(this.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
+    if (total >= MAX_SCRUB_TOTAL) throw refuse(`at most ${MAX_SCRUB_TOTAL} patterns in the vault`)
+    const pattern = { id: id.scrubPattern(), source, added_at: new Date().toISOString() }
+    cred.scrub_patterns = [...mine, pattern]
+    this.#persist()
+    this.audit.write('cred.scrub_pattern_added', {
+      credential_slug: cred.slug, pattern_id: pattern.id,
+      pattern_sha256: createHash('sha256').update(source).digest('hex'), length: source.length,
+    })
+    return { ...pattern }
+  }
+
+  /** Remove one scrub pattern. False, and nothing recorded, when there was none. */
+  removeScrubPattern(slug, patternId) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const mine = cred.scrub_patterns || []
+    if (!mine.some((p) => p.id === patternId)) return false
+    cred.scrub_patterns = mine.filter((p) => p.id !== patternId)
+    this.#persist()
+    this.audit.write('cred.scrub_pattern_removed', { credential_slug: cred.slug, pattern_id: patternId })
+    return true
   }
 
   deleteCredential(slug) {

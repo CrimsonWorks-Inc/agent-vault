@@ -1297,6 +1297,38 @@ const MUTATIONS = [
     to: "    this.#persist({ durable: false })\n    this.audit.write('session.revoked', { session_id: sid, reason })",
     tests: ['test/core/passphrase.test.js'],
   },
+  // ---- store F4: scrub-pattern CRUD ----
+  {
+    // A pattern is shown to whoever lists credentials: with a secret in it,
+    // the listing publishes the secret.
+    what: 'a scrub pattern may contain a stored credential value',
+    file: 'src/store/vault.js',
+    from: "      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')",
+    to: '      if (false) throw refuse(secret)',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    what: 'a scrub pattern may contain a placeholder',
+    file: 'src/store/vault.js',
+    from: "    if (ph.findAll(source).length) throw refuse('it contains a placeholder')\n",
+    to: '',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    what: 'a credential takes any number of scrub patterns',
+    file: 'src/store/vault.js',
+    from: '    if (mine.length >= MAX_SCRUB_PER_CRED) throw refuse',
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    // 0.7: the source is not recorded, only its digest.
+    what: 'the scrub pattern source is written to the audit log',
+    file: 'src/store/vault.js',
+    from: "      credential_slug: cred.slug, pattern_id: pattern.id,\n",
+    to: "      credential_slug: cred.slug, pattern_id: pattern.id, source,\n",
+    tests: ['test/security/store-scrub.test.js'],
+  },
 ]
 
 let survived = 0
