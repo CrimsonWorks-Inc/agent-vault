@@ -48,5 +48,4 @@ export const id = {
   request: () => `req_${ulid()}`,
   sessionRequest: () => `sr_${ulid()}`,
   client: () => `cl_${ulid()}`,
-  scrubPattern: () => `sp_${ulid()}`,
 }
