@@ -217,8 +217,8 @@ const MUTATIONS = [
   {
     what: 'a budget with no limit means no limit',
     file: 'src/core/policy.js',
-    from: '  return limits.length ? { unit, limit: Math.min(...limits) } : { unit }',
-    to: '  return { unit, limit: Math.min(a.limit, b.limit) }',
+    from: "  return limits.length ? { unit: 'requests', limit: Math.min(...limits) } : { unit: 'requests' }",
+    to: "  return { unit: 'requests', limit: Math.min(a?.limit, b?.limit) }",
     tests: ['test/security/pipeline.test.js'],
   },
   {
@@ -913,10 +913,10 @@ const MUTATIONS = [
     tests: ['test/security/gateway-core.test.js'],
   },
   {
-    what: 'intersecting two rates keeps the first window whatever the units',
+    what: 'intersecting two rates compares their counts whatever the units',
     file: 'src/core/policy.js',
-    from: 'return { count, per: pa >= pb ? a.per : b.per }',
-    to: 'return { count, per: a.per }',
+    from: '  const ar = a.count / units[a[key]], br = b.count / units[b[key]]',
+    to: '  const ar = a.count, br = b.count',
     tests: ['test/security/gateway-core.test.js'],
   },
   {
@@ -1156,6 +1156,234 @@ const MUTATIONS = [
     from: 'if (scrubbedBody.unscannable) {',
     to: 'if (false) {',
     tests: ['test/security/gateway-hardening.test.js'],
+  },
+  // ------------------------------------------------- wave 2, gateway batch
+  {
+    // R1: a mode nobody knows is the strictest one, never auto.
+    what: 'an unknown approval mode needs no approval',
+    file: 'src/core/policy.js',
+    from: "    case 'each': return true\n    default: return true",
+    to: "    case 'each': return true\n    default: return false",
+    tests: ['test/core/policy.test.js', 'test/security/gateway-w2-policy.test.js'],
+  },
+  {
+    // 0.6: a child can only narrow. Taking the inner layer's value is the
+    // widening the property test exists to catch.
+    what: 'intersecting max_concurrent takes the inner layer instead of the minimum',
+    file: 'src/core/policy.js',
+    from: '  return minNum(a, b)\n}\nexport function budgetInteger',
+    to: '  return b ?? a\n}\nexport function budgetInteger',
+    tests: ['test/core/policy.test.js'],
+  },
+  {
+    what: 'intersecting two rates takes the inner layer',
+    file: 'src/core/policy.js',
+    from: "function intersectRate(a, b) {\n  return intersectWindow(a, b, PER_MS, 'per', 1_000_000)",
+    to: 'function intersectRate(a, b) {\n  return b ?? a',
+    tests: ['test/core/policy.test.js', 'test/security/gateway-core.test.js'],
+  },
+  {
+    what: 'intersecting two spend limits takes the inner layer',
+    file: 'src/core/policy.js',
+    from: "  return Object.fromEntries(['tokens', 'usd_micros'].filter((k) => a[k] != null || b[k] != null).map((k) => [k, minNum(a[k], b[k])]))",
+    to: '  return b',
+    tests: ['test/core/policy.test.js'],
+  },
+  {
+    // F1: a concurrency slot is released however the request ends.
+    what: 'a concurrency slot is released only when the upstream answered',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (!streaming) resources.release?.()',
+    to: '      if (!streaming && upstreamOpened) resources.release?.()',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'the rolling quota admits a request that would take it past the limit',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (enforce && estimate + 1 > effective.quota.count)',
+    to: 'if (enforce && estimate > effective.quota.count)',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // F2: every operation in the document, not only the first or the named one.
+    what: 'a GraphQL document is judged by its first operation only',
+    file: 'src/core/payload.js',
+    from: "    if (!rules.operations.includes(op)) fail('payload:graphql:operation')",
+    to: "    if (!operations && !rules.operations.includes(op)) fail('payload:graphql:operation')",
+    tests: ['test/security/gateway-w2-payload.test.js'],
+  },
+  {
+    what: 'a duplicate JSON key is read last-wins instead of refused',
+    file: 'src/core/payload.js',
+    from: "          if (own(out,k)) fail('payload_duplicate_key')",
+    to: "          if (false) fail('payload_duplicate_key')",
+    tests: ['test/security/gateway-w2-payload.test.js'],
+  },
+  {
+    what: 'only the last payload rule-set is enforced',
+    file: 'src/core/payload.js',
+    from: '  for (const set of sets) {\n    if (set.query_strict)',
+    to: '  for (const set of sets.slice(-1)) {\n    if (set.query_strict)',
+    tests: ['test/security/gateway-w2-payload.test.js'],
+  },
+  {
+    // F3: every inherited route set must allow the request.
+    what: 'a request allowed by any one route set passes the others',
+    file: 'src/core/policy.js',
+    from: "    if (!pair) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
+    to: "    if (!pair && (policy.route_sets ?? []).some((s) => s.some((x) => x.methods.includes(m) && x.paths.some((g) => matchPath(g, p))))) continue\n    if (!pair) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
+    tests: ['test/security/gateway-w2-policy.test.js', 'test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a route pair matches the method from one pair and the path from another',
+    file: 'src/core/policy.js',
+    from: '    const pair = set.find((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))',
+    to: '    const pair = set.some((x) => x.methods.includes(m)) && set.some((x) => x.paths.some((glob) => matchPath(glob, p))) ? { paths: set.flatMap((x) => x.paths) } : null',
+    tests: ['test/security/gateway-w2-policy.test.js'],
+  },
+  {
+    // F4 (C5, revised): only literals may follow the variable quantifier.
+    // With this rule in place a second variable quantifier is refused by it
+    // too, so the one-variable rule has no separate entry: it cannot fail
+    // on its own.
+    what: 'a scrub pattern may put classes after its variable quantifier, which backtracks for seconds',
+    file: 'src/core/scrub.js',
+    from: "      if (afterVariable && (!literal || quantified)) bad('only literal characters may follow the variable quantifier')",
+    to: '',
+    tests: ['test/security/gateway-w2-scrub.test.js'],
+  },
+  {
+    what: 'a scrub pattern branch may match more than 512 characters',
+    file: 'src/core/scrub.js',
+    from: "    if (length > 512) bad('a branch can match more than 512 characters')",
+    to: '',
+    tests: ['test/security/gateway-w2-scrub.test.js'],
+  },
+  {
+    what: 'the stream scrubber holds back less than an extra pattern can match',
+    file: 'src/core/scrub.js',
+    from: '        const keep = Math.min(Math.max(self.overlap, self.extraHold), combined.length)',
+    to: '        const keep = Math.min(self.overlap, combined.length)',
+    tests: ['test/security/gateway-w2-scrub.test.js'],
+  },
+  {
+    what: 'the stream scrubber cuts through an extra-pattern match instead of moving past it',
+    file: 'src/core/scrub.js',
+    from: '        for (const { re } of self.extraPatterns) {\n          re.lastIndex = 0',
+    to: '        for (const { re } of []) {\n          re.lastIndex = 0',
+    tests: ['test/security/gateway-w2-scrub.test.js'],
+  },
+  {
+    what: 'a stored scrub pattern that no longer compiles is skipped instead of withholding the response',
+    file: 'src/daemon/pipeline.js',
+    from: "          throw deny('AV_UNSCANNABLE', 'a stored scrub pattern is invalid', { rule: 'scrub_pattern_invalid' })",
+    to: '          continue',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // F5: missing usage is charged in full, never as free.
+    what: 'a call with no usage report is charged nothing',
+    file: 'src/core/model-usage.js',
+    from: '  if (!usage || !count(usage.input_tokens) || !count(usage.output_tokens)) return { ...reservation }',
+    to: '  if (!usage || !count(usage.input_tokens) || !count(usage.output_tokens)) return { tokens: 0, usd_micros: 0 }',
+    tests: ['test/security/gateway-w2-pipeline.test.js', 'test/security/gateway-w2-model.test.js'],
+  },
+  {
+    what: 'the spend check ignores what calls in flight have reserved',
+    file: 'src/daemon/pipeline.js',
+    from: '      const committed = state[`${key}_used`] + reserved',
+    to: '      const committed = state[`${key}_used`]',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // F6: a hop is a request, and policy decides where it may go.
+    what: 'a redirect hop is followed without checking the grant',
+    file: 'src/daemon/pipeline.js',
+    from: '        try { hop = policyMod.evaluateHttp(effective, { method, host: next.hostname, path: next.pathname }) }',
+    to: '        try { hop = { host: next.hostname, path: next.pathname, method } }',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'redirects are followed for every method',
+    file: 'src/daemon/pipeline.js',
+    from: "      if (!['GET', 'HEAD'].includes(method) || policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'",
+    to: "      if (policyMod.needsApproval(effective, { method, firstUse: false })) reason = 'approval'",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a redirect may choose another port on an allowed host',
+    file: 'src/daemon/pipeline.js',
+    from: "        if (next.port !== credPort) reason = 'host'",
+    to: '',
+    tests: ['test/security/gateway-w2-seams.test.js'],
+  },
+  {
+    // F11 (C2): pins nothing can check are refused, never dropped.
+    what: 'pins configured with no pin checker installed are ignored',
+    file: 'src/daemon/pipeline.js',
+    from: "  if (pins != null) throw Object.assign(new Error('certificate pins are set and pin checking is not available')",
+    to: "  if (false) throw Object.assign(new Error('certificate pins are set and pin checking is not available')",
+    tests: ['test/security/gateway-w2-seams.test.js'],
+  },
+  {
+    // F13: the human reads the preview; the scrub is what makes that safe.
+    what: 'an approval preview is not scrubbed',
+    file: 'src/daemon/pipeline.js',
+    from: "      scrub: (text) => { const r = scrubber.scrub(text); return r.unscannable ? '[withheld: unscannable]' : r.text },",
+    to: '      scrub: (text) => text,',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'the agent-facing approval status carries the preview',
+    file: 'src/daemon/pipeline.js',
+    from: '        request_hash: approval.request_hash,\n        created_at',
+    to: '        request_hash: approval.request_hash, preview: approval.preview,\n        created_at',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // F16: only authenticated denials count.
+    what: 'a tripwire counts a denial against the session its placeholder names, before authentication',
+    file: 'src/daemon/pipeline.js',
+    from: '        await this.tripwires.observe({ sessionId: session?.id ?? null,',
+    to: '        await this.tripwires.observe({ sessionId: session?.id ?? sub.locate(req).occurrences[0]?.parsed?.sid ?? null,',
+    tests: ['test/security/gateway-w2-seams.test.js'],
+  },
+  {
+    what: 'a quarantined credential is not refused before its use is spent',
+    file: 'src/daemon/pipeline.js',
+    from: "      stage('quarantine')\n      this.#checkQuarantine(cred)\n      stage('grant')\n      const grant",
+    to: "      stage('grant')\n      const grant",
+    tests: ['test/security/gateway-w2-seams.test.js', 'test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // F18: the grant's own lifetime is checked before anything happens.
+    what: 'the gateway does not ask the store whether the grant is still live',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (peek) this.#peekGrant(grant)\n      else this.vault.assertGrantLive?.(grant)',
+    to: '      if (peek) this.#peekGrant(grant)',
+    tests: ['test/security/gateway-w2-pipeline.test.js', 'test/security/gateway-w2-seams.test.js'],
+  },
+  {
+    // F20: a preflight spends nothing and touches nothing.
+    what: 'preflight extends the session it is asked about',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (touch) this.vault.touchSession(session)\n      return session\n    }\n\n    // Placeholder-as-carrier',
+    to: '      this.vault.touchSession(session)\n      return session\n    }\n\n    // Placeholder-as-carrier',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'preflight creates the approval it predicts',
+    file: 'src/daemon/pipeline.js',
+    from: '    if (preflight) {\n      const held = this.approvals.get(requestHash)',
+    to: '    if (preflight && false) {\n      const held = this.approvals.get(requestHash)',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a preflight denial is fed to the tripwires',
+    file: 'src/daemon/pipeline.js',
+    from: "      code = err.code; rule = err.rule ?? null; would = 'deny'",
+    to: "      code = err.code; rule = err.rule ?? null; would = 'deny'; this.tripwires.observe({ sessionId: session.id, credentialId: route?.cred?.id ?? null, code, rule })",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
 ]
 
