@@ -1400,6 +1400,58 @@ const MUTATIONS = [
     to: "        decision: 'allow',",
     tests: ['test/security/gateway-w2-seams.test.js'],
   },
+  {
+    // Round 2: a redirect hop is a body-less GET, held to every payload rule.
+    what: 'a redirect hop skips the GraphQL rules',
+    file: 'src/daemon/pipeline.js',
+    from: "        try { evaluatePayload(effective.payload_sets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }",
+    to: "        try { evaluatePayload(effective.payload_sets?.map(({ graphql, ...rest }) => rest), { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a redirect hop silently drops the body rules',
+    file: 'src/daemon/pipeline.js',
+    from: "        try { evaluatePayload(effective.payload_sets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }",
+    to: "        try { evaluatePayload(effective.payload_sets?.map(({ json, form, ...rest }) => rest), { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // Round 2: one value per single-valued header, read and sent.
+    what: 'a single-valued header sent twice with different values is let through',
+    file: 'src/daemon/pipeline.js',
+    from: '    if (differs) {',
+    to: '    if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a request is checked on headers that were never folded',
+    file: 'src/daemon/pipeline.js',
+    from: '      req = { ...req, headers: foldHeaders(req.headers) }\n      session = this.#authenticate(req)',
+    to: '      session = this.#authenticate(req)',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'preflight reads headers that were never folded',
+    file: 'src/daemon/pipeline.js',
+    from: '    req = { ...req, headers: foldHeaders(req.headers) }\n    session = this.#authenticate(req, { touch: false })',
+    to: '    session = this.#authenticate(req, { touch: false })',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'two header keys differing only in case reach the client, and the last one wins',
+    file: 'src/daemon/pipeline.js',
+    from: '      if (key === undefined) { spelled.set(lower, n); headers[n] = v } else headers[key] = [headers[key], v].flat()',
+    to: '      headers[n] = v',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // Round 2: the query rules read only what the URL will carry.
+    what: 'a query the URL would cut at # or rewrite is checked as written',
+    file: 'src/daemon/pipeline.js',
+    from: "    if (/[#\\t\\n\\r]|[\\x00-\\x20]$/.test(String(req.query ?? ''))) {",
+    to: '    if (false) {',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
 ]
 
 let survived = 0

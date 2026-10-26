@@ -377,3 +377,121 @@ test('quarantine tripwire pauses only its credential and leaves other sessions a
   const rule = f.pipeline.tripwires.observe({ sessionId: f.session.id, credentialId: f.cred.id, code: 'AV_BAD_LOCATION' })
   assert.equal(rule.id, 'quarantine'); assert.equal(f.cred.quarantine.by, 'tripwire'); assert.equal(f.session.state, 'active')
 })
+
+// ------------------------------------- round 2: checked one, sent another
+
+// A hop is a body-less GET, and every payload rule that can read one applies
+// to it. Only the query rules were kept, so a Location could carry a GraphQL
+// document the grant denies, and it went out with the credential.
+test('a redirect hop is held to the GraphQL rules a direct request is held to', async t => {
+  const graphql = { operations: ['query'], deny_fields: ['createDeployKey'] }
+  for (const document of [
+    'mutation { createDeployKey(input:{title:"x"}) { id } }',
+    'mutation { innocent: createDeployKey(input:{title:"x"}) { id } }',
+    'query A { viewer { id } } mutation B { createDeployKey(input:{title:"x"}) { id } }',
+  ]) {
+    const location = `https://api.example.test/graphql?query=${encodeURIComponent(document)}`
+    const f = fixture(t, { redirects: { max: 2 }, payload: { graphql } }, { upstream: () => ({ status: 302, headers: { location }, body: Buffer.from('go') }) })
+    const result = await f.pipeline.handle(f.req())
+    assert.equal(result.status, 302); assert.equal(result.headers['av-redirect-stopped'], 'path', document)
+    assert.equal(f.sent.length, 1, document); assert.equal(f.grant.budget_used, 1)
+  }
+  // The operation type alone, with no field denied.
+  const op = fixture(t, { redirects: { max: 2 }, payload: { graphql: { operations: ['query'] } } }, { upstream: () => ({ status: 302, headers: { location: `/graphql?query=${encodeURIComponent('mutation { a }')}` }, body: Buffer.alloc(0) }) })
+  assert.equal((await op.pipeline.handle(op.req())).headers['av-redirect-stopped'], 'path'); assert.equal(op.sent.length, 1)
+  // Control: a query the grant allows is followed.
+  let n = 0
+  const ok = fixture(t, { redirects: { max: 2 }, payload: { graphql } }, { upstream: () => (++n === 1 ? { status: 302, headers: { location: `/graphql?query=${encodeURIComponent('{ viewer { id } }')}` }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
+  const followed = await ok.pipeline.handle(ok.req())
+  assert.equal(followed.status, 200); assert.equal(followed.body.toString(), 'done'); assert.equal(ok.sent.length, 2)
+})
+
+test('a redirect hop answers to the body rules as a body-less request, not to none', async t => {
+  const hop = (payload) => {
+    let n = 0
+    return fixture(t, { redirects: { max: 2 }, payload }, { upstream: () => (++n === 1 ? { status: 302, headers: { location: '/next' }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
+  }
+  // The first request has a body; the hop has none, so a required field is missing.
+  const required = hop({ json: { '/confirm': { required: true } } })
+  const result = await required.pipeline.handle(required.req({ method: 'GET', headers: [...required.req().headers, ['content-type', 'application/json']], body: Buffer.from('{"confirm":true}') }))
+  assert.equal(result.headers['av-redirect-stopped'], 'path'); assert.equal(required.sent.length, 1)
+  // A rule that an absent body satisfies leaves the hop alone.
+  const absent = hop({ json: { '/force': { absent: true } }, form: { mode: { one_of: ['safe'] } } })
+  const done = await absent.pipeline.handle(absent.req())
+  assert.equal(done.status, 200); assert.equal(absent.sent.length, 2)
+})
+
+// Content-Type was read from the first copy and sent from the last.
+test('a single-valued header sent twice, differently, is refused before anything is sent', async t => {
+  const json = ['content-type', 'application/json']
+  for (const [label, extra] of [
+    ['same case, different value', [json, ['content-type', 'application/x-www-form-urlencoded']]],
+    ['different case, different value', [json, ['Content-Type', 'application/x-www-form-urlencoded']]],
+    ['different case, same value', [json, ['Content-Type', 'application/json']]],
+    ['one entry holding two values', [['content-type', ['application/json', 'application/x-www-form-urlencoded']]]],
+    ['content-encoding', [json, ['content-encoding', 'identity'], ['Content-Encoding', 'gzip']]],
+    ['content-length', [json, ['content-length', '18'], ['content-length', '2']]],
+    ['transfer-encoding', [json, ['transfer-encoding', 'chunked'], ['Transfer-Encoding', 'identity']]],
+  ]) {
+    const f = fixture(t, { payload: { json: { '/channel': { one_of: ['safe'] } } } })
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, ...extra], body: Buffer.from('{"channel":"safe"}') }))
+    assert.equal(result.status, 403, label); assert.equal(problem(result).code, 'AV_POLICY_DENIED'); assert.equal(problem(result).rule, 'header_duplicate', label)
+    assert.equal(f.sent.length, 0, label); assert.equal(f.row.uses, 0, label); assert.equal(f.grant.budget_used, 0, label)
+  }
+  // Two Authorization headers: one checked for a session, the other sent.
+  const auth = fixture(t)
+  const twice = await auth.pipeline.handle(auth.req({ headers: [['host', 'localhost'], ['authorization', `Bearer ${auth.token}`], ['Authorization', `Bearer ${auth.ph}`]] }))
+  assert.equal(problem(twice).rule, 'header_duplicate'); assert.equal(auth.sent.length, 0)
+  // Preflight folds the same way, and refuses such a request outright, as it
+  // does one it cannot authenticate.
+  const pre = fixture(t, { payload: { json: { '/channel': { one_of: ['safe'] } } } })
+  const before = JSON.stringify(pre.vault.db)
+  await assert.rejects(pre.pipeline.preflight(pre.req({ method: 'POST', headers: [...pre.req().headers, json, ['Content-Type', 'text/plain']], body: Buffer.from('{"channel":"safe"}') })), (e) => e.rule === 'header_duplicate')
+  assert.equal(JSON.stringify(pre.vault.db), before)
+})
+
+test('one Content-Type, or an exact repeat of it, is checked and sent as that one value', async t => {
+  const json = fixture(t, { payload: { json: { '/channel': { one_of: ['safe'] } } } })
+  for (const extra of [[['content-type', 'application/json']], [['content-type', 'application/json'], ['content-type', 'application/json']]]) {
+    const result = await json.pipeline.handle(json.req({ method: 'POST', headers: [...json.req().headers, ...extra], body: Buffer.from('{"channel":"safe"}') }))
+    assert.equal(result.status, 200, result.body.toString())
+    assert.deepEqual(Object.entries(json.sent.at(-1).headers).filter(([k]) => k.toLowerCase() === 'content-type'), [['content-type', 'application/json']])
+  }
+  const form = fixture(t, { payload: { form: { channel: { one_of: ['safe'] } } } })
+  const ok = await form.pipeline.handle(form.req({ method: 'POST', headers: [...form.req().headers, ['Content-Type', 'application/x-www-form-urlencoded']], body: Buffer.from('channel=safe') }))
+  assert.equal(ok.status, 200, ok.body.toString()); assert.equal(form.sent[0].headers['Content-Type'], 'application/x-www-form-urlencoded')
+  const refused = await form.pipeline.handle(form.req({ method: 'POST', headers: [...form.req().headers, ['content-type', 'application/x-www-form-urlencoded']], body: Buffer.from('channel=other') }))
+  assert.equal(refused.status, 403); assert.equal(form.sent.length, 1)
+})
+
+// Two keys differing only in case reached the client, and Node kept the last.
+test('a repeated list header goes upstream once per name, carrying every value', async t => {
+  const f = fixture(t)
+  const result = await f.pipeline.handle(f.req({ headers: [...f.req().headers, ['X-Trace', 'checked'], ['x-trace', 'other'], ['accept', 'a/b']] }))
+  assert.equal(result.status, 200)
+  const names = Object.keys(f.sent[0].headers).filter((k) => k.toLowerCase() === 'x-trace')
+  assert.deepEqual(names, ['X-Trace']); assert.deepEqual(f.sent[0].headers['X-Trace'], ['checked', 'other'])
+  assert.equal(f.sent[0].headers.accept, 'a/b')
+  // A placeholder in the second copy is substituted there, and only there.
+  f.cred.fields[0].sites.push('header:x-api-key')
+  const ph = f.vault.issuePlaceholder({ grantId: f.grant.id, field: 'token', maxUses: 5 }).placeholder
+  const keyed = await f.pipeline.handle(f.req({ headers: [...f.req().headers, ['x-api-key', 'not-a-secret'], ['X-Api-Key', ph]] }))
+  assert.equal(keyed.status, 200, keyed.body.toString())
+  assert.deepEqual(f.sent[1].headers['x-api-key'], ['not-a-secret', SECRET])
+  assert.ok(!JSON.stringify(f.sent[1].headers).includes(ph))
+})
+
+// The query rules read the string as written; the URL holds less of it.
+test('a query a URL would cut or rewrite is refused before the payload rules read it', async t => {
+  const policy = { payload: { query: { dry_run: { required: true }, force: { absent: true }, op: {} }, query_strict: true } }
+  for (const query of ['op=delete#&dry_run=true', 'dry_run=true&fo\nrce=true', 'dry_run=true&fo\trce=true', 'dry_run=true&fo\rrce=true', 'dry_run=true&op=x ']) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ query }))
+    assert.equal(result.status, 403, JSON.stringify(query)); assert.equal(problem(result).rule, 'query_unsendable')
+    assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0)
+  }
+  // Control: the same characters percent-encoded are values like any other.
+  const f = fixture(t, policy)
+  const result = await f.pipeline.handle(f.req({ query: 'dry_run=true&op=a%23b%0A%20' }))
+  assert.equal(result.status, 200, result.body.toString()); assert.ok(f.sent[0].url.endsWith('?dry_run=true&op=a%23b%0A%20'))
+})

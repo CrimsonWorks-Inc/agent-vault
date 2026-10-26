@@ -158,6 +158,9 @@ export class Pipeline {
 
     try {
       this.#refuseBrowsers(req)
+      // Folded once, here, so authentication, the payload rules, the approval
+      // and the outbound request all read the same single value.
+      req = { ...req, headers: foldHeaders(req.headers) }
       session = this.#authenticate(req)
       route = this.#route(req, session)
       const result = await this.#proxy({
@@ -612,6 +615,7 @@ export class Pipeline {
       current = next
     }
     this.#refuseBrowsers(req)
+    req = { ...req, headers: foldHeaders(req.headers) }
     session = this.#authenticate(req, { touch: false })
     const now = performance.now()
     const prior = this.#preflightBuckets.get(session.id)
@@ -682,9 +686,13 @@ export class Pipeline {
         if (next.port !== credPort) reason = 'host'
       }
       if (!reason) {
-        // The query rules only: a hop has no body.
-        const querySets = effective.payload_sets?.map((set) => Object.fromEntries(Object.entries({ query: set.query, query_strict: set.query_strict }).filter(([, v]) => v !== undefined)))
-        try { evaluatePayload(querySets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }
+        // Every payload rule, as for any body-less GET. The query and GraphQL
+        // rules read the URL, which a hop has: a GraphQL document in
+        // `?query=` is a request the grant decides on like any other, and
+        // keeping only the query rules let a Location carry a mutation the
+        // grant denies. The body rules see no body, exactly as a direct GET
+        // does: a body field the grant requires is missing, so the hop stops.
+        try { evaluatePayload(effective.payload_sets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }
       }
       if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
       if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
@@ -1141,6 +1149,18 @@ export class Pipeline {
     stage('policy')
     const decision = policyMod.evaluateHttp(effective, { method: req.method, host: route.host, path: route.path })
     stage('payload')
+    // A query only as the upstream URL will hold it. The URL parser ends the
+    // query at `#`, deletes tabs and line breaks and trims trailing spaces,
+    // so the rules read `fo\nrce=true` as a parameter `fo\nrce` while
+    // `force=true` went on the wire, and read `x=1#&dry_run=true` as asking
+    // for a dry run that was never sent. The server never passes these;
+    // vault_http passes the agent's query as written.
+    if (/[#\t\n\r]|[\x00-\x20]$/.test(String(req.query ?? ''))) {
+      throw deny('AV_POLICY_DENIED', 'the query string contains a character a URL cannot carry as written (#, a tab, a line break, or trailing whitespace)', {
+        rule: 'query_unsendable',
+        hint: 'Percent-encode it, as %23, %09, %0A, %0D or %20.',
+      })
+    }
     evaluatePayload(effective.payload_sets, { method: decision.method, path: decision.path, query: req.query, body: req.body, contentType: sub.getHeader(req, 'content-type') })
     stage('budget')
     this.#budget(grant, effective)
@@ -1316,6 +1336,7 @@ export class Pipeline {
 
     // --- forward -----------------------------------------------------------
     const headers = {}
+    const spelled = new Map()
     for (const [n, v] of outgoing.headers) {
       const lower = n.toLowerCase()
       if (HOP_BY_HOP.has(lower) || CONSUMED.has(lower)) continue
@@ -1330,7 +1351,12 @@ export class Pipeline {
         ? v.some((x) => SESSION_TOKEN.test(String(x)))
         : SESSION_TOKEN.test(String(v))
       if (carriesToken) continue
-      headers[n] = v
+      // One key per name, whatever its case. Two keys that differ only in
+      // case reached the client as two, and Node kept the later one, while
+      // every check read the first. A repeated list header goes out as
+      // repeated lines, all of them, as the checks and the approval saw it.
+      const key = spelled.get(lower)
+      if (key === undefined) { spelled.set(lower, n); headers[n] = v } else headers[key] = [headers[key], v].flat()
     }
     headers.host = route.port ? `${decision.host}:${route.port}` : decision.host
     headers['accept-encoding'] = 'identity'
@@ -1713,6 +1739,44 @@ function methodOverrides(headers) {
         if (method && !out.includes(method)) out.push(method)
       }
     }
+  }
+  return out
+}
+
+/**
+ * Headers a request carries once. Every check reads one value for each, and
+ * a second copy is a second reading: the payload rules read the first
+ * Content-Type while the outbound object kept the last, so a body checked as
+ * JSON went upstream labelled as form data.
+ */
+const SINGLE_VALUED = new Set(['content-type', 'content-length', 'content-encoding', 'transfer-encoding', 'authorization'])
+
+/**
+ * The request's headers with each single-valued name folded to one entry,
+ * done once, before anything reads them. A copy that repeats the first
+ * exactly is dropped. One that differs in value, or only in the case of its
+ * name, is refused: which of the two an upstream acts on is its choice, not
+ * ours, so there is no copy we could safely check instead.
+ */
+function foldHeaders(headers) {
+  const out = []
+  const first = new Map()
+  for (const [name, value] of headers) {
+    const lower = String(name).toLowerCase()
+    if (!SINGLE_VALUED.has(lower)) { out.push([name, value]); continue }
+    const values = [value].flat().map(String)
+    if (!values.length) values.push('')
+    const prior = first.get(lower)
+    const differs = new Set(prior ? [prior[1], ...values] : values).size > 1 || (prior && prior[0] !== name)
+    if (differs) {
+      throw deny('AV_POLICY_DENIED', `the ${lower} header appears more than once, so the upstream could read a different one from the one checked`, {
+        rule: 'header_duplicate',
+        hint: `Send ${lower} once.`,
+      })
+    }
+    if (prior) continue
+    first.set(lower, [name, values[0]])
+    out.push([name, values[0]])
   }
   return out
 }

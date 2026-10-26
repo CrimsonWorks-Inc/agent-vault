@@ -187,16 +187,17 @@ test('Basic substitution writes the Authorization header the placeholder was fou
   assert.equal(out.headers[1][1], `Basic ${Buffer.from('user:SECRET').toString('base64')}`)
 })
 
+// Two Authorization headers are two readings of one credential slot: which
+// one the upstream acts on is its choice. Refused before anything is sent;
+// the unit test above keeps the substitution itself honest.
 test('Basic substitution through the pipeline, with a second Authorization header present', async () => {
   const s = setup({ sites: { key: ['basic:pass'] } })
   const ph = s.ph()
-  await s.pipeline.handle(s.request({
+  const res = await s.pipeline.handle(s.request({
     headers: [...s.request().headers, ['Authorization', 'Bearer x'], ['authorization', `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`]],
   }))
-  assert.equal(s.sent.length, 1)
-  const values = Object.entries(s.sent[0].headers).filter(([n]) => n.toLowerCase() === 'authorization').map(([, v]) => v)
-  assert.ok(values.includes(`Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`), JSON.stringify(values))
-  assert.ok(!JSON.stringify(s.sent[0].headers).includes('av1.'), 'a placeholder went upstream')
+  assert.equal(res.status, 403); assert.equal(JSON.parse(res.body).rule, 'header_duplicate')
+  assert.equal(s.sent.length, 0, 'a request went upstream')
 })
 
 test('an ordinary single Basic header is substituted as before', async () => {
