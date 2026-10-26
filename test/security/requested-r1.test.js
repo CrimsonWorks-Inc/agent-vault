@@ -381,7 +381,18 @@ test('the CLI says what to do when auto with writes cannot be proved', async () 
     const r = await cli(pass.dir, ['session', 'create', '--cred', 'demo', '--methods', 'GET,POST', '--approval', 'auto'])
     assert.equal(r.code, 5, r.stderr)
     assert.match(r.stderr, /no terminal to ask on/)
+    // A passphrase-only vault is not sent to a UI that cannot confirm anything.
+    assert.doesNotMatch(r.stderr, /next:/)
   } finally { await pass.stop() }
+  // With an authenticator as well, the UI is a way through, and is named.
+  const both = await startDaemon({ passphrase: PASSPHRASE, socketName: 'control.sock' })
+  enrol(both.vault, makeAuthenticator())
+  try {
+    const r = await cli(both.dir, ['session', 'create', '--cred', 'demo', '--methods', 'GET,POST', '--approval', 'auto'])
+    assert.equal(r.code, 5, r.stderr)
+    assert.match(r.stderr, /no terminal to ask on/)
+    assert.match(r.stderr, /next: agent-vault ui {3}\(confirm it there with your authenticator\)/)
+  } finally { await both.stop() }
 })
 
 test('the CLI exits with the refusal code’s own exit status', async () => {

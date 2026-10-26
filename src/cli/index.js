@@ -150,8 +150,12 @@ async function controlWithPresence(method, path, body) {
       })
     }
     if (!process.stdin.isTTY) {
+      // The UI can confirm it only with an authenticator, so it is named only
+      // when there is one: a passphrase-only vault would be sent to a page
+      // that cannot help.
       throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
         exit: EXIT.PRESENCE,
+        ...(factors.includes('authenticator') ? { next: 'agent-vault ui   (confirm it there with your authenticator)' } : {}),
       })
     }
     // Fresh presence: the passphrase goes with this one request and opens no
