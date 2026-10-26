@@ -21,6 +21,18 @@ import { PROFILES } from '../connectors/profiles.js'
 
 export const SCHEMA_VERSION = 1
 
+export function expiryMs(iso) {
+  if (iso === null || iso === undefined) return Infinity;
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? -Infinity : ms;
+}
+
+export function sessionExpiryMs(s) {
+  if (s.infinite === true && s.expires_at === null) return Infinity;
+  if (s.expires_at == null && !s.infinite) return -Infinity;
+  return expiryMs(s.expires_at);
+}
+
 // How many placeholder rows the ledger keeps. Active ones are capped per grant
 // by `max_active`; this bounds the dead ones, which nothing used to remove.
 const MAX_PLACEHOLDER_ROWS = 512
@@ -669,8 +681,19 @@ export class Vault {
 
   /** The credential as anything outside the daemon may see it: never a value. */
   publicCredential(cred) {
+    const soonThreshold = Date.now() + 7 * 86400000;
+    let expiry_warning = null;
+    let actualExpiry = cred.health?.observed_expires_at || cred.expires_at;
+    if (actualExpiry) {
+      if (!(expiryMs(actualExpiry) > Date.now())) expiry_warning = 'expired';
+      else if (expiryMs(actualExpiry) < soonThreshold) expiry_warning = 'soon';
+    }
     return {
       id: cred.id, slug: cred.slug, kind: cred.connector_kind, connector: cred.connector,
+      expires_at: cred.expires_at || null,
+      health: cred.health || null,
+      expiry_warning,
+      quarantine: cred.quarantine || null,
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
@@ -706,6 +729,72 @@ export class Vault {
       }
     }
     return out
+  }
+
+  setCredentialExpiry(slug, isoOrNull) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (isoOrNull !== null) {
+      if (Number.isNaN(Date.parse(isoOrNull))) throw deny('AV_POLICY_DENIED', 'expires_at must be a valid ISO date or null', { rule: 'expires_at' })
+    }
+    cred.expires_at = isoOrNull
+    this.#persist()
+    this.audit.write('cred.expiry_set', { credential_slug: slug, expires_at: isoOrNull })
+  }
+
+  recordHealth(credIdOrSlug, patch) {
+    const cred = this.db.credentials[credIdOrSlug] || this.findCredential(credIdOrSlug)
+    if (!cred) return null
+    const oldStatus = cred.health?.status
+    const oldObserved = cred.health?.observed_expires_at
+    cred.health = { ...(cred.health || {}), ...patch }
+    this.#persist({ durable: false })
+    if (cred.health.status !== oldStatus || cred.health.observed_expires_at !== oldObserved) {
+      this.audit?.write('cred.health_recorded', { credential_slug: cred.slug, status: cred.health.status, observed_expires_at: cred.health.observed_expires_at })
+    }
+    return cred.health
+  }
+
+  setQuarantine(slug, { by, rule_id, reason_untrusted }) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    cred.quarantine = { since: new Date().toISOString(), by, rule_id, reason_untrusted }
+    this.#persist()
+    this.audit.write('cred.quarantined', { credential_slug: slug, by, rule_id })
+  }
+
+  clearQuarantine(slug) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (!cred.quarantine) return false
+    cred.quarantine = null
+    this.#persist()
+    this.audit.write('cred.released', { credential_slug: slug })
+    return true
+  }
+
+  getSettings() {
+    this.#requireUnlocked()
+    return JSON.parse(JSON.stringify(this.db.kv.settings || {}))
+  }
+
+  updateSettings(patch) {
+    this.#requireUnlocked()
+    if (!this.db.kv.settings) this.db.kv.settings = {}
+    if (patch.tripwires) {
+      if (typeof patch.tripwires !== 'object' || !Array.isArray(patch.tripwires.rules)) {
+        throw deny('AV_POLICY_DENIED', 'invalid tripwires shape', { rule: 'tripwire_rule' })
+      }
+    }
+    for (const [k, v] of Object.entries(patch)) {
+      this.db.kv.settings[k] = v
+    }
+    this.#persist()
+    this.audit.write('settings.changed', { keys: Object.keys(patch) })
+    return this.getSettings()
   }
 
   deleteCredential(slug) {
@@ -765,8 +854,11 @@ export class Vault {
    * 24-hour cap by a day. It is now both: what is asked for is clamped down to
    * the cap, and what was asked for caps the idle extension.
    */
-  createSession({ workspaceId, label, ttlMs = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  createSession({ workspaceId, label, ttlMs = null, infinite = false, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
     this.#requireUnlocked()
+    if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) throw deny('AV_POLICY_DENIED', 'ttl must be a positive number', { rule: 'ttl' })
+    if (infinite && ttlMs != null) throw deny('AV_POLICY_DENIED', 'an infinite session has no lifetime to set', { rule: 'ttl' })
+    if (infinite && remote) throw deny('AV_REMOTE_FORBIDDEN', 'infinite session cannot be remote', { rule: 'infinite_remote' })
     const sid = ph.newSid()
     const secret = randomBytes(33).toString('base64url')
     const token = `avs1.${sid}.${secret}`
@@ -783,14 +875,15 @@ export class Vault {
       policy, owner_uid: peerUid ?? null, remote, client_name: clientName,
       state: 'active',
       created_at: new Date(now).toISOString(),
-      expires_at: new Date(now + life).toISOString(),
-      max_expires_at: new Date(now + ceiling).toISOString(),
-      idle_timeout_ms: (remote ? 1 : 2) * 3600_000,
+      expires_at: infinite ? null : new Date(now + life).toISOString(),
+      max_expires_at: infinite ? null : new Date(now + ceiling).toISOString(),
+      idle_timeout_ms: infinite ? null : ((remote ? 1 : 2) * 3600_000),
+      infinite,
       last_seen_at: new Date(now).toISOString(),
     }
     this.db.sessions[sid] = session
     this.#persist()
-    this.audit.write('session.created', { session_id: sid, workspace_id: workspaceId, label, remote })
+    this.audit.write('session.created', { session_id: sid, workspace_id: workspaceId, label, remote, infinite, expires_at: session.expires_at })
     return { session, token }
   }
 
@@ -807,7 +900,7 @@ export class Vault {
       next: { cli: ['agent-vault session create --cred <slug>'], mcp: { tool: 'vault_request_session' } },
     })
     if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
-    if (Date.parse(session.expires_at) <= Date.now()) {
+    if (!(sessionExpiryMs(session) > Date.now())) {
       if (session.state !== 'expired') {
         session.state = 'expired'
         // Its placeholders die with it, as they do on revocation. Left
@@ -826,9 +919,31 @@ export class Vault {
   /** Idle extension. Never widens capability, so it needs no presence. */
   touchSession(session) {
     const now = Date.now()
-    const extended = Math.min(now + session.idle_timeout_ms, Date.parse(session.max_expires_at))
-    if (extended > Date.parse(session.expires_at)) session.expires_at = new Date(extended).toISOString()
+    if (!session.infinite) {
+      const extended = Math.min(now + session.idle_timeout_ms, Date.parse(session.max_expires_at))
+      if (extended > Date.parse(session.expires_at)) session.expires_at = new Date(extended).toISOString()
+    }
     session.last_seen_at = new Date(now).toISOString()
+  }
+
+  shortenSession(sid, ttlMs) {
+    this.#requireUnlocked()
+    const s = this.db.sessions[sid]
+    if (!s) throw deny('AV_NOT_FOUND', `no session ${sid}`)
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw deny('AV_POLICY_DENIED', 'ttlMs must be finite and positive', { rule: 'ttl' })
+    const now = Date.now()
+    const currentExpiry = s.infinite ? Infinity : Date.parse(s.expires_at)
+    const newExpiry = Math.min(currentExpiry, now + ttlMs)
+    s.expires_at = new Date(newExpiry).toISOString()
+    const currentMax = s.infinite ? Infinity : Date.parse(s.max_expires_at)
+    const newMax = Math.min(currentMax, now + ttlMs)
+    s.max_expires_at = new Date(newMax).toISOString()
+    const was_infinite = s.infinite
+    s.infinite = false
+    s.idle_timeout_ms = (s.remote ? 1 : 2) * 3600_000
+    this.#persist()
+    this.audit.write('session.shortened', { session_id: sid, expires_at: s.expires_at, was_infinite })
+    return s
   }
 
   revokeSession(sid, reason = 'revoked') {
@@ -876,7 +991,7 @@ export class Vault {
 
   // ----------------------------------------------------------------- grants
 
-  createGrant({ sessionId, credentialId, fields, policy, narrow = null }) {
+  createGrant({ sessionId, credentialId, fields, policy, narrow = null, ttlMs = null }) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
     // nothing while locked rather than persisting unrecorded.
@@ -885,6 +1000,8 @@ export class Vault {
     if (!session) throw deny('AV_NOT_FOUND', `no session ${sessionId}`)
     const cred = this.db.credentials[credentialId]
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${credentialId}`)
+    if (ttlMs !== null && (!Number.isFinite(ttlMs) || ttlMs <= 0)) throw deny('AV_POLICY_DENIED', 'grant ttl must be positive', { rule: 'grant_ttl' })
+    const expires_at = ttlMs !== null ? new Date(Math.min(Date.now() + ttlMs, sessionExpiryMs(session))).toISOString() : null
     const grantId = id.grant()
     const grant = {
       id: grantId, session_id: sessionId, credential_id: credentialId,
@@ -895,15 +1012,53 @@ export class Vault {
       policy: narrow && Object.keys(narrow).length ? policyMod.intersect([policy, narrow]) : policy,
       budget_used: 0, counters: { requests: 0, denials: 0 }, state: 'active',
       created_at: new Date().toISOString(),
+      expires_at,
     }
     this.db.grants[grantId] = grant
     this.#persist()
-    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug })
+    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug, expires_at })
     return grant
+  }
+
+  findGrant(sid, credId) {
+    let newest = null;
+    for (const g of Object.values(this.db.grants)) {
+      if (g.session_id === sid && g.credential_id === credId) {
+        if (!newest || String(g.created_at).localeCompare(String(newest.created_at)) > 0) {
+          newest = g;
+        }
+      }
+    }
+    return newest;
+  }
+
+  assertGrantLive(grant) {
+    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grant?.id}`);
+    if (!(expiryMs(grant.expires_at) > Date.now())) {
+      grant.state = 'expired';
+      for (const p of Object.values(this.db.placeholders)) {
+        if (p.grant_id === grant.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'expired'; }
+      }
+      this.#persist();
+      this.audit.write('grant.expired', { grant_id: grant.id, session_id: grant.session_id });
+      throw deny('AV_GRANT_EXPIRED', `grant ${grant.id} has expired`, { next: { mcp: { tool: 'vault_request_session' } } });
+    }
+    return grant;
   }
 
   grantsForSession(sid) {
     return Object.values(this.db.grants).filter((g) => g.session_id === sid && g.state === 'active')
+  }
+
+  chargeGrant(grantId, n = 1) {
+    const grant = this.db.grants[grantId];
+    if (!grant) return false;
+    const limit = grant.policy?.budget?.limit;
+    if (limit !== undefined && Number.isFinite(limit) && grant.budget_used + n > limit) return false;
+    grant.budget_used += n;
+    grant.counters.requests += n;
+    this.#persist({ durable: false });
+    return true;
   }
 
   revokeGrant(grantId, reason = 'revoked') {
@@ -922,6 +1077,25 @@ export class Vault {
   }
 
   /** Narrow an existing grant. Reducing capability never needs presence. */
+  shortenGrant(grantId, ttlMs) {
+    this.#requireUnlocked()
+    const g = this.db.grants[grantId]
+    if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
+    if (!Number.isFinite(ttlMs) || ttlMs <= 0) throw deny('AV_POLICY_DENIED', 'ttlMs must be finite and positive', { rule: 'grant_ttl' })
+    const now = Date.now()
+    const currentExpiry = g.expires_at ? Date.parse(g.expires_at) : Infinity
+    g.expires_at = new Date(Math.min(currentExpiry, now + ttlMs)).toISOString()
+    for (const p of Object.values(this.db.placeholders)) {
+      if (p.grant_id === grantId && p.state === 'active') {
+        const theirExpiry = p.expires_at ? Date.parse(p.expires_at) : Infinity
+        p.expires_at = new Date(Math.min(theirExpiry, Date.parse(g.expires_at))).toISOString()
+      }
+    }
+    this.#persist()
+    this.audit.write('grant.shortened', { grant_id: grantId, expires_at: g.expires_at })
+    return g
+  }
+
   narrowGrant(grantId, narrow) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
@@ -950,11 +1124,12 @@ export class Vault {
   issuePlaceholder({ grantId, field, uses = null, ttlMs = null }) {
     this.#requireUnlocked()
     const grant = this.db.grants[grantId]
-    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grantId}`)
+    this.assertGrantLive(grant)
     const session = this.assertSessionLive(this.db.sessions[grant.session_id])
     const cred = this.db.credentials[grant.credential_id]
     const fieldName = field || grant.fields[0]
     if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)
+    if (cred.quarantine) throw deny('AV_QUARANTINED', `credential ${cred.slug} is quarantined`, { rule: 'quarantined' })
 
     // `?? 1000` does not catch NaN, only null and undefined, so a malformed
     // budget propagated straight into the placeholder's use ceiling — and
@@ -1009,8 +1184,9 @@ export class Vault {
     // included. The session's own liveness is checked on every use anyway
     // (#authenticate asserts it for token and carrier alike).
     const expires = Math.min(
-      Date.now() + ttl,
-      Date.parse(session.max_expires_at ?? session.expires_at),
+      ttl ? Date.now() + ttl : Infinity,
+      session.infinite ? Infinity : Date.parse(session.max_expires_at ?? session.expires_at),
+      expiryMs(grant.expires_at)
     )
     this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
@@ -1019,7 +1195,7 @@ export class Vault {
       sid: session.id, nonce_hash: minted.nonceHash,
       uses: 0, max_uses: maxUses, state: 'active', dead_reason: null, replaces_id: null,
       created_at: new Date().toISOString(),
-      expires_at: new Date(expires).toISOString(),
+      expires_at: Number.isFinite(expires) ? new Date(expires).toISOString() : null,
       last_used_at: null,
     }
     this.db.placeholders[row.id] = row
@@ -1063,7 +1239,8 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
-    if (Date.parse(row.expires_at) <= Date.now()) {
+    this.assertGrantLive(this.db.grants[row.grant_id])
+    if (row.expires_at !== null && !(expiryMs(row.expires_at) > Date.now())) {
       row.state = 'dead'; row.dead_reason = 'expired'; this.#persist({ durable: false })
       throw deny('AV_PH_STALE', 'placeholder expired', {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
@@ -1247,7 +1424,11 @@ export class Vault {
     return {
       credentials: Object.keys(this.db.credentials).length,
       workspaces: Object.keys(this.db.workspaces).length,
-      sessions_active: live(this.db.sessions, (s) => s.state === 'active' && Date.parse(s.expires_at) > Date.now()),
+      credentials_expiring: Object.values(this.db.credentials).filter(c => {
+        const actualExpiry = c.health?.observed_expires_at || c.expires_at;
+        return actualExpiry && expiryMs(actualExpiry) < Date.now() + 7 * 86400000;
+      }).length,
+      sessions_active: live(this.db.sessions, (s) => s.state === 'active' && sessionExpiryMs(s) > Date.now()),
       grants_active: live(this.db.grants, (g) => g.state === 'active'),
       placeholders_live: live(this.db.placeholders, (p) => p.state === 'active'),
       listeners: Object.keys(this.db.listeners).length,

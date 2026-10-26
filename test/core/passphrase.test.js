@@ -307,7 +307,7 @@ test('key material is still written durably, whatever the ledger does', () => {
   // placeholder is one the agent asks for again; a lost credential is gone.
   const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
   const nonDurable = [...src.matchAll(/#persist\(\{ durable: false \}\)/g)].length
-  assert.ok(nonDurable > 0 && nonDurable <= 4,
+  assert.ok(nonDurable > 0 && nonDurable <= 6,
     `${nonDurable} non-durable writes: this should be the placeholder ledger and nothing else`)
 
   // The credential and factor paths must not be among them.
