@@ -1329,6 +1329,38 @@ const MUTATIONS = [
     to: "      credential_slug: cred.slug, pattern_id: pattern.id, source,\n",
     tests: ['test/security/store-scrub.test.js'],
   },
+  // ---- store F7: rotation ----
+  {
+    // F7 mutation 1: an upstream echoing the old token reaches the agent.
+    what: 'allSecrets skips the retired values',
+    file: 'src/store/vault.js',
+    from: '        for (const r of f.retired || []) {',
+    to: '        for (const r of []) {',
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    what: 'revoke-mode rotation leaves the grants live',
+    file: 'src/store/vault.js',
+    from: "    if (mode === 'revoke') {\n      for (const g of Object.values(this.db.grants)) {",
+    to: "    if (false) {\n      for (const g of Object.values(this.db.grants)) {",
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    // Checked after the grants were revoked, a bad expiry left a half-done
+    // rotation: grants gone, value unchanged.
+    what: 'rotation does not check the expiry before it changes anything',
+    file: 'src/store/vault.js',
+    from: "    if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null', { rule: 'expires_at' })\n",
+    to: '',
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    what: 'rotating to the same value is accepted',
+    file: 'src/store/vault.js',
+    from: '    if (crypt.constantTimeEqual(current, value)) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-rotate.test.js'],
+  },
 ]
 
 let survived = 0

@@ -85,6 +85,8 @@ function isoOrUndefined(v) {
   return Number.isNaN(ms) ? undefined : new Date(ms).toISOString()
 }
 
+const DAY_MS = 86_400_000
+
 // F4's bounds on scrub patterns. The grammar is the gateway's (C5).
 const MAX_SCRUB_SOURCE = 256
 const MAX_SCRUB_PER_CRED = 16
@@ -812,7 +814,10 @@ export class Vault {
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
-      fields: cred.fields.map((f) => ({ name: f.name, sites: f.sites, fp8: f.fp8, size: sizeBucket(f.length) })),
+      fields: cred.fields.map((f) => ({
+        name: f.name, sites: f.sites, fp8: f.fp8, size: sizeBucket(f.length),
+        version: f.key_version ?? 1, rotated_at: f.rotated_at ?? null,
+      })),
       // The profile's own read-only probe. Not sensitive — it is a constant of
       // the connector kind — and it lets a caller show an example request that
       // actually works instead of a made-up path.
@@ -834,13 +839,26 @@ export class Vault {
     return crypt.open(key, field, `${credId}|${fieldName}|${field.key_version}`)
   }
 
-  /** Every unsealed credential value, for the scrubber's match set. */
+  /**
+   * Every unsealed credential value, for the scrubber's match set. That
+   * includes a rotated-out value until its retire_until (F7), so an upstream
+   * that echoes the old token for a while is still scrubbed. Read-only: an
+   * expired retired value is skipped here and dropped at the next rotation.
+   */
   allSecrets() {
     this.#requireUnlocked()
     const out = []
+    const now = Date.now()
     for (const cred of Object.values(this.db.credentials)) {
+      const key = crypt.dek(this.vmk, cred.id)
       for (const f of cred.fields) {
         try { out.push({ secret: this.revealField(cred.id, f.name), label: cred.slug, field: f.name }) } catch { /* skip */ }
+        for (const r of f.retired || []) {
+          if (!(expiryMs(r.retire_until) > now)) continue
+          try {
+            out.push({ secret: crypt.open(key, r, `${cred.id}|${f.name}|${r.key_version}`), label: cred.slug, field: f.name, retired: true })
+          } catch { /* skip */ }
+        }
       }
     }
     return out
@@ -1017,6 +1035,72 @@ export class Vault {
     this.#persist()
     this.audit.write('cred.scrub_pattern_removed', { credential_slug: cred.slug, pattern_id: patternId })
     return true
+  }
+
+  // ------------------------------------------------------- F7: rotation
+
+  /**
+   * Replace a field's value (F7). The current sealed value moves into
+   * `retired`, where it stays only so an upstream that echoes the old token
+   * is still scrubbed until `retire_until`; it is never substituted again.
+   * The new value is sealed under the same per-credential key with the next
+   * key_version in the AAD, as every field is.
+   *
+   * Everything is checked before anything changes, and `mode: 'revoke'`
+   * revokes the credential's grants. The route then denies the credential's
+   * held approvals (pipeline.denyApprovals): a human approved those against
+   * the old key, and the new one may reach further.
+   */
+  rotateCredential(slug, { field = null, value, mode = 'keep', retireMs = DAY_MS, expiresAt = undefined } = {}) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const f = field === null ? cred.fields[0] : cred.fields.find((x) => x.name === field)
+    if (!f) throw deny('AV_NOT_FOUND', `credential ${slug} has no field ${field}`)
+    if (typeof value !== 'string' || value.length === 0) {
+      throw deny('AV_POLICY_DENIED', 'the new value must be a non-empty string')
+    }
+    if (mode !== 'keep' && mode !== 'revoke') throw deny('AV_POLICY_DENIED', 'mode must be keep or revoke', { rule: 'rotate_mode' })
+    if (!Number.isSafeInteger(retireMs) || retireMs < 0 || retireMs > 7 * DAY_MS) {
+      throw deny('AV_POLICY_DENIED', 'the retire window is a whole number of milliseconds, at most 7 days', { rule: 'retire_window' })
+    }
+    // Undefined clears it: the old expiry described the old token.
+    const expires = expiresAt === undefined || expiresAt === null ? null : isoOrUndefined(expiresAt)
+    if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null', { rule: 'expires_at' })
+    const current = this.revealField(cred.id, f.name)
+    if (crypt.constantTimeEqual(current, value)) {
+      throw deny('AV_POLICY_DENIED', 'that is the value already stored', { rule: 'rotate_same_value' })
+    }
+
+    const now = Date.now()
+    const version = (Number.isSafeInteger(f.key_version) ? f.key_version : 1) + 1
+    const sealed = crypt.seal(crypt.dek(this.vmk, cred.id), value, `${cred.id}|${f.name}|${version}`)
+    const retireUntil = new Date(now + retireMs).toISOString()
+    // A zero window keeps nothing: an old value nobody will scrub for is
+    // only ciphertext of a secret, lying around.
+    const kept = (f.retired || []).filter((r) => expiryMs(r.retire_until) > now)
+    const retired = retireMs > 0
+      ? [...kept, { ct: f.ct, nonce: f.nonce, key_version: f.key_version ?? 1, retired_at: new Date(now).toISOString(), retire_until: retireUntil }]
+      : kept
+    const previousFp8 = f.fp8
+    Object.assign(f, {
+      ct: sealed.ct, nonce: sealed.nonce, key_version: version, retired,
+      fp8: crypt.fingerprint8(this.kFingerprint, value), length: value.length,
+      rotated_at: new Date(now).toISOString(),
+    })
+    cred.expires_at = expires
+    let revokedGrants = 0
+    if (mode === 'revoke') {
+      for (const g of Object.values(this.db.grants)) {
+        if (g.credential_id === cred.id && g.state === 'active') { this.revokeGrant(g.id, 'credential_rotated'); revokedGrants++ }
+      }
+    }
+    this.#persist()
+    const rotated = {
+      field: f.name, version, previous_fp8: previousFp8, fp8: f.fp8, mode, revoked_grants: revokedGrants, retire_until: retireUntil,
+    }
+    this.audit.write('cred.rotated', { credential_slug: cred.slug, ...rotated })
+    return { credential: this.publicCredential(cred), rotated }
   }
 
   deleteCredential(slug) {
