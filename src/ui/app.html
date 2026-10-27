@@ -604,6 +604,33 @@
         listener, and asks for your passphrase or fingerprint every time you create one, for
         the same reason.</p></div>
         ${code(`${c.cli} session create --cred ${c.cred} --infinite`, 'Revoke it when you are done: session revoke <sid>.')}
+        <div class="prose"><h3>3c. Tighter limits</h3>
+        <p>A grant can carry more than methods, paths and a budget. Each of these only ever takes
+        capability away, and each is under <strong>Advanced limits</strong> on the Sessions page too:</p>
+        <ul>
+          <li><strong>Rate, concurrency and quota</strong>: <code>--rate 60/min</code>,
+            <code>--concurrency 4</code>, <code>--quota 1000/day</code>. Over the limit is
+            <code>AV_QUOTA_EXCEEDED</code> with the seconds to wait.</li>
+          <li><strong>Routes</strong>: <code>--route GET:/repos/**</code>, repeated, so a method is allowed
+            only on its own paths.</li>
+          <li><strong>Payload rules</strong>: <code>--payload-file F</code> constrains JSON fields, form
+            fields and query parameters; <code>--graphql query</code> allows GraphQL queries and nothing
+            else. Constrain the request's own fields, never the place the placeholder goes.</li>
+          <li><strong>Spend</strong>, for model providers: <code>--spend-tokens 50000</code> or
+            <code>--spend-usd 5</code>. The dollar figure is an estimate from a dated price table.</li>
+          <li><strong>Redirects</strong>: <code>--redirects 2</code> follows up to two, each checked
+            against the grant; none are followed by default.</li>
+          <li><strong>Grant lifetime</strong>: <code>--grant-ttl 30</code> ends one credential's access
+            after thirty minutes while the session goes on (<code>AV_GRANT_EXPIRED</code>).</li>
+        </ul></div>
+        ${code(`${c.cli} session create --cred ${c.cred} --methods GET,POST --rate 60/min --route GET:/repos/** --route POST:/repos/*/issues --grant-ttl 60`)}
+        <div class="prose"><h3>3d. Save the shape as a template</h3>
+        <p>A template is a session shape you wrote once and reuse: by name from the command line or the
+        Sessions page, or named by an agent asking for a session. It is configuration, not standing
+        approval: every session made from it still needs you, the fields on top of it can only narrow it,
+        and if the template changes after you looked at it, the create is refused.</p></div>
+        ${code(`${c.cli} template save gh-read --cred ${c.cred} --methods GET,HEAD
+${c.cli} session create --template gh-read`)}
         <div class="prose"><h3>4. Connect the agent</h3>
         <p>See <strong>Connect your agent</strong> for the three ways to do this.
         The shortest one is <code>${esc(c.cli)} mcp install --agent claude-code</code>.</p></div>`,
@@ -619,7 +646,7 @@
         ${code(`${c.cli} mcp install --agent claude-code`, 'Also: cursor, gemini, codex.')}
         ${code(`${c.cli} mcp install --agent codex --print`, 'Show the block without writing anything.')}
         <div class="prose">
-        <p>Restart the agent afterwards. It gains seven tools:</p>
+        <p>Restart the agent afterwards. It gains nine tools:</p>
         <ul>
           <li><code>vault_status</code> — is the vault reachable and unlocked</li>
           <li><code>vault_list_creds</code> — what this session may use, and where each placeholder goes</li>
@@ -628,7 +655,17 @@
           <li><code>vault_explain_denial</code> — why that was refused, and what is allowed instead</li>
           <li><code>vault_request_session</code> — ask you for a session; nothing exists until you approve it here or with <span class="mono">agent-vault approve</span></li>
           <li><code>vault_approval_status</code> — whether you have answered a write that was held for you</li>
+          <li><code>vault_describe_access</code> — what this session may do right now: hosts, methods, paths,
+            approval mode, budgets and limits, lifetimes, and where each placeholder goes. Read-only: it
+            returns no secret, no token and no placeholder, and changes nothing</li>
+          <li><code>vault_preflight</code> — would this request be allowed, held for you, or refused?
+            Nothing is sent upstream and nothing is spent; it is a prediction, and the real request is
+            checked again</li>
         </ul>
+        <p>The agent is told to call <code>vault_preflight</code> before a write it is unsure of, and
+        <code>vault_describe_access</code> to learn its limits. A session request can name a template you
+        saved, <code>vault_request_session { template }</code>, so you are shown a shape you wrote
+        rather than a policy to read.</p>
         <p>No token is written to the config file: the bridge finds your current session
         from the state file, which is written whether you create the session here or with
         <span class="mono">agent-vault session create</span>. Only the session that was made
@@ -767,6 +804,9 @@ ${c.cli} unlock`)}
         own key and use it to approve everything else. The daemon verifies each later
         signature itself and checks it against the operation in the request it received, so a
         page that shows one action and submits another is caught.</p>
+        <p>To move to a new device or authenticator, use <strong>Replace authenticator</strong> on the
+        Overview page. The new key is registered first, and enrolled only when the one you have now
+        signs for it, so a replacement needs the old key, not just access to this page.</p>
         <p>Both factors work everywhere: the passphrase is what the command line uses, and a
         confirmed passphrase opens a five-minute window so you are not asked on every call.</p></div>`,
     },
@@ -780,7 +820,96 @@ ${c.cli} unlock`)}
         <p>Revoking a session ends it and every placeholder it handed out, at once, whatever
         lifetime it was given.</p>
         <p>Revoking: agent-vault session revoke &lt;sid&gt;, or Panic, ends an infinite session like any other.</p></div>
-        ${code(`${c.cli} session revoke <sid>`)}`,
+        ${code(`${c.cli} session revoke <sid>`)}
+        <div class="prose"><h3>Narrow it instead</h3>
+        <p>A live session can be tightened without ending it: drop its writes, make every request wait
+        for you, or give it an hour to live. A narrow is intersected with what the session already has,
+        so it can never widen anything, and an endless session given a lifetime stops being endless. The
+        Sessions page has the three common ones as buttons.</p></div>
+        ${code(`${c.cli} session narrow <sid> --methods GET,HEAD
+${c.cli} session narrow <sid> --approval each --ttl 60`)}
+        <div class="prose"><h3>Panic</h3>
+        <p>Panic revokes every session, infinite ones included, denies every held request and every
+        session request, and can lock the vault as well. Nothing comes back by itself: agents need new
+        sessions afterwards. The Overview page has a Panic button, and it asks for no fingerprint, because
+        in an emergency a prompt only slows you down.</p></div>
+        ${code(`${c.cli} panic --lock --reason "agent went off script"`)}
+        <div class="prose"><h3>Quarantine a credential</h3>
+        <p>Quarantine stops every use of one credential at once (<code>AV_QUARANTINED</code>), and denies
+        anything waiting on it. Its sessions are paused, not revoked: releasing it brings back the ones
+        that are still live. Releasing needs your passphrase or fingerprint; quarantining does not.</p></div>
+        ${code(`${c.cli} cred quarantine ${c.cred} --reason "odd traffic"
+${c.cli} cred release ${c.cred}`)}
+        <div class="prose"><h3>Tripwires</h3>
+        <p>Tripwires act for you when a session behaves like an attack: a replayed placeholder, a
+        placeholder put where it does not belong, one session's placeholder used in another, or repeated
+        attempts at paths you denied. The session is revoked before the refused request even returns.
+        They are off until you turn them on. Turning them on needs nothing; turning them off or changing
+        the rules needs your passphrase or fingerprint.</p>
+        <p>The trade, stated plainly: panic, quarantine and turning tripwires on are open to anything that
+        can reach the vault, because each one only takes capability away. So an agent can end your
+        sessions or quarantine a credential. That is a denial of service against your own work, and it is
+        audited; it can never gain the agent anything.</p></div>
+        ${code(`${c.cli} tripwire on
+${c.cli} tripwire show`)}
+        <div class="prose"><h3>Rotate a credential</h3>
+        <p>Rotation stores a new value under the same name. Sessions keep working with the new value, or,
+        with <code>--revoke</code>, lose their grants at once. The old value stays scrubbed from responses
+        for a while (a day by default), in case an upstream echoes it. Anything waiting for your approval
+        on that credential is denied, because you approved it against the old key.</p></div>
+        ${code(`${c.cli} cred rotate ${c.cred} --retire-hours 24`)}
+        <div class="prose"><h3>Know when a token runs out</h3>
+        <p>Record when a token expires, and the Overview page and <code>doctor</code> warn you a week
+        ahead. It is a reminder, not a lock: an expired token is still sent until the upstream refuses
+        it. <code>cred test</code> runs the connector's own read-only probe and records whether the
+        token still works; GitHub also reports expiry in its responses, which the vault notices on
+        its own.</p></div>
+        ${code(`${c.cli} cred expiry ${c.cred} 2027-01-31
+${c.cli} cred test ${c.cred}`)}
+        <div class="prose"><h3>Extra shapes to scrub, and pinned keys</h3>
+        <p>Every stored value is already scrubbed from responses. A scrub pattern adds another shape of
+        token to redact, for an upstream that hands out tokens of its own. A pin refuses any TLS key for
+        a host that you did not pin, so nothing is sent through a proxy that intercepts TLS. Pins are set
+        from the command line, where the live chain can be fetched and checked out of band; the
+        Credentials page shows them.</p></div>
+        ${code(`${c.cli} cred scrub ${c.cred} --add 'acme_[A-Za-z0-9]{20,40}' --sample 'token acme_...'
+${c.cli} cred pin ${c.cred} --host api.github.com --live`)}
+        <div class="prose"><h3>Hear about it when something is waiting</h3>
+        <p>A held request or a session request waits for you. <code>watch</code> prints each one the moment
+        it arrives and shows a desktop notification; the Overview page can do the same while its tab is
+        open. A notice is a signal, never an approval: it carries what the daemon saw, never what the
+        agent claimed, and it only opens Approvals. An optional webhook sends the same signal elsewhere:
+        HTTPS only, counts and ids by default, and its URL is kept sealed like a credential.</p></div>
+        ${code(`${c.cli} watch
+${c.cli} notify set --detail minimal`)}
+        <div class="prose"><h3>Review what each session did</h3>
+        <p>The detail view of a session, and <code>session show</code>, list what it may do, what it did,
+        what was refused and what waited for you. The access review covers every session and points out
+        methods that were granted and never used. Both say so when the audit log does not cover the
+        whole period: missing records are never counted as no activity.</p></div>
+        ${code(`${c.cli} session show <sid> --markdown
+${c.cli} report --since 7d`)}
+        <div class="prose"><h3>Back up and restore</h3>
+        <p>The backup is encrypted with a recovery passphrase that is not your vault passphrase. Sessions and placeholders are never backed up: after a restore, every agent needs a new session.</p>
+        <p>Exporting asks for your passphrase every time, even inside the five-minute window, and is
+        refused on a vault with no passphrase: a backup holds every secret, and an agent that could make
+        one would choose its own recovery passphrase. Quarantines travel with the backup and stay in
+        force after a restore.</p></div>
+        ${code(`${c.cli} backup export --out vault-backup.json
+${c.cli} backup inspect vault-backup.json
+${c.cli} backup restore vault-backup.json --on-conflict rename`)}
+        <div class="prose"><h3>Keep a witness</h3>
+        <p>The audit log is hash-chained, so an edit is detectable. Removing records from the end is not,
+        unless something outside the log remembers where the end was. A witness is that memory: a
+        checkpoint of the head, authenticated with a key only this vault holds, appended to a file. Verify
+        against it later, and a log that was cut short shows up.</p>
+        <p>The honest limit: a witness file that an agent can write, it can truncate. Its value comes from
+        being copied somewhere the agent cannot rewrite, such as another machine or a write-once store.
+        The Audit page shows the head and copies a checkpoint for you.</p></div>
+        ${code(`${c.cli} audit witness --out ~/.agent-vault/witness.jsonl
+# every hour, from cron:
+0 * * * * ${c.cli} audit witness
+${c.cli} audit verify --witness ~/.agent-vault/witness.jsonl`)}`,
     },
     {
       id: 'refused',
@@ -835,14 +964,30 @@ ${c.cli} status                     is it running, and what is live
 ${c.cli} doctor                     diagnose a broken install
 ${c.cli} quickstart                 credential, session, and what to hand the agent
 
-${c.cli} cred add [slug] [--kind K] store a credential (value read from the terminal)
+${c.cli} cred add [slug] [--kind K] [--host H] [--expires YYYY-MM-DD]
+                               store a credential (value read from the terminal)
 ${c.cli} cred list | cred rm SLUG
+${c.cli} cred rotate SLUG [--field F] [--revoke] [--retire-hours N]
+                               replace the value; sessions keep working
+${c.cli} cred test [SLUG | --all]   run the connector's read-only probe
+${c.cli} cred expiry SLUG YYYY-MM-DD|none
+${c.cli} cred scrub SLUG [--add PATTERN [--sample TEXT] | --rm ID]
+${c.cli} cred pin SLUG --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
+${c.cli} cred quarantine SLUG [--reason T] | cred release SLUG
 ${c.cli} profiles                   the built-in connector kinds and their ceilings
 
 ${c.cli} session create --cred S[,S...] [--methods GET,POST] [--paths "/repos/**"]
                [--budget N] [--uses N] [--approval each|on-write|first-use|auto]
                [--ttl HOURS | --infinite] [--label TEXT] [--grants-file F]
+               [--template NAME] [--rate 60/min] [--concurrency N] [--quota 1000/day]
+               [--route GET:/repos/**]... [--payload-file F] [--graphql query]
+               [--redirects N] [--spend-tokens N] [--spend-usd X] [--grant-ttl MIN]
 ${c.cli} session list | session revoke [SID]
+${c.cli} session narrow [SID] [--cred S] [any limit above] [--ttl MIN]
+                               tighten a live session; it can never widen
+${c.cli} session show [SID] [--markdown]
+${c.cli} template save NAME --cred S [session flags] | template list
+${c.cli} template show NAME | template rm NAME
 ${c.cli} ph next CRED [--uses N]    issue a placeholder
 ${c.cli} ph check PLACEHOLDER       is it well formed (offline; not whether it is still live)
 ${c.cli} ph pattern                 the regex that recognises one
@@ -852,12 +997,21 @@ ${c.cli} env --out F [--force] [--map NAME=S[:base_url]]... [--map-file F] [--pr
                                an env file of placeholders, 0600, never replaced unasked
 ${c.cli} exec [--map NAME=S]... -- COMMAND
                                run a command with those exports
+${c.cli} preflight --cred S --method M --path P [--body-file F]
+                               would this request pass? nothing is sent
 ${c.cli} mcp                        stdio transport
 ${c.cli} mcp url                    the Streamable HTTP endpoint
 ${c.cli} mcp install --agent AGENT  write the config for that tool
 
-${c.cli} approvals | approve ID | deny ID
-${c.cli} audit tail [--limit N] | audit verify
+${c.cli} approvals [--show ID] | approve ID | deny ID
+${c.cli} watch [--no-notify] [--open]
+${c.cli} notify set | notify show | notify off | notify test
+${c.cli} panic [--lock] [--reason T]
+${c.cli} tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
+${c.cli} audit tail [--limit N] | audit verify [--witness F]
+${c.cli} audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
+${c.cli} report [--since 7d] [--markdown]
+${c.cli} backup export --out F | backup inspect F | backup restore F [--on-conflict skip|rename|fail]
 ${c.cli} lock | unlock
 ${c.cli} passphrase set | passphrase remove
 ${c.cli} listen add ID --address HOST:PORT | listen list | listen rm ID
