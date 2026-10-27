@@ -784,7 +784,8 @@ test('a name a server could fold onto a rule\'s name is refused, and a repeated 
   for (const [query, rule] of [
     ['dry_run=true&FORCE=true', 'request_ambiguous'],
     ['dry_run=true&%66orce=true', 'request_ambiguous'],
-    ['dry_run=true&force[]=true', 'request_ambiguous'],
+    // An entry under the rule's name is read as the rule's parameter.
+    ['dry_run=true&force[]=true', 'payload:query:force:absent'],
     ['dry_run=true&Force=1', 'request_ambiguous'],
     // Satisfied for this reader and missing for one that does not decode
     // names, or that does not fold `.` into `_`.
@@ -827,7 +828,13 @@ const decode = s => new URLSearchParams(`x=${s}`).get('x')
 const pairsOf = (query, separator) => query.split(separator).filter(Boolean).map(p => { const i = p.indexOf('='); return i === -1 ? [decode(p), ''] : [decode(p.slice(0, i)), decode(p.slice(i + 1))] })
 const READERS = {
   whatwg: q => [...new URLSearchParams(q)],
-  rack: q => pairsOf(q, /[&;]/),
+  // Rack 2.2's normalize_params: a name is what is left after any brackets
+  // at its start, up to the next bracket, so `[force]`, `]force` and
+  // `force]` are `force`.
+  rack: q => pairsOf(q, /[&;]/).map(([k, v]) => [/^[[\]]*([^[\]]*)/.exec(k)[1], v]),
+  // Express's default query parser, qs: the name before the first `[`, or
+  // the text of the first bracket pair when the name opens with one.
+  qs: q => pairsOf(q, '&').map(([k, v]) => [k.startsWith('[') ? (/^\[([^[\]]*)\]/.exec(k)?.[1] ?? k) : k.replace(/\[.*$/s, ''), v]),
   // PHP: `&` only; a name read up to its first NUL with its leading spaces
   // dropped, then space and `.` read as `_`, and `name[...]` is the array
   // `name`.
@@ -841,7 +848,10 @@ function generatedQueries(n) {
   const names = ['a', 'dry_run', 'force', 'note', '_method', '.method', '%5Fmethod', 'FORCE', '%66orce', 'dry.run', 'force[]', 'x-http-method-override', '__method', 'b+c', 'q%20x', '%64ry_run',
     // Names readers cut, trim or decode differently: a NUL, a space or `+`
     // at either end, a tab, another control character, non-ASCII, none.
-    'force%00', 'force%00x', '_method%00', '+force', '++force', '%20force', '%20%20_method', '+_method', 'force+', 'force%20', '%09force', 'force%09', '%01_method', '%7Fforce', 'forc%C3%A9', '%C3%A9', '']
+    'force%00', 'force%00x', '_method%00', '+force', '++force', '%20force', '%20%20_method', '+_method', 'force+', 'force%20', '%09force', 'force%09', '%01_method', '%7Fforce', 'forc%C3%A9', '%C3%A9', '',
+    // Bracket names: wrapped, as qs and Rack 2.2 read them, and the list
+    // entries APIs send.
+    '[force]', '%5Bforce%5D', '[force][]', '[_method]', '%5B_method%5D', ']force', '[]force', 'force]', '_method]', 'expand[]', 'items[0][price]', 'force[x]']
   const values = ['1', 'true', 'GET', 'DELETE', 'x%3By', 'a+b', '', '%26force%3D1']
   const out = []
   for (let i = 0; i < n; i++) {
@@ -1148,4 +1158,172 @@ test('ordinary provider traffic is sent unchanged under the name check', async t
   assert.equal((await u.pipeline.handle(u.req({ method: 'POST', headers: [...u.req().headers, multipart], body: upload }))).status, 200)
   const h = hopFixture(t, {}, '/v1/charges?limit=10&expand[]=data')
   assert.equal((await h.pipeline.handle(h.req())).status, 200); assert.equal(h.sent[1].url, 'https://api.example.test/v1/charges?limit=10&expand[]=data')
+})
+
+// ------------------------------------- round 7: bracket names
+
+// Express's default query parser (qs) and Rack 2.2 read a name that opens
+// with a bracket by what is inside it: `[force]` is `force`, `[_method]` is
+// `_method`. Rack 2.2 also drops brackets at either end, so `]force`,
+// `[]force` and `force]` are `force` too. A field name now has to start
+// with a letter, a digit or one of `_ - . $`, and foldedNames reads a name
+// the way those two parsers do.
+const BRACKET_PAYLOAD_ROWS = [
+  ['query', 'dry_run=true&[force]=true'],
+  ['query', 'dry_run=true&%5Bforce%5D=true'],
+  ['query', 'dry_run=true&[force][]=true'],
+  ['form', 'amount=2000&[force]=1'],
+]
+const BRACKET_METHOD_ROWS = [
+  ['query', '[_method]=DELETE'],
+  ['form', 'a=1&[_method]=DELETE'],
+  ['form', 'a=1&%5B_method%5D=DELETE'],
+]
+
+test('Grok round 7, payload: a bracket-wrapped name is refused, and a hop to it is not followed', async t => {
+  for (const [where, pairs] of BRACKET_PAYLOAD_ROWS) {
+    await t.test(`${where} ${pairs}`, async t => {
+      const f = where === 'query' ? fixture(t, FORCE) : fixture(t, FORM_FORCE)
+      const result = await f.pipeline.handle(where === 'query' ? f.req({ query: pairs }) : f.req({ method: 'POST', headers: [...f.req().headers, form], body: Buffer.from(pairs) }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'request_ambiguous')
+      assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0); assert.equal(f.grant.budget_used, 0)
+      const h = hopFixture(t, where === 'query' ? FORCE : QUERY_AMOUNT, `https://api.example.test/next?${pairs}`)
+      const hop = await h.pipeline.handle(h.req({ query: where === 'query' ? 'dry_run=true' : 'amount=1' }))
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+})
+
+test('Grok round 7, method: a bracket-wrapped _method is refused, and a hop to it is not followed', async t => {
+  for (const [where, pairs] of BRACKET_METHOD_ROWS) {
+    await t.test(`${where} ${pairs}`, async t => {
+      const f = fixture(t, { methods: ['GET', 'POST'] })
+      const result = await f.pipeline.handle(where === 'query' ? f.req({ method: 'POST', query: pairs }) : f.req({ method: 'POST', headers: [...f.req().headers, form], body: Buffer.from(pairs) }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'method_override')
+      assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0)
+      const h = hopFixture(t, { routes: ROUTES }, `https://api.example.test/admin/keys?${pairs}`)
+      const hop = await h.pipeline.handle(h.req({ path: '/p/test/public/start' }))
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+})
+
+// Rack 2.2 alone reads these as `force` and `_method`. `force]` starts with
+// a letter, so the name check passes it, and the fold refuses it.
+test('a name Rack 2.2 reads as a ruled one or as _method is refused', async t => {
+  for (const [policy, request, rule] of [
+    [FORCE, { query: 'dry_run=true&]force=true' }, 'request_ambiguous'],
+    [FORCE, { query: 'dry_run=true&[]force=true' }, 'request_ambiguous'],
+    [FORCE, { query: 'dry_run=true&[[force]]=true' }, 'request_ambiguous'],
+    [FORCE, { query: 'dry_run=true&force]=true' }, 'request_ambiguous'],
+    [FORCE, { query: 'dry_run=true&[force=true' }, 'request_ambiguous'],
+    [{ methods: ['GET', 'POST'] }, { method: 'POST', query: '_method]=DELETE' }, 'method_override'],
+    [{ methods: ['GET', 'POST'] }, { method: 'POST', query: ']_method=DELETE' }, 'method_override'],
+  ]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req(request))
+    assert.equal(result.status, 403, request.query); assert.equal(problem(result).rule, rule, request.query); assert.equal(f.sent.length, 0, request.query)
+  }
+})
+
+// A name that opens with punctuation other than `_ - . $`, with no rules at
+// all. An override-shaped one that names the request's own method is still
+// a name no API sends.
+test('a name that starts with punctuation is refused on every path, and a hop to it is not followed', async t => {
+  for (const query of ['[x]=1', '%5Bx%5D=1', ']x=1', '[]=1', '[_method]=GET', '@x=1', '~x=1', '!x=1', '*x=1', '%2Fx=1', ':x=1', 'a=1&{x}=2']) {
+    await t.test(query, async t => {
+      const f = fixture(t)
+      const result = await f.pipeline.handle(f.req({ query }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'request_ambiguous'); assert.equal(f.sent.length, 0)
+      const h = hopFixture(t, {}, `/next?${query}`)
+      const hop = await h.pipeline.handle(h.req())
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+  for (const body of ['a=1&[force]=1', `${part('[force]', '1')}--XyZ--\r\n`]) {
+    const f = fixture(t)
+    const type = body.startsWith('--') ? multipart : form
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, type], body: Buffer.from(body) }))
+    assert.equal(result.status, 403, body); assert.equal(problem(result).rule, 'request_ambiguous', body); assert.equal(f.sent.length, 0, body)
+  }
+  // The second layer without the first: the fold reads bracket names.
+  for (const name of ['[_method]', '_method]', ']_method', '[]_method', '[_METHOD][]']) assert.equal(isOverrideField(name), true, name)
+  for (const name of ['[force]', '[force][]', ']force', 'force]']) assert.ok(foldedNames(name).includes('force'), name)
+  for (const query of ['dry_run=true&[force]=true', 'dry_run=true&%5Bforce%5D=true', 'dry_run=true&[force][]=true', 'dry_run=true&force]=true']) {
+    assert.throws(() => evaluatePayload([FORCE.payload], { query }), { rule: 'request_ambiguous' }, query)
+  }
+  for (const name of ['[x]', ']x', '@x', '~x', '!x']) assert.equal(isStrayName(name), true, name)
+  for (const name of ['x', '0', '_x', '-x', '.x', '$filter', 'expand[]', 'items[0][price]']) assert.equal(isStrayName(name), false, name)
+})
+
+test('ordinary traffic that opens a name with $ or a JSON key with $ or @ is sent', async t => {
+  // Microsoft Graph and other OData APIs.
+  for (const query of ['$select=displayName,mail&$filter=startswith(displayName,%27a%27)&$top=10', '$expand=members&$count=true']) {
+    const f = fixture(t, { payload: { query: { $top: { max_length: 4 } } } })
+    const result = await f.pipeline.handle(f.req({ path: '/p/test/v1.0/users', query }))
+    assert.equal(result.status, 200, `${query}: ${result.body}`); assert.ok(f.sent[0].url.endsWith(`?${query}`), query)
+  }
+  const h = hopFixture(t, {}, '/v1.0/users?$skiptoken=abc&$top=10')
+  assert.equal((await h.pipeline.handle(h.req())).status, 200); assert.equal(h.sent[1].url, 'https://api.example.test/v1.0/users?$skiptoken=abc&$top=10')
+  // A JSON body is read by no bracket parser, so a key there may open with
+  // `$` or `@`.
+  const j = fixture(t)
+  const body = Buffer.from('{"$schema":"https://json-schema.org/draft/2020-12/schema","@context":"https://schema.org","name":"x"}')
+  const result = await j.pipeline.handle(j.req({ method: 'POST', headers: [...j.req().headers, json], body }))
+  assert.equal(result.status, 200, result.body.toString()); assert.ok(j.sent[0].body.equals(body))
+})
+
+// ------------------------------------- round 7: list names repeat
+
+// `expand[]=a&expand[]=b` is a list of two, to every reader, and Stripe sends
+// it. A repeat of a name in the bracket syntax is the next entry, not a
+// duplicate. A rule on the base checks every entry.
+test('a repeated list name is sent under unrelated rules, and a rule on its base checks every entry', async t => {
+  for (const [policy, path, query] of [
+    [{ payload: { query: { limit: { required: true } } } }, '/p/test/v1/charges', 'limit=10&expand[]=customer&expand[]=invoice'],
+    [{ payload: { query: { limit: { required: true } } } }, '/p/test/v1/charges', 'limit=10&expand%5B%5D=customer&expand%5B%5D=invoice'],
+    [{ payload: { query: { limit: { required: true } } } }, '/p/test/v1/charges', 'limit=10&created[gte]=1609459200&created[lte]=1640995200'],
+    [{ payload: { query: { expand: { one_of: ['customer', 'invoice'] } } } }, '/p/test/v1/charges', 'expand[]=customer&expand[]=invoice'],
+    [{ payload: { query: { expand: { required: true } } } }, '/p/test/v1/charges', 'expand[]=customer'],
+    [{ payload: { query: { expand: {} }, query_strict: true } }, '/p/test/v1/charges', 'expand[]=customer&expand[]=invoice'],
+  ]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ path, query }))
+    assert.equal(result.status, 200, `${query}: ${result.body}`); assert.ok(f.sent[0].url.endsWith(`?${query}`), query)
+  }
+  // A Stripe form with line items, under an unrelated form rule.
+  const s = fixture(t, { payload: { form: { mode: { one_of: ['payment'] } } } })
+  const items = 'mode=payment&line_items[0][price]=price_1&line_items[0][quantity]=1&line_items[1][price]=price_2&line_items[1][quantity]=2&payment_method_types[]=card&payment_method_types[]=link'
+  const sent = await s.pipeline.handle(s.req({ method: 'POST', path: '/p/test/v1/checkout/sessions', headers: [...s.req().headers, form], body: Buffer.from(items) }))
+  assert.equal(sent.status, 200, sent.body.toString()); assert.equal(s.sent[0].body.toString(), items)
+  // And on a hop.
+  const h = hopFixture(t, { payload: { query: { limit: { required: true } } } }, '/v1/charges?limit=10&expand[]=customer&expand[]=invoice')
+  assert.equal((await h.pipeline.handle(h.req({ query: 'limit=1' }))).status, 200); assert.equal(h.sent[1].url, 'https://api.example.test/v1/charges?limit=10&expand[]=customer&expand[]=invoice')
+  // Refused: a plain name twice, an entry a rule on the base does not allow,
+  // any entry under `absent`, and an entry under a respelled base.
+  for (const [policy, query, rule] of [
+    [FORCE, 'dry_run=true&force=1&force=2', 'payload_duplicate_key'],
+    [{ payload: { query: { limit: { required: true } } } }, 'limit=10&limit=20', 'payload_duplicate_key'],
+    [{ payload: { query: { expand: { one_of: ['customer', 'invoice'] } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:expand:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand=customer&expand[]=invoice', 'payload:query:expand:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand%5B%5D=customer&expand%5B%5D=invoice', 'payload:query:expand:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand[x]=invoice', 'payload:query:expand:one_of'],
+    [{ payload: { query: { expand: { max_length: 8 } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:expand:max_length'],
+    [{ payload: { query: { expand: { absent: true } } } }, 'expand[]=customer', 'payload:query:expand:absent'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, '%65xpand[]=invoice', 'request_ambiguous'],
+    [{ payload: { query: { expand: {} }, query_strict: true } }, 'expand[]=customer&other[]=x', 'payload:query:other%5B%5D:strict'],
+  ]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ query }))
+    assert.equal(result.status, 403, query); assert.equal(problem(result).rule, rule, query); assert.equal(f.sent.length, 0, query)
+  }
+  // A form rule reads the entries of a form body the same way.
+  for (const [body, status] of [['mode=payment&items[]=a&items[]=b', 200], ['mode=payment&items[]=a&items[]=c', 403], ['mode=payment&mode=setup', 403]]) {
+    const f = fixture(t, { payload: { form: { mode: { one_of: ['payment'] }, items: { one_of: ['a', 'b'] } } } })
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, form], body: Buffer.from(body) }))
+    assert.equal(result.status, status, body)
+  }
+  // The payload rules alone, without the gateway.
+  assert.doesNotThrow(() => evaluatePayload([{ query: { limit: { required: true } } }], { query: 'limit=1&expand[]=a&expand[]=b' }))
+  assert.throws(() => evaluatePayload([{ query: { expand: { one_of: ['a'] } } }], { query: 'expand[]=a&expand[]=b' }), { rule: 'payload:query:expand:one_of' })
 })

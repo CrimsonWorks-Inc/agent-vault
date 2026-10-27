@@ -36,15 +36,30 @@ const METHOD_OVERRIDE_FIELDS = new Set(['_method', '__method', 'x_http_method_ov
  * `_method` field to Rack and PHP. The name as written is folded as well as
  * the name PHP keeps, and letter case and `-` against `_` are folded too: a
  * name only ever folds to refuse more.
+ *
+ * Express's default query parser (qs) and Rack 2.2 read the bracket syntax
+ * too: the name is the part before the first `[`, and a name that opens
+ * with a bracket is the text inside it, so `[force]` is `force` and
+ * `[_method]` is `_method`. Rack 2.2 drops any brackets at either end
+ * (`\A[\[\]]*([^\[\]]+)\]*`), so `]force`, `[]force` and `force]` are
+ * `force` as well. That reading is folded too.
  */
 export function foldedNames(name) {
   const out = new Set()
   for (const base of [String(name), String(name).split('\0')[0].replace(/^ +/, '')]) {
     const n = base.toLowerCase().replace(/[ .-]/g, '_')
-    out.add(n.replace(/\[.*$/s, '')).add(n.replace(/\[/g, '_'))
+    out.add(n.replace(/\[.*$/s, '')).add(n.replace(/\[/g, '_')).add(/^[[\]]*([^[\]]*)/.exec(n)[1])
   }
   return [...out]
 }
+
+/**
+ * A name in the bracket syntax qs, Rack and PHP read as an entry in a list
+ * or an object: a base, then one or more `[...]`, as `expand[]`,
+ * `items[0][price]` or `metadata[order_id]`. Its base, or undefined for any
+ * other name.
+ */
+export const listBase = (name) => /^([^[\]]+)(?:\[[^[\]]*\])+$/.exec(name)?.[1]
 
 export const isOverrideField = (name) => foldedNames(name).some((n) => METHOD_OVERRIDE_FIELDS.has(n))
 
@@ -55,8 +70,15 @@ export const isOverrideField = (name) => foldedNames(name).some((n) => METHOD_OV
  * reader sees another name, and folding each such shape onto the names the
  * rules use would be one more list of spellings to get wrong. No API names a
  * parameter so, so the gateway refuses a request that does.
+ *
+ * A JSON key is held to that. A query, form or multipart field name must
+ * also start with a letter, a digit, `_`, `-`, `.` or `$` (OData's
+ * `$filter`): qs and Rack 2.2 read `[force]` as `force`, and a name that
+ * opens with other punctuation is no parameter an API names. A JSON key is
+ * read by no bracket parser, and `$schema` and `@context` are ordinary there.
  */
-export const isStrayName = (name) => !name || /[^\x20-\x7e]|^ | $/.test(name)
+export const isStrayKey = (name) => !name || /[^\x20-\x7e]|^ | $/.test(name)
+export const isStrayName = (name) => isStrayKey(name) || !/^[A-Za-z0-9_.$-]/.test(name)
 
 /** One component of a query or form body, decoded exactly as URLSearchParams does. */
 const formDecode = (s) => new URLSearchParams(`x=${s}`).get('x')
@@ -109,10 +131,10 @@ const bothReadings = (raw) => [...queryParams(raw), ...(raw.includes(';') ? quer
  * frameworks differ on which one wins.
  */
 function fields(query, mediaType, body) {
-  const names = [], overrides = []
+  const names = [], keys = [], overrides = []
   const read = (list) => { for (const p of list) { names.push(p.name); if (isOverrideField(p.name)) overrides.push(p.value) } }
   read(bothReadings(query))
-  if (body == null || !body.length) return { names, overrides }
+  if (body == null || !body.length) return { names, keys, overrides }
   const text = (Buffer.isBuffer(body) ? body.toString('utf8') : String(body)).replace(/^﻿/, '')
   if (mediaType === 'application/x-www-form-urlencoded') read(bothReadings(text))
   else if (mediaType === 'multipart/form-data') {
@@ -129,12 +151,12 @@ function fields(query, mediaType, body) {
     }
   } else if (/[/+]json$/.test(mediaType)) {
     let parsed
-    try { parsed = JSON.parse(text) } catch { return { names, overrides } }
+    try { parsed = JSON.parse(text) } catch { return { names, keys, overrides } }
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      for (const [k, v] of topLevelJsonFields(text, isOverrideField)) { names.push(k); if (isOverrideField(k)) overrides.push(typeof v === 'string' ? v : JSON.stringify(v)) }
+      for (const [k, v] of topLevelJsonFields(text, isOverrideField)) { keys.push(k); if (isOverrideField(k)) overrides.push(typeof v === 'string' ? v : JSON.stringify(v)) }
     }
   }
-  return { names, overrides }
+  return { names, keys, overrides }
 }
 
 /**
@@ -188,7 +210,8 @@ function topLevelJsonFields(text, wanted) {
  *   so the URL parser would send something other than what was read.
  * - `strayName`: a field name in the query, a form or multipart body, or at
  *   the top level of a JSON body is one its readers do not agree on
- *   (`isStrayName`), whatever rules a grant carries.
+ *   (`isStrayName`, or `isStrayKey` for a JSON key), whatever rules a grant
+ *   carries.
  * - `headers`, `body`: as given; the body is read by the payload rules.
  * - `contentType`, `mediaType`: the Content-Type, and its lowercased type
  *   without parameters.
@@ -208,7 +231,7 @@ export function requestView({ method = 'GET', query = '', headers = [], body = n
     params,
     semicolon: q.includes(';'),
     unsendable: /[#\t\n\r]|[\x00-\x20]$/.test(q),
-    strayName: read.names.some(isStrayName),
+    strayName: read.names.some(isStrayName) || read.keys.some(isStrayKey),
     headers,
     body,
     contentType: type ?? '',

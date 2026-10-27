@@ -1605,7 +1605,7 @@ const MUTATIONS = [
     // Round 6: a name its readers do not agree on.
     what: 'a name with a NUL, a control or non-ASCII character, an edge space or none is read like any other',
     file: 'src/core/request-view.js',
-    from: '    strayName: read.names.some(isStrayName),',
+    from: '    strayName: read.names.some(isStrayName) || read.keys.some(isStrayKey),',
     to: '    strayName: false,',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
@@ -1626,14 +1626,14 @@ const MUTATIONS = [
   {
     what: 'a name with DEL or a non-ASCII character is not stray',
     file: 'src/core/request-view.js',
-    from: 'export const isStrayName = (name) => !name || /[^\\x20-\\x7e]|^ | $/.test(name)',
-    to: 'export const isStrayName = (name) => !name || /[\\x00-\\x1f]|^ | $/.test(name)',
+    from: 'export const isStrayKey = (name) => !name || /[^\\x20-\\x7e]|^ | $/.test(name)',
+    to: 'export const isStrayKey = (name) => !name || /[\\x00-\\x1f]|^ | $/.test(name)',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   {
     what: 'a top-level JSON key is not checked for a stray name',
     file: 'src/core/request-view.js',
-    from: '{ names.push(k); if (isOverrideField(k))',
+    from: '{ keys.push(k); if (isOverrideField(k))',
     to: '{ if (isOverrideField(k))',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
@@ -1649,6 +1649,35 @@ const MUTATIONS = [
     file: 'src/core/request-view.js',
     from: ".replace(/;[ \\t]*\\r?\\n|\\r?\\n[ \\t]+/g, (s) => (s[0] === ';' ? '; ' : ' '))",
     to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    // Round 7: bracket names.
+    what: 'a name that opens with a bracket or other punctuation is not stray',
+    file: 'src/core/request-view.js',
+    from: 'export const isStrayName = (name) => isStrayKey(name) || !/^[A-Za-z0-9_.$-]/.test(name)',
+    to: 'export const isStrayName = isStrayKey',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a name is not folded as qs and Rack 2.2 read brackets, so [_method] and force] are other names',
+    file: 'src/core/request-view.js',
+    from: '.add(/^[[\\]]*([^[\\]]*)/.exec(n)[1])',
+    to: '',
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a repeated list name such as expand[] is refused as a duplicate',
+    file: 'src/core/payload.js',
+    from: "if (own(out,name) && !listBase(name)) fail('payload_duplicate_key')",
+    to: "if (own(out,name)) fail('payload_duplicate_key')",
+    tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  {
+    what: 'a rule on a list name checks only its first entry',
+    file: 'src/core/payload.js',
+    from: 'for (const v of values) check(kind,key,c,true,v)',
+    to: 'for (const v of values.slice(0,1)) check(kind,key,c,true,v)',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
 ]

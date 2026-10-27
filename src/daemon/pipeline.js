@@ -1222,14 +1222,15 @@ export class Pipeline {
     checkOverrides(effective, view, { host: route.host, path: route.path })
     // A name its readers do not agree on (request-view.js, isStrayName):
     // PHP reads `force%00` and `+force` as `force` where every other reader
-    // sees another name. Refused whatever rules the grant carries, since a
+    // sees another name, and Express's qs and Rack 2.2 read `[force]` as
+    // `force`. Refused whatever rules the grant carries, since a
     // method override matters wherever methods are restricted. It runs after
     // the override check, so a stray name that is also an override naming
     // another method is refused as that.
     if (view.strayName) {
-      throw deny('AV_POLICY_DENIED', 'a parameter name is empty, or holds a control character, a non-ASCII character or a space at either end, which servers read differently', {
+      throw deny('AV_POLICY_DENIED', 'a parameter name is empty, holds a control character, a non-ASCII character or a space at either end, or starts with punctuation such as [, which servers read differently', {
         rule: 'request_ambiguous',
-        hint: 'Name each parameter in printable ASCII, without a space at either end.',
+        hint: 'Name each parameter in printable ASCII, starting with a letter, a digit, _, -, . or $, without a space at either end.',
       })
     }
     evaluatePayload(effective.payload_sets, { ...view, path: decision.path })

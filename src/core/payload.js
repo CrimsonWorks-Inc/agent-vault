@@ -1,5 +1,5 @@
 import { deny } from './errors.js'
-import { requestView, isView, foldedNames, queryParams } from './request-view.js'
+import { requestView, isView, foldedNames, listBase, queryParams } from './request-view.js'
 
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const own = (v, k) => Object.hasOwn(v, k)
@@ -175,11 +175,22 @@ export function scanGraphQL(document, rules) {
   if (!operations) invalid()
 }
 
+// A name in the bracket syntax (`expand[]`, `items[0][price]`) is one entry
+// in a list or an object, and Stripe sends `expand[]=a&expand[]=b`: a repeat
+// of it is the next entry, not a second reading of one value. A rule on its
+// base reads every entry (`elements`).
 function params(list) {
   const out = Object.create(null)
-  for (const {name,value} of list) { if (own(out,name)) fail('payload_duplicate_key'); out[name]=value }
+  for (const {name,value} of list) { if (own(out,name) && !listBase(name)) fail('payload_duplicate_key'); out[name]=value }
   return out
 }
+
+/**
+ * Whether a parameter is the one a query or form rule's `key` names: written
+ * as the key, or as an entry under it (`expand[]` or `expand%5B%5D` for
+ * `expand`). Any other spelling that folds onto the key is `respelled`.
+ */
+const element = (p, key) => p.rawName === key || listBase(p.rawName.replace(/%5b/gi, '[').replace(/%5d/gi, ']')) === key
 
 // A request two reasonable upstreams could read differently. Neither reading
 // is checked in place of the other: it is refused, and nothing is sent.
@@ -199,7 +210,7 @@ const ambiguous = why => { throw deny('AV_POLICY_DENIED', AMBIGUOUS[why], { rule
 function respelled(rules, list) {
   for (const key of Object.keys(rules ?? {})) {
     const want = foldedNames(key)[0]
-    for (const p of list) if (p.rawName !== key && foldedNames(p.name).includes(want)) ambiguous('spelling')
+    for (const p of list) if (!element(p, key) && foldedNames(p.name).includes(want)) ambiguous('spelling')
   }
 }
 
@@ -277,7 +288,7 @@ export function evaluatePayload(sets, input = {}) {
     // A repeated name is refused first, as the duplicate it is.
     if (set.query) { getQuery(); respelled(set.query, view.params) }
     if (set.form && bytes && isForm) { getForm(); respelled(set.form, getFormList()) }
-    if (set.query_strict) for (const k of Object.keys(getQuery())) if (!own(set.query ?? {},k)) fail(`payload:query:${nameForRule(k)}:strict`)
+    if (set.query_strict) { getQuery(); for (const p of view.params) if (!Object.keys(set.query ?? {}).some(key => element(p,key))) fail(`payload:query:${nameForRule(p.name)}:strict`) }
     for (const kind of ['json','form','query']) {
       if (!set[kind]) continue
       let data
@@ -285,8 +296,18 @@ export function evaluatePayload(sets, input = {}) {
       if (kind === 'form' && bytes) { if (!isForm) fail('payload_content_type'); data=getForm() }
       if (kind === 'query') data=getQuery()
       for (const [key,c] of Object.entries(set[kind])) {
+        if (kind !== 'json') {
+          // Every entry the key names is checked, `expand[]` as well as
+          // `expand`: a reader keeps the list, and any entry may be the one
+          // it acts on. `absent` refuses any entry at all.
+          const list = data === undefined ? [] : kind === 'query' ? view.params : getFormList()
+          const values = list.filter(p => element(p,key)).map(p => p.value)
+          if (!values.length) check(kind,key,c,false)
+          for (const v of values) check(kind,key,c,true,v)
+          continue
+        }
         let v=data, present=data !== undefined
-        const keys = kind === 'json' ? key.slice(1).split('/').map(k => k.replace(/~1/g,'/').replace(/~0/g,'~')) : [key]
+        const keys = key.slice(1).split('/').map(k => k.replace(/~1/g,'/').replace(/~0/g,'~'))
         for (const k of keys) {
           // A key that differs from the rule's only by case is the rule's
           // key to a reader that ignores case, and another key here.
