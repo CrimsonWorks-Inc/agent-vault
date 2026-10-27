@@ -44,11 +44,28 @@ test('bounded grammar refuses combinatorial repetition and accepts realistic sha
   }
   for (const source of ['acme_[A-Za-z0-9]{32,40}', 'sk-live-[0-9a-f]{24}', 'tok\\.[A-Z]{4}-[0-9]{6}', 'abc[a-z]{0,256}Z', 'abc_[0-9]{1,64}', 'abc\\d{2,20}', 'abc\\.xyz|def_[A-Z]{0,40}', 'ab\\|_[A-Z]{20,80}', 'long_[A-Z]{200}', 'abc[A-Z]{250}x[B-Z]{250}x', 'tok_[A-Z]{4}-[0-9]{6,8}', 'abc_[a-z]{0,10}_end']) {
     const { re } = compileScrubPattern(source)
-    const start = performance.now()
-    re.test('abc' + 'a'.repeat(64 * 1024))
-    assert.ok(performance.now() - start < 50, source)
+    const took = cpuMs(() => re.test('abc' + 'a'.repeat(64 * 1024)))
+    assert.ok(took < 50, `${source} took ${took.toFixed(1)} ms of CPU`)
   }
 })
+
+/**
+ * CPU time `fn` takes, in ms: the process's own, not the wall clock, so a
+ * machine busy with other work does not fail a scan that did nothing wrong.
+ * A run over `bound` is tried again, up to three times, and the least is
+ * kept; a run at or under it is final. Super-linear work stays over the bound
+ * however often it runs (the calibration below proves the meter sees it).
+ */
+function cpuMs(fn, bound = 50) {
+  let least = Infinity
+  for (let i = 0; i < 3 && least > bound; i++) {
+    const start = process.cpuUsage()
+    fn()
+    const { user, system } = process.cpuUsage(start)
+    least = Math.min(least, (user + system) / 1000)
+  }
+  return least
+}
 
 // C5: whatever the grammar accepts finishes 64 KiB of input that never
 // matches in under 50 ms, including input shaped to make it try hardest:
@@ -64,9 +81,23 @@ test('every accepted pattern scans hostile input in under 50 ms', () => {
     'abc\\S{253}\\S{0,256}', 'abc[^ ]{0,256}Q|abd[^ ]{0,256}Q|abe[^ ]{0,256}Q|abf[^ ]{0,256}Q|abg[^ ]{0,256}Q|abh[^ ]{0,256}Q',
     'abc[^Q]{250}[^Q]{250}[^Q]{9}',
   ]
+  // Shapes C5 keeps out because they backtrack: a class after the variable
+  // quantifier. If the grammar ever accepted one, it would have to pass the
+  // same bound, and it cannot (the first takes seconds).
+  const keptOut = ['abc[^Q]{0,250}[^Q]{250}Q', 'abc[^Q]{0,128}[^Q]{128}Q']
   const N = 64 * 1024
   const fill = (unit) => unit.repeat(Math.ceil(N / unit.length)).slice(0, N)
-  for (const source of accepted) {
+  // The meter and the input can see super-linear work: a pattern C5 refuses,
+  // compiled here directly, is far over the bound on the same input.
+  const calibration = new RegExp(keptOut[1], 'g')
+  const slow = cpuMs(() => calibration.test(fill(' abc')))
+  assert.ok(slow > 50, `a backtracking pattern took only ${slow.toFixed(1)} ms of CPU; the meter cannot see super-linear work`)
+  const compiled = []
+  for (const source of accepted) compiled.push(source)
+  for (const source of keptOut) {
+    try { compileScrubPattern(source); compiled.push(source) } catch (e) { assert.equal(e.rule, 'scrub_pattern') }
+  }
+  for (const source of compiled) {
     const { re } = compileScrubPattern(source)
     const prefixes = source.split('|').map((b) => b.slice(0, 3))
     const hostile = [
@@ -79,11 +110,8 @@ test('every accepted pattern scans hostile input in under 50 ms', () => {
       ...[100, 300, 520].map((run) => fill(' ' + prefixes[0] + 'q'.repeat(run) + 'Q'.repeat(3))),
     ]
     for (const input of hostile) {
-      re.lastIndex = 0
-      const start = performance.now()
-      re.test(input)
-      const took = performance.now() - start
-      assert.ok(took < 50, `${source} took ${took.toFixed(1)} ms`)
+      const took = cpuMs(() => { re.lastIndex = 0; re.test(input) })
+      assert.ok(took < 50, `${source} took ${took.toFixed(1)} ms of CPU`)
     }
   }
 })
