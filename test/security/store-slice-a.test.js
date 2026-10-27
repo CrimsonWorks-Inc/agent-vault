@@ -120,8 +120,10 @@ test('a finite session is unchanged: it expires, and idle activity extends it on
     // Seven hours in, a request moves the end out by the idle timeout.
     at(created + 7 * HOUR, () => v.vault.touchSession(session))
     assert.equal(Date.parse(session.expires_at), created + 9 * HOUR)
-    // But never past the 24-hour ceiling.
-    at(created + 23.5 * HOUR, () => v.vault.touchSession(session))
+    // But never past the 24-hour ceiling, however long it is kept busy. (A
+    // single touch at 23.5 hours used to do this, on a session that had been
+    // idle-expired since hour 9: finding 2 of the round-1 review.)
+    for (let t = 8.5; t <= 23.5; t += 1.5) at(created + t * HOUR, () => v.vault.touchSession(session))
     assert.equal(Date.parse(session.expires_at), Date.parse(session.max_expires_at))
     assert.equal(at(created + 25 * HOUR, () => code(() => v.vault.assertSessionLive(session))).code, 'AV_SESSION_EXPIRED')
 
@@ -725,5 +727,41 @@ test('an elevation the store does not recognise is refused, and nothing is writt
       refusedCleanly(v, () => v.vault.createSession({ elevated }), { code: 'AV_POLICY_DENIED', rule: 'elevation_invalid' })
     }
     assert.equal(Object.keys(v.vault.db.sessions).length, 0)
+  } finally { v.done() }
+})
+
+// A placeholder lives as long as its session COULD (idle extension included),
+// so a session that went idle and expired early still has placeholders whose
+// own date has not passed. The session is asked at the moment of use.
+test('a placeholder of a session that expired idle is refused at use, though its own date has not passed', () => {
+  const v = fresh()
+  try {
+    const { session } = v.vault.createSession({}) // 8 hours, idle-extensible to 24
+    const { row } = v.vault.issuePlaceholder({ grantId: grantFor(v, session).id })
+    assert.equal(row.expires_at, session.max_expires_at)
+    const idle = Date.parse(session.expires_at) + HOUR
+    assert.ok(idle < Date.parse(row.expires_at), 'the fixture must leave the row itself in date')
+    assert.equal(at(idle, () => code(() => v.vault.consumePlaceholder(row.id))).code, 'AV_SESSION_EXPIRED')
+    assert.equal(row.state, 'dead')
+    // An ordinary use inside the session's life is fine.
+    const live = v.vault.createSession({}).session
+    v.vault.consumePlaceholder(v.vault.issuePlaceholder({ grantId: grantFor(v, live).id }).row.id)
+  } finally { v.done() }
+})
+
+test('settings never carry the webhook URL, locked or unlocked', () => {
+  const v = fresh()
+  try {
+    const url = 'https://hooks.example/services/T0/B0/WEBHOOKSECRETPATH?token=QUERYSECRET'
+    v.vault.setNotifyWebhook({ url })
+    v.vault.updateSettings({ tripwires: { enabled: true, rules: DEFAULT_RULES } })
+    const seen = [JSON.stringify(v.vault.getSettings())]
+    v.vault.lock()
+    seen.push(JSON.stringify(v.vault.getSettings()))
+    for (const text of seen) {
+      for (const part of ['WEBHOOKSECRETPATH', 'QUERYSECRET', 'hooks.example/services', v.vault.db.kv.notify.sealed.ct.slice(0, 24)]) {
+        assert.ok(!text.includes(part), `getSettings carried ${part}`)
+      }
+    }
   } finally { v.done() }
 })

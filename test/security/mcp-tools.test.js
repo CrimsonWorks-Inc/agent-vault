@@ -356,13 +356,20 @@ test('no error path names an MCP tool that does not exist', async () => {
   }
   walk(new URL('../../src', import.meta.url).pathname)
 
+  // Words of the same shape that are not tools. Each one is named, never
+  // pattern-matched, and none may ever be a real tool's name, so this list
+  // cannot hide a tool that went missing. vault_id is the F9 witness
+  // checkpoint's field (and kv.vault_id), not a tool.
+  const NOT_A_TOOL = new Set(['vault_id'])
+  for (const word of NOT_A_TOOL) assert.ok(!names.has(word), `${word} is a real tool; it cannot be excused here`)
+
   const bad = []
   for (const file of files) {
     readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
       const t = line.trim()
       if (t.startsWith('*') || t.startsWith('//')) return
       for (const m of line.matchAll(/\bvault_[a-z_]+/g)) {
-        if (names.has(m[0])) continue
+        if (names.has(m[0]) || NOT_A_TOOL.has(m[0])) continue
         bad.push(`${file.replace(/^.*\/src\//, 'src/')}:${i + 1} → ${m[0]}`)
       }
     })

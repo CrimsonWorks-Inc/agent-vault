@@ -20,11 +20,18 @@
 // still stays out: that is where a credential actually appears in a URL.
 
 import { readFileSync, existsSync, writeFileSync, openSync, writeSync, closeSync, renameSync, truncateSync } from 'node:fs'
-import { createHmac } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import * as canon from '../core/canon.js'
+import { deny } from '../core/errors.js'
 
 const CHECKPOINT_EVERY = 1000
 const HEX64 = /^[0-9a-f]{64}$/
+const GENESIS = '0'.repeat(64)
+// Set by write() itself; a caller's field may never carry one of these names.
+export const CHAIN_FIELDS = Object.freeze(['seq', 'ts', 'kind', 'prev_hash', 'hash'])
+// F9's bounds: one export page, and one witness file's worth of checkpoints.
+const MAX_EXPORT_ROWS = 5000
+const MAX_WITNESS_CHECKPOINTS = 10_000
 
 /**
  * Whether a parsed line has the shape of a record. Parsing is not enough: a
@@ -252,7 +259,19 @@ export class AuditLog {
     // carry agent-written values (a `reason` of 1.5), so write() threw AFTER
     // the change it was recording had been made: a stored session request,
     // a minted placeholder, and no record of either.
-    const record = { seq: this.seq + 1, ts: new Date().toISOString(), kind, ...recordable(fields), prev_hash: this.prevHash }
+    //
+    //
+    // And the chain fields come from the chain, never from the caller (C10).
+    // They were spread in before `prev_hash` and after `seq`, `ts` and `kind`,
+    // so a field named `seq` rewrote the record's own place in the chain
+    // (verify then reports a sequence gap, and this.seq rewinds to it) and
+    // one named `hash` was replaced by the chain hash without a word. Dropping
+    // such a field would lose what the caller meant to record, so it is
+    // refused, before anything is appended.
+    const own = recordable(fields) ?? {}
+    const reserved = CHAIN_FIELDS.find((k) => Object.hasOwn(own, k))
+    if (reserved) throw deny('AV_INTERNAL', `audit record ${kind} sets the chain field ${reserved}; name it something else`)
+    const record = { seq: this.seq + 1, ts: new Date().toISOString(), kind, ...own, prev_hash: this.prevHash }
     record.hash = this.#hash(record)
     this.#append(`${JSON.stringify(record)}\n`)
     this.seq = record.seq
@@ -397,6 +416,97 @@ export class AuditLog {
       }
     }
     return { ok: true, count: rows.length, head: prev }
+  }
+
+  // ------------------------------------------------- F9: export and witness
+
+  /**
+   * A page of the log as it is on disk, chain fields and all, so anyone who
+   * holds the vault can re-verify it elsewhere (F9). Records with seq above
+   * `sinceSeq`, in order, at most 5000. Reading it is recorded, after it is
+   * read, so the head returned is the one the page was read against.
+   */
+  export({ sinceSeq = 0, limit = MAX_EXPORT_ROWS } = {}) {
+    if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) {
+      throw deny('AV_POLICY_DENIED', 'since_seq must be a whole number, 0 or more', { rule: 'audit_range' })
+    }
+    if (typeof limit !== 'number' || Number.isNaN(limit)) {
+      throw deny('AV_POLICY_DENIED', `limit must be a number, clamped to 1..${MAX_EXPORT_ROWS}`, { rule: 'audit_range' })
+    }
+    const take = Math.min(MAX_EXPORT_ROWS, Math.max(1, Math.floor(limit)))
+    const rows = this.#rows().filter((r) => !r.unreadable && r.seq > sinceSeq).slice(0, take)
+    const head = { seq: this.seq, hash: this.prevHash }
+    const nextSeq = rows.length ? rows[rows.length - 1].seq : sinceSeq
+    this.write('audit.exported', { from_seq: rows.length ? rows[0].seq : null, to_seq: rows.length ? nextSeq : null, rows: rows.length })
+    return { rows, next_seq: nextSeq, head }
+  }
+
+  /**
+   * Where the log has got to, MACed under K_audit, for keeping somewhere the
+   * agent cannot rewrite (F9). The MAC message starts `witness|`, which no
+   * record hash or anchor MAC does, so none can stand in for another.
+   */
+  checkpoint() {
+    const vaultId = this.#vaultId()
+    const seq = this.seq
+    const head = this.prevHash
+    const ts = new Date().toISOString()
+    const mac = this.#witnessMac(vaultId, seq, head, ts)
+    this.write('audit.checkpoint_issued', { checkpoint_seq: seq })
+    return { vault_id: vaultId, seq, head, ts, mac }
+  }
+
+  /**
+   * Check witness checkpoints against the log on disk (F9). A checkpoint
+   * whose MAC does not verify is `forged`; one for another vault is
+   * `other_vault`; one past the last record is `ahead` (the log was cut back);
+   * one whose record now has a different hash is `mismatched`. A witness
+   * behind the head is normal. Read from the file, not from memory: a log
+   * truncated under a running daemon is still ahead of what the daemon
+   * remembers writing.
+   */
+  verifyWitness(checkpoints) {
+    if (!Array.isArray(checkpoints) || checkpoints.length > MAX_WITNESS_CHECKPOINTS) {
+      throw deny('AV_POLICY_DENIED', `checkpoints must be a list of at most ${MAX_WITNESS_CHECKPOINTS}`, { rule: 'audit_range' })
+    }
+    const vaultId = this.#vaultId()
+    const hashAt = new Map([[0, GENESIS]])
+    let last = 0
+    for (const r of this.#rows()) {
+      if (r.unreadable) continue
+      hashAt.set(r.seq, r.hash)
+      if (r.seq > last) last = r.seq
+    }
+    const out = { ok: true, checked: checkpoints.length, ahead: [], mismatched: [], forged: [], other_vault: [] }
+    checkpoints.forEach((c, i) => {
+      const shaped = c && typeof c === 'object' && typeof c.vault_id === 'string' && Number.isSafeInteger(c.seq) && c.seq >= 0 &&
+        typeof c.head === 'string' && HEX64.test(c.head) && typeof c.ts === 'string' && typeof c.mac === 'string' && HEX64.test(c.mac)
+      if (!shaped || !timingSafeEqual(Buffer.from(c.mac, 'hex'), Buffer.from(this.#witnessMac(c.vault_id, c.seq, c.head, c.ts), 'hex'))) {
+        out.forged.push(i)
+      } else if (c.vault_id !== vaultId) {
+        out.other_vault.push(i)
+      } else if (c.seq > last) {
+        out.ahead.push(c.seq)
+      } else if (hashAt.get(c.seq) !== c.head) {
+        out.mismatched.push(c.seq)
+      }
+    })
+    out.ok = !out.forged.length && !out.ahead.length && !out.mismatched.length
+    this.write('audit.witness_verified', {
+      ok: out.ok, checked: out.checked, ahead: out.ahead.length, mismatched: out.mismatched.length, forged: out.forged.length,
+    })
+    return out
+  }
+
+  #witnessMac(vaultId, seq, head, ts) {
+    return createHmac('sha256', this.key).update(`witness|${vaultId}|${seq}|${head}|${ts}`).digest('hex')
+  }
+
+  /** The vault's stable id, kept in the vault (kv.vault_id), created on first use. */
+  #vaultId() {
+    const vaultId = this.stamp?.vaultId?.()
+    if (typeof vaultId !== 'string' || !vaultId) throw new Error('this audit log belongs to no vault id, so it cannot be witnessed')
+    return vaultId
   }
 
   get head() { return this.prevHash }

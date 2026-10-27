@@ -487,8 +487,8 @@ const MUTATIONS = [
   {
     what: 'a float in audit fields throws after the change is made',
     file: 'src/store/audit.js',
-    from: "...recordable(fields)",
-    to: "...fields",
+    from: 'const own = recordable(fields) ?? {}',
+    to: 'const own = fields ?? {}',
     tests: ['test/security/fix-control-audit.test.js'],
   },
   {
@@ -1202,8 +1202,8 @@ const MUTATIONS = [
     // F18's own mutation: the test uses a placeholder minted before the end.
     what: 'consumePlaceholder does not ask whether the grant has ended',
     file: 'src/store/vault.js',
-    from: '    this.assertGrantLive(this.db.grants[row.grant_id])\n',
-    to: '',
+    from: '    const grant = this.assertGrantLive(this.db.grants[row.grant_id])\n',
+    to: '    const grant = this.db.grants[row.grant_id]\n',
     tests: ['test/security/store-slice-a.test.js'],
   },
   {
@@ -1296,6 +1296,411 @@ const MUTATIONS = [
     from: "    this.#persist()\n    this.audit.write('session.revoked', { session_id: sid, reason })",
     to: "    this.#persist({ durable: false })\n    this.audit.write('session.revoked', { session_id: sid, reason })",
     tests: ['test/core/passphrase.test.js'],
+  },
+  // ---- store F4: scrub-pattern CRUD ----
+  {
+    // A pattern is shown to whoever lists credentials: with a secret in it,
+    // the listing publishes the secret.
+    what: 'a scrub pattern may contain a stored credential value',
+    file: 'src/store/vault.js',
+    from: "      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')",
+    to: '      if (false) throw refuse(secret)',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    what: 'a scrub pattern may contain a placeholder',
+    file: 'src/store/vault.js',
+    from: "    if (ph.findAll(source).length) throw refuse('it contains a placeholder')\n",
+    to: '',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    what: 'a credential takes any number of scrub patterns',
+    file: 'src/store/vault.js',
+    from: '    if (mine.length >= MAX_SCRUB_PER_CRED) throw refuse',
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  {
+    // 0.7: the source is not recorded, only its digest.
+    what: 'the scrub pattern source is written to the audit log',
+    file: 'src/store/vault.js',
+    from: "      credential_slug: cred.slug, pattern_id: pattern.id,\n",
+    to: "      credential_slug: cred.slug, pattern_id: pattern.id, source,\n",
+    tests: ['test/security/store-scrub.test.js'],
+  },
+  // ---- store F7: rotation ----
+  {
+    // F7 mutation 1: an upstream echoing the old token reaches the agent.
+    what: 'allSecrets skips the retired values',
+    file: 'src/store/vault.js',
+    from: '        for (const r of f.retired || []) {',
+    to: '        for (const r of []) {',
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    what: 'revoke-mode rotation leaves the grants live',
+    file: 'src/store/vault.js',
+    from: "    if (mode === 'revoke') {\n      for (const g of Object.values(this.db.grants)) {",
+    to: "    if (false) {\n      for (const g of Object.values(this.db.grants)) {",
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    // Checked after the grants were revoked, a bad expiry left a half-done
+    // rotation: grants gone, value unchanged.
+    what: 'rotation does not check the expiry before it changes anything',
+    file: 'src/store/vault.js',
+    from: "    if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null', { rule: 'expires_at' })\n",
+    to: '',
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  {
+    what: 'rotating to the same value is accepted',
+    file: 'src/store/vault.js',
+    from: '    if (crypt.constantTimeEqual(current, value)) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-rotate.test.js'],
+  },
+  // ---- store F14: sealed webhook ----
+  {
+    // F14 mutation 2: the URL is a bearer credential.
+    what: 'the webhook URL is stored unsealed beside its sealed copy',
+    file: 'src/store/vault.js',
+    from: '    this.db.kv.notify = { sealed, host: parsed.host, detail,',
+    to: '    this.db.kv.notify = { sealed, url, host: parsed.host, detail,',
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'the webhook URL is audited whole instead of by host',
+    file: 'src/store/vault.js',
+    from: "    this.audit.write('notify.configured', { host: parsed.host, detail })",
+    to: "    this.audit.write('notify.configured', { host: url, detail })",
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'a plaintext http webhook to another machine is accepted',
+    file: 'src/store/vault.js',
+    from: "    if (!(parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback))) throw refuse",
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-notify.test.js'],
+  },
+  {
+    what: 'a webhook URL with userinfo is accepted',
+    file: 'src/store/vault.js',
+    from: '    if (parsed.username || parsed.password) throw refuse',
+    to: '    if (false) throw refuse',
+    tests: ['test/security/store-notify.test.js'],
+  },
+  // ---- store F17: templates ----
+  {
+    // The hash is what a human's signature binds; over raw JSON text it
+    // depends on key order, and the CLI and the daemon would disagree.
+    what: 'the template hash is taken over the JSON text, not the canonical form',
+    file: 'src/store/vault.js',
+    from: '      hash: createHash(\'sha256\').update(canonicalOperation(stored)).digest(\'hex\'),',
+    to: '      hash: createHash(\'sha256\').update(text).digest(\'hex\'),',
+    tests: ['test/security/store-templates.test.js'],
+  },
+  {
+    what: 'a template spec may carry template, template_hash or presence',
+    file: 'src/store/vault.js',
+    from: "      if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`",
+    to: "      if (false) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`",
+    tests: ['test/security/store-templates.test.js'],
+  },
+  {
+    what: 'a template spec of any size is stored',
+    file: 'src/store/vault.js',
+    from: '    if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-templates.test.js'],
+  },
+  // ---- store F9: audit export and witness; C10 ----
+  {
+    // F9's own mutation.
+    what: 'a witness ahead of the log is treated as ok',
+    file: 'src/store/audit.js',
+    from: '    out.ok = !out.forged.length && !out.ahead.length && !out.mismatched.length',
+    to: '    out.ok = !out.forged.length && !out.mismatched.length',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    what: 'a witness past the last record is not reported ahead',
+    file: 'src/store/audit.js',
+    from: '      } else if (c.seq > last) {',
+    to: '      } else if (false) {',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    what: "a witness checkpoint's MAC is not checked",
+    file: 'src/store/audit.js',
+    from: "      if (!shaped || !timingSafeEqual(Buffer.from(c.mac, 'hex'), Buffer.from(this.#witnessMac(c.vault_id, c.seq, c.head, c.ts), 'hex'))) {",
+    to: '      if (!shaped) {',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  {
+    // C10: `seq` from a caller rewrote the record's place in the chain.
+    what: 'a caller may set a chain field in an audit record',
+    file: 'src/store/audit.js',
+    from: '    if (reserved) throw deny(',
+    to: '    if (false) throw deny(',
+    tests: ['test/security/store-audit-witness.test.js'],
+  },
+  // ---- store F8: backup and restore ----
+  {
+    // F8 mutation 2: a restore must give no capability back.
+    what: 'the backup plaintext includes the sessions',
+    file: 'src/store/backup.js',
+    from: "  const bytes = Buffer.from(JSON.stringify({ credentials, templates }), 'utf8')",
+    to: "  const bytes = Buffer.from(JSON.stringify({ credentials, templates, sessions: vault.db.sessions }), 'utf8')",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'a bundle that carries more than credentials and templates is read anyway',
+    file: 'src/store/backup.js',
+    from: "  if (!plainObject(plain) || !onlyKeys(plain, new Set(['credentials', 'templates'])) ||",
+    to: '  if (!plainObject(plain) ||',
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'the backup is written to the audit log, not just its digest',
+    file: 'src/store/backup.js',
+    from: "  vault.audit.write('backup.exported', { credentials: credentials.length, templates: templates.length, bundle_sha256: digest })",
+    to: "  vault.audit.write('backup.exported', { credentials: credentials.length, templates: templates.length, bundle_sha256: digest, bundle })",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    // A work factor of 2^17 on the event loop stalls the whole gateway.
+    what: 'the backup key is derived synchronously',
+    file: 'src/store/backup.js',
+    from: '  return crypt.scryptAsync(recoveryPassphrase, salt, { ...BACKUP_KDF, keylen: 32, maxmem: MAXMEM })',
+    to: '  return Promise.resolve(crypt.passphraseFactor(recoveryPassphrase, salt))',
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    what: 'a fail-mode restore with a conflict writes what it can',
+    file: 'src/store/backup.js',
+    from: "      if (onConflict === 'fail') throw refused(",
+    to: "      if (false) throw refused(",
+    tests: ['test/security/store-backup.test.js'],
+  },
+  {
+    // Dropping the pins restores a credential with less protection than the
+    // human gave it.
+    what: "a restore goes ahead when it cannot restore a bundle's pins",
+    file: 'src/store/vault.js',
+    from: "      if (Object.values(c.pins ?? {}).some((l) => l.length) && typeof this.setPins !== 'function') {",
+    to: '      if (false) {',
+    tests: ['test/security/store-backup.test.js'],
+  },
+  // ---- store F19: activity ----
+  {
+    // F19's own mutation.
+    what: "a denial's detail is copied into the activity",
+    file: 'src/store/activity.js',
+    from: '      const d = denials.get(key) ?? { code, rule, count: 0 }',
+    to: '      const d = denials.get(key) ?? { code, rule, count: 0, detail: r.detail }',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    // Missing records are not zero activity.
+    what: 'a log that starts after the session is reported complete',
+    file: 'src/store/activity.js',
+    from: "  const note = anomaly ?? (created ? null : 'the audit log starts after this session was created, so its early activity is not in it')",
+    to: '  const note = anomaly',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    what: 'a truncated or unanchored log is reported complete',
+    file: 'src/store/activity.js',
+    from: '  const hit = rows.find((r) => ANOMALIES.has(r.kind))',
+    to: '  const hit = null',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    what: 'a placeholder in a recorded path is repeated in the activity',
+    file: 'src/store/activity.js',
+    from: "  for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}[[av:placeholder]]${out.slice(hit.end)}`\n",
+    to: '',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  {
+    // A held write counted as a use hides it from unused_methods. This is
+    // the inference for logs written before the gateway marked holds.
+    what: 'a request held for approval counts as a use',
+    file: 'src/store/activity.js',
+    from: "  return (r) => r.decision === 'held' || ids.has(r.request_id) || (r.req?.status === 202 && r.req?.path == null)",
+    to: "  return (r) => r.decision === 'held'",
+    tests: ['test/security/store-activity.test.js'],
+  },
+  // ---- store: coordinator conditions on the slice B review ----
+  {
+    // A placeholder is bounded by its session's ceiling, so an idle-expired
+    // session's placeholder is still in date: only the session check stops it.
+    what: 'consumePlaceholder does not ask whether the session is still live',
+    file: 'src/store/vault.js',
+    from: '    this.assertSessionLive(this.db.sessions[row.sid])\n',
+    to: '',
+    tests: ['test/security/store-slice-a.test.js'],
+  },
+  {
+    what: "a row the gateway marks as held is counted as a use",
+    file: 'src/store/activity.js',
+    from: "  return (r) => r.decision === 'held' || ids.has(r.request_id)",
+    to: '  return (r) => ids.has(r.request_id)',
+    tests: ['test/security/store-activity.test.js'],
+  },
+  // ---- store: round-2 review of the wave-2 store ----
+  {
+    // Finding 1: a pattern the restore did not check stopped it halfway.
+    what: "a restore does not check a credential's scrub patterns before it writes",
+    file: 'src/store/vault.js',
+    from: '      for (const p of patterns) this.#checkScrubSource(p?.source, secrets)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a restore whose write fails keeps its credentials in memory',
+    file: 'src/store/vault.js',
+    from: '      for (const cred of staged) delete this.db.credentials[cred.id]\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a restore writes each credential as it goes',
+    file: 'src/store/vault.js',
+    from: '    for (const cred of staged) this.db.credentials[cred.id] = cred\n',
+    to: '    for (const cred of staged) { this.db.credentials[cred.id] = cred; this.#persist() }\n',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: "a restore the vault refuses is not recorded as a refusal",
+    file: 'src/store/backup.js',
+    from: '  try { out = vault.restoreEntries({ credentials: plan, templates: plain.templates }) } catch (e) { throw refused(e) }',
+    to: '  out = vault.restoreEntries({ credentials: plan, templates: plain.templates })',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 2.
+    what: 'touchSession extends a session that has ended',
+    file: 'src/store/vault.js',
+    from: "    if (!session || session.state !== 'active' || !(sessionExpiryMs(session) > now)) return false\n",
+    to: '    if (!session) return false\n',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a session marked ended is live again once its date is later',
+    file: 'src/store/vault.js',
+    from: "    if (session.state !== 'active') throw deny('AV_SESSION_EXPIRED', `session ${session.id} has ended`)\n",
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'touchSession extends past the ceiling',
+    file: 'src/store/vault.js',
+    from: '      const extended = Math.min(now + session.idle_timeout_ms, sessionCeilingMs(session))',
+    to: '      const extended = now + session.idle_timeout_ms',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 3.
+    what: 'a quarantined credential is consumed through a placeholder issued before it',
+    file: 'src/store/vault.js',
+    from: '    if (cred.quarantine) throw quarantined(cred)\n    if (!(rowExpiryMs(row) > Date.now())) {',
+    to: '    if (!(rowExpiryMs(row) > Date.now())) {',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'a quarantined credential is revealed',
+    file: 'src/store/vault.js',
+    from: '    if (cred.quarantine) throw quarantined(cred)\n    return this.#unseal(cred, fieldName)',
+    to: '    return this.#unseal(cred, fieldName)',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 4.
+    what: 'a budget of 0 issues a placeholder',
+    file: 'src/store/vault.js',
+    from: '    if (limit === 0) throw budgetSpent(limit)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: 'consume does not re-check the grant budget',
+    file: 'src/store/vault.js',
+    from: '    if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used + 1 > limit) throw budgetSpent(limit)\n',
+    to: '',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    what: "consume does not re-check a placeholder ceiling narrowed after issue",
+    file: 'src/store/vault.js',
+    from: '    if (Number.isFinite(phMax) && row.uses >= phMax) {',
+    to: '    if (false) {',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Finding 5.
+    what: 'a rotation is written without an fsync',
+    file: 'src/store/vault.js',
+    from: '    this.#persist()\n    const rotated = {',
+    to: '    this.#persist({ durable: false })\n    const rotated = {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    what: 'a restore is written without an fsync',
+    file: 'src/store/vault.js',
+    from: '    try {\n      this.#persist()\n    } catch {',
+    to: '    try {\n      this.#persist({ durable: false })\n    } catch {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    // A writer the lists do not name: the classification test must see it.
+    what: 'a vault writer is on neither durability list',
+    file: 'src/store/vault.js',
+    from: '  removeScrubPattern(slug, patternId) {',
+    to: '  dropScrubPattern(slug, patternId) {',
+    tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    // Finding 6.
+    what: "a forked grant drops the lifetime of the grant it copies",
+    file: 'src/store/vault.js',
+    from: '      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow, ttlMs })',
+    to: '      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow })',
+    tests: ['test/security/store-review-r2.test.js'],
+  },
+  {
+    // Round 3 (a): a restore must never release a quarantine.
+    what: "a backup leaves out each credential's quarantine",
+    file: 'src/store/vault.js',
+    from: '      quarantine: c.quarantine ? structuredClone(c.quarantine) : null,',
+    to: '      quarantine: null,',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (b).
+    what: "a restore drops the bundle's quarantine instead of re-applying it",
+    file: 'src/store/vault.js',
+    from: '      if (c.quarantine != null) cred.quarantine = restoredQuarantine(c.quarantine, format)',
+    to: '      if (c.quarantine != null) restoredQuarantine(c.quarantine, format)',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (c).
+    what: "a restore releases the copy of a credential this vault holds quarantined",
+    file: 'src/store/vault.js',
+    from: '        if (held) cred.quarantine = structuredClone(held)',
+    to: '        if (held) void held',
+    tests: ['test/security/store-review-r3.test.js'],
+  },
+  {
+    // Round 3 (c): a renamed copy holds the restore too.
+    what: "only the exact slug holds a restore, not a renamed copy of it",
+    file: 'src/store/vault.js',
+    from: '  return a === b || copyOf(a, b) || copyOf(b, a)',
+    to: '  return a === b',
+    tests: ['test/security/store-review-r3.test.js'],
   },
 ]
 
