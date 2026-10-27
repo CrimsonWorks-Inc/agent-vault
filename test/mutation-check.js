@@ -2845,6 +2845,70 @@ const MUTATIONS = [
     to: '          })',
     tests: ['test/security/integrate2-c12-surfaces.test.js'],
   },
+  // ---- wave 3, control-cli: parsing, files and untrusted presentation ----
+  {
+    what: "CLI numeric limits accept invalid finite or integer bounds",
+    file: "src/cli/policy-input.js",
+    from: "if (!Number.isFinite(n) || n < min || n > max || (integer && !Number.isSafeInteger(n))) usage(",
+    to: "if (false) usage(",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI session creation drops the reviewed template hash",
+    file: "src/cli/index.js",
+    from: "      body.template_hash = template.hash",
+    to: "      body.template_hash = undefined",
+    tests: ["test/security/control-cli-routes.test.js"],
+  },
+  {
+    what: "CLI accepts secret-bearing command-line flags",
+    file: "src/cli/index.js",
+    from: "if (['value', 'webhook-url', 'webhook_url', 'recovery-passphrase', 'recovery_passphrase'].some((key) => Object.hasOwn(args, key))) usageError(",
+    to: "if (false) usageError(",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI backup and audit export overwrite files without force",
+    file: "src/cli/control-commands.js",
+    from: "return writeFileExclusive(path, text, { force })",
+    to: "return writeFileExclusive(path, text, { force: true })",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI witness writes erase prior checkpoints",
+    file: "src/cli/control-commands.js",
+    from: "try { appendLineExclusive(path, line) } catch (e) {",
+    to: "try { writeFileExclusive(path, line + \"\\n\", { force: true }) } catch (e) {",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI probe treats a truthy non-boolean result as success",
+    file: "src/cli/control-commands.js",
+    from: "if (results.some((v) => v.ok !== true)) process.exitCode",
+    to: "if (results.some((v) => !v.ok)) process.exitCode",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI approval preview renders agent terminal controls",
+    file: "src/cli/control-commands.js",
+    from: "  const body = cleanText(p.body?.text || '')",
+    to: "  const body = p.body?.text || ''",
+    tests: ["test/security/control-cli-files.test.js"],
+  },
+  {
+    what: "CLI watch puts notification text inside AppleScript code",
+    file: "src/cli/watch.js",
+    from: "'-e', 'display notification (item 1 of argv) with title \"agent-vault\"'",
+    to: "'-e', `display notification \"${text}\" with title \"agent-vault\"`",
+    tests: ["test/security/control-cli-watch.test.js"],
+  },
+  {
+    what: "CLI watch omits notification control-character stripping",
+    file: "src/cli/watch.js",
+    from: "String(value ?? '').replace(/[\\x00-\\x1f\\x7f-\\x9f]/g, '')",
+    to: "String(value ?? '')",
+    tests: ["test/security/control-cli-watch.test.js"],
+  },
 ]
 
 let survived = 0
