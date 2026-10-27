@@ -332,15 +332,27 @@
     for (const key of Object.keys(params).sort()) {
       const v = params[key]
       if (v === undefined || key === 'presence') continue
-      if (key === 'value' || key === 'prf_secret') {
-        const bytes = new TextEncoder().encode(String(v))
-        const digest = await crypto.subtle.digest('SHA-256', bytes)
+      // The secret-bearing fields the servers bind by digest (DIGESTED in
+      // webauthn.js). A string is its own bytes; anything else its canonical
+      // form, which is how the servers digest it too.
+      if (DIGESTED.includes(key)) {
+        const text = typeof v === 'string' ? v : canonicalJson(v)
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
         out[`${key}_sha256`] = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
         continue
       }
       out[key] = v
     }
     return out
+  }
+  const DIGESTED = ['value', 'prf_secret', 'recovery_passphrase', 'bundle', 'webhook_url']
+
+  /** Sorted keys, undefined dropped: canonicalOperation in webauthn.js. */
+  function canonicalJson(value) {
+    if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null)
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+    const keys = Object.keys(value).filter((k) => value[k] !== undefined).sort()
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`
   }
 
   let presenceState = { enrolled: false }
@@ -833,25 +845,11 @@ ${c.cli} ui                         open this page`)}`,
    * goes. Anywhere else and the daemon refuses with AV_BAD_LOCATION, so a
    * generic example would be an example of the error.
    */
-  /**
-   * Narrowing typed into the approvals page, read exactly as the CLI flags
-   * are (parseOverrides in src/pending.js): lists split on commas, methods
-   * upper-cased, numbers as numbers. The server rebuilds the signed operation
-   * from that parse, so the page has to sign the same thing.
-   */
-  function parseNarrowing(raw) {
-    const out = {}
-    const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
-    if (raw.methods) out.methods = list(raw.methods).map((m) => m.toUpperCase())
-    if (raw.paths) out.paths = list(raw.paths)
-    for (const k of ['budget', 'uses', 'ttl_minutes']) {
-      if (raw[k] !== undefined && raw[k] !== null && raw[k] !== '') out[k] = Number(raw[k])
-    }
-    // The owner's own options, read as parseOverrides reads them.
-    if (typeof raw.approval === 'string' && raw.approval !== '') out.approval = raw.approval
-    if (raw.infinite === true || raw.infinite === 'true') out.infinite = true
-    return out
-  }
+  // Narrowing typed into the approvals page is read by the CLI's own parser,
+  // parseOverrides from src/pending.js, which the UI server puts here when it
+  // serves the page. A copy kept in the page was a second reader, and the
+  // server rebuilds the signed operation with the first (contract C21).
+  /* parseOverrides: injected by src/ui/server.js from src/pending.js */
 
   const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
   /** Auto with any method that writes: the session never asks you again. */
@@ -1360,7 +1358,7 @@ ${c.cli} ui                         open this page`)}`,
       // Parsed before it is signed. The raw text ("GET", "100") was signed and
       // the server rebuilt the operation from parsed values (["GET"], 100), so
       // every narrowing typed here failed as a different operation.
-      const overrides = parseNarrowing(typed)
+      const overrides = parseOverrides(typed)
       if (btn.dataset.kind === 'session') {
         const op = await operationFor('session_request.decide', { id, granted, ...overrides })
         await gated(op, (proof) => api('POST', 'session-requests/decide', {

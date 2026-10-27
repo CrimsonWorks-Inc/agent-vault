@@ -575,7 +575,7 @@ const MUTATIONS = [
   {
     what: 'the page signs the raw narrowing text',
     file: 'src/ui/app.html',
-    from: "const overrides = parseNarrowing(typed)",
+    from: "const overrides = parseOverrides(typed)",
     to: "const overrides = typed",
     tests: ['test/security/fix-control-page.test.js'],
   },
