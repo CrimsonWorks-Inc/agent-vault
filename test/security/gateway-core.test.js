@@ -126,7 +126,7 @@ test('intersecting two rates never allows more than either', () => {
   const HOUR = 60 * MINUTE
   const allows = (r, windowMs) => {
     const per = { minute: MINUTE, hour: HOUR }[r.per] ?? r.per
-    return r.count * Math.ceil(windowMs / per)
+    return r.count * (windowMs / per)
   }
   const a = { count: 10, per: 'minute' }
   const b = { count: 100, per: 'hour' }
@@ -142,10 +142,10 @@ test('intersecting rates in the same unit is the smaller count', () => {
   assert.deepEqual(policy.intersect([{ rate: { count: 10, per: 'minute' } }, {}]).rate, { count: 10, per: 'minute' })
 })
 
-test('lint says which limits are carried but not enforced', () => {
+test('lint accepts valid enforced limits', () => {
   const base = { hosts: ['h'], budget: { unit: 'requests', limit: 5 } }
-  assert.ok(policy.lint({ ...base, max_concurrent: 2 }).some((p) => p.rule === 'max_concurrent'))
-  assert.ok(policy.lint({ ...base, rate: { count: 1, per: 'minute' } }).some((p) => p.rule === 'rate'))
+  assert.ok(!policy.lint({ ...base, max_concurrent: 2 }).some((p) => p.rule === 'max_concurrent'))
+  assert.ok(!policy.lint({ ...base, rate: { count: 1, per: 'minute' } }).some((p) => p.rule === 'rate'))
   assert.ok(!policy.lint(base).some((p) => p.rule === 'max_concurrent' || p.rule === 'rate'))
 })
 
@@ -187,16 +187,17 @@ test('Basic substitution writes the Authorization header the placeholder was fou
   assert.equal(out.headers[1][1], `Basic ${Buffer.from('user:SECRET').toString('base64')}`)
 })
 
+// Two Authorization headers are two readings of one credential slot: which
+// one the upstream acts on is its choice. Refused before anything is sent;
+// the unit test above keeps the substitution itself honest.
 test('Basic substitution through the pipeline, with a second Authorization header present', async () => {
   const s = setup({ sites: { key: ['basic:pass'] } })
   const ph = s.ph()
-  await s.pipeline.handle(s.request({
+  const res = await s.pipeline.handle(s.request({
     headers: [...s.request().headers, ['Authorization', 'Bearer x'], ['authorization', `Basic ${Buffer.from(`user:${ph}`).toString('base64')}`]],
   }))
-  assert.equal(s.sent.length, 1)
-  const values = Object.entries(s.sent[0].headers).filter(([n]) => n.toLowerCase() === 'authorization').map(([, v]) => v)
-  assert.ok(values.includes(`Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`), JSON.stringify(values))
-  assert.ok(!JSON.stringify(s.sent[0].headers).includes('av1.'), 'a placeholder went upstream')
+  assert.equal(res.status, 403); assert.equal(JSON.parse(res.body).rule, 'header_duplicate')
+  assert.equal(s.sent.length, 0, 'a request went upstream')
 })
 
 test('an ordinary single Basic header is substituted as before', async () => {
@@ -206,12 +207,14 @@ test('an ordinary single Basic header is substituted as before', async () => {
   assert.equal(s.sent[0].headers.authorization, `Basic ${Buffer.from(`user:${SECRET}`).toString('base64')}`)
 })
 
-test('rate windows are compared in real units, and an unknown one is refused', () => {
+test('rate layers preserve canonical windows and refuse unknown units at evaluation', () => {
   const r = (x, y) => policy.intersect([{ rate: x }, { rate: y }]).rate
-  assert.deepEqual(r({ count: 5, per: '15m' }, { count: 9, per: '2 hours' }), { count: 5, per: '2 hours' })
-  assert.deepEqual(r({ count: 5, per: 500 }, { count: 9, per: '1s' }), { count: 5, per: '1s' })
-  assert.deepEqual(r({ count: 5, per: '90 ms' }, { count: 9, per: 'second' }), { count: 5, per: 'second' })
-  assert.throws(() => r({ count: 5, per: 'minute' }, { count: 9, per: 'fortnight' }), (e) => e.rule === 'rate')
+  assert.deepEqual(r({ count: 60, per: 'second' }, { count: 100, per: 'minute' }), { count: 100, per: 'minute' })
+  const invalid = { count: 9, per: 'fortnight' }
+  assert.deepEqual(r({ count: 5, per: 'minute' }, invalid), invalid)
+  assert.throws(() => policy.evaluateHttp({ rate: invalid }, { method: 'GET', host: 'example.test', path: '/' }), (e) => e.rule === 'rate_invalid')
+  const profile = { defaultBudget: { unit: 'requests', limit: 5 } }
+  assert.deepEqual(policy.grantPolicyFromInput({ rate: '5/sec' }, { profile, ceiling: ['example.test'] }).rate, { count: 5, per: 'second' })
 })
 
 // ---------------------------------------------------------------- round 2

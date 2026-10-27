@@ -225,13 +225,18 @@ test('the places a naive scan does not look are not hiding places', async () => 
   }
 })
 
-test('a second header of the same name gets the secret, not the placeholder', async () => {
+test('a second Authorization header is refused, so no placeholder goes upstream', async () => {
   // The site is header:authorization:Bearer, so this placeholder IS at a
   // declared site and must be substituted. apply() looked the header up by
   // name and always found the first, so it rewrote a header that did not
   // contain the placeholder and left the one that did — and the request went
   // upstream carrying a live placeholder, past a location check that had just
   // approved it.
+  //
+  // Authorization is now carried once (round 2): two different copies are
+  // refused before substitution, so neither the placeholder nor the secret
+  // goes anywhere. A list header is still substituted where it stands; the
+  // gateway-w2-pipeline suite covers that.
   setup()
   const res = await pipeline.handle(req({
     headers: [
@@ -240,11 +245,9 @@ test('a second header of the same name gets the secret, not the placeholder', as
       ['authorization', `Bearer ${placeholder}`],
     ],
   }))
-  assert.equal(res.status, 200)
-  assert.equal(sent.length, 1)
-  const wire = JSON.stringify(sent[0].headers)
-  assert.ok(!wire.includes(placeholder), 'a placeholder reached the upstream')
-  assert.ok(wire.includes(SECRET), 'the secret was never substituted')
+  assert.equal(res.status, 403)
+  assert.equal(JSON.parse(res.body).rule, 'header_duplicate')
+  assert.equal(sent.length, 0, 'a request with two Authorization headers reached the upstream')
 })
 
 test('a malformed percent-escape in a query key does not blind the scan', async () => {
