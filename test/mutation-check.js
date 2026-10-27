@@ -3272,9 +3272,9 @@ const MUTATIONS = [
     // control-api (wave 3).
     what: "a human's numeric override is coerced, so a typo becomes null and is dropped",
     file: "src/pending.js",
-    from: "  const num = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)$/.test(String(v)) ? Number(v) : String(v)))",
-    to: "  const num = (v) => Number(v)",
-    tests: ["test/security/control-api-sessions.test.js"],
+    from: "    const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN)",
+    to: "    const n = Number(v)",
+    tests: ["test/security/control-api-sessions.test.js", "test/security/control-api-overrides.test.js"],
   },
   {
     // control-api (wave 3).
@@ -3299,6 +3299,86 @@ const MUTATIONS = [
     from: "    if (input.grant_ttl_minutes !== undefined && narrow.grant_ttl_minutes !== undefined) {",
     to: "    if (false) {",
     tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a JSON-string routes narrowing is dropped, so the agent's wider routes are approved (C21, C23)",
+    file: "src/pending.js",
+    from: "  if (given(args.routes)) out.routes = json('routes', args.routes)",
+    to: "  if (Array.isArray(args.routes)) out.routes = args.routes",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a JSON-string payload narrowing is dropped (C21, C23)",
+    file: "src/pending.js",
+    from: "  if (given(args.payload)) out.payload = json('payload', args.payload)",
+    to: "  if (given(args.payload) && typeof args.payload === 'object') out.payload = args.payload",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a routes or payload narrowing that is not JSON is dropped instead of refused (C23)",
+    file: "src/pending.js",
+    from: "    try { parsed = JSON.parse(v) } catch { throw fail(field, 'not valid JSON') }",
+    to: "    try { parsed = JSON.parse(v) } catch { return undefined }",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "parseOverrides reaches outside its own body, so the page's injected copy throws (C21, C23)",
+    file: "src/pending.js",
+    from: "export function parseOverrides(args = {}) {\n  const out = {}",
+    to: "const NO_OVERRIDES = () => ({})\nexport function parseOverrides(args = {}) {\n  const out = NO_OVERRIDES()",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a numeric narrowing that is not finite is sent as NaN, which JSON drops (C23)",
+    file: "src/pending.js",
+    from: "    if (!Number.isFinite(n)) throw fail(field, `not a number: ${JSON.stringify(v)}`)",
+    to: "",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a blank numeric narrowing becomes a limit of 0 (C23)",
+    file: "src/pending.js",
+    from: "(typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN)",
+    to: "(typeof v === 'string' ? Number(v) : NaN)",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a rate or quota narrowing is stringified and not trimmed (C23)",
+    file: "src/pending.js",
+    from: "  const shape = (v) => (typeof v === 'string' ? v.trim() : v)",
+    to: "  const shape = (v) => String(v)",
+    tests: ["test/security/control-api-overrides.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "a notification headline keeps a stored secret an agent put in a path (F14)",
+    file: "src/daemon/notify.js",
+    from: "    headline: secrets ? cleanHeadline(redactStored(event.headline, secrets)) : '',",
+    to: "    headline: cleanHeadline(event.headline),",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "the stored-secret scrub matches values under the scrubber's floor (F14)",
+    file: "src/daemon/notify.js",
+    from: "    if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret)",
+    to: "    if (typeof secret === 'string') out = out.split(secret)",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3, fix round 1).
+    what: "an agent-written reason is cut before it is scrubbed, so a secret across the cut leaves half behind (F16)",
+    file: "src/daemon/server.js",
+    from: "    let out = redactStored(text, this.vault.allSecrets())",
+    to: "    let out = redactStored(text.slice(0, max), this.vault.allSecrets())",
+    tests: ["test/security/control-api-credentials.test.js"],
   },
 ]
 
