@@ -3000,6 +3000,20 @@ const MUTATIONS = [
     to: 'return send(e.status || 500,',
     tests: ['test/security/control-ui-handoff.test.js'],
   },
+  {
+    what: 'a decision is sent when its narrowing does not parse (C23)',
+    file: 'src/ui/app.html',
+    from: 'if (narrowing.error) return toast(narrowing.error)',
+    to: 'if (false) return toast(narrowing.error)',
+    tests: ['test/security/control-ui-narrowing.test.js'],
+  },
+  {
+    what: 'a narrowing that does not parse is read as no narrowing (C23)',
+    file: 'src/ui/app.html',
+    from: 'return { error: `That narrowing does not parse, so nothing was sent: ${e?.message ?? e}` }',
+    to: 'return { overrides: {} }',
+    tests: ['test/security/control-ui-narrowing.test.js'],
+  },
 ]
 
 let survived = 0

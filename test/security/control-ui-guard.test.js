@@ -103,7 +103,8 @@ test('the page runs the very parser the server rebinds a narrowing with (C21)', 
   // No second reader left in the page.
   assert.ok(!/function parseNarrowing\(/.test(PAGE))
   const decide = PAGE.slice(PAGE.indexOf('async decide(btn) {'))
-  assert.match(decide.slice(0, decide.indexOf('gated(')), /const overrides = parseOverrides\(typed\)/)
+  assert.match(decide.slice(0, decide.indexOf('gated(')), /readNarrowing\(typed\)/)
+  assert.match(PAGE.slice(PAGE.indexOf('function readNarrowing(')), /^function readNarrowing\(typed\) \{\n {4}try \{\n {6}const overrides = parseOverrides\(typed\)/)
   // The injected function stands alone: evaluated with nothing around it, it
   // reads every field as the module's own copy does.
   const alone = new Script(`(${parseOverrides.toString()})`).runInNewContext({})

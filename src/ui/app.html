@@ -1038,6 +1038,21 @@ ${c.cli} ui                         open this page`)}`,
   // server rebuilds the signed operation with the first (contract C21).
   /* parseOverrides: injected by src/ui/server.js from src/pending.js */
 
+  /**
+   * The narrowing typed for a decision, as the one parser reads it, or why it
+   * does not parse. The parser throws on a number that is not finite and on
+   * routes or payload that are not JSON (C23); the caller then sends nothing,
+   * so a decision never goes through without the narrowing typed for it.
+   */
+  function readNarrowing(typed) {
+    try {
+      const overrides = parseOverrides(typed)
+      return { overrides }
+    } catch (e) {
+      return { error: `That narrowing does not parse, so nothing was sent: ${e?.message ?? e}` }
+    }
+  }
+
   const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
   /** Auto with any method that writes: the session never asks you again. */
   const autoWrites = (approval, methods) =>
@@ -2356,7 +2371,9 @@ ${c.cli} ui                         open this page`)}`,
       // Parsed before it is signed. The raw text ("GET", "100") was signed and
       // the server rebuilt the operation from parsed values (["GET"], 100), so
       // every narrowing typed here failed as a different operation.
-      const overrides = parseOverrides(typed)
+      const narrowing = readNarrowing(typed)
+      if (narrowing.error) return toast(narrowing.error)
+      const { overrides } = narrowing
       if (btn.dataset.kind === 'session') {
         const op = await operationFor('session_request.decide', { id, granted, ...overrides })
         await gated(op, (proof) => api('POST', 'session-requests/decide', {
