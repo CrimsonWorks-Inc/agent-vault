@@ -331,8 +331,10 @@ const MUTATIONS = [
     // leaving this protection unchecked.
     // And again when ttl_minutes was split off the final spec before it is
     // passed on, so a lifetime of 0 is refused rather than read as default.
-    from: '    const { ttl_minutes: ttlMinutes, ...spec } = final',
-    to: '    const { ttl_minutes: ttlMinutes, ...spec } = record.proposal',
+    // And again in wave 3, when that split moved into requestSpec so the
+    // proposer's dry run and the settle path read a proposal the same way.
+    from: '      ...requestSpec(final),\n',
+    to: '      ...requestSpec(record.proposal),\n',
     tests: ['test/security/session-requests.test.js'],
   },
   {
@@ -435,8 +437,10 @@ const MUTATIONS = [
   {
     what: 'vault_http never sends the session token',
     file: 'src/daemon/mcp.js',
-    from: "headers.push(['av-session', this.#tokenFor(session, token)])",
-    to: "headers.push(['av-session', this.#tokenFor(session)])",
+    // Anchored on the comment above it since vault_preflight (wave 3) pushes
+    // the same header line.
+    from: "        // as carrier, which only a header site allows.\n        headers.push(['av-session', this.#tokenFor(session, token)])",
+    to: "        // as carrier, which only a header site allows.\n        headers.push(['av-session', this.#tokenFor(session)])",
     tests: ['test/security/fix-control-mcp.test.js'],
   },
   {
@@ -1232,7 +1236,9 @@ const MUTATIONS = [
     // clicks approve without reading closely.
     what: 'a session request may carry an owner-only field',
     file: 'src/daemon/server.js',
-    from: '          if (owned.length) {',
+    // Re-anchored in wave 3: the check moved into proposeSessionRequest, which
+    // the route and vault_request_session share.
+    from: '    if (owned.length) {',
     to: '          if (false) {',
     tests: ['test/security/requested-r1.test.js'],
   },
@@ -1353,8 +1359,9 @@ const MUTATIONS = [
     // for a passphrase and a session.created has been written and revoked.
     what: 'a session for a quarantined credential is planned and gated',
     file: 'src/daemon/server.js',
-    from: '      // a passphrase and a session exists to be torn down again.\n      if (cred.quarantine) throw quarantined(cred)',
-    to: '      // a passphrase and a session exists to be torn down again.\n      if (false) throw quarantined(cred)',
+    // Re-anchored in wave 3: only saving a template skips the check.
+    from: '      if (cred.quarantine && !savingTemplate) throw quarantined(cred)',
+    to: '      if (false) throw quarantined(cred)',
     tests: ['test/security/requested-seams.test.js'],
   },
   {
@@ -2878,10 +2885,10 @@ const MUTATIONS = [
     tests: ["test/security/control-api-mcp.test.js", "test/security/control-api-credentials.test.js"],
   },
   {
-    // control-api (wave 3).
+    // control-api (wave 3). The proposal for one is refused here too.
     what: "a session can be planned for a quarantined credential",
     file: "src/daemon/server.js",
-    from: "      if (cred.quarantine && !dryRun) throw quarantined(cred)",
+    from: "      if (cred.quarantine && !savingTemplate) throw quarantined(cred)",
     to: "",
     tests: ["test/security/control-api-credentials.test.js"],
   },
