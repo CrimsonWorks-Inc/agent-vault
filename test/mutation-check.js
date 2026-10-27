@@ -1448,8 +1448,8 @@ const MUTATIONS = [
     // Fail-open: a budget nobody can read becomes no budget.
     what: 'an unreadable grant budget means no limit',
     file: 'src/store/vault.js',
-    from: '  return Number.isSafeInteger(n) && n >= 0 ? n : null\n}',
-    to: '  return Number.isSafeInteger(n) && n >= 0 ? n : Infinity\n}',
+    from: '  return policyMod.budgetLimit(policy?.budget)\n',
+    to: '  return policyMod.budgetLimit(policy?.budget) ?? Infinity\n',
     tests: ['test/security/store-slice-a.test.js'],
   },
   {
@@ -1694,13 +1694,14 @@ const MUTATIONS = [
     tests: ['test/security/store-backup.test.js'],
   },
   {
-    // Dropping the pins restores a credential with less protection than the
-    // human gave it.
+    // Pins that setPins would refuse are refused by a restore too, never
+    // stored or dropped. (Re-anchored in integrate-2: the restore stores pins
+    // now, so the old "cannot restore pins yet" refusal is gone.)
     what: "a restore goes ahead when it cannot restore a bundle's pins",
     file: 'src/store/vault.js',
-    from: "      if (Object.values(c.pins ?? {}).some((l) => l.length) && typeof this.setPins !== 'function') {",
-    to: '      if (false) {',
-    tests: ['test/security/store-backup.test.js'],
+    from: '        cred.pins = { ...pinTableOf(cred.pins, key), [key]: pinList(list) }',
+    to: '        cred.pins = { ...pinTableOf(cred.pins, key), [key]: list }',
+    tests: ['test/security/store-pins.test.js'],
   },
   // ---- store F19: activity ----
   {
@@ -2058,7 +2059,7 @@ const MUTATIONS = [
     // A pin key written as a bare IPv6 address names the same host as the
     // bracketed URL host, and must not be skipped.
     what: 'probe pin keys that are a bare IPv6 address are not read as a host',
-    file: 'src/connectors/probe.js',
+    file: 'src/connectors/pinning.js',
     from: "const host = isIP(bare) === 6 ? `[${bare}]` : hostOnly(key)",
     to: 'const host = hostOnly(key)',
     tests: ['test/security/connectors-probe.test.js'],
@@ -2144,7 +2145,7 @@ const MUTATIONS = [
   },
   {
     what: 'a probe pin entry of the wrong shape is skipped',
-    file: 'src/connectors/probe.js',
+    file: 'src/connectors/pinning.js',
     from: 'if (!Array.isArray(value)) return false',
     to: 'if (!Array.isArray(value)) continue',
     tests: ['test/security/connectors-probe.test.js'],
@@ -2347,14 +2348,6 @@ const MUTATIONS = [
     tests: ['test/security/gateway-w2-seams.test.js'],
   },
   {
-    // F11 (C2): pins nothing can check are refused, never dropped.
-    what: 'pins configured with no pin checker installed are ignored',
-    file: 'src/daemon/pipeline.js',
-    from: "  if (pins != null) throw Object.assign(new Error('certificate pins are set and pin checking is not available')",
-    to: "  if (false) throw Object.assign(new Error('certificate pins are set and pin checking is not available')",
-    tests: ['test/security/gateway-w2-seams.test.js'],
-  },
-  {
     // F13: the human reads the preview; the scrub is what makes that safe.
     what: 'an approval preview is not scrubbed',
     file: 'src/daemon/pipeline.js',
@@ -2388,7 +2381,7 @@ const MUTATIONS = [
     // F18: the grant's own lifetime is checked before anything happens.
     what: 'the gateway does not ask the store whether the grant is still live',
     file: 'src/daemon/pipeline.js',
-    from: '      if (peek) this.#peekGrant(grant)\n      else this.vault.assertGrantLive?.(grant)',
+    from: '      if (peek) this.#peekGrant(grant)\n      else this.vault.assertGrantLive(grant)',
     to: '      if (peek) this.#peekGrant(grant)',
     tests: ['test/security/gateway-w2-pipeline.test.js', 'test/security/gateway-w2-seams.test.js'],
   },
@@ -2708,6 +2701,123 @@ const MUTATIONS = [
     from: 'for (const v of values) check(kind,key,c,true,v)',
     to: 'for (const v of values.slice(0,1)) check(kind,key,c,true,v)',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
+  },
+  // ---- integrate-2: the wave-2 seams, F11 pin storage, C12, one budget reader ----
+  {
+    // F11 (C2 resolved): the gateway's upstream is pinnedRequest, with the
+    // credential's pins. The lazy loader and its "no checker" fallback are gone.
+    what: "the gateway's upstream drops the credential's pins",
+    file: 'src/daemon/pipeline.js',
+    from: '  return pinnedRequest({ url, method, headers: lines, body, pins })',
+    to: '  return pinnedRequest({ url, method, headers: lines, body, pins: null })',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // C9: pins by the canonical URL host, and a table that cannot be read is
+    // pinned, not unpinned. An exact-key lookup read a malformed table as none.
+    what: 'the gateway looks pins up by exact key, so a malformed pin table means no pins',
+    file: 'src/daemon/pipeline.js',
+    from: 'pins: pinsFor(cred, urlIdentity(new URL(upstreamUrl))) })',
+    to: 'pins: cred.pins?.[decision.host] ?? null })',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // pinnedRequest's own refusals (host_mismatch, header_format) happen before
+    // a connection: refunded, and reported as themselves.
+    what: "a refusal from pinnedRequest is reported as an unreachable upstream and not refunded",
+    file: 'src/daemon/pipeline.js',
+    from: "      if (e instanceof VaultError && e.code === 'AV_POLICY_DENIED') {\n        throw deny('AV_POLICY_DENIED', e.detail, { rule: e.rule, refunded: true })\n      }\n",
+    to: '',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // pinnedRequest refuses a header value that is not one string, so a
+    // repeated list header must be folded, or ordinary requests fail.
+    what: 'a repeated header reaches pinnedRequest as a list and the request is refused',
+    file: 'src/daemon/pipeline.js',
+    from: "    lines[name] = Array.isArray(value) ? value.map(String).join(name.toLowerCase() === 'cookie' ? '; ' : ', ') : String(value)",
+    to: '    lines[name] = value',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // C12: an infinite session is never reachable from the network, at use.
+    what: 'an infinite session is usable from a network listener',
+    file: 'src/daemon/pipeline.js',
+    from: '  if (session.infinite === true && req.listener?.remote) {',
+    to: '  if (false) {',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // C4, one reader: an unreadable budget refuses at the gateway and the store.
+    what: 'the shared budget reader calls an unreadable budget no limit',
+    file: 'src/core/policy.js',
+    from: '  if (!validBudget(budget)) return null\n',
+    to: '  if (!validBudget(budget)) return Infinity\n',
+    tests: ['test/security/budget-reader.test.js'],
+  },
+  {
+    // C4, one reader: the store's old reading of a limit-less layer, which
+    // stopped a redirect hop the gateway had counted.
+    what: 'the store reads a budget layer with no limit as unreadable',
+    file: 'src/store/vault.js',
+    from: '  return policyMod.budgetLimit(policy?.budget)\n',
+    to: "  return policy?.budget && typeof policy.budget === 'object' && policy.budget.limit === undefined ? null : policyMod.budgetLimit(policy?.budget)\n",
+    tests: ['test/security/budget-reader.test.js', 'test/security/integrate2-seams.test.js'],
+  },
+  {
+    // F4 + C5: the store saves only what the gateway's scrubber can compile.
+    what: 'the store saves a scrub pattern the gateway grammar refuses',
+    file: 'src/store/vault.js',
+    from: '    compileScrubPattern(source)\n',
+    to: '',
+    tests: ['test/security/integrate2-seams.test.js'],
+  },
+  {
+    // F11 store: one pin format (PIN_RE through pinListState).
+    what: 'setPins stores a malformed pin list',
+    file: 'src/store/vault.js',
+    from: "  if (pinListState(pins) !== 'pinned') {",
+    to: '  if (false) {',
+    tests: ['test/security/store-pins.test.js'],
+  },
+  {
+    what: 'setPins pins a host the credential cannot reach',
+    file: 'src/store/vault.js',
+    from: '    if (!key || !ceiling.some((h) => urlHostOf(h) === key || policyMod.matchHost(h, key))) {',
+    to: '    if (!key) {',
+    tests: ['test/security/store-pins.test.js'],
+  },
+  {
+    // The gateway and the probe look pins up by the canonical URL host.
+    what: 'setPins stores a host as written, not as the connectors read it',
+    file: 'src/store/vault.js',
+    from: '    const key = this.#pinHost(cred, host)\n    const list = pinList(pins)',
+    to: '    const key = (this.#pinHost(cred, host), host)\n    const list = pinList(pins)',
+    tests: ['test/security/store-pins.test.js'],
+  },
+  {
+    // F11 + F8: a restore puts pins back; dropping them is less protection.
+    what: "a restore drops a bundle's pins",
+    file: 'src/store/vault.js',
+    from: '        cred.pins = { ...pinTableOf(cred.pins, key), [key]: pinList(list) }',
+    to: '        pinList(list)',
+    tests: ['test/security/store-pins.test.js'],
+  },
+  {
+    what: 'the public credential view carries the pins themselves, not counts',
+    file: 'src/store/vault.js',
+    from: '      pins: pinCounts(cred.pins),',
+    to: '      pins: structuredClone(cred.pins ?? {}),',
+    tests: ['test/security/store-pins.test.js'],
+  },
+  {
+    // The durability scan reads one-line methods (Grok's residual): a
+    // one-line writer used to be on no list and was never checked.
+    what: 'a one-line method that writes the vault is on no durability list',
+    file: 'src/store/vault.js',
+    from: '  listListeners() { return Object.values(this.db.listeners) }',
+    to: '  listListeners() { this.#persist(); return Object.values(this.db.listeners) }',
+    tests: ['test/core/passphrase.test.js'],
   },
 ]
 
