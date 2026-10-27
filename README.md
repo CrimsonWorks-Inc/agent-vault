@@ -78,6 +78,17 @@ agent-vault session create --cred gh --paths "/repos/frozencrow/**"
 
 Run either of those without arguments and you get a wizard instead of a flag list.
 
+A session asks you before every write by default (`--approval on-write`). To let an agent write without asking, say so, and prove it is you:
+
+```bash
+agent-vault session create --cred gh --methods GET,POST --approval auto   # asks for your passphrase, every time
+agent-vault session create --cred gh --approval auto                      # read-only: asks for nothing extra
+agent-vault session create --cred gh --infinite                           # no expiry; asks for your passphrase
+agent-vault session create --cred gh,openai-key                           # one session, two credentials
+```
+
+`auto` with a write method, and `--infinite`, each take you out of the loop for as long as the session lives, so creating one needs your passphrase (or fingerprint, in the UI) for that one operation — the five-minute confirmation window does not count — and is refused on a vault with no passphrase at all. An agent cannot ask for either one; you can add them when approving its request: `agent-vault approve sr_… --approval auto`. A read-only `auto` session is unaffected, because `on-write` would never ask for GET or HEAD either. An infinite session lasts until `agent-vault session revoke <sid>`, and is never reachable from a network listener.
+
 After installing, confirm the boundary is real. This should be refused:
 
 ```bash
@@ -126,6 +137,15 @@ eval "$(agent-vault env)"
 curl "$AGENT_VAULT_URL/p/gh/user" -H "Authorization: Bearer $AGENT_VAULT_PLACEHOLDER"
 ```
 
+**An env file**, for tools that read their own variable names:
+
+```bash
+agent-vault env --out .env --map GH_TOKEN=gh --profile-vars
+agent-vault exec --map GH_TOKEN=gh -- gh pr list      # the same, for one process, no file
+```
+
+The file holds placeholders and loopback gateway URLs — never a credential and never the session token, which is checked again just before the file is opened. It is written 0600, is never overwritten without `--force` (or a yes at the prompt), and a symlink at that path is refused rather than followed. `--profile-vars` adds `OPENAI_API_KEY` / `OPENAI_BASE_URL` and the like for every credential in the session whose SDK reads them; `--map-file F` takes one `NAME=SPEC` per line. When a session holds two credentials for the same host, use `/p/<credential>/`: `/t/` picks the first grant for the host.
+
 ### Route the model key too
 
 The API key the agent itself runs on is usually the most valuable secret on the machine, and every major SDK reads its base URL from the environment, so no code changes:
@@ -158,6 +178,8 @@ That opens the docs inside the web UI, where they are written against your actua
 **Responses are scrubbed** against every injected secret and every other stored credential, in every encoding a response is likely to carry it in — raw, the UTF-8 bytes as the wire actually delivers them, percent-encoded, escaped-slash, JSON-escaped (both `\u` escapes and the two-character ones, mixed freely), hex in either case, HTML entities, and base64 at all three byte alignments in both alphabets — and those encodings stacked inside one another, such as base64 inside a percent-encoded value, up to three layers deep — including across streaming chunk boundaries. Tokens the vault never stored (a minted installation token, an AWS key) are redacted by shape.
 
 **An agent can ask for a session; only a human can grant one.** `vault_request_session` opens a request and creates nothing — no session, no token, no grant — until a human answers it. They see what was asked for and the agent's stated reason as an unverified claim, and they can narrow it before approving: `agent-vault approve sr_… --methods GET --paths "/user"`. What they approve is what gets created, through the same code path as `session create`, so an approved proposal cannot reach a laxer one. Approval supplies the human, never the permission — the credential's host ceiling and the profile's deny paths still bind afterwards. Only the agent that asked can collect the answer: asking returns a one-time secret (`collect_secret` over HTTP, `poll_secret` from `vault_request_session`) that polling must present, because request ids are listed on the socket for anyone to read. The client you approve with records the session for local agents directly from the approval.
+
+**Sessions that remove the human need the human, every time.** A session whose writes go through without asking (`approval: auto` with any method beyond GET, HEAD and OPTIONS), or that never expires, is *elevated*. Creating one, approving an agent's request into one, or a bulk decision containing one needs a proof made for that one operation — the passphrase sent with the request, or an authenticator signature over it — and the shared confirmation window, which admits every caller on the socket while it is open, is never enough. With no human factor enrolled it is refused outright. An agent cannot propose either setting: a request that names one is refused, not trimmed. An approval mode the daemon does not know is refused too, where it used to mean `auto`.
 
 **Approvals are bound to the request hash.** A write held for a human executes exactly once however many times the client retries; later resends replay the stored response instead of producing a second side effect.
 

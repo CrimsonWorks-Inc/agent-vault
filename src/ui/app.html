@@ -466,8 +466,10 @@
     return `${Math.floor(s / 3600)}h ago`
   }
   const until = (iso) => {
+    // A session with no expiry has none to count down to.
+    if (iso === null) return 'never'
     const s = (Date.parse(iso) - Date.now()) / 1000
-    if (s <= 0) return 'expired'
+    if (!Number.isFinite(s) || s <= 0) return 'expired'
     if (s < 3600) return `${Math.floor(s / 60)}m left`
     return `${Math.floor(s / 3600)}h left`
   }
@@ -478,6 +480,17 @@
 
   let docsSection = hashSection || 'how'
   let docsCtx = null
+
+  /** This install's CLI name, port and credentials, fetched once. */
+  async function loadDocsCtx() {
+    if (docsCtx) return docsCtx
+    docsCtx = await api('GET', 'docs/context').catch(() => ({}))
+    docsCtx.cli = docsCtx.cli || 'agent-vault'
+    docsCtx.gateway_port = docsCtx.gateway_port || 7411
+    // Use a credential the reader actually has, so the examples are theirs.
+    docsCtx.cred = docsCtx.cred_slugs?.[0] || 'gh-work'
+    return docsCtx
+  }
 
   /** A copyable command block. `cmd` is shell text; `caption` explains it. */
   const code = (cmd, caption) =>
@@ -532,6 +545,20 @@
         which paths, how many requests.</p></div>
         ${code(`${c.cli} session create`, 'Walks you through it, then prints what to give the agent.')}
         ${code(`${c.cli} session create --cred ${c.cred} --methods GET,HEAD --paths "/repos/**" --budget 200`)}
+        <div class="prose"><h3>3b. Let it write without asking</h3>
+        <p>By default a session asks you before every write (<code>on-write</code>). To let the
+        agent write without asking:</p></div>
+        ${code(`${c.cli} session create --cred ${c.cred} --methods GET,POST --approval auto`)}
+        <div class="prose">
+        <p>auto means no approval prompts at all, including for writes. Because that takes you out of the loop for the life of the session, creating one asks for your passphrase or fingerprint every time, even inside the five-minute window, and is refused on a vault with no passphrase. Read-only sessions are unaffected: GET and HEAD never ask under on-write either.</p>
+        <p>So a read-only <code>--approval auto</code> session needs no passphrase at all. The
+        other modes are <code>each</code> (ask for every request) and <code>first-use</code>
+        (ask once).</p>
+        <p>A session can also have no expiry: <code>--infinite</code> in place of
+        <code>--ttl</code>. It lasts until you revoke it, is never reachable from a network
+        listener, and asks for your passphrase or fingerprint every time you create one, for
+        the same reason.</p></div>
+        ${code(`${c.cli} session create --cred ${c.cred} --infinite`, 'Revoke it when you are done: session revoke <sid>.')}
         <div class="prose"><h3>4. Connect the agent</h3>
         <p>See <strong>Connect your agent</strong> for the three ways to do this.
         The shortest one is <code>${esc(c.cli)} mcp install --agent claude-code</code>.</p></div>`,
@@ -604,6 +631,21 @@
         ${code(`eval "$(${c.cli} env)"`, 'Exports AGENT_VAULT_URL, AGENT_VAULT_SESSION and a placeholder.')}
         ${code(`${c.cli} exec -- <your agent command>`,
           'Same thing, but scoped to one child process, with stale real tokens stripped from its environment.')}
+        <div class="prose"><h3>Give a tool an env file</h3>
+        <p>Most tools read a token from a variable of their own: <code>GH_TOKEN</code>,
+        <code>OPENAI_API_KEY</code>. Map those names to credentials in a session, and the vault
+        writes a placeholder under each one, plus the base URLs for credentials whose SDK
+        reads one.</p></div>
+        ${code(`${c.cli} env --out .env --map GH_TOKEN=${c.cred} --profile-vars`)}
+        <div class="prose">
+        <p>The file holds placeholders, which only work through this vault, and is written readable by you alone. It is never overwritten unless you say so.</p>
+        <p>The session token is never written into it. <code>--map NAME=&lt;slug&gt;:base_url</code>
+        maps a credential's gateway URL, <code>--map-file F</code> reads one
+        <code>NAME=SPEC</code> per line, and <code>exec --map</code> does the same for one child
+        process without writing a file.</p>
+        <p>When a session holds two credentials for the same host, use the
+        <code>/p/&lt;credential&gt;/</code> route: <code>/t/</code> picks the first grant for the
+        host, and refuses the other credential's placeholder.</p></div>
         <div class="prose"><p>The agent then makes requests through one of two routes:</p></div>
         ${code(`curl "$AGENT_VAULT_URL/p/${c.cred}/user" \\
   -H "AV-Session: $AGENT_VAULT_SESSION" \\
@@ -691,7 +733,8 @@ ${c.cli} unlock`)}
         vault back if this machine does not come back.</p>
         <h3>End a session now</h3>
         <p>Revoking a session ends it and every placeholder it handed out, at once, whatever
-        lifetime it was given.</p></div>
+        lifetime it was given.</p>
+        <p>Revoking: agent-vault session revoke &lt;sid&gt;, or Panic, ends an infinite session like any other.</p></div>
         ${code(`${c.cli} session revoke <sid>`)}`,
     },
     {
@@ -751,14 +794,19 @@ ${c.cli} cred add [slug] [--kind K] store a credential (value read from the term
 ${c.cli} cred list | cred rm SLUG
 ${c.cli} profiles                   the built-in connector kinds and their ceilings
 
-${c.cli} session create [--cred S] [--methods M] [--paths P] [--budget N]
+${c.cli} session create --cred S[,S...] [--methods GET,POST] [--paths "/repos/**"]
+               [--budget N] [--uses N] [--approval each|on-write|first-use|auto]
+               [--ttl HOURS | --infinite] [--label TEXT] [--grants-file F]
 ${c.cli} session list | session revoke [SID]
 ${c.cli} ph next CRED [--uses N]    issue a placeholder
 ${c.cli} ph check PLACEHOLDER       is it well formed (offline; not whether it is still live)
 ${c.cli} ph pattern                 the regex that recognises one
 
 ${c.cli} env                        shell exports for an agent
-${c.cli} exec -- COMMAND            run a command with those exports
+${c.cli} env --out F [--force] [--map NAME=S[:base_url]]... [--map-file F] [--profile-vars]
+                               an env file of placeholders, 0600, never replaced unasked
+${c.cli} exec [--map NAME=S]... -- COMMAND
+                               run a command with those exports
 ${c.cli} mcp                        stdio transport
 ${c.cli} mcp url                    the Streamable HTTP endpoint
 ${c.cli} mcp install --agent AGENT  write the config for that tool
@@ -799,8 +847,18 @@ ${c.cli} ui                         open this page`)}`,
     for (const k of ['budget', 'uses', 'ttl_minutes']) {
       if (raw[k] !== undefined && raw[k] !== null && raw[k] !== '') out[k] = Number(raw[k])
     }
+    // The owner's own options, read as parseOverrides reads them.
+    if (typeof raw.approval === 'string' && raw.approval !== '') out.approval = raw.approval
+    if (raw.infinite === true || raw.infinite === 'true') out.infinite = true
     return out
   }
+
+  const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
+  /** Auto with any method that writes: the session never asks you again. */
+  const autoWrites = (approval, methods) =>
+    approval === 'auto' && (methods || ['GET', 'HEAD']).some((m) => !SAFE_METHODS.includes(String(m).toUpperCase()))
+  /** The name a tool most likely reads a credential from. */
+  const suggestedName = (g) => g.env?.key || `${String(g.cred).toUpperCase().replace(/[^A-Z0-9]/g, '_')}_TOKEN`
 
   function exampleCall(s) {
     const site = (s.sites || [])[0] || ''
@@ -821,20 +879,28 @@ ${c.cli} ui                         open this page`)}`,
   function handoffCard() {
     if (!lastSession) return ''
     const s = lastSession
-    const curl = exampleCall(s)
+    const grants = s.grants || [s]
+    const curl = exampleCall({ ...grants[0], token: s.token, sites: s.sites, probe: s.probe })
+    // Names a tool reads, mapped to credentials. The command writes
+    // placeholders and loopback URLs only; the session token is not in it.
+    const envCmd = `${s.cli} env --session ${s.session_id} --out .env ${grants.map((g) => `--map ${suggestedName(g)}=${g.cred}`).join(' ')}`
     return `
       <div class="card"><h2>Hand this to the agent</h2><div class="body">
-        <p class="caption">Session <span class="mono">${esc(s.session_id)}</span>, ${esc(until(s.expires_at))}.
+        <p class="caption">Session <span class="mono">${esc(s.session_id)}</span>, ${esc(s.infinite ? 'never expires' : until(s.expires_at))}.
           Shown once here — reload and it is gone from this page. It is saved to
           <span class="mono">~/.agent-vault/cli-state.json</span>, which is where the CLI and the
           MCP bridge look for it.</p>
-        ${codeRow('Base URL', s.base_url)}
         ${codeRow('Session token', s.token)}
-        ${codeRow('Placeholder', s.placeholder)}
-        <p class="caption" style="margin-top:14px">The placeholder goes here, and nowhere else:</p>
-        <ul class="prose" style="margin-bottom:14px">${(s.usage || []).map((u) => `<li><code>${esc(u)}</code></li>`).join('')}</ul>
-        ${(s.lint || []).length ? `<div class="notice">${(s.lint || []).map(esc).join('<br>')}</div>` : ''}
-        <p class="caption">A request that exercises it:</p>
+        ${grants.map((g) => `
+          <h3 class="mono" style="margin:16px 0 6px">${esc(g.cred)}</h3>
+          ${codeRow('Base URL', g.base_url)}
+          ${codeRow('Placeholder', g.placeholder)}
+          <p class="caption" style="margin-top:10px">The placeholder goes here, and nowhere else:</p>
+          <ul class="prose" style="margin-bottom:10px">${(g.usage || []).map((u) => `<li><code>${esc(u)}</code></li>`).join('')}</ul>
+          ${(g.lint || []).length ? `<div class="notice">${(g.lint || []).map((p) => esc(p.message ?? p)).join('<br>')}</div>` : ''}`).join('')}
+        <p class="caption" style="margin-top:14px">An env file for your tools: placeholders only, written readable by you alone.</p>
+        ${code(envCmd)}
+        <p class="caption">A request that exercises the first one:</p>
         ${code(curl)}
         <button class="action" data-act="dismiss-handoff">Done</button>
       </div></div>`
@@ -965,15 +1031,17 @@ ${c.cli} ui                         open this page`)}`,
           <div class="main">
             <div class="name">${esc(s.label)}
               <span class="pill ${s.state === 'active' ? 'ok' : ''}">${esc(s.state)}</span>
-              ${s.remote ? '<span class="pill warn">remote</span>' : ''}</div>
+              ${s.remote ? '<span class="pill warn">remote</span>' : ''}
+              ${approvalBadge(s)}
+              ${s.infinite ? '<span class="pill warn">infinite</span>' : ''}</div>
             <div class="meta"><span class="mono">${esc(s.id)}</span> &middot; ${s.grants} grant(s) &middot;
-              ${esc(until(s.expires_at))}</div>
+              ${esc(s.infinite ? 'never' : until(s.expires_at))}</div>
           </div>
           <div class="actions">${s.state === 'active'
             ? `<button class="action danger" data-act="revoke" data-sid="${esc(s.id)}">Revoke</button>` : ''}</div>
         </div>`).join('') : '<div class="empty">No sessions yet.</div>'
 
-      const options = creds.map((c) => `<option value="${esc(c.slug)}">${esc(c.slug)}</option>`).join('')
+      const options = creds.map((c, i) => `<option value="${esc(c.slug)}"${i === 0 ? ' selected' : ''}>${esc(c.slug)}</option>`).join('')
       return `
         <header class="page"><h1>Sessions</h1></header>
         <p class="sub">A session is what an agent holds. Revoking one cuts off every placeholder it issued.</p>
@@ -981,17 +1049,26 @@ ${c.cli} ui                         open this page`)}`,
         <div class="card"><h2>Sessions</h2>${rows}</div>
         ${creds.length ? `<div class="card"><h2>New session</h2><div class="body">
           <div class="grid">
-            <div><label for="sCred">Credential</label><select id="sCred">${options}</select></div>
+            <div><label for="sCred">Credentials</label><select id="sCred" multiple size="${Math.min(4, creds.length)}">${options}</select></div>
             <div><label for="sLabel">Label</label><input id="sLabel" placeholder="issue triage" autocomplete="off"></div>
             <div><label for="sMethods">Methods</label><input id="sMethods" value="GET,HEAD" autocomplete="off"></div>
             <div><label for="sPaths">Paths</label><input id="sPaths" value="/**" autocomplete="off"></div>
             <div><label for="sBudget">Budget</label><input id="sBudget" type="number" value="500" min="1"></div>
-            <div><label for="sApproval">Writes</label><select id="sApproval">
-              <option value="on-write">ask me (on-write)</option>
+            <div><label for="sApproval">Approval</label><select id="sApproval">
+              <option value="on-write">ask me before writes (on-write)</option>
               <option value="each">ask me every time</option>
-              <option value="auto">no approval</option>
+              <option value="first-use">ask me the first time</option>
+              <option value="auto">never ask (auto)</option>
+            </select></div>
+            <div><label for="sLifetime">Lifetime</label><select id="sLifetime">
+              <option value="1">1 hour</option>
+              <option value="8" selected>8 hours</option>
+              <option value="24">24 hours</option>
+              <option value="never">No expiry</option>
             </select></div>
           </div>
+          <div class="notice warn" id="sAutoWarn" hidden>No approval prompts for writes. Your authenticator is asked every time you create one.</div>
+          <div class="notice warn" id="sNeverWarn" hidden>This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>
           <button class="action primary" data-act="add-session">Create session</button>
         </div></div>` : ''}`
     },
@@ -1042,6 +1119,19 @@ ${c.cli} ui                         open this page`)}`,
                     <input class="narrow-input" data-field="${esc(f)}"
                       placeholder="${esc(String(item.proposal[f] ?? 'unchanged'))}"></label>`).join('')}
               </div>` : ''}
+            ${(item.owner_settable || []).length ? `
+              <div class="meta" style="color:var(--muted);margin:10px 0 6px">Owner options, which the agent cannot ask for:</div>
+              <div class="owner" data-for="${esc(item.id)}">
+                <label class="field"><span>approval</span>
+                  <select class="owner-approval">
+                    <option value="">unchanged</option>
+                    <option value="on-write">on-write</option>
+                    <option value="each">each</option>
+                    <option value="first-use">first-use</option>
+                    <option value="auto">auto: never ask</option>
+                  </select></label>
+                <label class="field pick"><input type="checkbox" class="owner-infinite"> <span>No expiry</span></label>
+              </div>` : ''}
             <div class="actions">
               <button class="action primary" data-act="decide" data-id="${esc(item.id)}"
                 data-kind="${esc(item.kind)}" data-granted="1">
@@ -1084,13 +1174,7 @@ ${c.cli} ui                         open this page`)}`,
     },
 
     async docs() {
-      if (!docsCtx) {
-        docsCtx = await api('GET', 'docs/context').catch(() => ({}))
-        docsCtx.cli = docsCtx.cli || 'agent-vault'
-        docsCtx.gateway_port = docsCtx.gateway_port || 7411
-        // Use a credential the reader actually has, so the examples are theirs.
-        docsCtx.cred = docsCtx.cred_slugs?.[0] || 'gh-work'
-      }
+      await loadDocsCtx()
       const section = DOCS.find((d) => d.id === docsSection) || DOCS[0]
       return `
         <header class="page"><h1>Docs</h1>
@@ -1170,23 +1254,33 @@ ${c.cli} ui                         open this page`)}`,
       render()
     },
     async 'add-session'() {
-      const body = {
-        cred: document.getElementById('sCred').value,
-        label: document.getElementById('sLabel').value.trim() || 'ui session',
-        methods: document.getElementById('sMethods').value.split(',').map((m) => m.trim()).filter(Boolean),
+      const picked = [...document.getElementById('sCred').selectedOptions].map((o) => o.value)
+      if (!picked.length) return toast('Pick at least one credential')
+      if (picked.length > 16) return toast('A session holds at most 16 credentials')
+      // The same limits for every credential picked, one grant each.
+      const shared = {
+        methods: document.getElementById('sMethods').value.split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
         paths: document.getElementById('sPaths').value.split(',').map((p) => p.trim()).filter(Boolean),
         budget: Number(document.getElementById('sBudget').value),
         approval: document.getElementById('sApproval').value,
+      }
+      const lifetime = document.getElementById('sLifetime').value
+      const body = {
+        label: document.getElementById('sLabel').value.trim() || 'ui session',
+        grants: picked.map((cred) => ({ cred, ...shared })),
+        // No expiry is no lifetime at all, never a long one.
+        ...(lifetime === 'never' ? { infinite: true } : { ttl_hours: Number(lifetime) }),
       }
       const s = await gated(
         await operationFor('session.create', body),
         (proof) => api('POST', 'sessions', { ...body, presence: proof }),
       )
-      // Carry the credential's own injection site through, so the example call
-      // puts the placeholder where this credential actually accepts it.
+      // Carry the first credential's own injection site through, so the
+      // example call puts the placeholder where it actually goes.
       const creds = await api('GET', 'credentials').catch(() => [])
-      const cred = creds.find((c) => c.slug === body.cred)
-      lastSession = { ...s, sites: cred?.fields?.[0]?.sites || [], probe: cred?.probe_path || '' }
+      const cred = creds.find((c) => c.slug === picked[0])
+      const { cli } = await loadDocsCtx()
+      lastSession = { ...s, cli, sites: cred?.fields?.[0]?.sites || [], probe: cred?.probe_path || '' }
       toast(`Session ${s.session_id} created`)
       render()
     },
@@ -1257,6 +1351,11 @@ ${c.cli} ui                         open this page`)}`,
         for (const input of document.querySelectorAll(`.narrow[data-for="${id}"] .narrow-input`)) {
           if (input.value.trim()) typed[input.dataset.field] = input.value.trim()
         }
+        const owner = document.querySelector(`.owner[data-for="${id}"]`)
+        if (owner) {
+          typed.approval = owner.querySelector('.owner-approval').value
+          if (owner.querySelector('.owner-infinite').checked) typed.infinite = true
+        }
       }
       // Parsed before it is signed. The raw text ("GET", "100") was signed and
       // the server rebuilt the operation from parsed values (["GET"], 100), so
@@ -1271,10 +1370,34 @@ ${c.cli} ui                         open this page`)}`,
         const op = await operationFor(granted ? 'approval.approve' : 'approval.deny', { id, granted })
         await gated(op, (proof) => api('POST', 'approvals', { id, granted, presence: proof }))
       }
+      for (const key of [...drafts.keys()]) if (key.startsWith(`${id}|`)) drafts.delete(key)
       toast(granted ? 'Approved' : 'Denied')
       render()
     },
   }
+
+  /** The session's strictest mode, in the warning colour when it never asks about writes. */
+  function approvalBadge(s) {
+    const order = ['auto', 'first-use', 'on-write', 'each']
+    const modes = (s.creds || []).map((c) => c.approval ?? 'auto')
+    if (!modes.length) return ''
+    const rank = (m) => (order.includes(m) ? order.indexOf(m) : order.length)
+    const mode = modes.reduce((a, b) => (rank(b) > rank(a) ? b : a))
+    const elevated = (s.elevated || []).includes('approval_auto_writes')
+    return `<span class="pill ${elevated ? 'warn' : ''}">approval: ${esc(elevated ? 'auto' : mode)}</span>`
+  }
+
+  /** Show what the new-session form is about to ask for, before anything is signed. */
+  function syncSessionWarnings() {
+    const approval = document.getElementById('sApproval')
+    if (!approval) return
+    const methods = document.getElementById('sMethods').value.split(',').map((m) => m.trim()).filter(Boolean)
+    document.getElementById('sAutoWarn').hidden = !autoWrites(approval.value, methods)
+    document.getElementById('sNeverWarn').hidden = document.getElementById('sLifetime').value !== 'never'
+  }
+  document.addEventListener('input', (e) => {
+    if (['sApproval', 'sMethods', 'sLifetime'].includes(e.target?.id)) syncSessionWarnings()
+  })
 
   /** The bar appears only when something is ticked, and counts what is. */
   function syncBulkBar() {
@@ -1288,6 +1411,7 @@ ${c.cli} ui                         open this page`)}`,
 
   document.addEventListener('change', (e) => {
     const box = e.target
+    if (['sApproval', 'sMethods', 'sLifetime'].includes(box?.id)) return syncSessionWarnings()
     if (!box.classList?.contains('bulk-pick')) return
     if (box.checked) selected.add(box.dataset.id)
     else selected.delete(box.dataset.id)
@@ -1357,10 +1481,39 @@ ${c.cli} ui                         open this page`)}`,
     syncBulkBar()
   }
 
+  /**
+   * What the human has typed or chosen on a card — a narrowing, an owner
+   * option — kept outside the DOM for the same reason as the selection: the
+   * five-second re-render wiped it, so a narrowing half typed was gone, and an
+   * approval could go out wider than the one being written.
+   */
+  const drafts = new Map()
+  const DRAFTED = '.narrow-input, .owner-approval, .owner-infinite'
+  const draftKey = (input) => {
+    const card = input.closest('[data-for]')
+    return card ? `${card.dataset.for}|${input.dataset.field || input.className}` : null
+  }
+  function rememberDraft(input) {
+    if (!input?.matches?.(DRAFTED)) return
+    const key = draftKey(input)
+    if (key) drafts.set(key, input.type === 'checkbox' ? input.checked : input.value)
+  }
+  document.addEventListener('input', (e) => rememberDraft(e.target))
+  document.addEventListener('change', (e) => rememberDraft(e.target))
+  function restoreDrafts() {
+    for (const input of document.querySelectorAll(DRAFTED)) {
+      const key = draftKey(input)
+      if (!drafts.has(key)) continue
+      if (input.type === 'checkbox') input.checked = drafts.get(key)
+      else input.value = drafts.get(key)
+    }
+  }
+
   async function render() {
     try {
       el.innerHTML = await views[current]()
       restoreSelection()
+      restoreDrafts()
     } catch (err) {
       el.innerHTML = `<header class="page"><h1>Cannot reach the daemon</h1></header>
         <p class="sub">${esc(err.message)}</p>
