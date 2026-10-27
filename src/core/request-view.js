@@ -14,7 +14,8 @@
  * query is split on `&` and on `;`, as Rack does. A name is decoded once, as
  * every form parser does. A method-override name is folded as PHP and Rack
  * fold it. Where two of those readers could disagree about what a request
- * says, the checks refuse it rather than pick one.
+ * says, the checks refuse it rather than pick one, and a name no API sends,
+ * one its readers cut, trim or decode differently, is refused outright.
  */
 
 /** Headers a framework may honour in place of the request-line method. */
@@ -28,17 +29,34 @@ export const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-htt
 const METHOD_OVERRIDE_FIELDS = new Set(['_method', '__method', 'x_http_method_override', 'x_http_method', 'x_method_override'])
 
 /**
- * The names a field may be read as. PHP turns a space, a dot and an unmatched
- * `[` in a name into `_`, so `.method` is Laravel's `_method`, and
- * `_method[]` is still the `_method` field to Rack and PHP. Letter case and
- * `-` against `_` are folded too: a name only ever folds to refuse more.
+ * The names a field may be read as. PHP registers a name only up to its
+ * first NUL and without its leading spaces, then turns a space, a dot and an
+ * unmatched `[` in what is left into `_`: so `.method` and `_method%00x` are
+ * Laravel's `_method`, `+force` is `force`, and `_method[]` is still the
+ * `_method` field to Rack and PHP. The name as written is folded as well as
+ * the name PHP keeps, and letter case and `-` against `_` are folded too: a
+ * name only ever folds to refuse more.
  */
 export function foldedNames(name) {
-  const n = String(name).toLowerCase().replace(/[ .-]/g, '_')
-  return [n.replace(/\[.*$/s, ''), n.replace(/\[/g, '_')]
+  const out = new Set()
+  for (const base of [String(name), String(name).split('\0')[0].replace(/^ +/, '')]) {
+    const n = base.toLowerCase().replace(/[ .-]/g, '_')
+    out.add(n.replace(/\[.*$/s, '')).add(n.replace(/\[/g, '_'))
+  }
+  return [...out]
 }
 
 export const isOverrideField = (name) => foldedNames(name).some((n) => METHOD_OVERRIDE_FIELDS.has(n))
+
+/**
+ * A name its readers do not agree on: an empty one, or one holding a NUL or
+ * another control character, a character outside ASCII, or a space at
+ * either end. PHP reads `force%00` and `+force` as `force`, where every other
+ * reader sees another name, and folding each such shape onto the names the
+ * rules use would be one more list of spellings to get wrong. No API names a
+ * parameter so, so the gateway refuses a request that does.
+ */
+export const isStrayName = (name) => !name || /[^\x20-\x7e]|^ | $/.test(name)
 
 /** One component of a query or form body, decoded exactly as URLSearchParams does. */
 const formDecode = (s) => new URLSearchParams(`x=${s}`).get('x')
@@ -78,47 +96,62 @@ function headerOverrides(headers) {
 }
 
 /**
- * The override values in a query or a form body, as both kinds of reader
- * read it. Split on `;` as well, `a=1;_method=DELETE` names DELETE; split on
- * `&` alone, `.method=GET;force=1` names `GET;force=1`, which is not GET.
+ * Every pair in a query or a form body, as both kinds of reader read it.
+ * Split on `;` as well, `a=1;_method=DELETE` names DELETE; split on `&`
+ * alone, `.method=GET;force=1` names `GET;force=1`, which is not GET.
  */
-const overrideValues = (raw) => [...queryParams(raw), ...(raw.includes(';') ? queryParams(raw, '&') : [])].filter((p) => isOverrideField(p.name)).map((p) => p.value)
+const bothReadings = (raw) => [...queryParams(raw), ...(raw.includes(';') ? queryParams(raw, '&') : [])]
 
 /**
- * Every value a method-override field carries: in the query, in a form or
- * multipart body, and at the top level of a JSON body. Each copy of a
- * repeated field is returned, since frameworks differ on which one wins.
+ * A multipart `name*` parameter, `utf-8''%5Fmethod`, decoded as RFC 5987
+ * writes it and busboy reads it. One that does not decode is read as a name
+ * no reader agrees on.
  */
-function fieldOverrides(query, mediaType, body) {
-  const out = overrideValues(query)
-  if (body == null || !body.length) return out
-  const text = (Buffer.isBuffer(body) ? body.toString('utf8') : String(body)).replace(/^﻿/, '')
-  if (mediaType === 'application/x-www-form-urlencoded') out.push(...overrideValues(text))
-  else if (mediaType === 'multipart/form-data') {
-    // Each part's name, from its Content-Disposition, and its value up to the
-    // next delimiter. A part that names an override and has no readable
-    // value counts as naming another method.
-    for (const m of text.matchAll(/content-disposition:[^\r\n]*?;\s*name\*?\s*=\s*(?:"([^"]*)"|([^;\r\n]*))[^\r\n]*\r?\n/gi)) {
-      if (!isOverrideField(m[1] ?? m[2].trim())) continue
-      const rest = text.slice(m.index + m[0].length)
-      const value = /^(?:[^\r\n]+\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(rest)
-      out.push(value ? value[1] : '')
-    }
-  } else if (/[/+]json$/.test(mediaType)) {
-    let parsed
-    try { parsed = JSON.parse(text) } catch { return out }
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) for (const v of topLevelJsonValues(text, isOverrideField)) out.push(typeof v === 'string' ? v : JSON.stringify(v))
-  }
-  return out
+function extendedName(raw) {
+  const m = /^[^']*'[^']*'(.*)$/s.exec(raw)
+  try { return decodeURIComponent(m ? m[1] : raw) } catch { return '�' }
 }
 
 /**
- * The values of the top-level keys `wanted` accepts, in a JSON object that
- * JSON.parse has already accepted, every copy of a repeated key included:
- * JSON.parse keeps only the last, and a server that keeps the first would
- * run the other. Only a wanted value is parsed; the rest is stepped over.
+ * Every field name a framework may read, and every value a method-override
+ * field carries: in the query, in a form or multipart body, and at the top
+ * level of a JSON body. Each copy of a repeated field is returned, since
+ * frameworks differ on which one wins.
  */
-function topLevelJsonValues(text, wanted) {
+function fields(query, mediaType, body) {
+  const names = [], overrides = []
+  const read = (list) => { for (const p of list) { names.push(p.name); if (isOverrideField(p.name)) overrides.push(p.value) } }
+  read(bothReadings(query))
+  if (body == null || !body.length) return { names, overrides }
+  const text = (Buffer.isBuffer(body) ? body.toString('utf8') : String(body)).replace(/^﻿/, '')
+  if (mediaType === 'application/x-www-form-urlencoded') read(bothReadings(text))
+  else if (mediaType === 'multipart/form-data') {
+    // Each part's names, every `name` and `name*` in its Content-Disposition,
+    // and its value up to the next delimiter. A part that names an override
+    // and has no readable value counts as naming another method.
+    for (const m of text.matchAll(/content-disposition:([^\r\n]*)\r?\n/gi)) {
+      const partNames = [...m[1].matchAll(/;\s*name(\*?)\s*=\s*(?:"([^"]*)"|([^;]*))/gi)].map(([, star, quoted, bare]) => (star ? extendedName : String)(quoted ?? bare.trim()))
+      const value = /^(?:[^\r\n]+\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(text.slice(m.index + m[0].length))
+      read(partNames.map((name) => ({ name, value: value ? value[1] : '' })))
+    }
+  } else if (/[/+]json$/.test(mediaType)) {
+    let parsed
+    try { parsed = JSON.parse(text) } catch { return { names, overrides } }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [k, v] of topLevelJsonFields(text, isOverrideField)) { names.push(k); if (isOverrideField(k)) overrides.push(typeof v === 'string' ? v : JSON.stringify(v)) }
+    }
+  }
+  return { names, overrides }
+}
+
+/**
+ * The top-level keys of a JSON object that JSON.parse has already accepted,
+ * each as `[key, value]`, every copy of a repeated key included: JSON.parse
+ * keeps only the last, and a server that keeps the first would run the
+ * other. Only a value `wanted` accepts the key of is parsed; the rest is
+ * stepped over and comes back as `[key]`.
+ */
+function topLevelJsonFields(text, wanted) {
   const out = []
   let i = text.indexOf('{') + 1
   const ws = () => { while (/\s/.test(text[i] ?? '')) i++ }
@@ -141,7 +174,7 @@ function topLevelJsonValues(text, wanted) {
     ws(); i++ /* : */; ws()
     start = i
     skipValue()
-    if (wanted(key)) out.push(JSON.parse(text.slice(start, i)))
+    out.push(wanted(key) ? [key, JSON.parse(text.slice(start, i))] : [key])
     ws()
     if (text[i] === ',') i++
   }
@@ -160,6 +193,9 @@ function topLevelJsonValues(text, wanted) {
  *   differently.
  * - `unsendable`: the query holds a character a URL cannot carry as written,
  *   so the URL parser would send something other than what was read.
+ * - `strayName`: a field name in the query, a form or multipart body, or at
+ *   the top level of a JSON body is one its readers do not agree on
+ *   (`isStrayName`), whatever rules a grant carries.
  * - `headers`, `body`: as given; the body is read by the payload rules.
  * - `contentType`, `mediaType`: the Content-Type, and its lowercased type
  *   without parameters.
@@ -172,17 +208,19 @@ export function requestView({ method = 'GET', query = '', headers = [], body = n
   const params = queryParams(q)
   const type = contentType !== undefined ? contentType : headers.find(([n]) => String(n).toLowerCase() === 'content-type')?.[1]
   const mediaType = String(type ?? '').split(';')[0].trim().toLowerCase()
+  const read = fields(q, mediaType, body)
   return Object.freeze({
     method: String(method || 'GET').toUpperCase(),
     query: q,
     params,
     semicolon: q.includes(';'),
     unsendable: /[#\t\n\r]|[\x00-\x20]$/.test(q),
+    strayName: read.names.some(isStrayName),
     headers,
     body,
     contentType: type ?? '',
     mediaType,
-    overrides: Object.freeze({ headers: headerOverrides(headers), fields: fieldOverrides(q, mediaType, body) }),
+    overrides: Object.freeze({ headers: headerOverrides(headers), fields: read.overrides }),
   })
 }
 

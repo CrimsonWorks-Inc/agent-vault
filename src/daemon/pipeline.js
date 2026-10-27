@@ -724,6 +724,8 @@ export class Pipeline {
         // for the hop's own method only.
         try { checkOverrides(effective, hopView, { host: hop.host, path: hop.path }) } catch { reason = 'path' }
         if (hopView.overrides.headers.some((m) => m !== hopView.method)) reason = 'path'
+        // A name its readers do not agree on, as on a direct request.
+        if (hopView.strayName) reason = 'path'
       }
       if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
       if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
@@ -1218,6 +1220,18 @@ export class Pipeline {
       })
     }
     checkOverrides(effective, view, { host: route.host, path: route.path })
+    // A name its readers do not agree on (request-view.js, isStrayName):
+    // PHP reads `force%00` and `+force` as `force` where every other reader
+    // sees another name. Refused whatever rules the grant carries, since a
+    // method override matters wherever methods are restricted. It runs after
+    // the override check, so a stray name that is also an override naming
+    // another method is refused as that.
+    if (view.strayName) {
+      throw deny('AV_POLICY_DENIED', 'a parameter name is empty, or holds a control character, a non-ASCII character or a space at either end, which servers read differently', {
+        rule: 'request_ambiguous',
+        hint: 'Name each parameter in printable ASCII, without a space at either end.',
+      })
+    }
     evaluatePayload(effective.payload_sets, { ...view, path: decision.path })
     const overrides = view.overrides.headers
     stage('budget')

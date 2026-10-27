@@ -12,6 +12,7 @@ import { Vault } from '../../src/store/vault.js'
 import * as vaultMod from '../../src/store/vault.js'
 import { Pipeline } from '../../src/daemon/pipeline.js'
 import { deny } from '../../src/core/errors.js'
+import { evaluatePayload } from '../../src/core/payload.js'
 import * as phMod from '../../src/core/placeholder.js'
 
 const SECRET = 'fixture_secret_gateway_seams_0123456789'
@@ -318,10 +319,17 @@ test('a binary upload passes a grant whose payload rules only constrain the quer
 
 test('a strict-query refusal names the parameter safely and never echoes a value', async (t) => {
   const f = fixture(t, { payload: { query: { a: {} }, query_strict: true } })
-  const result = await f.pipeline.handle(f.req({ query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` }))
+  const result = await f.pipeline.handle(f.req({ query: `a=1&${encodeURIComponent('<evil> "name"')}=SECRETVALUE` }))
   const p = problem(result)
-  assert.equal(p.rule, `payload:query:${encodeURIComponent('évil\nname')}:strict`)
+  assert.equal(p.rule, `payload:query:${encodeURIComponent('<evil> "name"')}:strict`)
   assert.ok(!JSON.stringify(p).includes('SECRETVALUE'))
+  // A name with a line break or non-ASCII is refused by the gateway before
+  // the payload rules read it (a stray name), and that refusal echoes
+  // nothing either. The payload rules alone still encode it in the rule.
+  const stray = problem(await f.pipeline.handle(f.req({ query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` })))
+  assert.equal(stray.rule, 'request_ambiguous')
+  assert.ok(!JSON.stringify(stray).includes('SECRETVALUE') && !JSON.stringify(stray).includes('vil'))
+  assert.throws(() => evaluatePayload([{ query: { a: {} }, query_strict: true }], { query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` }), { rule: `payload:query:${encodeURIComponent('évil\nname')}:strict` })
 })
 
 // -------------------------------------------------------------- F5 spend

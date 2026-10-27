@@ -9,7 +9,7 @@ import { Vault } from '../../src/store/vault.js'
 import { Pipeline, approvalPreview } from '../../src/daemon/pipeline.js'
 import { deny } from '../../src/core/errors.js'
 import { meterRequest, reservationFor } from '../../src/core/model-usage.js'
-import { requestView } from '../../src/core/request-view.js'
+import { requestView, foldedNames, isOverrideField, isStrayName } from '../../src/core/request-view.js'
 import { evaluatePayload } from '../../src/core/payload.js'
 
 const SECRET = 'fixture_secret_gateway_only_0123456789'
@@ -828,16 +828,20 @@ const pairsOf = (query, separator) => query.split(separator).filter(Boolean).map
 const READERS = {
   whatwg: q => [...new URLSearchParams(q)],
   rack: q => pairsOf(q, /[&;]/),
-  // PHP: `&` only; a leading space dropped, then space and `.` read as `_`,
-  // and `name[...]` is the array `name`.
-  php: q => pairsOf(q, '&').map(([k, v]) => [k.replace(/^ +/, '').replace(/[ .]/g, '_').replace(/\[.*$/s, ''), v]),
+  // PHP: `&` only; a name read up to its first NUL with its leading spaces
+  // dropped, then space and `.` read as `_`, and `name[...]` is the array
+  // `name`.
+  php: q => pairsOf(q, '&').map(([k, v]) => [k.split('\0')[0].replace(/^ +/, '').replace(/[ .]/g, '_').replace(/\[.*$/s, ''), v]),
   caseBlind: q => [...new URLSearchParams(q)].map(([k, v]) => [k.toLowerCase(), v]),
 }
 const random = seed => () => { seed = (seed + 0x6D2B79F5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296 }
 function generatedQueries(n) {
   const next = random(5)
   const pick = list => list[Math.floor(next() * list.length)]
-  const names = ['a', 'dry_run', 'force', 'note', '_method', '.method', '%5Fmethod', 'FORCE', '%66orce', 'dry.run', 'force[]', 'x-http-method-override', '__method', 'b+c', 'q%20x', '%64ry_run']
+  const names = ['a', 'dry_run', 'force', 'note', '_method', '.method', '%5Fmethod', 'FORCE', '%66orce', 'dry.run', 'force[]', 'x-http-method-override', '__method', 'b+c', 'q%20x', '%64ry_run',
+    // Names readers cut, trim or decode differently: a NUL, a space or `+`
+    // at either end, a tab, another control character, non-ASCII, none.
+    'force%00', 'force%00x', '_method%00', '+force', '++force', '%20force', '%20%20_method', '+_method', 'force+', 'force%20', '%09force', 'force%09', '%01_method', '%7Fforce', 'forc%C3%A9', '%C3%A9', '']
   const values = ['1', 'true', 'GET', 'DELETE', 'x%3By', 'a+b', '', '%26force%3D1']
   const out = []
   for (let i = 0; i < n; i++) {
@@ -960,4 +964,176 @@ test('the view reads a query as the union of its readers', () => {
   // A loose request and its view are refused alike by the payload rules.
   assert.throws(() => evaluatePayload([FORCE.payload], { query: 'dry_run=true;force=true' }), { rule: 'request_ambiguous' })
   assert.throws(() => evaluatePayload([FORCE.payload], requestView({ query: 'dry_run=true;force=true' })), { rule: 'request_ambiguous' })
+})
+
+// ------------------------------------- round 6: a name its readers do not agree on
+
+// PHP registers a name only up to a NUL and without its leading spaces, so
+// it read `force%00` and `+force` as `force`, and `_method%00` and
+// `%20%20_method` as `_method`, where the view saw other names. The grant
+// was satisfied and the credential was sent. Two layers close the class: a
+// name no API sends (a control character, a NUL, non-ASCII, a space at
+// either end, or none at all) is refused on every path whatever the rules,
+// and foldedNames reads a name the way PHP registers it.
+const FORM_FORCE = { payload: { form: { force: { absent: true }, amount: { required: true } } } }
+const QUERY_AMOUNT = { payload: { query: { force: { absent: true }, amount: { required: true } } } }
+// Grok's payload table. A body row's hop carries the same pairs in the
+// Location's query, under the same rules for the query: a hop has no body.
+const PAYLOAD_ROWS = [
+  ['query', 'dry_run=true&force%00=true'],
+  ['query', 'dry_run=true&force%00x=true'],
+  ['query', 'dry_run=true&force%00[]=true'],
+  ['query', 'dry_run=true&+force=true'],
+  ['query', 'dry_run=true&%20force=true'],
+  ['query', 'dry_run=true&++force=true'],
+  ['form', 'amount=2000&force%00=1'],
+  ['form', 'amount=2000&+force=1'],
+]
+// Grok's method table: a POST, where the grant allows GET and POST and not DELETE.
+const METHOD_ROWS = [
+  ['query', '_method%00=DELETE'],
+  ['form', 'a=1&_method%00=DELETE'],
+  ['form', 'a=1&%20%20_method=DELETE'],
+]
+
+test('Grok round 6, payload: a name PHP reads as a ruled one is refused, and nothing is sent', async t => {
+  for (const [where, pairs] of PAYLOAD_ROWS) {
+    await t.test(`${where} ${pairs}`, async t => {
+      const f = where === 'query' ? fixture(t, FORCE) : fixture(t, FORM_FORCE)
+      const result = await f.pipeline.handle(where === 'query' ? f.req({ query: pairs }) : f.req({ method: 'POST', headers: [...f.req().headers, form], body: Buffer.from(pairs) }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'request_ambiguous')
+      assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0); assert.equal(f.grant.budget_used, 0)
+      // On a hop, after a first request the rules allowed.
+      const h = hopFixture(t, where === 'query' ? FORCE : QUERY_AMOUNT, `https://api.example.test/next?${pairs}`)
+      const hop = await h.pipeline.handle(h.req({ query: where === 'query' ? 'dry_run=true' : 'amount=1' }))
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+})
+
+// The override check runs before the name check, so a stray name that is
+// also an override naming another method is refused as the override it is.
+test('Grok round 6, method: a name PHP reads as _method is refused, and a hop to it is not followed', async t => {
+  for (const [where, pairs] of METHOD_ROWS) {
+    await t.test(`${where} ${pairs}`, async t => {
+      const f = fixture(t, { methods: ['GET', 'POST'] })
+      const result = await f.pipeline.handle(where === 'query' ? f.req({ method: 'POST', query: pairs }) : f.req({ method: 'POST', headers: [...f.req().headers, form], body: Buffer.from(pairs) }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'method_override')
+      assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0)
+      // The /admin hop: checked as GET /admin/keys, where DELETE is not allowed.
+      const h = hopFixture(t, { routes: ROUTES }, `https://api.example.test/admin/keys?${pairs}`)
+      const hop = await h.pipeline.handle(h.req({ path: '/p/test/public/start' }))
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+})
+
+// Every shape the hygiene check covers, with no payload rule at all: a name
+// none of the rules or override fields would fold onto is refused all the
+// same, because whether one does is the question the check stops asking.
+const STRAY = ['force%00=1', '+force=1', '%20%20force=1', 'x%00=1','%00x=1', 'x%01=1', '%1Fx=1', 'x%7F=1', '%09x=1', 'x%09=1', '+x=1', 'x+=1', '%20x=1', 'x%20=1', 'x%0Ay=1', '%C3%A9=1', 'caf%C3%A9=1', 'x%FF=1', '=1', 'a=1&=2', 'a=1;%20b=2']
+test('a stray name is refused on every path under any rules, and a hop to one is not followed', async t => {
+  for (const query of STRAY) {
+    await t.test(query, async t => {
+      const f = fixture(t)
+      const result = await f.pipeline.handle(f.req({ query }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, 'request_ambiguous'); assert.equal(f.sent.length, 0)
+      const h = hopFixture(t, {}, `/next?${query}`)
+      const hop = await h.pipeline.handle(h.req())
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+  // A form body, a multipart part's name or name*, and a top-level JSON key.
+  // The stray names that are overrides naming another method are refused as
+  // that; the rest as names no reader agrees on.
+  for (const [type, body, rule] of [
+    [form, 'a=1&%09b=2', 'request_ambiguous'],
+    [form, 'a=1&b%C3%A9=2', 'request_ambiguous'],
+    [form, 'a=1&force%00=1', 'request_ambiguous'],
+    [multipart, `${part(' force', '1')}--XyZ--\r\n`, 'request_ambiguous'],
+    [multipart, `${part('a\x01', '1')}--XyZ--\r\n`, 'request_ambiguous'],
+    [multipart, `--XyZ\r\nContent-Disposition: form-data; name="a"; name*=utf-8''%C3%A9\r\n\r\n1\r\n--XyZ--\r\n`, 'request_ambiguous'],
+    [json, '{"a":1," force":true}', 'request_ambiguous'],
+    [json, '{"force\\u0000":true}', 'request_ambiguous'],
+    [json, '{"model":"x","":1}', 'request_ambiguous'],
+    [json, '{"modèle":"x"}', 'request_ambiguous'],
+    [multipart, `${part(' _method', 'DELETE')}--XyZ--\r\n`, 'method_override'],
+    [json, '{"a":1," _method":"DELETE"}', 'method_override'],
+    [json, '{"_method\\u0000":"DELETE"}', 'method_override'],
+  ]) {
+    await t.test(`${type[1]} ${JSON.stringify(body)}`, async t => {
+      const f = fixture(t)
+      const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, type], body: Buffer.from(body) }))
+      assert.equal(result.status, 403, result.body.toString()); assert.equal(problem(result).rule, rule); assert.equal(f.sent.length, 0)
+    })
+  }
+  // Preflight says the same and changes nothing.
+  const g = fixture(t)
+  const before = JSON.stringify(g.vault.db)
+  const predicted = await g.pipeline.preflight(g.req({ query: '+force=1' }))
+  assert.equal(predicted.would, 'deny'); assert.equal(predicted.checks.at(-1).rule, 'request_ambiguous')
+  assert.equal(JSON.stringify(g.vault.db), before)
+})
+
+test('a multipart name* is read as busboy decodes it', async t => {
+  const f = fixture(t, { methods: ['GET', 'POST', 'DELETE'] })
+  const body = `--XyZ\r\nContent-Disposition: form-data; name="a"; name*=utf-8''%5Fmethod\r\n\r\nDELETE\r\n--XyZ--\r\n`
+  const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, multipart], body: Buffer.from(body) }))
+  assert.equal(result.status, 403); assert.equal(problem(result).rule, 'method_override'); assert.equal(f.sent.length, 0)
+})
+
+// The second layer, read without the first: the payload rules and the
+// override fields see the name PHP registers.
+test('a name is folded the way PHP registers it: cut at NUL, leading spaces dropped', () => {
+  for (const name of ['_method\0', '_method\0x', ' _method', '  _method', '   _method[]', ' .method', '_METHOD\0[]']) assert.equal(isOverrideField(name), true, JSON.stringify(name))
+  for (const name of ['my_method', 'x\0_method', 'method']) assert.equal(isOverrideField(name), false, JSON.stringify(name))
+  assert.ok(foldedNames('force\0x').includes('force')); assert.ok(foldedNames('  force[]').includes('force'))
+  for (const query of ['dry_run=true&force%00=true', 'dry_run=true&force%00x=true', 'dry_run=true&force%00[]=true', 'dry_run=true&+force=true', 'dry_run=true&%20force=true', 'dry_run=true&++force=true', '%20dry_run=true']) {
+    assert.throws(() => evaluatePayload([FORCE.payload], { query }), { rule: 'request_ambiguous' }, query)
+  }
+  assert.throws(() => evaluatePayload([FORM_FORCE.payload], { method: 'POST', contentType: 'application/x-www-form-urlencoded', body: Buffer.from('amount=2000&force%00=1') }), { rule: 'request_ambiguous' })
+  for (const query of ['_method%00=DELETE', '%20%20_method=DELETE', '+_method=DELETE']) assert.deepEqual(requestView({ method: 'POST', query }).overrides.fields, ['DELETE'], query)
+  // The view marks each stray name, and nothing else.
+  for (const query of STRAY) assert.equal(requestView({ query }).strayName, true, query)
+  for (const query of ['a=1', 'flag', 'a=1&&b=2', 'q=caf%C3%A9&tag=a+b', 'c+d=e', 'expand[]=data', 'metadata[order id]=1', 'a=1;b=2']) assert.equal(requestView({ query }).strayName, false, query)
+  assert.equal(isStrayName(''), true); assert.equal(isStrayName('a b'), false)
+})
+
+test('ordinary provider traffic is sent unchanged under the name check', async t => {
+  // OpenAI and Anthropic JSON, non-ASCII in values and in nested keys.
+  const o = fixture(t, { hosts: ['api.openai.com'] }, { kind: 'openai' })
+  const openai = Buffer.from(JSON.stringify({ model: 'gpt-4.1-mini', messages: [{ role: 'user', content: 'héllo ✓ 日本' }], metadata: { 'clé': 'v' }, response_format: { type: 'json_object' } }))
+  const sent = await o.pipeline.handle(o.req({ method: 'POST', path: '/p/test/v1/chat/completions', headers: [...o.req().headers, json], body: openai }))
+  assert.equal(sent.status, 200, sent.body.toString()); assert.ok(o.sent[0].body.equals(openai))
+  const a = fixture(t, { hosts: ['api.anthropic.com'] }, { kind: 'anthropic' })
+  a.vault.db.credentials[a.cred.id].fields.find(x => x.name === 'token').sites = ['header:x-api-key']
+  const anthropic = Buffer.from(JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 32, system: 'Réponds.', messages: [{ role: 'user', content: 'ping' }] }))
+  const msg = await a.pipeline.handle(a.req({ method: 'POST', path: '/p/test/v1/messages', headers: [['host', 'localhost'], ['av-session', a.token], ['x-api-key', a.ph], ['anthropic-version', '2023-06-01'], json], body: anthropic }))
+  assert.equal(msg.status, 200, msg.body.toString()); assert.equal(a.sent[0].headers['anthropic-version'], '2023-06-01'); assert.equal(a.sent[0].headers['x-api-key'], SECRET)
+  // GitHub and Stripe queries, brackets included, with and without rules.
+  for (const [policy, path, query] of [
+    [{}, '/p/test/v1/models', 'limit=20&after_id=model_1'],
+    [{}, '/p/test/repos/o/r/contents', 'ref=main'],
+    [{}, '/p/test/search/issues', 'q=org%3Afoo+language%3Ago&per_page=30'],
+    [{}, '/p/test/search/code', 'q=caf%C3%A9+in%3Afile'],
+    [{}, '/p/test/v1/charges', 'limit=10&starting_after=ch_123&expand[]=data'],
+    [{}, '/p/test/v1/charges', 'expand[]=data.customer&expand[]=data.invoice'],
+    [{ payload: { query: { starting_after: { max_length: 64 } } } }, '/p/test/v1/charges', 'limit=10&starting_after=ch_123&expand[]=data'],
+  ]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ path, query }))
+    assert.equal(result.status, 200, `${query}: ${result.body}`); assert.ok(f.sent[0].url.endsWith(`?${query}`), query)
+  }
+  for (const policy of [{}, { payload: { form: { amount: { required: true }, currency: { one_of: ['usd'] } } } }]) {
+    const f = fixture(t, policy)
+    const body = 'amount=2000&currency=usd&source=tok_visa&metadata[order_id]=6735&metadata[note]=caf%C3%A9&description=Order+6735'
+    const result = await f.pipeline.handle(f.req({ method: 'POST', path: '/p/test/v1/charges', headers: [...f.req().headers, form], body: Buffer.from(body) }))
+    assert.equal(result.status, 200, result.body.toString()); assert.equal(f.sent[0].body.toString(), body)
+  }
+  // A multipart upload with a filename, and a redirect to an ordinary query.
+  const u = fixture(t)
+  const upload = Buffer.from(`--XyZ\r\nContent-Disposition: form-data; name="purpose"\r\n\r\nfine-tune\r\n--XyZ\r\nContent-Disposition: form-data; name="file"; filename="données.jsonl"\r\nContent-Type: application/jsonl\r\n\r\n{"é":1}\r\n--XyZ--\r\n`)
+  assert.equal((await u.pipeline.handle(u.req({ method: 'POST', headers: [...u.req().headers, multipart], body: upload }))).status, 200)
+  const h = hopFixture(t, {}, '/v1/charges?limit=10&expand[]=data')
+  assert.equal((await h.pipeline.handle(h.req())).status, 200); assert.equal(h.sent[1].url, 'https://api.example.test/v1/charges?limit=10&expand[]=data')
 })
