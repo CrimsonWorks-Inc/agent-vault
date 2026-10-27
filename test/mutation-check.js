@@ -1702,6 +1702,281 @@ const MUTATIONS = [
     to: '  return a === b',
     tests: ['test/security/store-review-r3.test.js'],
   },
+  {
+    // An unparseable provider date is not an expiry. Keeping the raw text
+    // would store whatever the upstream sent as observed_expires_at.
+    what: 'an unparseable expiry header is kept as the observed expiry',
+    file: 'src/connectors/profiles.js',
+    from: 'if (iso) out.observed_expires_at = iso',
+    to: 'out.observed_expires_at = iso || String(rawExpiry).trim()',
+    tests: ['test/security/connectors-health.test.js'],
+  },
+  {
+    // Node flushes the request, headers and all, once the handshake has
+    // completed. Ending before the pin comparison delivers the secret.
+    what: 'the request is ended before the certificate pin is checked',
+    file: 'src/connectors/pinning.js',
+    from: 'const verdict = pinVerdict(socket, identity, pinList)',
+    to: 'req.end(body); const verdict = pinVerdict(socket, identity, pinList)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // The bytes go to the URL host, so that is the name a certificate must
+    // carry. Taking the name from the Host header (and so no longer refusing
+    // one that differs) let a certificate for the header's name, chaining to
+    // a pinned intermediate or root, receive the secret. With the refusal in
+    // place a Host header can only name the URL host, so both go together.
+    what: 'the certificate identity check reads the Host header',
+    file: 'src/connectors/pinning.js',
+    from: 'const identity = urlIdentity(parsed)\n    if (!hostHeaderValues(sent).every((v) => hostHeaderMatches(v, parsed))) {',
+    to: "const identity = String(hostHeaderValues(sent)[0] || urlIdentity(parsed)).replace(/:\\d+$/, '')\n    if (false) {",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a Host header naming another host is sent instead of refused',
+    file: 'src/connectors/pinning.js',
+    from: 'if (!hostHeaderValues(sent).every((v) => hostHeaderMatches(v, parsed))) {',
+    to: 'if (false) {',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'any Host header value passes as the URL host',
+    file: 'src/connectors/pinning.js',
+    from: "return parsed.port === '' && !!defaultPort",
+    to: "return true || parsed.port === '' && !!defaultPort",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a Host header under another spelling of the name is not checked',
+    file: 'src/connectors/pinning.js',
+    from: "filter((name) => name.toLowerCase() === 'host')",
+    to: "filter((name) => name === 'host')",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // Only an exact leaf pin stands in for CA trust. Treating every pinned
+    // handshake as verified lets an intermediate or root pin accept a chain
+    // nothing trusts, or a certificate for another name.
+    what: 'a pinned request treats an unverified chain as verified',
+    file: 'src/connectors/pinning.js',
+    from: '  if (socket.authorized) {\n    const wrongName',
+    to: '  if (true) {\n    const wrongName',
+    tests: ['test/security/connectors-pinning.test.js', 'test/security/connectors-probe.test.js'],
+  },
+  {
+    // The leaf's key is the one the handshake proves. A pin on any other
+    // certificate in the chain, even one whose signature checks, must still
+    // wait for the chain to verify to a trusted root.
+    what: 'a pin on a non-leaf certificate stands in for CA trust',
+    file: 'src/connectors/pinning.js',
+    from: 'const leafPinned = leafPin !== null && pinList.includes(leafPin)',
+    to: 'const leafPinned = verifiedChainPins(socket).some((p) => pinList.includes(p))',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pin on any presented certificate stands in for CA trust',
+    file: 'src/connectors/pinning.js',
+    from: 'const leafPinned = leafPin !== null && pinList.includes(leafPin)',
+    to: 'const leafPinned = chainPins(socket).some((p) => pinList.includes(p))',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // With the chain unverified Node never ran the name check. Skipping it
+    // here lets a pinned leaf for one host answer for another.
+    what: 'a pinned leaf skips the host name check',
+    file: 'src/connectors/pinning.js',
+    from: 'if (nameError) return nameError',
+    to: 'if (false) return nameError',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'an expired pinned leaf is accepted',
+    file: 'src/connectors/pinning.js',
+    from: "if (!(now <= Date.parse(leafX509.validTo))) return",
+    to: "if (false) return",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pinned leaf that is not yet valid is accepted',
+    file: 'src/connectors/pinning.js',
+    from: "if (!(now >= Date.parse(leafX509.validFrom))) return",
+    to: "if (false) return",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // Node links issuers by name and key identifier only. Without the
+    // signature check, a forged leaf borrows a real intermediate's pin.
+    what: 'an issuer satisfies a pin without having signed the certificate below it',
+    file: 'src/connectors/pinning.js',
+    from: 'signed = child.checkIssued(x509) && child.verify(x509.publicKey)',
+    to: 'signed = child.checkIssued(x509)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pins value that is not an array is read as no pins',
+    file: 'src/connectors/pinning.js',
+    from: "if (!Array.isArray(pins)) return 'invalid'",
+    to: "if (!Array.isArray(pins)) return 'none'",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    what: 'a pin list with a malformed entry is used anyway',
+    file: 'src/connectors/pinning.js',
+    from: "return pins.every((p) => typeof p === 'string' && PIN_RE.test(p)) ? 'pinned' : 'invalid'",
+    to: "return 'pinned'",
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // The Host check reads a copy of the headers. Handing Node the caller's
+    // object instead lets a getter or a Proxy answer the check with the URL
+    // host and Node with another, and the secret goes out under that Host.
+    what: 'pinnedRequest gives Node the caller\'s headers, not the copy it checked',
+    file: 'src/connectors/pinning.js',
+    from: '      method,\n      headers: sent,\n    }',
+    to: '      method,\n      headers,\n    }',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // parsed.hostname keeps IPv6 brackets, and Node looks '[::1]' up as a
+    // name. Every IPv6 request failed with ENOTFOUND.
+    what: 'pinnedRequest connects to the bracketed IPv6 host',
+    file: 'src/connectors/pinning.js',
+    from: '    const opts = {\n      hostname: identity,',
+    to: '    const opts = {\n      hostname: parsed.hostname,',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // A pin key written as a bare IPv6 address names the same host as the
+    // bracketed URL host, and must not be skipped.
+    what: 'probe pin keys that are a bare IPv6 address are not read as a host',
+    file: 'src/connectors/probe.js',
+    from: "const host = isIP(bare) === 6 ? `[${bare}]` : hostOnly(key)",
+    to: 'const host = hostOnly(key)',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    // With no pins, verification has to stay exactly what Node already does.
+    // Turning it off would accept any certificate for an unpinned host.
+    what: 'a request with no pins skips certificate verification',
+    file: 'src/connectors/pinning.js',
+    from: '// Certificate verification stays at Node\'s default.\n      const req = open(opts, onResponse)',
+    to: 'opts.rejectUnauthorized = false\n      const req = open(opts, onResponse)',
+    tests: ['test/security/connectors-pinning.test.js'],
+  },
+  {
+    // Pins belong to the host the secret is written to. Looking them up by
+    // the declared spelling missed a key written the way the URL reads it,
+    // and the probe went out unpinned.
+    what: 'probe pins are looked up by the declared host, not the URL host',
+    file: 'src/connectors/probe.js',
+    from: 'const pins = pinsFor(cred, urlIdentity(new URL(url)))',
+    to: 'const pins = pinsFor(cred, destination.host)',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    // The probe target is the profile constant. A path on the call would aim
+    // the credential at whatever the caller asked for.
+    what: 'the probe takes its path from the request input',
+    file: 'src/connectors/probe.js',
+    from: 'const probePath = probe.path',
+    to: 'const probePath = path || probe.path',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe takes its method from the request input',
+    file: 'src/connectors/probe.js',
+    from: 'method: probeMethod,',
+    to: 'method: method || probeMethod,',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe sends a body supplied by the caller',
+    file: 'src/connectors/probe.js',
+    from: 'body: requestBody,',
+    to: 'body: body || requestBody,',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a second probe inside a minute is sent anyway',
+    file: 'src/connectors/probe.js',
+    from: 'if (Number.isInteger(prev) && now - prev < PROBE_WINDOW_MS) {',
+    to: 'if (false && Number.isInteger(prev) && now - prev < PROBE_WINDOW_MS) {',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    // A route that spreads its body into runProbe would hand the caller the
+    // throttle's clock: skip the window, or lock the credential out.
+    what: 'the probe throttle reads a time supplied on the call',
+    file: 'src/connectors/probe.js',
+    from: 'takeProbeSlot(cred.id, probeClock.now())',
+    to: 'takeProbeSlot(cred.id, arguments[0]?.now ?? probeClock.now())',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe body past the drain bound is left open',
+    file: 'src/connectors/probe.js',
+    from: 'if (cut) {\n        try { stream.destroy?.() } catch { /* already gone */ }',
+    to: 'if (false) {\n        try { stream.destroy?.() } catch { /* already gone */ }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe body that never ends holds the probe open',
+    file: 'src/connectors/probe.js',
+    from: 'const timer = setTimeout(() => finish(true), DRAIN_TIMEOUT_MS)',
+    to: 'const timer = null',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a recordHealth failure is swallowed',
+    file: 'src/connectors/probe.js',
+    from: "// upstream already answered and is not \"unreachable\".\n      throw scrubThrown(e, scrubber)",
+    to: "// upstream already answered and is not \"unreachable\".\n      void e",
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe pin entry of the wrong shape is skipped',
+    file: 'src/connectors/probe.js',
+    from: 'if (!Array.isArray(value)) return false',
+    to: 'if (!Array.isArray(value)) continue',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'an expiry offset outside +-14:00 is applied',
+    file: 'src/connectors/profiles.js',
+    from: 'if (hours > 14 || minutes > 59 || (hours === 14 && minutes > 0)) return null',
+    to: 'if (false) return null',
+    tests: ['test/security/connectors-health.test.js'],
+  },
+  {
+    // Scopes are copied off a response header. Without the scrub, a header
+    // that echoes the secret is returned and stored on the health record.
+    what: 'probe scopes are returned without scrubbing the credential',
+    file: 'src/connectors/probe.js',
+    from: 'const scopes = scrubList(extracted?.scopes, scrubber)',
+    to: 'const scopes = extracted?.scopes ?? null',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'the probe result includes the credential value',
+    file: 'src/connectors/probe.js',
+    from: 'observed_expires_at: observed,\n      checked_at,\n    }',
+    to: 'observed_expires_at: observed,\n      checked_at,\n      secret,\n    }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe host that is not a hostname is used anyway',
+    file: 'src/connectors/probe.js',
+    from: 'const parts = splitHostPort(declared)\n  if (!parts) {\n    throw deny(\'AV_POLICY_DENIED\', \'host is outside what this credential permits\', { rule: \'credential_host\' })\n  }',
+    to: 'const parts = splitHostPort(declared)\n  if (false) {\n    throw deny(\'AV_POLICY_DENIED\', \'host is outside what this credential permits\', { rule: \'credential_host\' })\n  }',
+    tests: ['test/security/connectors-probe.test.js'],
+  },
+  {
+    what: 'a probe accepts a scheme other than http or https',
+    file: 'src/connectors/probe.js',
+    from: "if (scheme !== 'https' && scheme !== 'http') {",
+    to: "if (false && scheme !== 'https' && scheme !== 'http') {",
+    tests: ['test/security/connectors-probe.test.js'],
+  },
 ]
 
 let survived = 0
