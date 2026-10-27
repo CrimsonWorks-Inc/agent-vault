@@ -212,6 +212,15 @@ test('cred test is open, hits only the profile\'s probe, and never returns the b
     const tested = a.audit('cred.tested').at(-1)
     assert.equal(tested.credential_slug, 'gh')
     assert.equal(tested.http_status, 200)
+    // Pins apply to the probe. Pinned over plain http, nothing is sent, and
+    // the refusal is the pin's, not an internal error.
+    a.vault.setPins('gh2', '127.0.0.1', [`sha256/${'B'.repeat(43)}=`])
+    const pinned = await a.control('POST', '/v1/credentials/test', { slug: 'gh2' })
+    assert.equal(pinned.status, 502, JSON.stringify(pinned.body))
+    assert.equal(pinned.body.code, 'AV_PIN_MISMATCH')
+    assert.equal(pinned.body.rule, 'pin_plaintext')
+    assert.equal(t.hits.length, 1, 'a pinned probe reached the upstream over plain http')
+    assert.ok(!JSON.stringify(pinned.body).includes('PROBEGH2'))
     // http has no fixed probe.
     const none = await a.control('POST', '/v1/credentials/test', { slug: 'demo' })
     assert.equal(none.body.rule, 'no_probe')

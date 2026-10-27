@@ -6,6 +6,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { startApi, PASSPHRASE, SECRET, HOUR } from './control-api-helpers.js'
+import { parseOverrides } from '../../src/pending.js'
 
 const sessions = (a) => Object.values(a.vault.db.sessions).length
 
@@ -176,6 +177,12 @@ test('a narrowing that turns redirects on is refused; turning them off is not (F
     const on = await a.control('POST', '/v1/sessions/narrow', { sid: s.session.id, narrow: { redirects: 5 } })
     assert.equal(on.status, 403)
     assert.equal(on.body.rule, 'narrow_widens')
+    // Refused before anything changes, the lifetime beside it included.
+    const expires = a.vault.db.sessions[s.session.id].expires_at
+    const both = await a.control('POST', '/v1/sessions/narrow', { sid: s.session.id, narrow: { redirects: 3 }, session_ttl_minutes: 5 })
+    assert.equal(both.body.rule, 'narrow_widens')
+    assert.equal(a.vault.db.sessions[s.session.id].expires_at, expires, 'a refused narrowing shortened the session')
+    assert.ok(!a.audit('session.shortened').length)
     const off = await a.control('POST', '/v1/sessions/narrow', { sid: s.session.id, narrow: { redirects: 0 } })
     assert.equal(off.status, 200, JSON.stringify(off.body))
     assert.deepEqual(off.body.grants[0].after.redirects, { max: 0 })
@@ -202,7 +209,7 @@ test('a session lifetime in a narrowing makes an infinite session finite, and a 
   try {
     const s = a.session({ infinite: true })
     assert.equal(s.session.infinite, true)
-    const r = await a.control('POST', '/v1/sessions/narrow', { sid: s.session.id, session_ttl_minutes: 30, grant_ttl_minutes: 10 })
+    const r = await a.control('POST', '/v1/sessions/narrow', { sid: s.session.id, session_ttl_minutes: 30, narrow: { grant_ttl_minutes: 10 } })
     assert.equal(r.status, 200, JSON.stringify(r.body))
     assert.equal(r.body.infinite, false)
     assert.ok(Date.parse(r.body.expires_at) <= Date.now() + 30 * 60_000 + 1000)
@@ -229,6 +236,9 @@ test('a narrowing that does nothing, or names what cannot be narrowed, is refuse
       [{ sid: s.session.id, narrow: { rate: '5/fortnight' } }, 'policy_invalid'],
       [{ sid: s.session.id, session_ttl_minutes: 0 }, 'ttl'],
       [{ sid: s.session.id, grant_ttl_minutes: '5' }, 'grant_ttl'],
+      [{ sid: s.session.id, narrow: { grant_ttl_minutes: 0 } }, 'grant_ttl'],
+      // One value, one place (C22): both at once is refused, whichever is shorter.
+      [{ sid: s.session.id, grant_ttl_minutes: 5, narrow: { grant_ttl_minutes: 10 } }, 'policy_invalid'],
     ]) {
       const r = await a.control('POST', '/v1/sessions/narrow', body)
       assert.equal(r.status, 403, JSON.stringify(body))
@@ -330,5 +340,27 @@ test('the access report covers every session and credential, and refuses a since
       assert.equal(r.status, 403, since)
       assert.equal(r.body.rule, 'report_since')
     }
+  } finally { await a.stop() }
+})
+
+// ------------------------------------------------- the human's overrides
+
+test('a typo in a narrowing is refused by the daemon, never dropped as null', async () => {
+  // Number('abc') is NaN, which JSON sends as null, and a null override is
+  // dropped: the human's "--budget abc" used to approve the agent's own budget.
+  assert.deepEqual(parseOverrides({ budget: 'abc', uses: '2', 'grant-ttl': 'soon', concurrency: '4', 'spend-usd': '1.25' }), {
+    budget: 'abc', uses: 2, grant_ttl_minutes: 'soon', max_concurrent: 4, spend_usd: 1.25,
+  })
+  assert.deepEqual(parseOverrides({ route: ['get,head:/repos/**'] }).routes, [{ methods: ['GET', 'HEAD'], paths: ['/repos/**'] }])
+  const a = await startApi()
+  try {
+    const asked = await a.control('POST', '/v1/session-requests', { cred: 'demo', budget: 50, reason: 'x' })
+    const typo = await a.control('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true, overrides: parseOverrides({ budget: 'abc' }) })
+    assert.equal(typo.status, 403, JSON.stringify(typo.body))
+    assert.equal(typo.body.rule, 'policy_invalid')
+    assert.equal(a.daemon.sessionRequests.get(asked.body.id).state, 'pending', 'a refused decision settled the request')
+    const ok = await a.control('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true, overrides: parseOverrides({ budget: '5' }) })
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    assert.equal(a.vault.db.grants[ok.body.session.grant_id].policy.budget.limit, 5)
   } finally { await a.stop() }
 })

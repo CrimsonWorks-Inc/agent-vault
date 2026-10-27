@@ -629,10 +629,9 @@ export class McpServer {
 
       case 'vault_preflight': {
         if (!session) return this.#needsSession(token, listener)
-        try { this.vault.assertSessionUsable(session, listener, { peek: true }) } catch (e) {
-          if (e instanceof VaultError) return this.#refusal(e)
-          throw e
-        }
+        // Usability on this listener (C18) is asked by the pipeline, which
+        // authenticates the preflight exactly as a real request, as a peek:
+        // the listener goes with the call below, as it does for vault_http.
         const shape = (detail) => this.#refusal({ code: 'AV_POLICY_DENIED', rule: 'preflight_shape', detail })
         if (typeof args.cred !== 'string' || !args.cred) return shape('cred is a credential slug')
         if (typeof args.method !== 'string' || !/^[A-Za-z]{1,16}$/.test(args.method)) return shape('method is an HTTP method name')

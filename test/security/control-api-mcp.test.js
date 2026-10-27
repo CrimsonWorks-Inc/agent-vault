@@ -167,10 +167,19 @@ test('vault_request_session forwards routes, uses and a grant lifetime, and noth
     assert.match(r.body.asked_for, /routes POST \/repos\/\*\/issues/)
     // A proposal that could never be created is refused while the agent is
     // still there to hear why, and nothing is opened.
+    // The dry run has no side effects: nothing persisted, audited or counted (C22).
     const before = a.daemon.sessionRequests.pending().length
-    const bad = await a.tool('vault_request_session', { cred: 'demo', reason: 'x', grant_ttl_minutes: 0 })
-    assert.equal(bad.body.rule, 'grant_ttl')
+    const records = a.audit().length
+    const stored = JSON.stringify(a.vault.db)
+    for (const args of [{ grant_ttl_minutes: 0 }, { routes: [{ methods: ['FETCH'], paths: ['/x'] }] }, { budget: 0 }, { methods: 'POST' }]) {
+      const bad = await a.tool('vault_request_session', { cred: 'demo', reason: 'x', ...args })
+      assert.equal(bad.isError, true, JSON.stringify(args))
+    }
+    const viaRoute = await a.control('POST', '/v1/session-requests', { cred: 'demo', reason: 'x', rate: '5/fortnight' })
+    assert.equal(viaRoute.body.rule, 'policy_invalid')
     assert.equal(a.daemon.sessionRequests.pending().length, before)
+    assert.equal(a.audit().length, records, 'a refused proposal wrote a record')
+    assert.equal(JSON.stringify(a.vault.db), stored, 'a refused proposal changed the vault')
   } finally { await a.stop() }
 })
 

@@ -15,7 +15,7 @@ import { Pipeline } from './pipeline.js'
 import { McpServer, PROTOCOL_VERSIONS, LATEST_PROTOCOL } from './mcp.js'
 import { getProfile, defaultSites, defaultField } from '../connectors/profiles.js'
 import * as sitesMod from '../core/sites.js'
-import { VaultError, deny } from '../core/errors.js'
+import { VaultError, deny, CODES } from '../core/errors.js'
 import * as policyMod from '../core/policy.js'
 import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
@@ -357,14 +357,12 @@ export class Daemon {
       proposal = proposalOf(input)
     }
     if (!proposal.cred) throw deny('AV_NOT_FOUND', 'a session request must name a credential')
-    const cred = this.vault.findCredential(proposal.cred)
-    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
-    // Nobody is asked to approve access to a credential a human has stopped
-    // (C12 note). Releasing it is the human's decision, not an agent's.
-    if (cred.quarantine) throw quarantined(cred)
+    if (!this.vault.findCredential(proposal.cred)) throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
     // Built exactly as an approval would build it, with nothing made: a
     // proposal that could never be created is refused while the agent is
-    // still there to hear why.
+    // still there to hear why. That includes a quarantined credential (C12
+    // note): nobody is asked to approve access to one a human has stopped,
+    // and releasing it is the human's decision, not an agent's.
     this.#planSession(requestSpec(proposal))
     try {
       return this.sessionRequests.propose({ proposal, reason: input.reason, fromTemplate })
@@ -2470,7 +2468,19 @@ export class Daemon {
   /** Run a credential's read-only probe (F12) and record that it ran. */
   async #probe(cred) {
     if (cred.quarantine) throw quarantined(cred)
-    const result = await runProbe({ vault: this.vault, cred, profile: getProfile(cred.connector_kind) })
+    let result
+    try {
+      result = await runProbe({ vault: this.vault, cred, profile: getProfile(cred.connector_kind) })
+    } catch (e) {
+      // The probe hands back its refusals already scrubbed of the secret it
+      // held, as plain errors carrying their code. Answered as what they are,
+      // not as an internal error: a pin mismatch is the upstream's key.
+      if (e instanceof VaultError || typeof e?.code !== 'string' || !Object.hasOwn(CODES, e.code)) throw e
+      const rule = e.code === 'AV_PIN_MISMATCH'
+        ? (e.reason === 'plaintext' ? 'pin_plaintext' : e.reason === 'pin_format' ? 'pin_format' : 'spki_pin')
+        : e.rule
+      throw deny(e.code, e.detail || e.message, { ...(rule ? { rule } : {}), ...(e.hint ? { hint: e.hint } : {}), ...(Number.isInteger(e.retryAfter) ? { retryAfter: e.retryAfter } : {}) })
+    }
     this.vault.audit.write('cred.tested', {
       credential_slug: cred.slug, status: result.status, http_status: result.http_status, latency_ms: result.latency_ms,
     })
@@ -2515,10 +2525,12 @@ export class Daemon {
       return v
     }
     const sessionTtl = minutes(input.session_ttl_minutes, 'ttl')
-    // The grant lifetime may be given in the narrowing or beside it; the
-    // shorter one wins.
-    const grantTtls = [minutes(input.grant_ttl_minutes, 'grant_ttl'), minutes(narrow.grant_ttl_minutes, 'grant_ttl')].filter((v) => v !== null)
-    const grantTtl = grantTtls.length ? Math.min(...grantTtls) : null
+    // The grant lifetime may be given in the narrowing or beside it, never
+    // both: two places for one value is two readers that can disagree (C22).
+    if (input.grant_ttl_minutes !== undefined && narrow.grant_ttl_minutes !== undefined) {
+      throw bad('grant_ttl_minutes given twice')
+    }
+    const grantTtl = minutes(input.grant_ttl_minutes ?? narrow.grant_ttl_minutes, 'grant_ttl')
     const fields = Object.keys(narrow).filter((k) => k !== 'grant_ttl_minutes')
     // Doing nothing is refused, so nobody believes they narrowed something.
     if (!fields.length && sessionTtl === null && grantTtl === null) {
