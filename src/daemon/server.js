@@ -984,7 +984,9 @@ export class Daemon {
         return json(200, { daemon_version: VERSION, api_version: '1', locked: this.vault.locked, ...this.vault.stats() })
       }
       if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
-      this.vault.assertSessionLive(session)
+      // The same question /p/ and /mcp ask. Liveness alone let an infinite
+      // session read its grants and mint placeholders on a network listener.
+      this.vault.assertSessionUsable(session, req.listener ?? null)
 
       if (url.pathname === '/v1/session') {
         return json(200, {
@@ -1050,9 +1052,15 @@ export class Daemon {
     // itself in #callTool. An expired token is treated as no token rather than
     // as an error, so a client reconnecting after an expiry comes up and can
     // say what is wrong.
+    // Usable here, not merely live: an infinite session on a network listener
+    // is a dead token to this endpoint (C12), and a tool that needs a session
+    // reports AV_REMOTE_FORBIDDEN, recorded, when it is called. A peek, so the
+    // handshake records nothing. The listener goes with each message too, so
+    // the tools and the pipeline under vault_http ask the same question.
+    const listener = req.listener ?? null
     let session = this.vault.sessionByToken(token)
     if (session) {
-      try { this.vault.assertSessionLive(session) } catch { session = null }
+      try { this.vault.assertSessionUsable(session, listener, { peek: true }) } catch { session = null }
     }
     this.currentMcpSession = session
     // A token that was sent and is dead says so, on every answer. The
@@ -1127,7 +1135,7 @@ export class Daemon {
       // on this Daemon, across the await below, so a concurrent request could
       // replace it between two messages of the same batch — and the rest of
       // the batch ran as somebody else's session, against their credentials.
-      const r = await this.mcp.handle(m, session, token)
+      const r = await this.mcp.handle(m, session, token, listener)
       if (r) responses.push(r)
     }
     if (!responses.length) return send(202, null, extra)

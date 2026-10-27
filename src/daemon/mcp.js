@@ -172,8 +172,13 @@ export class McpServer {
    *   with an `await` in it, and reading the session from shared state across
    *   that await let a concurrent request swap it mid-batch: one agent's
    *   second call ran as another agent's session.
+   * @param {string} [forToken] the session token this message arrived with
+   * @param {object|null} [forListener] the network listener it arrived on, or
+   *   null for the machine itself (stdio, the built-in gateway). It travels
+   *   with the message for the same reason, and every tool asks the vault
+   *   whether the session is usable on it.
    */
-  async handle(message, forSession, forToken) {
+  async handle(message, forSession, forToken, forListener = null) {
     const { id, method, params } = message
     // Resolved once, here, and then carried explicitly. Reading it again
     // deeper in would reintroduce the race this parameter exists to close.
@@ -184,6 +189,7 @@ export class McpServer {
     // and the rest of the batch authenticated as somebody else. Fixing the
     // session and leaving the token behind fixed half a race.
     const token = forToken !== undefined ? forToken : this.sessionToken
+    const listener = forListener
     const ok = (result) => (id === undefined ? null : { jsonrpc: '2.0', id, result })
     const fail = (code, msg, data) => (id === undefined ? null : { jsonrpc: '2.0', id, error: { code, message: msg, data } })
 
@@ -205,9 +211,9 @@ export class McpServer {
         case 'resources/list':
           return ok({ resources: [{ uri: 'agent-vault://session', name: 'Current session', mimeType: 'application/json' }] })
         case 'resources/read':
-          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(session, token), null, 2) }] })
+          return ok({ contents: [{ uri: params.uri, mimeType: 'application/json', text: JSON.stringify(this.#status(session, token, listener), null, 2) }] })
         case 'tools/call':
-          return ok(await this.#callTool(params?.name, params?.arguments || {}, session, token))
+          return ok(await this.#callTool(params?.name, params?.arguments || {}, session, token, listener))
         default:
           return fail(-32601, `unknown method: ${method}`)
       }
@@ -222,7 +228,7 @@ export class McpServer {
     }
   }
 
-  #status(session, token) {
+  #status(session, token, listener) {
     return {
       daemon: 'agent-vault', version: SERVER_INFO.version,
       locked: this.vault.locked,
@@ -230,23 +236,31 @@ export class McpServer {
       // Why there is no session, when there is none. This is the tool an agent
       // reaches for when something stopped working, and "session: null" does
       // not distinguish never-had-one from expired-an-hour-ago.
-      session_problem: session ? null : this.#sessionProblem(token),
+      session_problem: session ? null : this.#sessionProblem(token, listener, { record: false })?.detail ?? null,
       credentials_available: session ? this.vault.grantsForSession(session.id).length : 0,
     }
   }
 
   /**
-   * Why the token on this connection does not yield a live session.
+   * Why the token on this connection does not yield a session usable here,
+   * as `{ detail, error }`, or null when it does. `error` is the vault's
+   * refusal, when there is one. A C12 refusal is recorded unless `record`
+   * is false: asking why is not a use, so vault_status records nothing.
    *
-   * Resolved from the token that travels WITH the message, never from shared
-   * state: the same race that made `handle` take the session and token as
-   * parameters would otherwise report one agent's expiry to another.
+   * Resolved from the token and listener that travel WITH the message, never
+   * from shared state: the same race that made `handle` take the session and
+   * token as parameters would otherwise report one agent's expiry to another.
    */
-  #sessionProblem(token) {
-    if (!token) return 'no session token was sent with this connection'
+  #sessionProblem(token, listener, { record = true } = {}) {
+    if (!token) return { detail: 'no session token was sent with this connection' }
     const found = this.vault.sessionByToken(token)
-    if (!found) return 'that session token is not recognised; it may belong to a vault that was reset'
-    try { this.vault.assertSessionLive(found); return null } catch (e) { return e.detail || e.message }
+    if (!found) return { detail: 'that session token is not recognised; it may belong to a vault that was reset' }
+    try {
+      this.vault.assertSessionUsable(found, listener, { record })
+      return null
+    } catch (e) {
+      return { detail: e.detail || e.message, error: e instanceof VaultError ? e : null }
+    }
   }
 
   /**
@@ -254,31 +268,40 @@ export class McpServer {
    *
    * `isError` is how MCP marks a failed tool call, and a client that does not
    * read it still gets the reason in the text. Returning a plain result would
-   * make "you have no session" look like an answer.
+   * make "you have no session" look like an answer. A session this listener
+   * may not use (C12) is refused as that, with its code and rule.
    */
-  #needsSession(token) {
+  #needsSession(token, listener) {
+    const problem = this.#sessionProblem(token, listener)
+    if (problem?.error?.code === 'AV_REMOTE_FORBIDDEN') {
+      const e = problem.error
+      return {
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ code: e.code, rule: e.rule, detail: e.detail, hint: e.hint }, null, 2) }],
+      }
+    }
     return {
       isError: true,
       content: [{
         type: 'text',
         text: JSON.stringify({
           error: 'this tool needs a live session',
-          detail: this.#sessionProblem(token),
+          detail: problem?.detail ?? null,
           next: 'call vault_request_session to ask a human for one, or ask them to run: agent-vault session create --cred <slug>',
         }, null, 2),
       }],
     }
   }
 
-  async #callTool(name, args, session, token) {
+  async #callTool(name, args, session, token, listener) {
     const text = (v) => ({ content: [{ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] })
 
     switch (name) {
       case 'vault_status':
-        return text(this.#status(session, token))
+        return text(this.#status(session, token, listener))
 
       case 'vault_list_creds': {
-        if (!session) return this.#needsSession(token)
+        if (!session) return this.#needsSession(token, listener)
         const out = this.vault.grantsForSession(session.id).map((g) => {
           const cred = this.vault.db.credentials[g.credential_id]
           const profile = getProfile(cred.connector_kind)
@@ -365,7 +388,7 @@ export class McpServer {
       }
 
       case 'vault_get_placeholder': {
-        if (!session) return this.#needsSession(token)
+        if (!session) return this.#needsSession(token, listener)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}`, known: this.vault.listCredentials().map((c) => c.slug) })
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
@@ -388,14 +411,14 @@ export class McpServer {
       }
 
       case 'vault_approval_status': {
-        if (!session) return this.#needsSession(token)
+        if (!session) return this.#needsSession(token, listener)
         const status = this.pipeline.approvalStatus(args.approval_id)
         if (!status) return text({ error: `no approval ${args.approval_id}`, detail: 'it may have expired, or already been spent' })
         return text(status)
       }
 
       case 'vault_http': {
-        if (!session) return this.#needsSession(token)
+        if (!session) return this.#needsSession(token, listener)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}` })
         const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
@@ -444,6 +467,9 @@ export class McpServer {
           res = await this.pipeline.handle({
             method: args.method, path: `/p/${cred.slug}${args.path}`, query,
             headers, body: args.body ? Buffer.from(args.body) : null,
+            // The listener this call arrived on, so the pipeline's own
+            // usability check fires here too, as it does on /p/.
+            listener,
           })
           // A streamed (text/event-stream) response has no `body`, only a
           // `stream`, and reading `body` threw after the request had run and

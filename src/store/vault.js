@@ -1711,6 +1711,44 @@ export class Vault {
   }
 
   /**
+   * Whether a session may be used on the listener a request arrived on. Every
+   * surface that turns a token into a session asks this, and nothing else:
+   * the gateway, discovery, the MCP endpoint and its tools. Only /p/ used to
+   * apply C12, inside the pipeline, so the same infinite token was refused
+   * there and spent its grants over /mcp and /v1 on the same listener.
+   *
+   * C12 first: a session that never expires is never usable from a network
+   * listener, and that is refused before the session is touched. Then
+   * liveness. `listener` is the network listener, or null for the machine
+   * itself (the built-in gateway, stdio, the control socket). `peek` answers
+   * without side effects, for preflight and for the MCP handshake: nothing is
+   * marked expired and no placeholder dies. A C12 refusal is recorded here,
+   * as `remote.denied`, unless the caller records its own denials (`record:
+   * false`: the pipeline, whose every denial is a record already) or peeks.
+   */
+  assertSessionUsable(session, listener = null, { peek = false, record = true } = {}) {
+    if (session && session.infinite === true && listener?.remote) {
+      const e = deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be used from a network listener', {
+        rule: 'infinite_remote',
+        hint: 'Use it on this machine, or start a session with an expiry for remote use.',
+      })
+      if (record && !peek) {
+        this.audit?.write(e.auditKind, {
+          decision: 'deny', reason_code: e.code, rule: e.rule, detail: e.detail, session_id: session.id,
+          peer: { kind: listener.kind || 'remote', listener_id: listener.id || null },
+        })
+      }
+      throw e
+    }
+    if (!peek || !session) return this.assertSessionLive(session)
+    if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
+    if (session.state !== 'active' || !(sessionExpiryMs(session) > Date.now())) {
+      throw deny('AV_SESSION_EXPIRED', `session ${session.id} has expired`)
+    }
+    return session
+  }
+
+  /**
    * Idle extension. Never widens capability, so it needs no presence. Only a
    * live session is extended: one that is revoked, marked ended, or past its
    * date though nothing has noticed yet stays ended, whoever calls this and

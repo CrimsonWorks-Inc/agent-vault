@@ -56,7 +56,7 @@ const MUTATIONS = [
     // times and the checker refuses an ambiguous anchor rather than guessing.
     what: 'a tool that spends capability runs without a session',
     file: 'src/daemon/mcp.js',
-    from: "case 'vault_http': {\n        if (!session) return this.#needsSession(token)",
+    from: "case 'vault_http': {\n        if (!session) return this.#needsSession(token, listener)",
     to: "case 'vault_http': {",
     tests: ['test/security/mcp.test.js', 'test/security/bridge.test.js'],
   },
@@ -180,7 +180,7 @@ const MUTATIONS = [
   {
     what: 'the MCP session is read from shared state again',
     file: 'src/daemon/server.js',
-    from: 'const r = await this.mcp.handle(m, session, token)',
+    from: 'const r = await this.mcp.handle(m, session, token, listener)',
     to: 'const r = await this.mcp.handle(m)',
     tests: ['test/security/mcp-tools.test.js'],
   },
@@ -2741,11 +2741,12 @@ const MUTATIONS = [
   },
   {
     // C12: an infinite session is never reachable from the network, at use.
+    // One check for every surface since round 2: it lives in the vault.
     what: 'an infinite session is usable from a network listener',
-    file: 'src/daemon/pipeline.js',
-    from: '  if (session.infinite === true && req.listener?.remote) {',
-    to: '  if (false) {',
-    tests: ['test/security/integrate2-seams.test.js'],
+    file: 'src/store/vault.js',
+    from: '    if (session && session.infinite === true && listener?.remote) {',
+    to: '    if (false) {',
+    tests: ['test/security/integrate2-seams.test.js', 'test/security/integrate2-c12-surfaces.test.js'],
   },
   {
     // C4, one reader: an unreadable budget refuses at the gateway and the store.
@@ -2818,6 +2819,31 @@ const MUTATIONS = [
     from: '  listListeners() { return Object.values(this.db.listeners) }',
     to: '  listListeners() { this.#persist(); return Object.values(this.db.listeners) }',
     tests: ['test/core/passphrase.test.js'],
+  },
+  {
+    // C12 on every surface (round 2): discovery asks the one usability check,
+    // not liveness alone, or an infinite token reads grants and mints
+    // placeholders on a network listener.
+    what: 'discovery checks liveness but not whether the session is usable on this listener',
+    file: 'src/daemon/server.js',
+    from: '      this.vault.assertSessionUsable(session, req.listener ?? null)\n',
+    to: '      this.vault.assertSessionLive(session)\n',
+    tests: ['test/security/integrate2-c12-surfaces.test.js'],
+  },
+  {
+    what: 'the MCP endpoint checks liveness but not whether the session is usable on this listener',
+    file: 'src/daemon/server.js',
+    from: '      try { this.vault.assertSessionUsable(session, listener, { peek: true }) } catch { session = null }',
+    to: '      try { this.vault.assertSessionLive(session) } catch { session = null }',
+    tests: ['test/security/integrate2-c12-surfaces.test.js'],
+  },
+  {
+    // Defence in depth: the pipeline under vault_http asks for itself.
+    what: 'vault_http does not hand its listener to the pipeline',
+    file: 'src/daemon/mcp.js',
+    from: '            listener,\n          })',
+    to: '          })',
+    tests: ['test/security/integrate2-c12-surfaces.test.js'],
   },
 ]
 

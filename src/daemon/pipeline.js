@@ -116,10 +116,10 @@ export class Pipeline {
     // in one never changes what this request gets.
     this.onPending = null   // (event) => void, after a request is held (F14)
     this.onPanic = null     // async ({ reason, at_ms }) => { session_requests_denied } (F16)
-    // The store's pure expiry helpers (slice A), so preflight reads a
-    // session's and a grant's lifetime exactly as the store does.
+    // The store's pure expiry helper (slice A), so preflight reads a grant's
+    // lifetime exactly as the store does. A session's is the store's own
+    // answer: assertSessionUsable, which peeks for preflight.
     this.expiryMs = opts.expiryMs ?? vaultMod.expiryMs
-    this.sessionExpiryMs = opts.sessionExpiryMs ?? vaultMod.sessionExpiryMs
     // The connectors' header reader (F10).
     this.extractHealth = opts.extractHealth ?? profiles.extractHealth
     this.tripwires = new Tripwires(vault, this)
@@ -289,17 +289,6 @@ export class Pipeline {
     } finally {
       if (!streaming) resources.release?.()
     }
-  }
-
-  /**
-   * assertSessionLive's answer, without its side effects. Preflight must not
-   * mark a session expired or kill its placeholders, and it decides with the
-   * same pure helper the store does, so the two cannot disagree.
-   */
-  #peekSession(session) {
-    if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
-    const expires = this.sessionExpiryMs(session)
-    if (session.state === 'expired' || !(expires > Date.now())) throw deny('AV_SESSION_EXPIRED', `session ${session.id} has expired`)
   }
 
   /** assertGrantLive's answer, without marking anything expired. */
@@ -900,9 +889,7 @@ export class Pipeline {
     if (token) {
       const session = this.vault.sessionByToken(token.trim())
       if (!session) throw deny('AV_SESSION_REQUIRED', 'session token is not recognised')
-      refuseRemoteInfinite(req, session)
-      if (touch) this.vault.assertSessionLive(session)
-      else this.#peekSession(session)
+      this.vault.assertSessionUsable(session, req.listener ?? null, { peek: !touch, record: false })
       if (touch) this.vault.touchSession(session)
       return session
     }
@@ -938,9 +925,7 @@ export class Pipeline {
           hint: 'This placeholder was never issued by this vault, or it was garbage-collected.',
         })
       }
-      refuseRemoteInfinite(req, session)
-      if (touch) this.vault.assertSessionLive(session)
-      else this.#peekSession(session)
+      this.vault.assertSessionUsable(session, req.listener ?? null, { peek: !touch, record: false })
       if (touch) this.vault.touchSession(session)
       return session
     }
@@ -1898,21 +1883,6 @@ function foldHeaders(headers) {
     out.push([name, values[0]])
   }
   return out
-}
-
-/**
- * C12: a session that never expires is never reachable from the network. It
- * cannot be created remote, and this holds at use as well: its token, or its
- * placeholder, arriving on a non-loopback listener is refused before the
- * session is touched or anything is sent. Loopback use is unchanged.
- */
-function refuseRemoteInfinite(req, session) {
-  if (session.infinite === true && req.listener?.remote) {
-    throw deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be used from a network listener', {
-      rule: 'infinite_remote',
-      hint: 'Use it on this machine, or start a session with an expiry for remote use.',
-    })
-  }
 }
 
 /**
