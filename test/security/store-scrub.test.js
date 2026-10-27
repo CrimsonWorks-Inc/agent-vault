@@ -68,6 +68,9 @@ test('a pattern that contains a stored credential value or a placeholder is refu
     const grant = v.vault.createGrant({ sessionId: session.id, credentialId: v.cred.id, fields: ['token'], policy: POLICY })
     const { placeholder } = v.vault.issuePlaceholder({ grantId: grant.id })
     refusedCleanly(v, () => v.vault.addScrubPattern('demo', `Bearer ${placeholder}`), { code: 'AV_POLICY_DENIED', rule: 'scrub_pattern' })
+    // The C5 grammar refuses a placeholder's dots as well, with the same rule;
+    // this says the placeholder check itself is the one that answered first.
+    assert.throws(() => v.vault.addScrubPattern('demo', `Bearer ${placeholder}`), /it contains a placeholder/)
     // A prefix of the secret's shape is the ordinary case, and is fine.
     v.vault.addScrubPattern('demo', 'ghp_[A-Za-z0-9]{36}')
   } finally { v.done() }

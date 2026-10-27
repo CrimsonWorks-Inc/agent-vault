@@ -58,6 +58,20 @@ test('a normal session reports complete activity with the right counts', async (
   assert.deepEqual(a.tripwires, [])
 })
 
+test('a log written before holds were marked reads the same: the hold is inferred, not counted as a use', async () => {
+  // The merged gateway marks a hold with decision: 'held' (C11). Before
+  // that, a held request's record said 'allow' like any other, and its hold
+  // must still not count as a use.
+  const s = fixture()
+  await traffic(s)
+  const rows = rowsOf(s).map((r) => (r.decision === 'held' ? { ...r, decision: 'allow' } : r))
+  assert.ok(rows.every((r) => r.decision !== 'held'), 'the fixture still carries a held decision')
+  assert.equal(rowsOf(s).filter((r) => r.decision === 'held').length, 1, 'the fixture has no hold to rewrite')
+  const a = summarizeSession(rows, { session: s.session, grants: [s.grant] })
+  assert.deepEqual(a.requests, { allowed: 4, denied: 1, held: 1 })
+  assert.deepEqual(a.paths.map((p) => `${p.method} ${p.path} ${p.count}`).sort(), ['GET /p/a/admin/x 1', 'GET /repos/one 3', 'GET /repos/two 1'])
+})
+
 test('the activity carries no placeholder, no query, no secret and no detail text', async () => {
   const s = fixture()
   const ph = s.ph()
