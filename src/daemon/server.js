@@ -20,10 +20,19 @@ import * as policyMod from '../core/policy.js'
 import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
-import { MIN_SECRET_LEN } from '../core/scrub.js'
-import { SessionRequests, proposalOf, overridesOf, elevationOf, OWNER_FIELDS } from './session-requests.js'
+import { MIN_SECRET_LEN, compileScrubPattern } from '../core/scrub.js'
+import * as ph from '../core/placeholder.js'
+import {
+  SessionRequests, proposalOf, overridesOf, elevationOf, OWNER_FIELDS,
+  resolveTemplate, grantSpecsOf, templateCreds, templateSummary,
+} from './session-requests.js'
 import { sessionExpiryMs } from '../store/vault.js'
+import { summarizeSession, accessReport } from '../store/activity.js'
+import { exportBackup, inspectBackup, restoreBackup, bundleDigest } from '../store/backup.js'
+import { runProbe } from '../connectors/probe.js'
 import { checkDecisions } from '../pending.js'
+import { Notifier } from './notify.js'
+import { DEFAULT_RULES } from './tripwire.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
 // of a version string are two chances to report one the code is not, and the
@@ -47,6 +56,12 @@ const GRANT_FIELDS = [
 const APPROVAL_MODES = ['each', 'on-write', 'first-use', 'auto']
 const MAX_GRANTS = 16
 const MAX_BATCH = 32
+// What a narrowing (F15) may name: a grant spec without its credential, and
+// without `uses`, which describes placeholders already handed out.
+const NARROW_FIELDS = GRANT_FIELDS.filter((f) => f !== 'cred' && f !== 'uses')
+// A preflight names one request (F20); bounds on the description of it.
+const MAX_PREFLIGHT_HEADERS = 100
+const PROBLEM_HEADERS = (err) => (err.retryAfter !== undefined ? { 'retry-after': String(err.retryAfter) } : {})
 
 // Where `agent-vault ui` listens unless told otherwise, and so the one web UI
 // origin the daemon trusts without being told. WebAuthn's relying party is
@@ -118,7 +133,7 @@ function unguardProcess(daemon) {
 }
 
 export class Daemon {
-  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null, uiPort = DEFAULT_UI_PORT, uiOrigins = [] } = {}) {
+  constructor(vault, { port = 7411, socketPath, host = '127.0.0.1', socketGroup = null, enrolledUid = null, uiPort = DEFAULT_UI_PORT, uiOrigins = [], notifyFetch = null } = {}) {
     this.vault = vault
     // The web UI origins whose assertions count, decided here. They used to be
     // whatever the caller minting a challenge named, so a page an agent served
@@ -163,6 +178,38 @@ export class Daemon {
     this.passphraseLockedUntil = 0
     // Refused listener peers already recorded, so a flood is one record.
     this.refusedPeers = new Map()
+    // Telling the human something is waiting (F14): the stream `watch` reads,
+    // and the owner's webhook. A signal only; nothing it sends can approve.
+    this.notifier = new Notifier(vault, { fetchImpl: notifyFetch, snapshot: () => this.#waitingItems() })
+    this.pipeline.onPending = (e) => this.notifier.pending(e)
+    this.sessionRequests.onPending = (e) => this.notifier.pending(e)
+    // Panic (F16, C1): the pipeline revokes and denies what it owns, then
+    // asks this for the session requests, which only the daemon holds.
+    this.pipeline.onPanic = async () => ({ session_requests_denied: this.#denyPendingSessionRequests('panic') })
+  }
+
+  /** Everything waiting for a human, as the notifier describes it. */
+  #waitingItems() {
+    return [
+      ...this.pipeline.pendingApprovals().map((a) => ({ kind: 'request', id: a.id, headline: a.summary, created_at: a.created_at })),
+      ...this.sessionRequests.pending().map((r) => ({ kind: 'session', id: r.id, headline: r.summary, created_at: r.created_at })),
+    ]
+  }
+
+  /**
+   * Deny every session request still waiting. Each is recorded before it
+   * changes: a denial that cannot be audited must not happen. Returns how many.
+   */
+  #denyPendingSessionRequests(reason) {
+    let n = 0
+    for (const record of this.sessionRequests.pending()) {
+      this.vault.audit.write('session_request.denied', { request_id: record.id, reason })
+      record.state = 'denied'
+      record.decided_at = new Date().toISOString()
+      n++
+    }
+    if (n) this.sessionRequests.persist()
+    return n
   }
 
   /**
@@ -256,12 +303,15 @@ export class Daemon {
     // Created through the same helper the human's own route uses, so an
     // approved proposal cannot reach a second, laxer path. A ttl of 0 is
     // passed on and refused there, rather than read as "the default".
-    const { ttl_minutes: ttlMinutes, ...spec } = final
-    const created = this.#createSession({
-      ...spec,
-      ttl_hours: ttlMinutes != null ? ttlMinutes / 60 : undefined,
+    //
+    // A request made from a template (F17) carries the template's fields as
+    // they were when the agent asked: that snapshot is what the human was
+    // shown, so it is what gets created. The template is never read again
+    // here, and an edit made since cannot reach this session.
+    const created = this.#makeSession(this.#planSession({
+      ...requestSpec(final),
       label: `requested by an agent (${record.id})`,
-    })
+    }), { template: templateOf(record.proposal) })
     record.state = 'approved'
     record.decided_at = new Date().toISOString()
     record.granted_proposal = final
@@ -274,6 +324,94 @@ export class Daemon {
       edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
     })
     return { ...SessionRequests.redact(record), granted: final }
+  }
+
+  /**
+   * Record an agent's request for a session (the route and MCP
+   * vault_request_session both come here, so neither can be the laxer one).
+   *
+   * Asking creates nothing. It is refused, not trimmed, when it names an
+   * owner field, when its credential is quarantined, or when it could never
+   * be created as asked, so the human is never shown something that would
+   * fail and the agent never believes it asked for something it did not.
+   *
+   * With `template` (F17) the daemon resolves the template now, with the
+   * agent's narrowing on top, and the proposal is that snapshot: the human
+   * approves what the agent was shown, whatever happens to the template.
+   */
+  proposeSessionRequest(input) {
+    if (!isObject(input)) throw deny('AV_POLICY_DENIED', 'a session request is an object', { rule: 'session_shape' })
+    const owned = OWNER_FIELDS.filter((f) => Object.hasOwn(input, f))
+    if (owned.length) {
+      throw deny('AV_POLICY_DENIED', `a session request cannot carry ${owned.join(' or ')}`, {
+        rule: 'owner_only_field',
+        hint: 'Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason.',
+      })
+    }
+    let proposal
+    let fromTemplate = false
+    if (input.template !== undefined) {
+      proposal = this.#templateProposal(input)
+      fromTemplate = true
+    } else {
+      proposal = proposalOf(input)
+    }
+    if (!proposal.cred) throw deny('AV_NOT_FOUND', 'a session request must name a credential')
+    const cred = this.vault.findCredential(proposal.cred)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
+    // Nobody is asked to approve access to a credential a human has stopped
+    // (C12 note). Releasing it is the human's decision, not an agent's.
+    if (cred.quarantine) throw quarantined(cred)
+    // Built exactly as an approval would build it, with nothing made: a
+    // proposal that could never be created is refused while the agent is
+    // still there to hear why.
+    this.#planSession(requestSpec(proposal))
+    try {
+      return this.sessionRequests.propose({ proposal, reason: input.reason, fromTemplate })
+    } catch (e) {
+      if (e.code === 'AV_TOO_MANY_REQUESTS') throw deny('AV_POLICY_DENIED', e.message, { rule: 'session_requests' })
+      throw e
+    }
+  }
+
+  /**
+   * A proposal from a template (F17): one credential only, so the human
+   * reviews one grant, resolved now. The template's own owner fields come
+   * with it (the owner wrote them); the agent's narrowing only narrows.
+   */
+  #templateProposal(input) {
+    if (typeof input.template !== 'string' || !input.template) {
+      throw deny('AV_POLICY_DENIED', 'template is the name of a saved template', { rule: 'session_shape' })
+    }
+    const template = this.vault.getTemplate(input.template)
+    if (!template) throw deny('AV_NOT_FOUND', `no template ${input.template}`)
+    const creds = templateCreds(template.spec)
+    if (creds.length !== 1 || grantSpecsOf(template.spec).length !== 1) {
+      throw deny('AV_POLICY_DENIED', `template ${template.name} covers ${creds.length} credentials; a request names exactly one`, {
+        rule: 'template_multi_cred',
+        hint: 'Ask with a template for one credential, or name the credential and its limits yourself.',
+      })
+    }
+    const { cred, ttl_minutes: ttlMinutes, ...narrowing } = proposalOf(input)
+    if (cred !== undefined && cred !== creds[0]) {
+      throw deny('AV_POLICY_DENIED', `template ${template.name} is for ${creds[0]}, not ${cred}`, { rule: 'session_shape' })
+    }
+    const overrides = { ...narrowing }
+    if (ttlMinutes !== undefined) {
+      if (typeof ttlMinutes !== 'number' || !Number.isFinite(ttlMinutes) || !(ttlMinutes > 0)) {
+        throw deny('AV_POLICY_DENIED', 'ttl_minutes must be a positive number of minutes', { rule: 'ttl' })
+      }
+      overrides.ttl_hours = ttlMinutes / 60
+    }
+    const spec = resolveTemplate(template, overrides, { budgetDefault: (g) => this.#defaultBudget(g) })
+    const [grant] = grantSpecsOf(spec)
+    const proposal = Object.fromEntries(GRANT_FIELDS.filter((k) => grant[k] !== undefined).map((k) => [k, grant[k]]))
+    if (spec.infinite === true) proposal.infinite = true
+    else if (spec.ttl_hours !== undefined) proposal.ttl_minutes = spec.ttl_hours * 60
+    proposal.template = template.name
+    proposal.template_hash = template.hash
+    proposal.template_version = template.version
+    return proposal
   }
 
   /**
@@ -296,7 +434,7 @@ export class Daemon {
    * refusal leaves no half-made session behind. The gate is chosen from
    * `elevated`, which is computed here once, over the same body.
    */
-  #planSession(input) {
+  #planSession(input, { dryRun = false, resolved = false } = {}) {
     const shape = (detail) => deny('AV_POLICY_DENIED', detail, {
       rule: 'session_shape',
       hint: 'A session is either one credential (cred and its limits at the top level) or grants: [{cred, …}, …], one entry per credential.',
@@ -304,7 +442,13 @@ export class Daemon {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw shape('send one of cred, grants or template')
     const has = (k) => input[k] !== undefined
     if (has('template') && (has('cred') || has('grants'))) throw shape('send one of cred, grants or template')
-    if (has('template')) throw shape('templates are not available on this daemon; send cred or grants')
+    if (has('template')) {
+      // A template's own spec never names another template; the store
+      // refuses one, and a hand-edited vault does not get a loop.
+      if (resolved) throw shape('a template cannot name another template')
+      const { template, spec } = this.#resolveTemplateInput(input)
+      return { ...this.#planSession(spec, { dryRun, resolved: true }), template: { name: template.name, version: template.version } }
+    }
     if (has('grants') && GRANT_FIELDS.some(has)) throw shape('send one of cred, grants or template')
     let specs
     if (has('grants')) {
@@ -339,7 +483,10 @@ export class Daemon {
         throw ttl('ttl_hours must be a positive number of hours')
       }
     }
-    const remote = !!input.remote
+    if (input.remote != null && typeof input.remote !== 'boolean') {
+      throw invalid('remote', 'remote is true or false')
+    }
+    const remote = input.remote === true
     // A capability that never ends must not be reachable from the network.
     if (infinite && remote) {
       throw deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be remote', { rule: 'infinite_remote' })
@@ -350,8 +497,9 @@ export class Daemon {
       const cred = this.vault.findCredential(spec.cred)
       if (!cred) throw deny('AV_NOT_FOUND', `no credential ${spec.cred}`)
       // The store refuses the grant too, but only after the gate has asked for
-      // a passphrase and a session exists to be torn down again.
-      if (cred.quarantine) throw quarantined(cred)
+      // a passphrase and a session exists to be torn down again. A template
+      // being saved is not a session, so a dry run does not ask.
+      if (cred.quarantine && !dryRun) throw quarantined(cred)
       // Never a default for a mode nobody chose: an unknown one used to mean
       // auto, because needsApproval fell through to false.
       if (spec.approval != null && !APPROVAL_MODES.includes(spec.approval)) {
@@ -363,11 +511,26 @@ export class Daemon {
       // default, and anything else must be a list of names.
       if (spec.methods != null && !strings(spec.methods)) throw invalid('methods', 'methods must be a list of method names')
       if (spec.paths != null && !strings(spec.paths)) throw invalid('paths', 'paths must be a list of path globs')
-      if (spec.budget != null && !(Number.isInteger(spec.budget) && spec.budget >= 0)) {
+      // One reader for a budget (C4): a whole number, or the canonical
+      // decimal string of one.
+      const budget = spec.budget == null ? null : policyMod.budgetInteger(spec.budget)
+      if (spec.budget != null && budget === null) {
         throw invalid('budget', 'budget must be a whole number of requests, 0 or more')
+      }
+      // A budget of 0 permits nothing at all. It used to make a session, fail
+      // to issue its placeholder and tear the session down again, after the
+      // human had been asked for a passphrase (C17).
+      if (budget === 0) {
+        throw deny('AV_POLICY_DENIED', 'a budget of 0 allows no request at all', {
+          rule: 'budget', hint: 'Give a budget of at least 1, or leave it out for the connector default.',
+        })
       }
       if (spec.uses != null && !(Number.isInteger(spec.uses) && spec.uses >= 1)) {
         throw invalid('uses', 'uses must be a whole number, 1 or more')
+      }
+      // F18: a grant may end before its session. Minutes, a whole number.
+      if (spec.grant_ttl_minutes != null && !(Number.isInteger(spec.grant_ttl_minutes) && spec.grant_ttl_minutes >= 1)) {
+        throw deny('AV_POLICY_DENIED', 'grant_ttl_minutes must be a whole number of minutes, 1 or more', { rule: 'grant_ttl' })
       }
       const profile = getProfile(cred.connector_kind)
       // A grant can only reach the hosts the credential itself declares.
@@ -375,33 +538,62 @@ export class Daemon {
       // credential at a host it controls (the exfiltration path found in
       // the pen test).
       const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
-      const hosts = policyMod.confineHosts(spec.hosts, ceiling)
-      const policy = {
-        hosts,
-        methods: spec.methods ?? ['GET', 'HEAD'],
-        paths: spec.paths ?? ['/**'],
-        budget: { unit: profile.defaultBudget.unit, limit: spec.budget ?? profile.defaultBudget.limit },
-        approval: spec.approval ?? 'on-write',
+      // The one converter from a grant spec to a policy layer (0.6). Every
+      // limit a spec can carry (rate, quota, routes, payload rules, spend,
+      // redirects) becomes the layer field the gateway reads, and anything
+      // it cannot read is refused here rather than stored.
+      const policy = policyMod.grantPolicyFromInput(spec, { profile, ceiling })
+      return {
+        cred, profile, spec, policy,
+        ttlMs: spec.grant_ttl_minutes != null ? spec.grant_ttl_minutes * 60_000 : null,
+        lint: policyMod.lint(policy, { kind: cred.connector_kind }),
       }
-      const problems = policyMod.validate(policy)
-      if (problems.length) throw invalid(problems[0].field, `${problems[0].field}: ${problems[0].message}`)
-      return { cred, profile, spec, policy, lint: policyMod.lint(policy, { kind: cred.connector_kind }) }
     })
     return {
       label: input.label, ttlMs: input.ttl_hours != null ? input.ttl_hours * 3600_000 : null,
-      infinite, remote, grants, elevated: elevationOf(input),
+      infinite, remote, grants, elevated: elevationOf(input), template: null,
     }
   }
 
-  #createSession(input) {
-    return this.#makeSession(this.#planSession(input))
+  /**
+   * A session-create body that names a template (F17), as the spec it stands
+   * for. The hash the human was shown must be the template's hash now: an
+   * edit between looking and creating is refused, never applied. Every other
+   * top-level field is an override, and overrides only narrow.
+   */
+  #resolveTemplateInput(input) {
+    if (typeof input.template !== 'string' || !input.template) {
+      throw deny('AV_POLICY_DENIED', 'template is the name of a saved template', { rule: 'session_shape' })
+    }
+    const template = this.vault.getTemplate(input.template)
+    if (!template) throw deny('AV_NOT_FOUND', `no template ${input.template}`)
+    if (typeof input.template_hash !== 'string' || input.template_hash !== template.hash) {
+      throw deny('AV_POLICY_DENIED', 'the template changed after you looked at it; review it again', {
+        rule: 'template_changed',
+        hint: 'Fetch the template again, read what it now grants, and send its current template_hash.',
+      })
+    }
+    const { template: _name, template_hash: _hash, presence: _proof, ...overrides } = input
+    return { template, spec: resolveTemplate(template, overrides, { budgetDefault: (g) => this.#defaultBudget(g) }) }
   }
 
-  /** Create what a plan describes. Only ever called after its gate. */
-  #makeSession(plan) {
+  /** The budget a grant gets when its spec names none: the profile's default. */
+  #defaultBudget(grantSpec) {
+    const cred = this.vault.findCredential(grantSpec?.cred)
+    return cred ? getProfile(cred.connector_kind).defaultBudget.limit : null
+  }
+
+  /**
+   * Create what a plan describes. Only ever called after its gate.
+   * `template` names the template a session request was made from, when its
+   * snapshot (not the template itself) is what the plan was built from.
+   */
+  #makeSession(plan, { template = null } = {}) {
+    const from = plan.template ?? template
     const { session, token } = this.vault.createSession({
       label: plan.label, ttlMs: plan.ttlMs, infinite: plan.infinite, elevated: plan.elevated,
       policy: {}, remote: plan.remote,
+      template: from?.name ?? null, templateVersion: from?.version ?? null,
     })
     try {
       // A store that cannot keep a session open forever must not hand back
@@ -409,10 +601,10 @@ export class Daemon {
       if (plan.infinite && session.infinite !== true) {
         throw deny('AV_POLICY_DENIED', 'this vault cannot create a session without expiry', { rule: 'ttl' })
       }
-      const grants = plan.grants.map(({ cred, profile, spec, policy, lint }) => {
+      const grants = plan.grants.map(({ cred, profile, spec, policy, ttlMs, lint }) => {
         const field = cred.fields[0]
         const grant = this.vault.createGrant({
-          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy,
+          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy, ttlMs,
         })
         // The grant's placeholder_policy is a ceiling, not a default. It sat
         // on the right of a `??`, so an agent asking for a million uses got
@@ -647,6 +839,24 @@ export class Daemon {
       // drops, so it is never bound into the signed operation.
       case 'POST /v1/presence': return of('presence.enroll', input)
       case 'POST /v1/ui/origins': return of('ui.origin_add', input)
+      // Wave 3 (A.2). Each name is the one the web UI signs. A DELETE binds
+      // its query parameters, read the way every DELETE here reads them.
+      case 'POST /v1/credentials/rotate': return of('cred.rotate', input)
+      case 'POST /v1/credentials/scrub': return of('cred.scrub_add', input)
+      case 'DELETE /v1/credentials/scrub':
+        return of('cred.scrub_remove', { slug: url.searchParams.get('slug'), id: url.searchParams.get('id') })
+      case 'POST /v1/credentials/expiry': return of('cred.expiry_set', input)
+      case 'POST /v1/credentials/pins': return of('cred.pins_set', input)
+      case 'DELETE /v1/credentials/pins':
+        return of('cred.pins_remove', {
+          slug: url.searchParams.get('slug'), host: url.searchParams.get('host'), spki: url.searchParams.get('spki'),
+        })
+      case 'POST /v1/credentials/release': return of('cred.release', input)
+      case 'POST /v1/tripwires': return of('tripwires.set', input)
+      case 'POST /v1/templates': return of('template.save', input)
+      case 'POST /v1/backup/export': return of('backup.export', input)
+      case 'POST /v1/backup/restore': return of('backup.restore', input)
+      case 'POST /v1/notify': return of('notify.set', input)
       default: return null
     }
   }
@@ -914,6 +1124,9 @@ export class Daemon {
 
   async stop() {
     unguardProcess(this)
+    // Open watch streams never end on their own, and a server waits for
+    // every connection before it closes.
+    this.notifier.close()
     for (const s of this.servers) await new Promise((r) => s.close(r))
     if (this.socketPath && existsSync(this.socketPath)) unlinkSync(this.socketPath)
     this.vault.audit?.write('daemon.stop', {})
@@ -947,7 +1160,7 @@ export class Daemon {
     const url = new URL(req.url, 'http://placeholder')
 
     if (url.pathname === '/mcp') return this.#onMcpHttp(req, res, body, url)
-    if (url.pathname.startsWith('/v1/')) return this.#onDiscovery(req, res, url)
+    if (url.pathname.startsWith('/v1/')) return this.#onDiscovery(req, res, url, body)
 
     const result = await this.pipeline.handle({
       method: req.method,
@@ -974,14 +1187,31 @@ export class Daemon {
   }
 
   /** Discovery endpoints an agent with no shell can use. */
-  async #onDiscovery(req, res, url) {
+  async #onDiscovery(req, res, url, body = Buffer.alloc(0)) {
     const token = req.headers['av-session'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
     const session = this.vault.sessionByToken(token)
-    const json = (status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj, null, 2)) }
+    const json = (status, obj, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(obj, null, 2)) }
 
     try {
       if (url.pathname === '/v1/status') {
         return json(200, { daemon_version: VERSION, api_version: '1', locked: this.vault.locked, ...this.vault.stats() })
+      }
+      // F20: would this request pass? A peek: it authenticates exactly as a
+      // real request, on the listener this arrived on (C18), and changes
+      // nothing — not the session's expiry, not a counter.
+      if (url.pathname === '/v1/preflight') {
+        if (req.method !== 'POST') return json(404, { code: 'AV_NOT_FOUND', detail: 'preflight is POST /v1/preflight' })
+        if (req.headers.origin || req.headers['sec-fetch-site']) {
+          return json(403, { code: 'AV_BROWSER_ORIGIN', detail: 'requests carrying Origin are refused' })
+        }
+        if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
+        this.vault.assertSessionUsable(session, req.listener ?? null, { peek: true })
+        const described = preflightRequest(body)
+        return json(200, await this.pipeline.preflight({
+          ...described,
+          headers: [...described.headers, ['av-session', token]],
+          listener: req.listener ?? null,
+        }))
       }
       if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
       // The same question /p/ and /mcp ask. Liveness alone let an infinite
@@ -1015,7 +1245,7 @@ export class Daemon {
       return json(404, { code: 'AV_NOT_FOUND', detail: `no discovery endpoint ${url.pathname}` })
     } catch (e) {
       const err = e instanceof VaultError ? e : deny('AV_INTERNAL', e.message)
-      return json(err.http, err.toProblem())
+      return json(err.http, err.toProblem(), PROBLEM_HEADERS(err))
     }
   }
 
@@ -1181,12 +1411,25 @@ export class Daemon {
             })
           }
           const field = input.field || defaultField(kind)
-          const cred = this.vault.addCredential({
+          // F10: when the token expires, if the human knows. Checked before
+          // the credential exists, so a bad date leaves nothing half-stored.
+          if (input.expires_at != null && (typeof input.expires_at !== 'string' || Number.isNaN(Date.parse(input.expires_at)))) {
+            throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date', { rule: 'expires_at' })
+          }
+          let cred = this.vault.addCredential({
             slug: input.slug, kind,
             connector: { host: input.host || profile.hosts[0], scheme: input.scheme || 'https' },
             fields: { [field]: input.value },
             sites: { [field]: input.sites || defaultSites(kind, field) },
           })
+          if (input.expires_at != null) {
+            try {
+              cred = this.vault.setCredentialExpiry(cred.slug, input.expires_at)
+            } catch (e) {
+              try { this.vault.deleteCredential(cred.slug) } catch { /* the refusal is what to report */ }
+              throw e
+            }
+          }
           // A value this short is scrubbed from the response to a request
           // that injected it — that one is known exactly — but NOT from other
           // responses, where the whole vault's secrets are matched by value
@@ -1225,37 +1468,16 @@ export class Daemon {
         // question for a human, which is why this route is not gated — there
         // is no capability here to guard.
         case 'POST /v1/session-requests': {
-          // Refused, not dropped, so an agent never believes it asked for
-          // something it did not get.
-          const owned = OWNER_FIELDS.filter((f) => Object.hasOwn(input || {}, f))
-          if (owned.length) {
-            throw deny('AV_POLICY_DENIED', `a session request cannot carry ${owned.join(' or ')}`, {
-              rule: 'owner_only_field',
-              hint: 'Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason.',
-            })
-          }
-          const proposal = proposalOf(input)
-          if (!proposal.cred) throw deny('AV_NOT_FOUND', 'a session request must name a credential')
-          if (!this.vault.findCredential(proposal.cred)) {
-            throw deny('AV_NOT_FOUND', `no credential ${proposal.cred}`)
-          }
-          try {
-            const { record, collectSecret } = this.sessionRequests.propose({ proposal, reason: input.reason })
-            return json(200, {
-              ...SessionRequests.redact(record),
-              // Shown once, here, to the asker. Only its hash is kept.
-              collect_secret: collectSecret,
-              next: {
-                agent: 'poll GET /v1/session-requests/collect?id=<id>&secret=<collect_secret> until a human answers',
-                human: [`agent-vault approvals`, `agent-vault approve ${record.id}`],
-              },
-            })
-          } catch (e) {
-            if (e.code === 'AV_TOO_MANY_REQUESTS') {
-              throw deny('AV_POLICY_DENIED', e.message, { rule: 'session_requests' })
-            }
-            throw e
-          }
+          const { record, collectSecret } = this.proposeSessionRequest(input)
+          return json(200, {
+            ...SessionRequests.redact(record),
+            // Shown once, here, to the asker. Only its hash is kept.
+            collect_secret: collectSecret,
+            next: {
+              agent: 'poll GET /v1/session-requests/collect?id=<id>&secret=<collect_secret> until a human answers',
+              human: [`agent-vault approvals`, `agent-vault approve ${record.id}`],
+            },
+          })
         }
 
         case 'GET /v1/session-requests':
@@ -1939,14 +2161,535 @@ export class Daemon {
             needs_secret: this.vault.hasPassphrase || this.vault.hasWebauthnUnlock,
           })
 
+        // ------------------------------------------------ F15: narrowing
+        //
+        // Open: it can only take capability away. The narrowing is converted
+        // with no defaults and then INTERSECTED with each grant (the store's
+        // narrowGrant), so nothing in it can make a grant laxer.
+        case 'POST /v1/sessions/narrow':
+          return json(200, this.#narrowSession(input))
+
+        // ----------------------------------------- F19: activity and review
+        case 'GET /v1/sessions/detail':
+          return json(200, this.#sessionDetail(url.searchParams.get('sid')))
+        case 'GET /v1/report/access': {
+          if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to read it')
+          const since = reportSince(url.searchParams.get('since'))
+          return json(200, accessReport(this.vault.audit.read({ limit: 100_000 }), {
+            sessions: this.vault.db.sessions, grants: this.vault.db.grants,
+            credentials: Object.values(this.vault.db.credentials).map((c) => ({ ...this.vault.publicCredential(c), id: c.id })),
+            since,
+          }))
+        }
+
+        // ------------------------------------------- credential records
+        //
+        // Every write to a credential record is gated (0.3), with one
+        // exception: quarantine, which only stops things and has to work in
+        // an emergency.
+        case 'POST /v1/credentials/rotate': {
+          this.#requireHumanForWidening('cred rotate', this.#wideningOperation(route, url, input), input.presence)
+          if (input.retire_hours !== undefined && !(Number.isInteger(input.retire_hours) && input.retire_hours >= 0 && input.retire_hours <= 168)) {
+            throw deny('AV_POLICY_DENIED', 'retire_hours is a whole number from 0 to 168', { rule: 'retire_window' })
+          }
+          const result = this.vault.rotateCredential(input.slug, {
+            field: input.field ?? null, value: input.value, mode: input.mode ?? 'keep',
+            retireMs: input.retire_hours !== undefined ? input.retire_hours * 3600_000 : undefined,
+            // Absent clears the expiry: it described the old token.
+            expiresAt: Object.hasOwn(input, 'expires_at') ? input.expires_at : undefined,
+          })
+          // A human approved those requests against the old key, and the new
+          // one may reach further. Counts only, never the approvals.
+          const invalidated = this.pipeline.denyApprovals({ credentialId: this.vault.findCredential(input.slug).id }, 'credential_rotated')
+          const warnings = input.value.length < MIN_SECRET_LEN
+            ? [`this value is under ${MIN_SECRET_LEN} characters, so it is only scrubbed from responses to requests that used it; another credential's response could echo it back to the agent unredacted`]
+            : null
+          return json(200, { ...result, invalidated_approvals: invalidated, ...(warnings ? { warnings } : {}) })
+        }
+        case 'POST /v1/credentials/scrub': {
+          // The grammar is checked before anyone is asked for presence: a
+          // pattern that would be refused needs no human to refuse it.
+          if (typeof input.pattern !== 'string') throw deny('AV_POLICY_DENIED', 'pattern is the pattern text', { rule: 'scrub_pattern' })
+          if (input.sample !== undefined && (typeof input.sample !== 'string' || input.sample.length > 64 * 1024)) {
+            throw deny('AV_POLICY_DENIED', 'sample is text of at most 64 KiB', { rule: 'policy_invalid' })
+          }
+          const { re } = compileScrubPattern(input.pattern)
+          this.#requireHumanForWidening('cred scrub add', this.#wideningOperation(route, url, input), input.presence)
+          const added = this.vault.addScrubPattern(input.slug, input.pattern)
+          if (input.sample === undefined) return json(200, added)
+          // The human's own text, with the pattern applied. Never a stored
+          // secret: nothing but `sample` is read here.
+          let matches = 0
+          const redacted = input.sample.replace(new RegExp(re.source, re.flags), () => { matches++; return '[[av:derived]]' })
+          return json(200, { ...added, sample: { redacted, matches } })
+        }
+        case 'DELETE /v1/credentials/scrub': {
+          this.#requireHumanForWidening('cred scrub remove', this.#wideningOperation(route, url, input), input.presence)
+          const removed = this.vault.removeScrubPattern(url.searchParams.get('slug'), url.searchParams.get('id'))
+          return json(200, { ok: true, removed })
+        }
+        case 'POST /v1/credentials/expiry': {
+          this.#requireHumanForWidening('cred expiry', this.#wideningOperation(route, url, input), input.presence)
+          if (!(input.expires_at === null || typeof input.expires_at === 'string')) {
+            throw deny('AV_POLICY_DENIED', 'expires_at is an ISO date, or null to clear it', { rule: 'expires_at' })
+          }
+          return json(200, this.vault.setCredentialExpiry(input.slug, input.expires_at))
+        }
+        case 'POST /v1/credentials/pins': {
+          this.#requireHumanForWidening('cred pins', this.#wideningOperation(route, url, input), input.presence)
+          if (!Array.isArray(input.pins)) throw deny('AV_POLICY_DENIED', 'pins is a list of sha256/<base64> values', { rule: 'pin_format' })
+          return json(200, this.vault.setPins(input.slug, input.host, input.pins))
+        }
+        case 'DELETE /v1/credentials/pins': {
+          this.#requireHumanForWidening('cred pins remove', this.#wideningOperation(route, url, input), input.presence)
+          const remaining = this.vault.clearPins(
+            url.searchParams.get('slug'), url.searchParams.get('host'), url.searchParams.get('spki'),
+          )
+          return json(200, { ok: true, remaining })
+        }
+        case 'POST /v1/credentials/test': {
+          // Open, and throttled to once a minute per credential by the probe
+          // itself: it spends the credential, on the profile's own read-only
+          // method and path, and nothing in this body reaches the request.
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to test a credential')
+          if (input.all !== undefined && input.all !== true) throw deny('AV_POLICY_DENIED', 'all is true, or absent', { rule: 'policy_invalid' })
+          if (input.all === true) {
+            const results = []
+            for (const cred of Object.values(this.vault.db.credentials)) {
+              try {
+                results.push({ slug: cred.slug, ...await this.#probe(cred) })
+              } catch (e) {
+                const err = e instanceof VaultError ? e : deny('AV_INTERNAL', 'the probe could not finish')
+                results.push({ slug: cred.slug, error: err.code, ...(err.rule ? { rule: err.rule } : {}), ...(err.retryAfter !== undefined ? { retry_after: err.retryAfter } : {}) })
+              }
+            }
+            return json(200, { results })
+          }
+          const cred = this.vault.findCredential(input.slug)
+          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.slug}`)
+          return json(200, await this.#probe(cred))
+        }
+        case 'POST /v1/credentials/quarantine': {
+          // Open, deliberately: it only stops things. An agent can deny the
+          // human's sessions this way and gain nothing.
+          if (input.reason != null && typeof input.reason !== 'string') {
+            throw deny('AV_POLICY_DENIED', 'reason is text', { rule: 'policy_invalid' })
+          }
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to quarantine a credential')
+          const cred = this.vault.findCredential(input.slug)
+          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.slug}`)
+          const quarantine = this.vault.setQuarantine(cred.slug, { by: 'control', reason: this.#untrustedText(input.reason) })
+          const denied = this.pipeline.denyApprovals({ credentialId: cred.id }, 'quarantined')
+          return json(200, { slug: cred.slug, quarantine, denied_approvals: denied })
+        }
+        case 'POST /v1/credentials/release': {
+          this.#requireHumanForWidening('cred release', this.#wideningOperation(route, url, input), input.presence)
+          const cred = this.vault.findCredential(input.slug)
+          if (!cred) throw deny('AV_NOT_FOUND', `no credential ${input.slug}`)
+          return json(200, { slug: cred.slug, released: this.vault.clearQuarantine(cred.slug) })
+        }
+
+        // ----------------------------------------------- F16: containment
+        case 'POST /v1/panic': {
+          // Open: it only takes capability away, and an emergency is no time
+          // to look for a fingerprint.
+          if (input.lock !== undefined && typeof input.lock !== 'boolean') {
+            throw deny('AV_POLICY_DENIED', 'lock is true or false', { rule: 'policy_invalid' })
+          }
+          if (input.reason != null && (typeof input.reason !== 'string' || input.reason.length > 200)) {
+            throw deny('AV_POLICY_DENIED', 'reason is text of at most 200 characters', { rule: 'policy_invalid' })
+          }
+          if (this.vault.locked) {
+            const err = deny('AV_LOCKED', 'the vault is already locked, so nothing was revoked')
+            return json(err.http, { ...err.toProblem(), locked: true, already: true })
+          }
+          const result = await this.pipeline.panic({ reason: input.reason ?? null, lock: input.lock === true })
+          // A lock that leaves the passphrase window open is not one.
+          if (result.locked) this.presenceGraceUntil = 0
+          return json(200, result)
+        }
+        case 'GET /v1/tripwires': {
+          const t = this.vault.getSettings().tripwires || {}
+          return json(200, { enabled: t.enabled === true, rules: Array.isArray(t.rules) ? t.rules : null, defaults: DEFAULT_RULES })
+        }
+        case 'POST /v1/tripwires': {
+          // Turning tripwires on only narrows, so exactly that is open: one
+          // key, `enabled`, and the boolean true. Anything else (turning them
+          // off, changing a rule, `'true'`, an extra key) changes what a
+          // human chose, and needs one (C20).
+          const { presence, ...body } = isObject(input) ? input : {}
+          const keys = Object.keys(body)
+          const enableOnly = keys.length === 1 && keys[0] === 'enabled' && body.enabled === true
+          if (!enableOnly) this.#requireHumanForWidening('tripwires set', this.#wideningOperation(route, url, input), presence)
+          const unknown = keys.filter((k) => k !== 'enabled' && k !== 'rules')
+          if (unknown.length) throw deny('AV_POLICY_DENIED', `tripwires has no setting ${unknown[0]}`, { rule: 'tripwire_rule' })
+          if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
+            throw deny('AV_POLICY_DENIED', 'enabled is true or false', { rule: 'tripwire_rule' })
+          }
+          if (body.rules !== undefined && body.rules !== 'defaults' && !Array.isArray(body.rules)) {
+            throw deny('AV_POLICY_DENIED', "rules is a list of rules, or 'defaults'", { rule: 'tripwire_rule' })
+          }
+          const current = this.vault.getSettings().tripwires || {}
+          const next = {
+            enabled: body.enabled ?? current.enabled === true,
+            // Rules that were never set are the defaults, which is what the
+            // gateway uses for them anyway; they are stored so the record
+            // says what is in force.
+            rules: body.rules === 'defaults' ? structuredClone(DEFAULT_RULES)
+              : (body.rules ?? (Array.isArray(current.rules) ? current.rules : structuredClone(DEFAULT_RULES))),
+          }
+          const saved = this.vault.updateSettings({ tripwires: next }).tripwires
+          return json(200, { enabled: saved.enabled === true, rules: saved.rules })
+        }
+
+        // ------------------------------------------------- F17: templates
+        case 'GET /v1/templates': {
+          const name = url.searchParams.get('name')
+          if (name !== null) {
+            const t = this.vault.getTemplate(name)
+            if (!t) throw deny('AV_NOT_FOUND', `no template ${name}`)
+            return json(200, { ...t, summary: templateSummary(t.spec), creds: templateCreds(t.spec), elevated: elevationOf(t.spec) })
+          }
+          return json(200, this.vault.listTemplates().map((t) => ({
+            name: t.name, version: t.version, hash: t.hash, summary: templateSummary(t.spec),
+            creds: templateCreds(t.spec), elevated: elevationOf(t.spec), updated_at: t.updated_at,
+          })))
+        }
+        case 'POST /v1/templates': {
+          // Configuration, not standing approval: a session made from it
+          // still passes its own gate. Saving is gated because the next
+          // human may trust the name. The spec is checked the way a create
+          // would check it, with nothing made, before anyone is asked.
+          const spec = input.spec
+          if (!isObject(spec)) throw deny('AV_POLICY_DENIED', 'spec is a session-create object', { rule: 'session_shape' })
+          for (const k of ['template', 'template_hash', 'presence']) {
+            if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`, { rule: 'session_shape' })
+          }
+          const plan = this.#planSession(spec, { dryRun: true })
+          this.#requireHumanForWidening('template save', this.#wideningOperation(route, url, input), input.presence)
+          const saved = this.vault.saveTemplate(input.name, spec)
+          return json(200, {
+            name: saved.name, version: saved.version, hash: saved.hash, spec: saved.spec,
+            lint: plan.grants.flatMap((g) => g.lint), elevated: elevationOf(saved.spec),
+          })
+        }
+        case 'DELETE /v1/templates':
+          // Open: removing a shape grants nothing.
+          return json(200, { ok: true, removed: this.vault.deleteTemplate(url.searchParams.get('name')) })
+
+        // ---------------------------------------------------- F8: backup
+        case 'POST /v1/backup/export': {
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to export it')
+          // Fresh, never the window: the bundle is every secret, under a
+          // passphrase whoever runs this chooses. An agent riding a window
+          // would choose its own.
+          this.#requireFreshPresence('backup export', this.#wideningOperation(route, url, input), input.presence)
+          return json(200, await exportBackup(this.vault, { recoveryPassphrase: input.recovery_passphrase }))
+        }
+        case 'POST /v1/backup/inspect': {
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to inspect a backup')
+          // Open, and charged like a passphrase attempt: each one is an
+          // scrypt, and a wrong recovery passphrase is a guess. Only a wrong
+          // one counts. A right one does not clear the count: an agent could
+          // inspect a bundle it made itself to reset the throttle on the
+          // vault passphrase it is guessing at.
+          this.#throttlePassphrase()
+          let inspected
+          try {
+            inspected = await inspectBackup(input.bundle, { recoveryPassphrase: input.recovery_passphrase })
+          } catch (e) {
+            if (e?.rule === 'backup_auth') this.#recordPassphraseAttempt(false)
+            if (e?.rule && !this.vault.locked) this.vault.audit.write('backup.refused', { reason: e.rule })
+            throw e
+          }
+          this.vault.audit.write('backup.inspected', { credentials: inspected.credentials.length, bundle_sha256: bundleDigest(input.bundle) })
+          return json(200, inspected)
+        }
+        case 'POST /v1/backup/restore': {
+          this.#requireHumanForWidening('backup restore', this.#wideningOperation(route, url, input), input.presence)
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to restore into it')
+          this.#throttlePassphrase()
+          try {
+            return json(200, await restoreBackup(this.vault, input.bundle, {
+              recoveryPassphrase: input.recovery_passphrase, onConflict: input.on_conflict ?? 'skip',
+            }))
+          } catch (e) {
+            if (e?.rule === 'backup_auth') this.#recordPassphraseAttempt(false)
+            throw e
+          }
+        }
+
+        // ----------------------------------------- F9: audit export, witness
+        case 'GET /v1/audit/export': {
+          if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to read it')
+          return json(200, this.vault.audit.export({
+            sinceSeq: wholeParam(url.searchParams.get('since_seq'), 0, 'since_seq'),
+            limit: wholeParam(url.searchParams.get('limit'), 5000, 'limit'),
+          }))
+        }
+        case 'GET /v1/audit/checkpoint':
+          if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to witness it')
+          return json(200, this.vault.audit.checkpoint())
+        case 'POST /v1/audit/verify-witness':
+          if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to verify it')
+          return json(200, this.vault.audit.verifyWitness(input.checkpoints))
+
+        // ---------------------------------------------- F14: notifications
+        //
+        // The stream resolves no session and needs none (C20): it reads what
+        // GET /v1/approvals and GET /v1/session-requests already show anyone
+        // on this socket, and a token sent to it is not read.
+        case 'GET /v1/pending/stream':
+          this.notifier.subscribe(res)
+          return
+        case 'GET /v1/notify':
+          return json(200, { webhook: this.vault.notifyConfig() })
+        case 'POST /v1/notify': {
+          // The URL decides where the signal goes, and it is a credential in
+          // its own right, so setting it needs the owner.
+          this.#requireHumanForWidening('notify set', this.#wideningOperation(route, url, input), input.presence)
+          return json(200, { webhook: this.vault.setNotifyWebhook({ url: input.webhook_url, detail: input.detail ?? 'minimal' }) })
+        }
+        case 'DELETE /v1/notify':
+          // Open: it narrows what leaves the machine.
+          if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to remove the webhook')
+          return json(200, { ok: true, removed: this.vault.clearNotifyWebhook() })
+        case 'POST /v1/notify/test':
+          return json(200, await this.notifier.test())
+
         default:
           return json(404, { code: 'AV_NOT_FOUND', detail: `no control route ${route}` })
       }
     } catch (e) {
       const err = e instanceof VaultError ? e : deny('AV_INTERNAL', e.message)
+      if (res.headersSent) return res.end()
       return json(err.http, err.toProblem())
     }
   }
+
+  /** Run a credential's read-only probe (F12) and record that it ran. */
+  async #probe(cred) {
+    if (cred.quarantine) throw quarantined(cred)
+    const result = await runProbe({ vault: this.vault, cred, profile: getProfile(cred.connector_kind) })
+    this.vault.audit.write('cred.tested', {
+      credential_slug: cred.slug, status: result.status, http_status: result.http_status, latency_ms: result.latency_ms,
+    })
+    return result
+  }
+
+  /**
+   * Text an agent may have written, as it may be stored: no placeholder and
+   * no stored secret, bounded. It is recorded as `*_untrusted` either way.
+   */
+  #untrustedText(text, max = 200) {
+    if (typeof text !== 'string' || !text) return null
+    let out = text.slice(0, max)
+    for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}«placeholder»${out.slice(hit.end)}`
+    for (const { secret, label } of this.vault.allSecrets()) {
+      if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret).join(`[[av:redacted:${label}]]`)
+    }
+    return out
+  }
+
+  /**
+   * Narrow a live session (F15). Open, because it can only take capability
+   * away: every grant's new policy is the intersection of its old one with
+   * the narrowing (the store's narrowGrant), and lifetimes only come closer.
+   * Everything is checked and converted before anything changes.
+   */
+  #narrowSession(input) {
+    const bad = (detail, rule = 'policy_invalid') => deny('AV_POLICY_DENIED', detail, { rule })
+    if (!isObject(input)) throw bad('send { sid, cred?, narrow, session_ttl_minutes?, grant_ttl_minutes? }')
+    if (typeof input.sid !== 'string' || !input.sid) throw deny('AV_NOT_FOUND', 'name the session: sid')
+    if (this.vault.locked) throw deny('AV_LOCKED', 'unlock the vault to narrow a session')
+    const session = Object.hasOwn(this.vault.db.sessions, input.sid) ? this.vault.db.sessions[input.sid] : null
+    if (!session) throw deny('AV_NOT_FOUND', `no session ${input.sid}`)
+    if (input.cred !== undefined && (typeof input.cred !== 'string' || !input.cred)) throw bad('cred is a credential slug')
+    if (input.narrow !== undefined && !isObject(input.narrow)) throw bad('narrow is an object of grant limits')
+    const narrow = input.narrow ?? {}
+    const unknown = Object.keys(narrow).filter((k) => !NARROW_FIELDS.includes(k))
+    if (unknown.length) throw bad(`a narrowing cannot carry ${unknown[0]}`)
+    const minutes = (v, rule) => {
+      if (v === undefined) return null
+      if (!(Number.isInteger(v) && v >= 1)) throw bad('a lifetime is a whole number of minutes, 1 or more', rule)
+      return v
+    }
+    const sessionTtl = minutes(input.session_ttl_minutes, 'ttl')
+    // The grant lifetime may be given in the narrowing or beside it; the
+    // shorter one wins.
+    const grantTtls = [minutes(input.grant_ttl_minutes, 'grant_ttl'), minutes(narrow.grant_ttl_minutes, 'grant_ttl')].filter((v) => v !== null)
+    const grantTtl = grantTtls.length ? Math.min(...grantTtls) : null
+    const fields = Object.keys(narrow).filter((k) => k !== 'grant_ttl_minutes')
+    // Doing nothing is refused, so nobody believes they narrowed something.
+    if (!fields.length && sessionTtl === null && grantTtl === null) {
+      throw bad('name at least one limit or lifetime to narrow', 'narrow_empty')
+    }
+    // The one field whose absence means "off" (0.6): stating any other
+    // value on a grant that never stated one would turn it on.
+    if (Object.hasOwn(narrow, 'redirects') && narrow.redirects !== 0) {
+      throw bad('a narrowing can only turn redirect following off: redirects 0', 'narrow_widens')
+    }
+    if (narrow.approval !== undefined && !APPROVAL_MODES.includes(narrow.approval)) {
+      throw deny('AV_POLICY_DENIED', 'approval is not one of the four modes', { rule: 'approval', hint: 'approval is one of: each, on-write, first-use, auto' })
+    }
+    if (narrow.budget !== undefined && policyMod.budgetInteger(narrow.budget) === null) {
+      throw bad('budget must be a whole number of requests, 0 or more')
+    }
+    // Revoked or ended sessions have nothing left to narrow. On the control
+    // socket, which is this machine.
+    this.vault.assertSessionUsable(session, null)
+
+    let grants = this.vault.grantsForSession(session.id)
+    if (input.cred !== undefined) {
+      grants = grants.filter((g) => this.vault.db.credentials[g.credential_id]?.slug === input.cred)
+      if (!grants.length) throw deny('AV_NOT_FOUND', `session ${session.id} has no grant for ${input.cred}`)
+    }
+    const describe = (g, profile) => policyMod.describeEffective(policyMod.intersect([profile.policyCeiling, session.policy, g.policy]))
+    const planned = grants.map((g) => {
+      const cred = this.vault.db.credentials[g.credential_id]
+      const profile = getProfile(cred.connector_kind)
+      const ceiling = policyMod.credentialHostCeiling(cred, profile.hosts)
+      const spec = Object.fromEntries(fields.map((k) => [k, narrow[k]]))
+      // No defaults: a narrowing that names only methods must not also
+      // "set" every path and the default budget.
+      const layer = fields.length ? policyMod.grantPolicyFromInput(spec, { profile, ceiling, defaults: false }) : null
+      return { g, cred, profile, layer, before: describe(g, profile) }
+    })
+
+    if (sessionTtl !== null) this.vault.shortenSession(session.id, sessionTtl * 60_000)
+    const out = planned.map(({ g, cred, profile, layer, before }) => {
+      if (layer) this.vault.narrowGrant(g.id, layer)
+      if (grantTtl !== null) this.vault.shortenGrant(g.id, grantTtl * 60_000)
+      const now = this.vault.db.grants[g.id]
+      return { cred: cred.slug, grant_id: g.id, before, after: describe(now, profile), expires_at: now.expires_at ?? null }
+    })
+    return { session_id: session.id, expires_at: session.expires_at ?? null, infinite: session.infinite === true, grants: out }
+  }
+
+  /** One session in full (F19): metadata, never a placeholder or a token. */
+  #sessionDetail(sid) {
+    if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to read it')
+    const session = typeof sid === 'string' && Object.hasOwn(this.vault.db.sessions, sid) ? this.vault.db.sessions[sid] : null
+    if (!session) throw deny('AV_NOT_FOUND', `no session ${sid}`)
+    const grants = Object.values(this.vault.db.grants).filter((g) => g.session_id === session.id)
+    const rows = this.vault.audit.read({ limit: 100_000 })
+    return {
+      session: {
+        id: session.id, label: session.label, state: session.state, created_at: session.created_at,
+        expires_at: session.expires_at ?? null, infinite: session.infinite === true, remote: session.remote === true,
+        last_seen_at: session.last_seen_at ?? null, template: session.template ?? null,
+        elevated: Array.isArray(session.elevated) ? session.elevated : [],
+      },
+      grants: grants.map((g) => {
+        const cred = this.vault.db.credentials[g.credential_id]
+        const profile = cred ? getProfile(cred.connector_kind) : null
+        const effective = policyMod.intersect([profile?.policyCeiling, session.policy, g.policy])
+        // The one budget reader (C4). No limit is null; an unreadable one is
+        // reported as such, and nothing is remaining under it.
+        const limit = policyMod.budgetLimit(effective.budget)
+        const used = Number.isSafeInteger(g.budget_used) ? g.budget_used : null
+        let spend = null
+        try { spend = this.pipeline.spendFor(g.id) } catch { spend = { invalid: true } }
+        return {
+          grant_id: g.id, cred: cred?.slug ?? null, state: g.state, expires_at: g.expires_at ?? null,
+          effective: policyMod.describeEffective(effective),
+          budget: {
+            limit: Number.isInteger(limit) ? limit : null, used,
+            remaining: Number.isInteger(limit) && used !== null ? Math.max(0, limit - used) : (limit === null ? 0 : null),
+            ...(limit === null ? { invalid: true } : {}),
+          },
+          limits: this.pipeline.limitsFor(g.id), spend, counters: g.counters ?? null,
+          // Ledger rows, never the placeholder text.
+          placeholders: Object.values(this.vault.db.placeholders).filter((p) => p.grant_id === g.id).map((p) => ({
+            id: p.id, field: p.field, uses: p.uses, max_uses: p.max_uses, state: p.state,
+            dead_reason: p.dead_reason ?? null, expires_at: p.expires_at ?? null,
+          })),
+        }
+      }),
+      activity: summarizeSession(rows, { session, grants }),
+    }
+  }
+}
+
+/** `since` for the access report: an ISO date, `<n>d` or `<n>h`; 7 days when absent. */
+function reportSince(raw) {
+  const text = raw ?? '7d'
+  const rel = /^([1-9][0-9]{0,4})([dh])$/.exec(text)
+  if (rel) return new Date(Date.now() - Number(rel[1]) * (rel[2] === 'd' ? 86_400_000 : 3_600_000)).toISOString()
+  if (/^\d{4}-\d{2}-\d{2}/.test(text) && !Number.isNaN(Date.parse(text))) return new Date(Date.parse(text)).toISOString()
+  throw deny('AV_POLICY_DENIED', 'since is an ISO date, or a span like 7d or 24h', { rule: 'report_since' })
+}
+
+/** A whole-number query parameter, or the default when absent. Anything else is refused, never coerced. */
+function wholeParam(raw, fallback, name) {
+  if (raw === null) return fallback
+  if (!/^(0|[1-9][0-9]{0,15})$/.test(raw)) {
+    throw deny('AV_POLICY_DENIED', `${name} must be a whole number`, { rule: 'audit_range' })
+  }
+  return Number(raw)
+}
+
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+/**
+ * A session request's spec (a proposal, with any human edits) as the
+ * session-create input it stands for. Minutes become hours, and the template
+ * it was made from is metadata, not a template to resolve again: the proposal
+ * already holds that template's fields as they were when the agent asked.
+ */
+function requestSpec(final) {
+  const { ttl_minutes: ttlMinutes, template: _t, template_hash: _h, template_version: _v, ...spec } = final
+  // A non-number is passed on as one, and refused there as a ttl.
+  if (ttlMinutes != null) spec.ttl_hours = typeof ttlMinutes === 'number' ? ttlMinutes / 60 : ttlMinutes
+  return spec
+}
+
+/**
+ * The request a gateway preflight describes (F20), read strictly. The body
+ * is text or base64, never both; headers are pairs or an object of strings.
+ * The caller's own session headers and Host are dropped: the route sets the
+ * session from the token it authenticated, and the request is one to this
+ * gateway.
+ */
+function preflightRequest(raw) {
+  const refuse = (detail) => deny('AV_POLICY_DENIED', detail, {
+    rule: 'preflight_shape',
+    hint: 'Send { method, path: "/p/<slug>/…", query?, headers?, body? | body_base64? }.',
+  })
+  let input
+  try { input = JSON.parse(raw.length ? raw.toString('utf8') : '{}') } catch { throw refuse('the body is not JSON') }
+  if (!isObject(input)) throw refuse('the body is a JSON object')
+  if (typeof input.method !== 'string' || !/^[A-Za-z]{1,16}$/.test(input.method)) throw refuse('method is an HTTP method name')
+  if (typeof input.path !== 'string' || !/^\/(p|t)\//.test(input.path)) throw refuse('path starts with /p/<slug>/ or /t/<scheme>/<host>/')
+  if (input.query !== undefined && typeof input.query !== 'string') throw refuse('query is a string')
+  if (input.body !== undefined && input.body_base64 !== undefined) throw refuse('send body or body_base64, not both')
+  if (input.body !== undefined && typeof input.body !== 'string') throw refuse('body is a string')
+  if (input.body_base64 !== undefined && (typeof input.body_base64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.body_base64))) {
+    throw refuse('body_base64 is base64')
+  }
+  let pairs = []
+  if (Array.isArray(input.headers)) pairs = input.headers
+  else if (isObject(input.headers)) pairs = Object.entries(input.headers)
+  else if (input.headers !== undefined) throw refuse('headers are [name, value] pairs or an object')
+  if (pairs.length > MAX_PREFLIGHT_HEADERS) throw refuse(`at most ${MAX_PREFLIGHT_HEADERS} headers`)
+  const headers = [['host', '127.0.0.1']]
+  for (const pair of pairs) {
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') {
+      throw refuse('each header is a name and a string value')
+    }
+    if (/^av-/i.test(pair[0]) || pair[0].toLowerCase() === 'host') continue
+    headers.push([pair[0], pair[1]])
+  }
+  const body = input.body !== undefined ? Buffer.from(input.body, 'utf8')
+    : input.body_base64 !== undefined ? Buffer.from(input.body_base64, 'base64') : null
+  return { method: input.method.toUpperCase(), path: input.path, query: input.query ?? '', headers, body: body?.length ? body : null }
+}
+
+/** The template a proposal was made from, as `{ name, version }`, or null. */
+function templateOf(proposal) {
+  return typeof proposal?.template === 'string' && Number.isSafeInteger(proposal.template_version)
+    ? { name: proposal.template, version: proposal.template_version }
+    : null
 }
 
 /** The store's refusal for a quarantined credential, met before anything is made. */
