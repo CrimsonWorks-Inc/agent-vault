@@ -226,6 +226,12 @@ agent-vault template rm repo-review
 agent-vault approve sr_… --methods GET --paths '/user' --grant-ttl 10
 ```
 
+A narrowing the CLI cannot read — an unknown or misspelled flag, a flag with no
+value, a number that is not one, `--routes` or `--payload` that is not JSON —
+exits 2 and sends nothing. It is never approved as the agent asked. The same
+holds for `session create`, `session narrow` and `template save`: a flag they
+do not know is refused rather than ignored.
+
 Template overrides only narrow. An agent can propose a template with
 `vault_request_session`; approval uses the saved snapshot rather than silently
 substituting a later edit. Templates create no session by themselves. Agents cannot add approval or infinite-lifetime overrides to a proposal. A saved
