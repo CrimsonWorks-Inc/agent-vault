@@ -224,8 +224,14 @@ test('malformed limits are refused before anything is created', async () => {
     }
     assert.equal(sessionCount(d), before)
     // The ordinary shapes of the same fields still work.
-    const ok = await d.control('POST', '/v1/sessions', { cred: 'demo', methods: ['GET'], paths: ['/a/**'], budget: 0, uses: 2, label: 'fine' })
+    const ok = await d.control('POST', '/v1/sessions', { cred: 'demo', methods: ['GET'], paths: ['/a/**'], budget: 1, uses: 2, label: 'fine' })
     assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    // A budget of 0 is well-formed, so it is not policy_invalid here. The
+    // store then issues nothing on a spent grant, and the session is torn down.
+    const zero = await d.control('POST', '/v1/sessions', { cred: 'demo', budget: 0 })
+    assert.equal(zero.status, 403, JSON.stringify(zero.body))
+    assert.equal(zero.body.rule, 'budget', JSON.stringify(zero.body))
+    assert.ok(Object.values(d.vault.db.sessions).every((s) => s.id === ok.body.session_id || s.state === 'revoked'), 'no live session for budget 0')
   } finally { await d.stop() }
 })
 
