@@ -432,7 +432,7 @@ export class Daemon {
    * refusal leaves no half-made session behind. The gate is chosen from
    * `elevated`, which is computed here once, over the same body.
    */
-  #planSession(input, { dryRun = false, resolved = false } = {}) {
+  #planSession(input, { savingTemplate = false, resolved = false } = {}) {
     const shape = (detail) => deny('AV_POLICY_DENIED', detail, {
       rule: 'session_shape',
       hint: 'A session is either one credential (cred and its limits at the top level) or grants: [{cred, …}, …], one entry per credential.',
@@ -445,7 +445,7 @@ export class Daemon {
       // refuses one, and a hand-edited vault does not get a loop.
       if (resolved) throw shape('a template cannot name another template')
       const { template, spec } = this.#resolveTemplateInput(input)
-      return { ...this.#planSession(spec, { dryRun, resolved: true }), template: { name: template.name, version: template.version } }
+      return { ...this.#planSession(spec, { savingTemplate, resolved: true }), template: { name: template.name, version: template.version } }
     }
     if (has('grants') && GRANT_FIELDS.some(has)) throw shape('send one of cred, grants or template')
     let specs
@@ -496,8 +496,9 @@ export class Daemon {
       if (!cred) throw deny('AV_NOT_FOUND', `no credential ${spec.cred}`)
       // The store refuses the grant too, but only after the gate has asked for
       // a passphrase and a session exists to be torn down again. A template
-      // being saved is not a session, so a dry run does not ask.
-      if (cred.quarantine && !dryRun) throw quarantined(cred)
+      // being saved is not a session, so saving one does not ask. Every other
+      // plan does, including a session request's proposal (C12 note).
+      if (cred.quarantine && !savingTemplate) throw quarantined(cred)
       // Never a default for a mode nobody chose: an unknown one used to mean
       // auto, because needsApproval fell through to false.
       if (spec.approval != null && !APPROVAL_MODES.includes(spec.approval)) {
@@ -2363,7 +2364,7 @@ export class Daemon {
           for (const k of ['template', 'template_hash', 'presence']) {
             if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`, { rule: 'session_shape' })
           }
-          const plan = this.#planSession(spec, { dryRun: true })
+          const plan = this.#planSession(spec, { savingTemplate: true })
           this.#requireHumanForWidening('template save', this.#wideningOperation(route, url, input), input.presence)
           const saved = this.vault.saveTemplate(input.name, spec)
           return json(200, {
