@@ -217,16 +217,100 @@ test('no mutating control route widens capability without a human', async () => 
     // And the mirror: stripping the human's unlock factor is a capability
     // change in the other direction.
     ['POST', '/v1/factors/webauthn', { action: 'remove' }],
+    // Wave 3 (contract A.2). Every write to a credential record but
+    // quarantine: each one changes what a credential is or where it goes.
+    ['POST', '/v1/credentials/rotate', { slug: 'prod', value: 'ROTATED-GATE-VALUE-0099887766' }],
+    ['POST', '/v1/credentials/scrub', { slug: 'prod', pattern: 'acme_[a-z0-9]{20}' }],
+    ['DELETE', '/v1/credentials/scrub?slug=prod&id=sp_x', null],
+    ['POST', '/v1/credentials/expiry', { slug: 'prod', expires_at: null }],
+    ['POST', '/v1/credentials/pins', { slug: 'prod', host: '127.0.0.1', pins: [`sha256/${'A'.repeat(43)}=`] }],
+    ['DELETE', '/v1/credentials/pins?slug=prod&host=127.0.0.1', null],
+    // Releasing a quarantine undoes a human's (or a tripwire's) stop.
+    ['POST', '/v1/credentials/release', { slug: 'prod' }],
+    // Tripwires: anything but turning them on.
+    ['POST', '/v1/tripwires', { enabled: false }],
+    ['POST', '/v1/tripwires', { enabled: true, rules: 'defaults' }],
+    ['POST', '/v1/tripwires', { rules: [] }],
+    // The next human may trust a template's name.
+    ['POST', '/v1/templates', { name: 'gate', spec: { cred: 'prod' } }],
+    // A restore writes credentials; the bundle is checked after the gate.
+    ['POST', '/v1/backup/restore', { bundle: { format: 'agent-vault-backup' }, recovery_passphrase: 'a recovery passphrase' }],
+    // The webhook URL decides where the signal goes, and is a credential.
+    ['POST', '/v1/notify', { webhook_url: 'https://hooks.example/abc' }],
   ]
+  const before = JSON.stringify({ c: vault.db.credentials, s: vault.getSettings(), t: vault.db.templates ?? null, n: vault.db.kv.notify ?? null })
   for (const [method, path, body] of widening) {
     const res = await ctl(method, path, body)
     assert.equal(res.status, 401, `${method} ${path} answered ${res.status}, not a presence refusal`)
     assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED', `${method} ${path}`)
   }
+  assert.equal(
+    JSON.stringify({ c: vault.db.credentials, s: vault.getSettings(), t: vault.db.templates ?? null, n: vault.db.kv.notify ?? null }),
+    before, 'a refused widening route changed something',
+  )
 
   // Reads never need a human: the unlock screen depends on them.
-  for (const path of ['/v1/status', '/v1/lockstate', '/v1/credentials', '/v1/sessions', '/v1/listeners', '/v1/approvals']) {
+  for (const path of [
+    '/v1/status', '/v1/lockstate', '/v1/credentials', '/v1/sessions', '/v1/listeners', '/v1/approvals',
+    // Wave 3 reads: none exposes more than `audit tail` and `session list`.
+    '/v1/tripwires', '/v1/templates', '/v1/notify', '/v1/audit/checkpoint', '/v1/audit/export',
+    '/v1/report/access', `/v1/sessions/detail?sid=${session.id}`,
+  ]) {
     assert.equal((await ctl('GET', path)).status, 200, `GET ${path} should stay open`)
+  }
+})
+
+test('the wave-3 routes that only narrow or read stay open, even with the gate on (A.2)', async () => {
+  // A vault of its own: these change things (a panic revokes every session),
+  // and the rest of this file shares one.
+  const d2 = mkdtempSync(join(tmpdir(), 'av-open-'))
+  const v2 = Vault.create(d2, { factor: 'none' })
+  const c2 = v2.addCredential({
+    slug: 'prod', kind: 'http', connector: { host: 'api.example.com', scheme: 'https' },
+    fields: { token: 'OPEN-ROUTES-SECRET-0001112' }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  const made = v2.createSession({ label: 'agent' })
+  v2.createGrant({
+    sessionId: made.session.id, credentialId: c2.id, fields: ['token'],
+    policy: { hosts: ['api.example.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'on-write' },
+  })
+  v2.setPassphrase(PASS)
+  const s2 = join(d2, 'c.sock')
+  const dm = await new Daemon(v2, { port: 0, socketPath: s2 }).start()
+  const call = (m, p, b) => new Promise((resolve) => {
+    const req = unixRequest({ socketPath: s2, path: p, method: m, headers: { 'content-type': 'application/json' } }, (res) => {
+      const c = []
+      res.on('data', (x) => c.push(x))
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+    })
+    req.on('error', () => resolve({ status: 0, body: {} }))
+    req.end(b ? JSON.stringify(b) : undefined)
+  })
+  try {
+    const open = [
+      // Each of these can only take capability away, or reads.
+      ['POST', '/v1/sessions/narrow', { sid: made.session.id, narrow: { methods: ['GET'] } }, 200],
+      ['POST', '/v1/tripwires', { enabled: true }, 200],
+      ['POST', '/v1/credentials/test', { slug: 'prod' }, 404], // http has no probe; not a presence refusal
+      ['DELETE', '/v1/templates?name=none', null, 200],
+      ['DELETE', '/v1/notify', null, 200],
+      ['POST', '/v1/notify/test', {}, 404], // none configured; not a presence refusal
+      ['POST', '/v1/backup/inspect', { bundle: { format: 'other' }, recovery_passphrase: 'a recovery passphrase' }, 403],
+      ['POST', '/v1/audit/verify-witness', { checkpoints: [] }, 200],
+      ['POST', '/v1/credentials/quarantine', { slug: 'prod' }, 200],
+      // Last: it revokes every session.
+      ['POST', '/v1/panic', {}, 200],
+    ]
+    for (const [method, path, body, status] of open) {
+      const res = await call(method, path, body)
+      assert.notEqual(res.body.code, 'AV_PRESENCE_REQUIRED', `${method} ${path} asked for presence`)
+      assert.equal(res.status, status, `${method} ${path}: ${JSON.stringify(res.body)}`)
+    }
+    assert.equal(v2.db.sessions[made.session.id].state, 'revoked')
+    assert.ok(v2.findCredential('prod').quarantine)
+  } finally {
+    await dm.stop()
+    rmSync(d2, { recursive: true, force: true })
   }
 })
 
@@ -249,6 +333,8 @@ async function freshRoutes(call) {
     ['POST', '/v1/pending/decide-many', {
       decisions: [{ id: two, kind: 'session', granted: true }, { id: one, kind: 'session', granted: true, overrides: { approval: 'auto' } }],
     }],
+    // A backup is every secret under a passphrase whoever runs this chooses.
+    ['POST', '/v1/backup/export', { recovery_passphrase: 'a long enough recovery passphrase' }],
   ]
 }
 
