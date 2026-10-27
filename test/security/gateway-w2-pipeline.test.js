@@ -4,10 +4,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { createServer } from 'node:http'
 import { Vault } from '../../src/store/vault.js'
 import { Pipeline, approvalPreview } from '../../src/daemon/pipeline.js'
 import { deny } from '../../src/core/errors.js'
 import { meterRequest, reservationFor } from '../../src/core/model-usage.js'
+import { requestView } from '../../src/core/request-view.js'
+import { evaluatePayload } from '../../src/core/payload.js'
 
 const SECRET = 'fixture_secret_gateway_only_0123456789'
 function fixture(t, policy = {}, { kind = 'http', upstream, options = {} } = {}) {
@@ -686,4 +689,275 @@ test('a hop keeps the API-version headers a provider needs, and never a cookie, 
   const o = fixture(t, { redirects: { max: 2 } }, { upstream: () => (++m === 1 ? { status: 302, headers: { location: '/next' }, body: Buffer.alloc(0) } : { status: 200, headers: {}, body: Buffer.from('done') }) })
   await o.pipeline.handle(o.req({ headers: [...o.req().headers, ['OpenAI-Beta', 'assistants=v2'], ['openai-organization', 'org'], ['openai-project', 'p'], ['x-api-version', '1'], ['api-version', '2'], ['Cookie', 'a=b']] }))
   assert.deepEqual(lowerKeys(o.sent[1].headers), ['accept-encoding', 'api-version', 'authorization', 'host', 'openai-beta', 'openai-organization', 'openai-project', 'x-api-version'])
+})
+
+// ------------------------------------- round 5: one view of the request, checked and sent
+
+// Round 4 refused `.method=DELETE` on a direct request and followed a hop to
+// `?.method=DELETE` as a GET, because the hop looked for `_method` alone. And
+// the payload rules read a query with URLSearchParams, which does not split
+// on `;`, while Rack does. Both are one request read two ways. The fix reads
+// every request into one view (src/core/request-view.js) that every check
+// reads and every send is built from, so these tests hold each check to that
+// view on the direct path and on a hop alike.
+
+// Each spelling a framework reads as `_method`, or as an override header
+// spelled as a field.
+const SPELLINGS = [
+  '_method=DELETE', '%5Fmethod=DELETE', '_METHOD=PUT', '__method=DELETE', '.method=DELETE', '%2Emethod=DELETE',
+  '_method[]=DELETE', '_method%5B%5D=DELETE', '_method[0]=DELETE', '+method=DELETE', '%20method=DELETE',
+  'x-http-method-override=DELETE', 'X-HTTP-Method-Override=DELETE', 'x_http_method=DELETE', 'X-Method-Override=PATCH',
+  'a=1;_method=DELETE', 'a=1;__method=DELETE', '__method=DELETE&__method=GET',
+  // GET to a reader that splits on `;`, and `GET;force=1` to one that does not.
+  '.method=GET;force=1',
+]
+const EVERY_METHOD = { methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] }
+const FORCE = { payload: { query: { force: { absent: true }, dry_run: { required: true } } } }
+
+test('Grok round 5, finding 1: a Location naming another method in a folded spelling is not followed', async t => {
+  // The routes scenario: /admin allows only GET, and the hop was checked as
+  // GET /admin/keys and sent with `.method=DELETE` and the credential.
+  const f = hopFixture(t, { routes: ROUTES }, 'https://api.example.test/admin/keys?.method=DELETE')
+  const result = await f.pipeline.handle(f.req({ path: '/p/test/public/start' }))
+  assert.equal(result.status, 302); assert.equal(result.headers['av-redirect-stopped'], 'path'); assert.equal(f.sent.length, 1)
+  // Under on-write a GET needs no human, so the hop was a DELETE no one approved.
+  for (const query of ['.method=DELETE', 'a=1;_method=DELETE', '_method[]=DELETE', '__method=DELETE']) {
+    const g = hopFixture(t, { methods: ['GET', 'DELETE'], approval: 'on-write', redirects: { max: 1 } }, `https://api.example.test/other?${query}`)
+    const stopped = await g.pipeline.handle(g.req())
+    assert.equal(stopped.status, 302, query); assert.equal(stopped.headers['av-redirect-stopped'], 'path', query)
+    assert.equal(g.sent.length, 1, query); assert.equal(g.pipeline.pendingApprovals().length, 0, query)
+  }
+})
+
+test('Grok round 5, finding 2: a ; in the query cannot hide a parameter from the payload rules', async t => {
+  for (const policy of [FORCE, { payload: { ...FORCE.payload, query_strict: true } }]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ query: 'dry_run=true;force=true' }))
+    assert.equal(result.status, 403); assert.equal(problem(result).rule, 'request_ambiguous')
+    assert.equal(f.sent.length, 0); assert.equal(f.row.uses, 0); assert.equal(f.grant.budget_used, 0)
+  }
+  // The same query in a Location, after a request that satisfied the rules.
+  const h = hopFixture(t, FORCE, 'https://api.example.test/next?dry_run=true;force=true')
+  const result = await h.pipeline.handle(h.req({ query: 'dry_run=true' }))
+  assert.equal(result.status, 302); assert.equal(result.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+})
+
+test('every override spelling is refused on a direct request and stops a hop', async t => {
+  for (const query of SPELLINGS) {
+    await t.test(query, async t => {
+      const f = fixture(t, EVERY_METHOD)
+      const direct = await f.pipeline.handle(f.req({ query }))
+      assert.equal(direct.status, 403); assert.equal(problem(direct).rule, 'method_override'); assert.equal(f.sent.length, 0)
+      const h = hopFixture(t, EVERY_METHOD, `/next?${query}`)
+      const hop = await h.pipeline.handle(h.req())
+      assert.equal(hop.status, 302); assert.equal(hop.headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+    })
+  }
+  // A spelling that names the request's own method is no override at all,
+  // on either path, and goes out as written.
+  const f = fixture(t)
+  assert.equal((await f.pipeline.handle(f.req({ query: 'a=1;.method=get' }))).status, 200); assert.ok(f.sent[0].url.endsWith('?a=1;.method=get'))
+  const h = hopFixture(t, {}, '/next?_method[]=GET')
+  assert.equal((await h.pipeline.handle(h.req())).status, 200); assert.equal(h.sent[1].url, 'https://api.example.test/next?_method[]=GET')
+})
+
+test('a ; query is refused under any payload rule on both paths, and goes out unchanged under none', async t => {
+  // A rule that has nothing to do with the query still means the query is read.
+  const rules = { payload: { json: { '/model': { max_length: 64 } } } }
+  const f = fixture(t, rules)
+  const result = await f.pipeline.handle(f.req({ query: 'a=1;b=2' }))
+  assert.equal(result.status, 403); assert.equal(problem(result).rule, 'request_ambiguous'); assert.equal(f.sent.length, 0)
+  const h = hopFixture(t, rules, '/next?a=1;b=2')
+  assert.equal((await h.pipeline.handle(h.req())).headers['av-redirect-stopped'], 'path'); assert.equal(h.sent.length, 1)
+  // No rules to disagree about: sent byte for byte, and the hop followed.
+  const g = fixture(t)
+  assert.equal((await g.pipeline.handle(g.req({ query: 'a=1;b=2' }))).status, 200); assert.ok(g.sent[0].url.endsWith('/ok?a=1;b=2'))
+  const k = hopFixture(t, {}, '/next?a=1;b=2')
+  assert.equal((await k.pipeline.handle(k.req())).status, 200); assert.equal(k.sent[1].url, 'https://api.example.test/next?a=1;b=2')
+  // `%3B` is a character in a value after one decode, to every reader.
+  const v = fixture(t, FORCE)
+  assert.equal((await v.pipeline.handle(v.req({ query: 'dry_run=true&note=a%3Bforce%3Dtrue' }))).status, 200)
+  assert.ok(v.sent[0].url.endsWith('?dry_run=true&note=a%3Bforce%3Dtrue'))
+})
+
+test('a name a server could fold onto a rule\'s name is refused, and a repeated name is a duplicate', async t => {
+  for (const [query, rule] of [
+    ['dry_run=true&FORCE=true', 'request_ambiguous'],
+    ['dry_run=true&%66orce=true', 'request_ambiguous'],
+    ['dry_run=true&force[]=true', 'request_ambiguous'],
+    ['dry_run=true&Force=1', 'request_ambiguous'],
+    // Satisfied for this reader and missing for one that does not decode
+    // names, or that does not fold `.` into `_`.
+    ['%64ry_run=true', 'request_ambiguous'],
+    ['dry.run=true', 'request_ambiguous'],
+    ['DRY_RUN=true', 'request_ambiguous'],
+    ['dry_run=true&dry_run=false', 'payload_duplicate_key'],
+    ['dry_run=true&%64ry_run=true', 'payload_duplicate_key'],
+    ['dry_run=true&force=1&force=1', 'payload_duplicate_key'],
+  ]) {
+    const f = fixture(t, FORCE)
+    const result = await f.pipeline.handle(f.req({ query }))
+    assert.equal(result.status, 403, query); assert.equal(problem(result).rule, rule, query); assert.equal(f.sent.length, 0, query)
+  }
+  // A form body and a JSON body are read the same way.
+  for (const [policy, type, body] of [
+    [{ payload: { form: { force: { absent: true } } } }, form, 'a=1&FORCE=1'],
+    [{ payload: { form: { force: { absent: true } } } }, form, 'a=1;force=1'],
+    [{ payload: { json: { '/force': { absent: true } } } }, json, '{"a":1,"Force":true}'],
+    [{ payload: { json: { '/opts/force': { absent: true } } } }, json, '{"opts":{"FORCE":true}}'],
+  ]) {
+    const f = fixture(t, policy)
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, type], body: Buffer.from(body) }))
+    assert.equal(result.status, 403, body); assert.equal(problem(result).rule, 'request_ambiguous', body); assert.equal(f.sent.length, 0, body)
+  }
+  // Controls: names that only look alike are other names.
+  const f = fixture(t, FORCE)
+  assert.equal((await f.pipeline.handle(f.req({ query: 'dry_run=true&forced=1&my_force=1&force_x=1' }))).status, 200)
+  const j = fixture(t, { payload: { json: { '/force': { absent: true } } } })
+  assert.equal((await j.pipeline.handle(j.req({ method: 'POST', headers: [...j.req().headers, json], body: Buffer.from('{"forced":true,"opts":{"Force":1}}') }))).status, 200)
+})
+
+// The property behind all of the above: whatever the gateway sends, every
+// common reader of that request reads it within the policy. Requests are
+// generated, sent through the real client to a local upstream, and what
+// arrived there is read the way WHATWG, Rack, PHP and a case-blind binder
+// read a query.
+const OVERRIDE_NAMES = new Set(['_method', '__method', 'x-http-method-override', 'x_http_method_override', 'x-http-method', 'x_http_method', 'x-method-override', 'x_method_override'])
+const decode = s => new URLSearchParams(`x=${s}`).get('x')
+const pairsOf = (query, separator) => query.split(separator).filter(Boolean).map(p => { const i = p.indexOf('='); return i === -1 ? [decode(p), ''] : [decode(p.slice(0, i)), decode(p.slice(i + 1))] })
+const READERS = {
+  whatwg: q => [...new URLSearchParams(q)],
+  rack: q => pairsOf(q, /[&;]/),
+  // PHP: `&` only; a leading space dropped, then space and `.` read as `_`,
+  // and `name[...]` is the array `name`.
+  php: q => pairsOf(q, '&').map(([k, v]) => [k.replace(/^ +/, '').replace(/[ .]/g, '_').replace(/\[.*$/s, ''), v]),
+  caseBlind: q => [...new URLSearchParams(q)].map(([k, v]) => [k.toLowerCase(), v]),
+}
+const random = seed => () => { seed = (seed + 0x6D2B79F5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296 }
+function generatedQueries(n) {
+  const next = random(5)
+  const pick = list => list[Math.floor(next() * list.length)]
+  const names = ['a', 'dry_run', 'force', 'note', '_method', '.method', '%5Fmethod', 'FORCE', '%66orce', 'dry.run', 'force[]', 'x-http-method-override', '__method', 'b+c', 'q%20x', '%64ry_run']
+  const values = ['1', 'true', 'GET', 'DELETE', 'x%3By', 'a+b', '', '%26force%3D1']
+  const out = []
+  for (let i = 0; i < n; i++) {
+    let q = next() < 0.6 ? 'dry_run=true' : ''
+    for (let k = 1 + Math.floor(next() * 3); k > 0; k--) q += `${q ? pick(['&', '&', '&', ';']) : ''}${pick(names)}${next() < 0.9 ? `=${pick(values)}` : ''}`
+    out.push(q)
+  }
+  return out
+}
+async function localUpstream(t) {
+  const seen = []
+  const server = createServer((req, res) => {
+    seen.push({ method: req.method, url: req.url })
+    const target = new URL(req.url, 'http://upstream').searchParams.get('to')
+    if (req.url.startsWith('/start') && target !== null) { res.writeHead(302, { location: `/next?${target}` }); res.end(); return }
+    res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  return { seen, host: `127.0.0.1:${server.address().port}` }
+}
+function localFixture(t, host, policy) {
+  const dir = mkdtempSync(join(tmpdir(), 'av-gw-w2-view-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const vault = Vault.create(dir, { factor: 'none' })
+  const added = vault.addCredential({ slug: 'test', kind: 'http', connector: { host }, fields: { token: SECRET }, sites: { token: ['header:authorization:Bearer'] } })
+  const cred = vault.findCredential(added.slug)
+  cred.connector.scheme = 'http'
+  const { session, token } = vault.createSession({ label: 'view', policy: {} })
+  const grant = vault.createGrant({ sessionId: session.id, credentialId: cred.id, fields: ['token'], policy: { hosts: ['127.0.0.1'], methods: ['GET', 'HEAD'], paths: ['/**'], budget: { unit: 'requests', limit: 100000 }, approval: 'auto', redirects: { max: 1 }, ...policy } })
+  const ph = vault.issuePlaceholder({ grantId: grant.id, field: 'token' }).placeholder
+  vault.chargeGrant ??= (id) => { const g = vault.db.grants[id]; g.budget_used++; g.counters.requests++; return true }
+  const pipeline = new Pipeline(vault, { expiryMs: v => v == null ? Infinity : Date.parse(v), sessionExpiryMs: s => s.infinite === true && s.expires_at === null ? Infinity : s.expires_at == null ? -Infinity : Date.parse(s.expires_at) })
+  return (path, query) => pipeline.handle({ method: 'GET', path, query, headers: [['host', 'localhost'], ['av-session', token], ['authorization', `Bearer ${ph}`]], body: null })
+}
+// What a reader of `query` sees that the policy forbids: an override naming
+// another method, and under FORCE a `force` or a missing `dry_run`.
+function violations(query, rules) {
+  const out = []
+  for (const [reader, read] of Object.entries(READERS)) {
+    const pairs = read(query)
+    if (pairs.some(([k, v]) => OVERRIDE_NAMES.has(k.toLowerCase()) && v.toUpperCase() !== 'GET')) out.push(`${reader}: override`)
+    if (rules && pairs.some(([k]) => k === 'force')) out.push(`${reader}: force`)
+    if (rules && !pairs.some(([k]) => k === 'dry_run')) out.push(`${reader}: no dry_run`)
+  }
+  return out
+}
+
+test('generated requests: what the policy read is what a local upstream received, and every reader reads it within the policy', async t => {
+  const upstream = await localUpstream(t)
+  const queries = generatedQueries(160)
+  const tally = { sent: 0, refused: 0, hops: 0, hopsStopped: 0 }
+  for (const policy of [FORCE, {}]) {
+    const rules = !!policy.payload
+    const send = localFixture(t, upstream.host, policy)
+    for (const query of queries) {
+      // Direct.
+      const before = upstream.seen.length
+      const result = await send('/p/test/ok', query)
+      const arrived = upstream.seen.slice(before)
+      if (result.status === 200) {
+        tally.sent++
+        assert.equal(arrived.length, 1, query)
+        const sent = arrived[0].url.slice('/ok'.length).replace(/^\?/, '')
+        // Byte for byte the query the view read, so the view's parameters
+        // are the parameters that arrived.
+        assert.equal(sent, requestView({ query }).query, query)
+        assert.deepEqual(requestView({ query: sent }).params, requestView({ query }).params, query)
+        assert.deepEqual(violations(sent, rules), [], query)
+      } else {
+        tally.refused++
+        assert.equal(result.status, 403, `${query}: ${result.body}`); assert.equal(arrived.length, 0, query)
+      }
+      // The same query in a Location, after a request within the policy.
+      const hopBefore = upstream.seen.length
+      const hop = await send('/p/test/start', `dry_run=true&to=${encodeURIComponent(query)}`)
+      const hopArrived = upstream.seen.slice(hopBefore)
+      assert.equal(hopArrived[0]?.url.startsWith('/start?'), true, query)
+      if (hopArrived.length === 2) {
+        tally.hops++
+        assert.equal(hop.status, 200, query)
+        const sent = hopArrived[1].url.slice('/next'.length).replace(/^\?/, '')
+        assert.equal(sent, new URL(`/next?${query}`, 'http://x').search.slice(1), query)
+        assert.deepEqual(violations(sent, rules), [], query)
+      } else {
+        tally.hopsStopped++
+        assert.equal(hopArrived.length, 1, query); assert.ok(hop.headers['av-redirect-stopped'], query)
+      }
+    }
+  }
+  // The generator has to have produced both outcomes on both paths, or
+  // the assertions above were never reached.
+  for (const [k, n] of Object.entries(tally)) assert.ok(n >= 20, `${k}: ${n}`)
+})
+
+test('ordinary traffic is untouched: & queries, provider APIs, and a redirect that keeps its version headers', async t => {
+  const f = fixture(t, FORCE)
+  const query = 'dry_run=true&limit=5&cursor=abc%3D%3D&tag=a+b&empty=&flag'
+  assert.equal((await f.pipeline.handle(f.req({ query }))).status, 200); assert.ok(f.sent[0].url.endsWith(`/ok?${query}`))
+  // An OpenAI-shaped JSON POST and an Anthropic-shaped GET with a query.
+  const o = fixture(t, { hosts: ['api.openai.com'] }, { kind: 'openai' })
+  assert.equal((await o.pipeline.handle(modelReq(o))).status, 200); assert.equal(o.sent[0].body.toString(), modelBody.toString())
+  const a = fixture(t, { hosts: ['api.anthropic.com'] }, { kind: 'anthropic' })
+  assert.equal((await a.pipeline.handle(a.req({ path: '/p/test/v1/models', query: 'limit=20&after_id=model_1' }))).status, 200)
+  assert.equal(a.sent[0].url, 'https://api.anthropic.com/v1/models?limit=20&after_id=model_1')
+  // GitHub needs its API version on every request, a redirected one included.
+  const g = hopFixture(t, {}, '/repos/o/r/contents?ref=main')
+  const result = await g.pipeline.handle(g.req({ headers: [...g.req().headers, ['X-GitHub-Api-Version', '2022-11-28'], ['accept', 'application/vnd.github+json']] }))
+  assert.equal(result.status, 200); assert.equal(g.sent[1].url, 'https://api.example.test/repos/o/r/contents?ref=main')
+  assert.equal(g.sent[1].headers['X-GitHub-Api-Version'], '2022-11-28')
+})
+
+test('the view reads a query as the union of its readers', () => {
+  const view = requestView({ method: 'post', query: '?a=1;b=2&%5Fmethod=DELETE&c+d=e%20f&flag', headers: [['X-HTTP-Method-Override', 'put, PATCH']] })
+  assert.equal(view.method, 'POST'); assert.equal(view.query, 'a=1;b=2&%5Fmethod=DELETE&c+d=e%20f&flag'); assert.equal(view.semicolon, true)
+  assert.deepEqual(view.params.map(p => [p.rawName, p.name, p.value]), [['a', 'a', '1'], ['b', 'b', '2'], ['%5Fmethod', '_method', 'DELETE'], ['c+d', 'c d', 'e f'], ['flag', 'flag', '']])
+  // Each reading's copy: split on `;` too, and on `&` alone.
+  assert.deepEqual(view.overrides, { headers: ['PUT', 'PATCH'], fields: ['DELETE', 'DELETE'] })
+  assert.deepEqual(requestView({ query: '.method=GET;force=1' }).overrides.fields, ['GET', 'GET;force=1'])
+  // A loose request and its view are refused alike by the payload rules.
+  assert.throws(() => evaluatePayload([FORCE.payload], { query: 'dry_run=true;force=true' }), { rule: 'request_ambiguous' })
+  assert.throws(() => evaluatePayload([FORCE.payload], requestView({ query: 'dry_run=true;force=true' })), { rule: 'request_ambiguous' })
 })

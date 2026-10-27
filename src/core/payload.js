@@ -1,4 +1,5 @@
 import { deny } from './errors.js'
+import { requestView, isView, foldedNames, queryParams } from './request-view.js'
 
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 const own = (v, k) => Object.hasOwn(v, k)
@@ -174,10 +175,32 @@ export function scanGraphQL(document, rules) {
   if (!operations) invalid()
 }
 
-function params(raw) {
+function params(list) {
   const out = Object.create(null)
-  for (const [k,v] of new URLSearchParams(raw)) { if (own(out,k)) fail('payload_duplicate_key'); out[k]=v }
+  for (const {name,value} of list) { if (own(out,name)) fail('payload_duplicate_key'); out[name]=value }
   return out
+}
+
+// A request two reasonable upstreams could read differently. Neither reading
+// is checked in place of the other: it is refused, and nothing is sent.
+const AMBIGUOUS = {
+  semicolon: 'the query separates parameters with ;, which some servers split on and others do not',
+  form_semicolon: 'the form body separates fields with ;, which some servers split on and others do not',
+  spelling: 'a parameter name differs from one this grant names only by case, percent-encoding or punctuation a server may fold',
+}
+const ambiguous = why => { throw deny('AV_POLICY_DENIED', AMBIGUOUS[why], { rule: 'request_ambiguous', hint: 'Send each parameter once, separated by &, under exactly the name the grant uses.' }) }
+
+/**
+ * A name written other than as the rule writes it, that some server would
+ * still read as the rule's name: `FORCE`, `%66orce`, `force[]` or `dry.run`
+ * for `dry_run`. The rules match names exactly, so the check would see
+ * another parameter where the upstream sees this one.
+ */
+function respelled(rules, list) {
+  for (const key of Object.keys(rules ?? {})) {
+    const want = foldedNames(key)[0]
+    for (const p of list) if (p.rawName !== key && foldedNames(p.name).includes(want)) ambiguous('spelling')
+  }
 }
 
 // Where a refusal says it happened. The key comes from the policy a human
@@ -208,15 +231,27 @@ function check(kind,key,c,present,v) {
  */
 const nameForRule = name => encodeURIComponent(name).slice(0, 64)
 
-export function evaluatePayload(sets, {method='GET',contentType='',body=null,query='',path=''} = {}) {
+/**
+ * Every payload rule, against the request's one view (request-view.js). A
+ * caller may pass the view, with the decided `path`, or the loose fields
+ * (`method`, `contentType`, `body`, `query`, `path`), which are read into a
+ * view the same way.
+ */
+export function evaluatePayload(sets, input = {}) {
   if (sets === undefined) return
   if (!Array.isArray(sets)) fail('payload_invalid')
   if (!sets.length) return
+  const view = isView(input) ? input : requestView(input)
+  const {body} = view, path = input.path ?? ''
   const bytes = body == null ? 0 : Buffer.byteLength(body)
   for (const set of sets) {
     if (validatePayload(set).length) fail('payload_invalid')
     if (bytes > (set.max_body_bytes ?? 1024*1024)) fail('payload_size')
   }
+  // Rack splits a query on `;` as well as `&`, and the WHATWG parser does
+  // not, so `dry_run=true;force=true` is one parameter to one upstream and
+  // two to the other. With any rule to enforce, that is refused.
+  if (view.semicolon) ambiguous('semicolon')
   // Decoded only when a rule reads the body. A grant with query rules alone
   // says nothing about the body, and an upload that is not UTF-8 is not a
   // reason to refuse it.
@@ -226,13 +261,22 @@ export function evaluatePayload(sets, {method='GET',contentType='',body=null,que
     try { bodyText = body == null ? '' : Buffer.isBuffer(body) ? new TextDecoder('utf-8',{fatal:true}).decode(body) : String(body) } catch { fail('payload_unparseable') }
     return bodyText
   }
-  const ct = String(contentType ?? '').split(';')[0].trim().toLowerCase(), isJson = /^application\/(?:json|[^/]+\+json)$/.test(ct)
+  const ct = view.mediaType, isJson = /^application\/(?:json|[^/]+\+json)$/.test(ct)
   const isForm = ct === 'application/x-www-form-urlencoded'
-  let json, parsed = false, q, form
+  let json, parsed = false, q, form, formList
   const getJson = () => { if (!parsed) { json = parseStrictJson(text()); parsed=true } return json }
-  const getQuery = () => q ??= params(String(query ?? '').replace(/^\?/,''))
-  const getForm = () => form ??= params(text())
+  const getQuery = () => q ??= params(view.params)
+  // A form body is read by the query's own parser, `;` included.
+  const getFormList = () => {
+    if (formList) return formList
+    if (text().includes(';')) ambiguous('form_semicolon')
+    return formList = queryParams(text())
+  }
+  const getForm = () => form ??= params(getFormList())
   for (const set of sets) {
+    // A repeated name is refused first, as the duplicate it is.
+    if (set.query) { getQuery(); respelled(set.query, view.params) }
+    if (set.form && bytes && isForm) { getForm(); respelled(set.form, getFormList()) }
     if (set.query_strict) for (const k of Object.keys(getQuery())) if (!own(set.query ?? {},k)) fail(`payload:query:${nameForRule(k)}:strict`)
     for (const kind of ['json','form','query']) {
       if (!set[kind]) continue
@@ -244,6 +288,9 @@ export function evaluatePayload(sets, {method='GET',contentType='',body=null,que
         let v=data, present=data !== undefined
         const keys = kind === 'json' ? key.slice(1).split('/').map(k => k.replace(/~1/g,'/').replace(/~0/g,'~')) : [key]
         for (const k of keys) {
+          // A key that differs from the rule's only by case is the rule's
+          // key to a reader that ignores case, and another key here.
+          if (object(v) && Object.keys(v).some(x => x !== k && x.toLowerCase() === k.toLowerCase())) ambiguous('spelling')
           if (v === null || typeof v !== 'object' || !own(v,k) || Array.isArray(v) && !/^(0|[1-9]\d*)$/.test(k)) { present=false; v=undefined; break }
           v=v[k]
         }

@@ -18,6 +18,7 @@ import * as sitesMod from '../core/sites.js'
 import * as policyMod from '../core/policy.js'
 import * as canon from '../core/canon.js'
 import { evaluatePayload, parseStrictJson } from '../core/payload.js'
+import { requestView, queryParams, METHOD_OVERRIDE_HEADERS } from '../core/request-view.js'
 import * as models from '../core/model-usage.js'
 import { Tripwires } from './tripwire.js'
 import { detectAll } from '../core/detect.js'
@@ -453,14 +454,14 @@ export class Pipeline {
    * What is already reserved by calls still in flight counts, so two calls
    * that fit alone but not together cannot both start.
    */
-  #checkSpend(grant, effective, route, req, decision) {
+  #checkSpend(grant, effective, route, view, decision) {
     if (effective.spend === undefined || !models.METERED_KINDS.includes(route.cred.connector_kind)) return null
     const limit = effective.spend
     if (!limit || limit.invalid || Object.entries(limit).some(([k, v]) => !['tokens', 'usd_micros'].includes(k) || !Number.isSafeInteger(v) || v < 0)) {
       throw deny('AV_POLICY_DENIED', 'this grant has a spend limit that is not a whole number', { rule: 'spend_invalid' })
     }
     const kind = route.cred.connector_kind
-    const meter = models.meterRequest(kind, { method: decision.method, path: decision.path, contentType: sub.getHeader(req, 'content-type'), body: req.body })
+    const meter = models.meterRequest(kind, { method: decision.method, path: decision.path, contentType: view.contentType, body: view.body })
     if (meter.unmodeled) {
       throw deny('AV_POLICY_DENIED', `${decision.method} ${decision.path} is not an endpoint whose cost can be bounded, so it cannot run under a spend limit`, { rule: 'spend_unmodeled' })
     }
@@ -669,6 +670,12 @@ export class Pipeline {
    * 302 and 303 send a GET (a HEAD stays a HEAD). It carries only the
    * headers in `#hopHeaders`, so nothing the agent sent can make the
    * upstream run anything but that method.
+   *
+   * A hop is read into a view of its own (request-view.js) and checked by
+   * the same functions as a direct request, against that view only. Round 4
+   * folded `.method` into `_method` for a direct request while a hop looked
+   * for `_method` alone, and a hop to `?.method=DELETE` was checked as a GET
+   * and sent as a DELETE, credential included.
    */
   async #redirects(response, { route, effective, decision, overrides, headers, credentialHeaders, upstreamUrl, requestId }) {
     let res = response, current = upstreamUrl, hops = 0
@@ -684,9 +691,13 @@ export class Pipeline {
       }
       if (!reason && (next.username || next.password)) reason = 'host'
       if (!reason && (!['http:', 'https:'].includes(next.protocol) || (route.scheme === 'https' && next.protocol !== 'https:'))) reason = 'scheme'
-      let hop, quota
+      let hop, quota, hopHeaders, hopView
       if (!reason) {
-        try { hop = policyMod.evaluateHttp(effective, { method, host: next.hostname, path: next.pathname }) }
+        // The hop's one view: its method, the Location's query exactly as it
+        // will be sent, the allowlisted headers and no body.
+        hopHeaders = this.#hopHeaders(headers, credentialHeaders, next.host)
+        hopView = requestView({ method, query: next.search, headers: Object.entries(hopHeaders), body: null })
+        try { hop = policyMod.evaluateHttp(effective, { method: hopView.method, host: next.hostname, path: next.pathname }) }
         catch (e) { reason = e.rule === 'hosts' ? 'host' : 'path' }
       }
       // The port, which policy does not see. A request only ever reaches the
@@ -704,11 +715,15 @@ export class Pipeline {
         // keeping only the query rules let a Location carry a mutation the
         // grant denies. The body rules see no body, exactly as a direct GET
         // does: a body field the grant requires is missing, so the hop stops.
-        try { evaluatePayload(effective.payload_sets, { method, query: next.search.slice(1), body: null, path: hop.path }) } catch { reason = 'path' }
-        // `_method` in a query is a method override too, for the frameworks
-        // that read one there. The hop is checked as one method and sent as
-        // that method, so a Location asking for another is not followed.
-        if ([...next.searchParams.keys()].some((k) => k.toLowerCase() === '_method')) reason = 'path'
+        try { evaluatePayload(effective.payload_sets, { ...hopView, path: hop.path }) } catch { reason = 'path' }
+        // A method-override field in the Location, in any spelling the view
+        // folds, is refused as it is on a direct request. The hop is checked
+        // as one method and sent as that method, so a Location asking for
+        // another is not followed. Nor is an override header, which the
+        // allowlist keeps off a hop in any case: approval was decided above
+        // for the hop's own method only.
+        try { checkOverrides(effective, hopView, { host: hop.host, path: hop.path }) } catch { reason = 'path' }
+        if (hopView.overrides.headers.some((m) => m !== hopView.method)) reason = 'path'
       }
       if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
       if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
@@ -720,10 +735,11 @@ export class Pipeline {
         return { ...res, redirectStopped: reason }
       }
       if (quota) { quota.count += 1; route.grant.quota_state = quota; this.vault.save({ durable: false }) }
-      const hopHeaders = this.#hopHeaders(headers, credentialHeaders, next.host)
-      next.pathname = policyMod.encodePathForWire(hop.path)
+      // Sent as the view that was checked: its method, the decided path
+      // encoded per segment, and its query byte for byte.
+      const hopUrl = `${next.protocol}//${next.host}${policyMod.encodePathForWire(hop.path)}${hopView.query ? `?${hopView.query}` : ''}`
       let following
-      try { following = await this.upstream({ url: next.href, method, headers: hopHeaders, body: null, pins: route.cred.pins?.[hop.host] ?? null }) }
+      try { following = await this.upstream({ url: hopUrl, method: hopView.method, headers: hopHeaders, body: null, pins: route.cred.pins?.[hop.host] ?? null }) }
       catch (e) {
         if (e?.code !== 'AV_PIN_MISMATCH') {
           res.res?.destroy()
@@ -737,7 +753,7 @@ export class Pipeline {
       res.res?.destroy()
       this.vault.audit.write('request.redirect_followed', { request_id: requestId, hop: ++hops, status: res.status, to_host: hop.host, to_path: this.#safePath(hop.path) })
       res = following
-      current = next.href
+      current = hopUrl
     }
     return res
   }
@@ -1176,12 +1192,18 @@ export class Pipeline {
     }
 
     // --- policy, then the limits, in the contract's stage order -----------
-    // Every check after this one reads the DECIDED method and path, the ones
+    // The request is read once, into the view every check below reads and
+    // the request that goes upstream is built from (request-view.js). Two
+    // readers of one request is the bug this gateway kept having: the rules
+    // read a query with URLSearchParams while Rack split it on `;` too.
+    //
+    // Every check after policy reads the DECIDED method and path, the ones
     // that go on the wire. Reading the raw path here and the normalised one
     // there is two readers of one input: `/graphql/.` would not end in
     // /graphql for the payload check and would be sent as /graphql.
     stage('policy')
-    const decision = policyMod.evaluateHttp(effective, { method: req.method, host: route.host, path: route.path })
+    const view = requestView({ method: req.method, query: req.query, headers: req.headers, body: req.body })
+    const decision = policyMod.evaluateHttp(effective, { method: view.method, host: route.host, path: route.path })
     stage('payload')
     // A query only as the upstream URL will hold it. The URL parser ends the
     // query at `#`, deletes tabs and line breaks and trims trailing spaces,
@@ -1189,55 +1211,23 @@ export class Pipeline {
     // `force=true` went on the wire, and read `x=1#&dry_run=true` as asking
     // for a dry run that was never sent. The server never passes these;
     // vault_http passes the agent's query as written.
-    if (/[#\t\n\r]|[\x00-\x20]$/.test(String(req.query ?? ''))) {
+    if (view.unsendable) {
       throw deny('AV_POLICY_DENIED', 'the query string contains a character a URL cannot carry as written (#, a tab, a line break, or trailing whitespace)', {
         rule: 'query_unsendable',
         hint: 'Percent-encode it, as %23, %09, %0A, %0D or %20.',
       })
     }
-    evaluatePayload(effective.payload_sets, { method: decision.method, path: decision.path, query: req.query, body: req.body, contentType: sub.getHeader(req, 'content-type') })
+    checkOverrides(effective, view, { host: route.host, path: route.path })
+    evaluatePayload(effective.payload_sets, { ...view, path: decision.path })
+    const overrides = view.overrides.headers
     stage('budget')
     this.#budget(grant, effective)
     stage('spend')
-    const spending = this.#checkSpend(grant, effective, route, req, decision)
+    const spending = this.#checkSpend(grant, effective, route, view, decision)
     stage('rate')
     this.#rate(grant, effective, preflight)
     stage('quota')
     this.#quota(grant, effective)
-
-    // --- method override --------------------------------------------------
-    // Plenty of frameworks run a POST carrying X-HTTP-Method-Override: DELETE
-    // as a DELETE. Only the request-line method was checked, so a grant of
-    // GET and POST reached DELETE behaviour, and under on-write a GET that the
-    // upstream runs as a DELETE was never held. Every method the upstream
-    // might act on is held to the same allowlist and the same approval rule.
-    const overrides = methodOverrides(req.headers)
-    for (const m of overrides) {
-      if (effective.methods && !effective.methods.includes(m)) {
-        throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
-          rule: 'methods',
-          hint: `Allowed methods: ${effective.methods.join(', ') || 'none'}.`,
-        })
-      }
-      // And the method-bound routes (F3), which bind a method to its paths.
-      // The methods allowlist is the check above, so it is left out here.
-      policyMod.evaluateHttp({ ...effective, methods: null }, { method: m, host: route.host, path: route.path })
-    }
-    // The same override as a field: Rails and Laravel run a POST whose form
-    // body says `_method=DELETE` as a DELETE, Laravel reads it from the query
-    // and a JSON body too, and Express's method-override can be pointed at
-    // any of them. The request was checked as its request-line method, so a
-    // field naming any other is refused outright rather than checked as a
-    // second method: nothing the agent needs is lost by sending the method
-    // it means on the request line.
-    for (const value of methodOverrideFields(req)) {
-      if (String(value).toUpperCase() !== decision.method) {
-        throw deny('AV_POLICY_DENIED', `a method-override field (such as _method) asks for a method other than ${decision.method}`, {
-          rule: 'method_override',
-          hint: 'Send the method you mean on the request line, without a method-override field.',
-        })
-      }
-    }
 
     // --- approval ----------------------------------------------------------
     // The placeholder's TEXT is in the headers and may be in the body, so
@@ -1277,15 +1267,15 @@ export class Pipeline {
       return stable(value)
     }
     // Read and rebuilt through latin1 so a binary body survives byte-for-byte.
-    const bodySha = req.body ? canon.sha256(Buffer.from(stable(req.body.toString('latin1')), 'latin1')) : ''
+    const bodySha = view.body ? canon.sha256(Buffer.from(stable(view.body.toString('latin1')), 'latin1')) : ''
     const requestHash = canon.requestHash({
       method: decision.method, host: decision.host, path: decision.path,
-      query: stable(req.query || ''), bodySha256: bodySha,
+      query: stable(view.query), bodySha256: bodySha,
       credentials: substitutions.map((s) => `${s.row.grant_id}:${s.row.field}`),
       // Only what will actually be forwarded: the daemon strips its own
       // headers and the hop-by-hop ones before sending, so including them
       // would make an approval depend on bytes no upstream ever sees.
-      headers: req.headers.filter(([n]) => {
+      headers: view.headers.filter(([n]) => {
         const lower = String(n).toLowerCase()
         return !HOP_BY_HOP.has(lower) && !CONSUMED.has(lower) && !lower.startsWith('av-')
       }).map(([n, v]) => [n, stableHeader(n, v)]),
@@ -1344,7 +1334,8 @@ export class Pipeline {
     resources.release = this.#acquire(grant, effective)
     // --- consume, then substitute -----------------------------------------
     const injected = []
-    let outgoing = { method: req.method, path: decision.path, query: req.query, headers: req.headers.map(([n, v]) => [n, v]), body: req.body }
+    // Built from the view the checks read, never from the request again.
+    let outgoing = { method: view.method, path: decision.path, query: view.query, headers: view.headers.map(([n, v]) => [n, v]), body: view.body }
     for (const s of substitutions) {
       const row = this.vault.consumePlaceholder(s.row.id)
       onConsume(row)
@@ -1381,6 +1372,14 @@ export class Pipeline {
         rule: 'injection_site',
         hint: 'Put each placeholder once, at a declared injection site, and nowhere a parser could read it twice.',
       })
+    }
+    // And substitution changed no more than the values it filled in: the
+    // query names the parameters the checks read, in their order. A secret
+    // is encoded where it goes, so this holds by construction; it is checked
+    // because the send must never rest on that.
+    const sentParams = queryParams(outgoing.query)
+    if (sentParams.length !== view.params.length || sentParams.some((p, i) => p.rawName !== view.params[i].rawName)) {
+      throw deny('AV_POLICY_DENIED', 'the query would have gone upstream with parameters other than the ones checked', { rule: 'request_ambiguous' })
     }
 
     // --- forward -----------------------------------------------------------
@@ -1777,8 +1776,43 @@ export class Pipeline {
   }
 }
 
-/** Headers a framework may honour in place of the request-line method. */
-const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override'])
+/**
+ * The method overrides a request's view carries, held to the policy. The
+ * same check runs on a direct request and on every redirect hop.
+ *
+ * Plenty of frameworks run a POST carrying X-HTTP-Method-Override: DELETE as
+ * a DELETE. Only the request-line method was checked, so a grant of GET and
+ * POST reached DELETE behaviour. A method an override header asks for is
+ * held to the same allowlist and the same method-bound routes (F3); the
+ * approval rule reads it in #proxy.
+ *
+ * The same override as a field: Rails and Laravel run a POST whose form body
+ * says `_method=DELETE` as a DELETE, Laravel reads it from the query and a
+ * JSON body too, and Express's method-override can be pointed at any of
+ * them. A field naming a method other than the request's is refused
+ * outright rather than checked as a second method: nothing the agent needs
+ * is lost by sending the method it means on the request line.
+ */
+function checkOverrides(effective, view, { host, path }) {
+  for (const m of view.overrides.headers) {
+    if (effective.methods && !effective.methods.includes(m)) {
+      throw deny('AV_POLICY_DENIED', `method ${m}, asked for in a method-override header, is not allowed`, {
+        rule: 'methods',
+        hint: `Allowed methods: ${effective.methods.join(', ') || 'none'}.`,
+      })
+    }
+    // The methods allowlist is the check above, so it is left out here.
+    policyMod.evaluateHttp({ ...effective, methods: null }, { method: m, host, path })
+  }
+  for (const value of view.overrides.fields) {
+    if (String(value).toUpperCase() !== view.method) {
+      throw deny('AV_POLICY_DENIED', `a method-override field (such as _method) asks for a method other than ${view.method}`, {
+        rule: 'method_override',
+        hint: 'Send the method you mean on the request line, without a method-override field.',
+      })
+    }
+  }
+}
 
 /**
  * The headers a redirect hop forwards besides the credential's (F6): a fixed
@@ -1794,7 +1828,7 @@ const METHOD_OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-metho
 const HOP_FORWARDED = new Set([
   'accept', 'user-agent', 'accept-language', 'cache-control', 'if-none-match', 'if-modified-since',
   'anthropic-version', 'anthropic-beta', 'openai-beta', 'openai-organization', 'openai-project',
-  'x-api-version', 'api-version',
+  'x-api-version', 'api-version', 'x-github-api-version',
 ])
 
 /**
@@ -1802,108 +1836,6 @@ const HOP_FORWARDED = new Set([
  * body, and its method and host are the ones it was checked with.
  */
 const HOP_NEVER = new Set([...METHOD_OVERRIDE_HEADERS, 'host', 'accept-encoding', 'content-type', 'content-length', 'content-encoding', 'transfer-encoding', 'expect'])
-
-/** Every method a method-override header asks for, uppercased, in order. */
-function methodOverrides(headers) {
-  const out = []
-  for (const [n, v] of headers) {
-    if (!METHOD_OVERRIDE_HEADERS.has(String(n).toLowerCase())) continue
-    for (const one of [v].flat()) {
-      for (const m of String(one).split(',')) {
-        const method = m.trim().toUpperCase()
-        if (method && !out.includes(method)) out.push(method)
-      }
-    }
-  }
-  return out
-}
-
-/**
- * Query and body fields a framework may honour in place of the request-line
- * method, by their names after `fieldName`: Rails and Laravel's `_method`,
- * `__method`, and the override headers spelled as fields.
- */
-const METHOD_OVERRIDE_FIELDS = new Set(['_method', '__method', 'x_http_method_override', 'x_http_method', 'x_method_override'])
-
-/**
- * A field name as a framework may read it. PHP turns a space, a dot and an
- * unmatched `[` in a name into `_`, so `.method` is Laravel's `_method`, and
- * `_method[]` is still the `_method` field to Rack and PHP. Letter case and
- * `-` against `_` are folded too: a near-miss is only ever refused, and only
- * when it names another method.
- */
-function isOverrideField(name) {
-  const n = String(name).toLowerCase().replace(/[ .-]/g, '_')
-  return METHOD_OVERRIDE_FIELDS.has(n.replace(/\[.*$/s, '')) || METHOD_OVERRIDE_FIELDS.has(n.replace(/\[/g, '_'))
-}
-
-/**
- * Every value a method-override field carries: in the query, in a form or
- * multipart body, and at the top level of a JSON body. Each copy of a
- * repeated field is returned, since frameworks differ on which one wins.
- */
-function methodOverrideFields(req) {
-  const out = []
-  // `;` separated pairs too, as older Rack read a query.
-  const pairs = (raw) => { for (const [k, v] of new URLSearchParams(String(raw).replace(/^\?/, '').replace(/;/g, '&'))) if (isOverrideField(k)) out.push(v) }
-  pairs(req.query ?? '')
-  if (req.body == null || !req.body.length) return out
-  const type = String(sub.getHeader(req, 'content-type') ?? '').toLowerCase()
-  const text = (Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body)).replace(/^﻿/, '')
-  if (type.startsWith('application/x-www-form-urlencoded')) pairs(text)
-  else if (type.startsWith('multipart/form-data')) {
-    // Each part's name, from its Content-Disposition, and its value up to the
-    // next delimiter. A part that names an override and has no readable
-    // value counts as naming another method.
-    for (const m of text.matchAll(/content-disposition:[^\r\n]*?;\s*name\*?\s*=\s*(?:"([^"]*)"|([^;\r\n]*))[^\r\n]*\r?\n/gi)) {
-      if (!isOverrideField(m[1] ?? m[2].trim())) continue
-      const rest = text.slice(m.index + m[0].length)
-      const value = /^(?:[^\r\n]+\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(rest)
-      out.push(value ? value[1] : '')
-    }
-  } else if (/[/+]json\b/.test(type)) {
-    let parsed
-    try { parsed = JSON.parse(text) } catch { return out }
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) for (const v of topLevelJsonValues(text, isOverrideField)) out.push(typeof v === 'string' ? v : JSON.stringify(v))
-  }
-  return out
-}
-
-/**
- * The values of the top-level keys `wanted` accepts, in a JSON object that
- * JSON.parse has already accepted, every copy of a repeated key included:
- * JSON.parse keeps only the last, and a server that keeps the first would
- * run the other. Only a wanted value is parsed; the rest is stepped over.
- */
-function topLevelJsonValues(text, wanted) {
-  const out = []
-  let i = text.indexOf('{') + 1
-  const ws = () => { while (/\s/.test(text[i] ?? '')) i++ }
-  const skipString = () => { i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; i++ }
-  const skipValue = () => {
-    let depth = 0
-    while (i < text.length) {
-      const c = text[i]
-      if (c === '"') { skipString(); if (!depth) return; continue }
-      if (c === '{' || c === '[') depth++
-      else if (c === '}' || c === ']') { if (!depth) return; if (!--depth) { i++; return } }
-      else if (c === ',' && !depth) return
-      i++
-    }
-  }
-  for (ws(); text[i] === '"'; ws()) {
-    let start = i
-    skipString()
-    const key = JSON.parse(text.slice(start, i))
-    ws(); i++ /* : */; ws()
-    start = i
-    skipValue()
-    if (wanted(key)) out.push(JSON.parse(text.slice(start, i)))
-    ws()
-    if (text[i] === ',') i++
-  }
-  return out
-}
 
 /**
  * Headers a request carries once. Every check reads one value for each, and
@@ -2532,7 +2464,8 @@ export function approvalPreview({ req, decision, substitutions, scrub }) {
   }
   const preview = {
     method: clean(decision.method, 'path'), host: clean(decision.host, 'path'), path: cap(clean(decision.path, 'path'), 1024),
-    query: [...new URLSearchParams(req.query ?? '')].slice(0, 64).map(([name, value]) => [cap(clean(name, 'query')), cap(clean(value, 'query'))]),
+    // The parameters as the checks read them, `;`-separated ones included.
+    query: queryParams(req.query).slice(0, 64).map(({ name, value }) => [cap(clean(name, 'query')), cap(clean(value, 'query'))]),
     headers,
     content_type: type === null ? null : cap(clean(type, 'headers')),
     body: { text: shown, bytes: raw.length, shown_bytes: shown === null ? 0 : Buffer.byteLength(shown), truncated: full !== null && full !== shown, kind },
