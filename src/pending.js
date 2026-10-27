@@ -40,7 +40,13 @@ function describe(kind, raw) {
       // honours it, but no interface could set it and no human could narrow it.
       // The one dimension a session request states in plain minutes could only
       // be reached by hand-writing the HTTP body.
-      narrowable: ['methods', 'paths', 'budget', 'uses', 'ttl_minutes'],
+      narrowable: [
+        'methods', 'paths', 'budget', 'uses', 'ttl_minutes',
+        // Wave 3: the grant limits an agent may also ask for. Each only
+        // narrows, and each is a dimension a human can tighten when answering.
+        'rate', 'max_concurrent', 'quota', 'routes', 'payload', 'redirects',
+        'spend_tokens', 'spend_usd', 'grant_ttl_minutes',
+      ],
       // What only the owner can add, never narrow: an agent cannot propose
       // either one, so they are offered here as the human's own choices.
       owner_settable: ['approval', 'infinite'],
@@ -58,6 +64,9 @@ function describe(kind, raw) {
     narrowable: [],
     owner_settable: [],
     grant_id: raw.grant_id || null,
+    // What the held request would send, scrubbed by the gateway (F13). The
+    // agent wrote it: it is shown as untrusted text, never acted on.
+    preview: raw.preview ?? null,
     decide: { path: '/v1/approvals', idField: 'id' },
   }
 }
@@ -102,20 +111,59 @@ export function parseOverrides(args = {}) {
   // one glob with a comma in it, and "get" a method nothing sends: both
   // approved a session that matched nothing, with nothing saying why.
   const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
+  const given = (v) => v !== undefined && v !== null && v !== ''
   if (args.methods) out.methods = list(args.methods).map((m) => m.toUpperCase())
   if (args.paths) out.paths = list(args.paths)
-  if (args.budget !== undefined && args.budget !== null && args.budget !== '') out.budget = Number(args.budget)
-  if (args.uses !== undefined && args.uses !== null && args.uses !== '') out.uses = Number(args.uses)
+  // A number as typed is a number; anything else is passed on as typed, so the
+  // daemon refuses it. Number('abc') is NaN, which JSON sends as null, and a
+  // null narrowing is dropped: the human's "--budget abc" approved the
+  // agent's own budget with nothing saying so.
+  const num = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)$/.test(String(v)) ? Number(v) : String(v)))
+  const dec = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(String(v)) ? Number(v) : String(v)))
+  if (given(args.budget)) out.budget = num(args.budget)
+  if (given(args.uses)) out.uses = num(args.uses)
   // The generated hint spells this `--ttl_minutes`, because it is generated
   // from the field name and there is only one list. `--ttl-minutes` is the
   // spelling a hand would reach for, so accept both.
   const ttl = args.ttl_minutes ?? args['ttl-minutes']
-  if (ttl !== undefined && ttl !== null && ttl !== '') out.ttl_minutes = Number(ttl)
+  if (given(ttl)) out.ttl_minutes = num(ttl)
+  // The wave-3 limits, by field name or by the CLI's flag. Shapes the daemon
+  // understands (`60/min`, `1000/day`) are passed through for it to check.
+  const pick = (...names) => names.map((n) => args[n]).find(given)
+  const grantTtl = pick('grant_ttl_minutes', 'grant-ttl', 'grant_ttl')
+  if (given(grantTtl)) out.grant_ttl_minutes = num(grantTtl)
+  const concurrent = pick('max_concurrent', 'concurrency')
+  if (given(concurrent)) out.max_concurrent = num(concurrent)
+  if (given(args.redirects)) out.redirects = num(args.redirects)
+  const tokens = pick('spend_tokens', 'spend-tokens')
+  if (given(tokens)) out.spend_tokens = num(tokens)
+  const usd = pick('spend_usd', 'spend-usd')
+  if (given(usd)) out.spend_usd = dec(usd)
+  if (given(args.rate)) out.rate = typeof args.rate === 'object' ? args.rate : String(args.rate)
+  if (given(args.quota)) out.quota = typeof args.quota === 'object' ? args.quota : String(args.quota)
+  if (Array.isArray(args.routes)) out.routes = args.routes
+  else if (given(args.route)) out.routes = (Array.isArray(args.route) ? args.route : [args.route]).map(routeOf)
+  if (given(args.payload) && typeof args.payload === 'object') out.payload = args.payload
   // Owner fields. The mode is passed through as typed and validated by the
   // daemon, so a typo is refused there rather than quietly meaning something.
   if (typeof args.approval === 'string' && args.approval !== '') out.approval = args.approval
   if (args.infinite === true || args.infinite === 'true') out.infinite = true
   return out
+}
+
+/**
+ * `GET,HEAD:/repos/**` as a route pair. Split on the first colon; the
+ * methods are comma-separated and upper-cased. Something that is not that
+ * shape is passed on as typed, for the daemon to refuse.
+ */
+function routeOf(text) {
+  const s = String(text)
+  const at = s.indexOf(':')
+  if (at <= 0) return s
+  return {
+    methods: s.slice(0, at).split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
+    paths: [s.slice(at + 1).trim()],
+  }
 }
 
 /**
