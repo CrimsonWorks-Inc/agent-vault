@@ -9,21 +9,13 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { Readable } from 'node:stream'
 import { Vault } from '../../src/store/vault.js'
-import * as vaultMod from '../../src/store/vault.js'
 import { Pipeline } from '../../src/daemon/pipeline.js'
-import { deny } from '../../src/core/errors.js'
 import { evaluatePayload } from '../../src/core/payload.js'
 import * as phMod from '../../src/core/placeholder.js'
 
 const SECRET = 'fixture_secret_gateway_seams_0123456789'
 const problem = (result) => JSON.parse(result.body)
 const streamText = async (stream) => { let out = ''; for await (const chunk of stream) out += chunk; return out }
-
-// Slice A's pure expiry helpers, as the contract defines them (0.11), for as
-// long as the store on this branch does not export them yet.
-const expiryMs = (iso) => (iso == null ? Infinity : (Number.isNaN(Date.parse(iso)) ? -Infinity : Date.parse(iso)))
-const sessionExpiryMs = (s) => (s.infinite === true && s.expires_at === null ? Infinity : s.expires_at == null ? -Infinity : expiryMs(s.expires_at))
-const helpers = vaultMod.sessionExpiryMs ? {} : { expiryMs, sessionExpiryMs }
 
 function fixture(t, policy = {}, { kind = 'http', host = 'api.example.test', upstream, options = {}, fetchImpl } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'av-gw-seams-'))
@@ -37,18 +29,17 @@ function fixture(t, policy = {}, { kind = 'http', host = 'api.example.test', ups
   const row = Object.values(vault.db.placeholders)[0]
   const sent = []
   const pipeline = new Pipeline(vault, {
-    ...helpers, ...options,
+    ...options,
     ...(fetchImpl === null ? {} : { fetchImpl: fetchImpl ?? (async (input) => { sent.push(input); return upstream ? upstream(input) : { status: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from('{"ok":true}') } }) }),
   })
   const req = (over = {}) => ({ method: 'GET', path: '/p/test/ok', query: '', headers: [['host', 'localhost'], ['av-session', token], ['authorization', `Bearer ${ph}`]], body: null, ...over })
-  vault.chargeGrant ??= (id) => { const g = vault.db.grants[id]; if (g.budget_used >= g.policy.budget.limit) return false; g.budget_used++; g.counters.requests++; return true }
   return { dir, vault, cred, session, token, grant, ph, row, sent, pipeline, req }
 }
 const policyHost = (host) => host.split(':')[0]
 
 // ------------------------------------------------------------------ F11 pins
 
-test('pins on a credential with no pin checker installed refuse before any connection; no pins still connects', async (t) => {
+test('pins on a plaintext credential refuse before any connection; no pins still connects', async (t) => {
   let connections = 0
   const server = createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}') })
   server.on('connection', () => { connections++ })
@@ -57,11 +48,12 @@ test('pins on a credential with no pin checker installed refuse before any conne
   const host = `127.0.0.1:${server.address().port}`
   const f = fixture(t, {}, { host, fetchImpl: null })
   f.cred.connector.scheme = 'http'
-  // The connectors module is not on this branch, so the default upstream has
-  // nothing to check pins with.
+  // The default upstream is the connectors' pinnedRequest: a pin cannot be
+  // checked over plaintext, so it is refused unsent rather than dropped.
   f.cred.pins = { '127.0.0.1': ['sha256/' + 'A'.repeat(43) + '='] }
   const refused = await f.pipeline.handle(f.req())
   assert.equal(problem(refused).code, 'AV_PIN_MISMATCH')
+  assert.equal(problem(refused).rule, 'pin_plaintext')
   assert.equal(problem(refused).refunded, true)
   assert.equal(f.row.uses, 0)
   assert.equal(connections, 0)
@@ -227,16 +219,6 @@ test('preflight and the real route agree on finite, expired, infinite and legacy
     const f = fixture(t)
     Object.assign(f.session, patch)
     if (!('infinite' in patch)) delete f.session.infinite
-    // Until slice A lands the store's liveness check is the pre-R3 one, so
-    // the real route is given slice A's rule (the same helpers) here.
-    if (!vaultMod.sessionExpiryMs) {
-      f.vault.assertSessionLive = (s) => {
-        if (s.state === 'revoked') throw deny('AV_SESSION_REVOKED', 'revoked')
-        if (!(sessionExpiryMs(s) > Date.now())) throw deny('AV_SESSION_EXPIRED', 'expired')
-        return s
-      }
-      f.vault.touchSession = () => {}
-    }
     let pre
     try { pre = (await f.pipeline.preflight(f.req())).would } catch (e) { pre = e.code }
     const real = await f.pipeline.handle(f.req())
@@ -247,9 +229,6 @@ test('preflight and the real route agree on finite, expired, infinite and legacy
   for (const [name, expires_at, expected] of [['no ttl', undefined, 'allow'], ['future', new Date(Date.now() + 60_000).toISOString(), 'allow'], ['past', new Date(Date.now() - 60_000).toISOString(), 'AV_GRANT_EXPIRED'], ['garbage', 'nope', 'AV_GRANT_EXPIRED']]) {
     const f = fixture(t)
     if (expires_at !== undefined) f.grant.expires_at = expires_at
-    if (!f.vault.assertGrantLive || !vaultMod.expiryMs) {
-      f.vault.assertGrantLive = (g) => { if (!(expiryMs(g.expires_at) > Date.now())) throw deny('AV_GRANT_EXPIRED', 'expired'); return g }
-    }
     const pre = await f.pipeline.preflight(f.req())
     const real = await f.pipeline.handle(f.req())
     assert.equal(pre.would === 'allow' ? 'allow' : pre.checks.at(-1).code, expected, `grant ${name}: preflight`)
@@ -366,7 +345,7 @@ test('a pipeline built while the vault is locked charges stale reservations at t
   f.grant.spend = { tokens_used: 0, usd_micros_used: 0, reserved: { req_stale: { tokens: 40, usd_micros: 0, at: Date.now() } } }
   f.vault.save()
   const reopened = Vault.open(f.dir)
-  const pipeline = new Pipeline(reopened, { ...helpers, fetchImpl: async () => ({ status: 200, headers: {}, body: Buffer.from('{}') }) })
+  const pipeline = new Pipeline(reopened, { fetchImpl: async () => ({ status: 200, headers: {}, body: Buffer.from('{}') }) })
   reopened.unlock()
   const grant = reopened.db.grants[f.grant.id]
   assert.equal(Object.keys(grant.spend.reserved).length, 1, 'nothing could be charged while locked')

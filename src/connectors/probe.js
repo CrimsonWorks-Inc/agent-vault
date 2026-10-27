@@ -22,8 +22,7 @@ import { credentialHostCeiling, hostOnly, matchHost } from '../core/policy.js'
 import { parseSite } from '../core/sites.js'
 import { SCANNER_PATTERN } from '../core/placeholder.js'
 import { extractHealth } from './profiles.js'
-import { isIP } from 'node:net'
-import { pinnedRequest, pinListState, urlIdentity } from './pinning.js'
+import { pinnedRequest, pinListState, urlIdentity, pinsFor } from './pinning.js'
 
 const PROBE_WINDOW_MS = 60_000
 // The body is never read. A little is drained so an ordinary response can
@@ -266,39 +265,6 @@ function firstHeaderSite(cred) {
     }
   }
   return null
-}
-
-/**
- * The stored pin list for `host`, the URL host the probe sends to, without
- * IPv6 brackets. Each key is read the way the URL parser reads a host, so
- * '[0:0::1]', '[::1]' and '::1', or 'API.GitHub.com.' and 'api.github.com',
- * are the same host.
- * Keys that name the same host are joined, so an empty duplicate cannot hide
- * a real list. A table or entry of the wrong shape comes back as `false`,
- * which pinListState refuses; it is never null.
- */
-function pinsFor(cred, host) {
-  const table = cred?.pins
-  if (table == null) return null
-  if (typeof table !== 'object' || Array.isArray(table)) return false
-  const found = []
-  for (const [key, value] of Object.entries(table)) {
-    if (urlHostOf(key) !== host || value == null) continue
-    if (!Array.isArray(value)) return false
-    found.push(...value)
-  }
-  return found.length > 0 ? found : null
-}
-
-/**
- * The host the URL parser gives `key`, without IPv6 brackets, or null if it
- * names no host. A bare IPv6 address is bracketed first.
- */
-function urlHostOf(key) {
-  const bare = String(key).trim()
-  const host = isIP(bare) === 6 ? `[${bare}]` : hostOnly(key)
-  if (!host) return null
-  try { return urlIdentity(new URL(`https://${host}/`)) } catch { return null }
 }
 
 function scrubText(text, scrubber) {

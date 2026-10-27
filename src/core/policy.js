@@ -217,6 +217,21 @@ function validBudget(v) {
   // Legacy layers may state only the unit; they add no numerical limit.
   return keys(v, ['unit', 'limit']) && (v.unit === undefined || v.unit === 'requests') && (v.limit === undefined || budgetInteger(v.limit) !== null)
 }
+/**
+ * C4: one budget layer's request limit, read the one way the gateway and the
+ * store both use, which is the way validate() reads a layer. Infinity when the
+ * layer states none (no budget, or a legacy layer that names only the unit),
+ * the whole number it states (a canonical decimal string such as "50"
+ * included), or null when it cannot be read: a null budget or limit, '',
+ * '5.5', '-1', '1e3', ' 5', a non-request unit, an unknown key, a value past
+ * the safe integers, or anything that is not a layer. An unreadable budget
+ * refuses; it never means no limit.
+ */
+export function budgetLimit(budget) {
+  if (budget === undefined) return Infinity
+  if (!validBudget(budget)) return null
+  return budget.limit === undefined ? Infinity : budgetInteger(budget.limit)
+}
 function intersectBudget(a, b) {
   for (const v of [a, b]) if (v != null && !validBudget(v)) return { unit: v.unit, invalid: true }
   const limits = [a?.limit, b?.limit].filter((value) => value !== undefined).map(budgetInteger)

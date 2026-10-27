@@ -18,6 +18,8 @@ import * as ph from '../core/placeholder.js'
 import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
+import { PIN_RE, pinListState, urlHostOf } from '../connectors/pinning.js'
+import { compileScrubPattern } from '../core/scrub.js'
 import { canonicalOperation } from '../ui/webauthn.js'
 
 export const SCHEMA_VERSION = 1
@@ -175,18 +177,6 @@ function quarantined(cred) {
   })
 }
 
-/**
- * The grant's own budget, for a placeholder's issue and use. A budget layer
- * that names no limit constrains nothing at this layer: the gateway takes the
- * limit from the session's layer when it intersects them, so reading it as
- * unreadable here refused requests the gateway had counted. Otherwise as
- * budgetLimit reads it.
- */
-function grantBudgetLimit(policy) {
-  const b = policy?.budget
-  if (b && typeof b === 'object' && !b.invalid && (b.limit === undefined || b.limit === null || b.limit === '')) return Infinity
-  return budgetLimit(policy)
-}
 
 /** The refusal for a grant whose budget is spent, or cannot be read: the gateway's rule. */
 function budgetSpent(limit) {
@@ -195,22 +185,44 @@ function budgetSpent(limit) {
     : `grant budget of ${limit} requests is spent`, { rule: 'budget', hint: 'A human must widen the grant or start a new session.' })
 }
 
+const MAX_PIN_HOSTS = 4
+
+/** F11: 1 to 4 pins of the one format, each kept once, or refused. */
+function pinList(pins) {
+  if (pinListState(pins) !== 'pinned') {
+    throw deny('AV_POLICY_DENIED', 'pins are 1 to 4 values of the form sha256/<base64 of 32 bytes>', { rule: 'pin_format' })
+  }
+  return [...new Set(pins)]
+}
+
+/** A stored pin table as an object, or {} when it is not one. */
+function plainTable(pins) {
+  return pins && typeof pins === 'object' && !Array.isArray(pins) ? pins : {}
+}
+
+/** A copy of a pin table without any key that names `key`'s host. */
+function pinTableOf(pins, key) {
+  return Object.fromEntries(Object.entries(plainTable(pins)).filter(([k]) => urlHostOf(k) !== key))
+}
+
+/** Pin counts per host for a public view (F11): never the pins. */
+function pinCounts(pins) {
+  return Object.fromEntries(Object.entries(plainTable(pins)).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0]))
+}
+
 function scrubRefusal(why) {
   return deny('AV_POLICY_DENIED', `scrub pattern refused: ${why}`, { rule: 'scrub_pattern' })
 }
 
 /**
- * A grant's request budget as a number, `Infinity` when it states none, or
- * null when it states one that cannot be read. C4: a canonical decimal string
- * ("50") is that integer; '', '5.5', '-1', '1e3', NaN and a non-request unit
- * are unreadable, and an unreadable budget refuses rather than allows.
+ * A grant's own request budget, for a placeholder's issue and use and a
+ * redirect hop's charge: the gateway's reader (C4, policy.budgetLimit), so the
+ * two cannot disagree. Infinity when the layer states no limit (the gateway
+ * then takes it from the session's layer), the number, or null when it cannot
+ * be read, which refuses. A policy with no budget key states none.
  */
 function budgetLimit(policy) {
-  const b = policy?.budget
-  if (b === undefined || b === null) return Infinity
-  if (typeof b !== 'object' || b.invalid || (b.unit !== undefined && b.unit !== 'requests')) return null
-  const n = typeof b.limit === 'string' && /^(0|[1-9][0-9]*)$/.test(b.limit) ? Number(b.limit) : b.limit
-  return Number.isSafeInteger(n) && n >= 0 ? n : null
+  return policyMod.budgetLimit(policy?.budget)
 }
 
 // How many placeholder rows the ledger keeps. Active ones are capped per grant
@@ -883,6 +895,8 @@ export class Vault {
       expiry_warning: expiryWarning(cred),
       quarantine: cred.quarantine ? structuredClone(cred.quarantine) : null,
       scrub_patterns: (cred.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
+      // F11: how many pins each host has, never the pins themselves.
+      pins: pinCounts(cred.pins),
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
@@ -1112,6 +1126,10 @@ export class Vault {
     for (const secret of secrets) {
       if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')
     }
+    // The gateway's own grammar (C5), so a pattern stored here is one the
+    // scrubber can apply. One it could not compile would withhold every
+    // response from every credential (scrub_pattern_invalid).
+    compileScrubPattern(source)
   }
 
   #auditScrubPattern(cred, pattern) {
@@ -1132,6 +1150,70 @@ export class Vault {
     this.#persist()
     this.audit.write('cred.scrub_pattern_removed', { credential_slug: cred.slug, pattern_id: patternId })
     return true
+  }
+
+  // ------------------------------------------------------- F11: SPKI pins
+
+  /**
+   * Pin a host of a credential to these SPKI digests (F11), replacing that
+   * host's list. The host is stored the way the connectors read a pin key
+   * (urlHostOf), so the gateway and the probe find it under the URL host
+   * they connect to, and two spellings of one host are one entry. It must be
+   * a host this credential can reach. Pins are 1 to 4 values of the one
+   * format (pinListState), each kept once; at most 4 hosts.
+   */
+  setPins(slug, host, pins) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const key = this.#pinHost(cred, host)
+    const list = pinList(pins)
+    const table = { ...pinTableOf(cred.pins, key), [key]: list }
+    if (Object.keys(table).length > MAX_PIN_HOSTS) {
+      throw deny('AV_POLICY_DENIED', `at most ${MAX_PIN_HOSTS} hosts can be pinned`, { rule: 'pin_host' })
+    }
+    cred.pins = table
+    this.#persist()
+    this.audit.write('cred.pins_set', { credential_slug: cred.slug, host: key, pins: list.length })
+    return { slug: cred.slug, host: key, pins: list.length }
+  }
+
+  /**
+   * Remove one pin from a host, or every pin of it (`spki` null). Returns how
+   * many stay for that host. Nothing is written or recorded when nothing was
+   * removed.
+   */
+  clearPins(slug, host, spki = null) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (spki !== null && (typeof spki !== 'string' || !PIN_RE.test(spki))) {
+      throw deny('AV_POLICY_DENIED', 'a pin is sha256/<base64 of 32 bytes>', { rule: 'pin_format' })
+    }
+    const key = typeof host === 'string' ? urlHostOf(host) : null
+    if (!key) throw deny('AV_POLICY_DENIED', `${String(host)} is not a host name`, { rule: 'pin_host' })
+    const current = Object.entries(plainTable(cred.pins))
+      .filter(([k, v]) => urlHostOf(k) === key && Array.isArray(v))
+      .flatMap(([, v]) => v)
+    const remaining = spki === null ? [] : [...new Set(current.filter((p) => p !== spki))]
+    const removed = new Set(current).size - remaining.length
+    if (removed === 0) return remaining.length
+    const table = pinTableOf(cred.pins, key)
+    if (remaining.length) table[key] = remaining
+    cred.pins = table
+    this.#persist()
+    this.audit.write('cred.pins_removed', { credential_slug: cred.slug, host: key, pins: removed })
+    return remaining.length
+  }
+
+  /** The canonical pin key for `host`, refused unless this credential can reach it. Writes nothing. */
+  #pinHost(cred, host) {
+    const key = typeof host === 'string' ? urlHostOf(host) : null
+    const ceiling = policyMod.credentialHostCeiling(cred, PROFILES[cred.connector_kind]?.hosts || [])
+    if (!key || !ceiling.some((h) => urlHostOf(h) === key || policyMod.matchHost(h, key))) {
+      throw deny('AV_POLICY_DENIED', `${String(host)} is not a host this credential reaches`, { rule: 'pin_host' })
+    }
+    return key
   }
 
   // ------------------------------------------------------- F7: rotation
@@ -1391,14 +1473,24 @@ export class Vault {
       if (c.fields.some((f) => typeof f?.value !== 'string' || !f.value) || new Set(c.fields.map((f) => f.name)).size !== c.fields.length) {
         throw format(`the fields of ${c.slug} are malformed`)
       }
-      if (Object.values(c.pins ?? {}).some((l) => l.length) && typeof this.setPins !== 'function') {
-        throw format('it carries certificate pins, which this vault cannot restore yet')
-      }
       const cred = this.#sealCredential({
         slug: c.slug, kind: c.kind, connector: c.connector ?? {},
         fields: Object.fromEntries(c.fields.map((f) => [f.name, f.value])),
         sites: Object.fromEntries(c.fields.map((f) => [f.name, f.sites ?? []])),
       })
+      // Pins come back as setPins would store them, or the restore is refused:
+      // dropping them would restore a credential with less protection than
+      // the human gave it.
+      const pins = c.pins ?? {}
+      if (!pins || typeof pins !== 'object' || Array.isArray(pins)) throw format(`the pins of ${c.slug} are malformed`)
+      for (const [host, list] of Object.entries(pins)) {
+        if (Array.isArray(list) && list.length === 0) continue
+        const key = this.#pinHost(cred, host)
+        cred.pins = { ...pinTableOf(cred.pins, key), [key]: pinList(list) }
+      }
+      if (Object.keys(cred.pins ?? {}).length > MAX_PIN_HOSTS) {
+        throw deny('AV_POLICY_DENIED', `at most ${MAX_PIN_HOSTS} hosts can be pinned`, { rule: 'pin_host' })
+      }
       if (c.expires_at != null) {
         const expires = isoOrUndefined(c.expires_at)
         if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null to clear it', { rule: 'expires_at' })
@@ -1455,6 +1547,7 @@ export class Vault {
       this.audit.write('cred.added', { credential_slug: cred.slug, connector: cred.connector_kind, fields: cred.fields.map((f) => f.name) })
       if (cred.expires_at !== undefined) this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: cred.expires_at })
       for (const p of cred.scrub_patterns ?? []) this.#auditScrubPattern(cred, p)
+      for (const [host, list] of Object.entries(cred.pins ?? {})) this.audit.write('cred.pins_set', { credential_slug: cred.slug, host, pins: list.length })
       if (cred.quarantine) {
         const { since, by, rule_id, reason_untrusted } = cred.quarantine
         this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted, since, restored: true })
@@ -1919,7 +2012,7 @@ export class Vault {
     // `Math.min(asked, NaN)` is NaN, which no `uses >= max_uses` ever stops.
     // A budget of 0 is no uses, not a thousand: it issues nothing. One that
     // cannot be read is refused when it is used, here and at the gateway.
-    const limit = grantBudgetLimit(grant.policy)
+    const limit = budgetLimit(grant.policy)
     if (limit === 0) throw budgetSpent(limit)
     const useLimit = limit === null || limit === Infinity ? 1000 : limit
     const phPolicy = grant.policy?.placeholder_policy || {}
@@ -2056,7 +2149,7 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
-    const limit = grantBudgetLimit(grant.policy)
+    const limit = budgetLimit(grant.policy)
     if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used + 1 > limit) throw budgetSpent(limit)
     row.uses += 1
     row.last_used_at = new Date().toISOString()

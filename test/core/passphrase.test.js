@@ -305,15 +305,21 @@ test('the placeholder ledger does not grow without bound', () => {
 /**
  * Every method of the Vault class, by name, with its source. A method starts
  * at a two-space-indented header and ends at the first line that is exactly
- * two spaces and a closing brace.
+ * two spaces and a closing brace. A method written on one line (`save(opts) {
+ * this.#persist(opts) }`) is its own body: the scan used to skip those, so a
+ * one-line writer was on no list and no check read it.
  */
 function vaultMethods(src) {
   const methods = new Map()
   const lines = src.split('\n')
   const header = /^  (?:static |async |get |set )*(#?[A-Za-z_$][\w$]*)\s*\(.*\{\s*$/
+  const oneLine = /^  (?:static |async |get |set )*(#?[A-Za-z_$][\w$]*)\s*\(.*\)\s*\{.*\}\s*$/
+  const keyword = (name) => ['if', 'for', 'while', 'switch', 'catch'].includes(name)
   for (let i = 0; i < lines.length; i++) {
+    const single = oneLine.exec(lines[i])
+    if (single && !keyword(single[1])) { methods.set(single[1], lines[i]); continue }
     const m = header.exec(lines[i])
-    if (!m || ['if', 'for', 'while', 'switch', 'catch'].includes(m[1])) continue
+    if (!m || keyword(m[1])) continue
     let j = i + 1
     while (j < lines.length && lines[j] !== '  }') j++
     methods.set(m[1], lines.slice(i, j + 1).join('\n'))
@@ -325,7 +331,10 @@ function vaultMethods(src) {
 // The writes allowed to skip the fsync: ledger churn an agent can simply ask
 // for again, a redirect hop's budget charge (F6) and a health observation
 // (F10), both coordinator-approved. Nothing that records a security decision.
-const NON_DURABLE_ALLOWED = new Set(['issuePlaceholder', 'consumePlaceholder', 'refundPlaceholder', 'chargeGrant', 'recordHealth'])
+// `save` is the pipeline's write for its own counters (quota windows, approval
+// state), which passes the option through; a one-line method, so the scan only
+// sees it since it reads those too.
+const NON_DURABLE_ALLOWED = new Set(['issuePlaceholder', 'consumePlaceholder', 'refundPlaceholder', 'chargeGrant', 'recordHealth', 'save'])
 
 // Every other method that writes the vault, each of which must write durably.
 // A method that writes and is on neither list fails the test below, so a new
@@ -343,6 +352,8 @@ const DURABLE = new Set([
   // slice B: scrub patterns (F4), rotation (F7), the webhook (F14), templates (F17), restore (F8)
   'addScrubPattern', 'removeScrubPattern', 'rotateCredential', 'setNotifyWebhook', 'clearNotifyWebhook',
   'saveTemplate', 'deleteTemplate', 'restoreEntries',
+  // F11: pins (integrate-2)
+  'setPins', 'clearPins',
 ])
 
 test('key material and security decisions are written durably, whatever the ledger does', () => {
@@ -354,6 +365,9 @@ test('key material and security decisions are written durably, whatever the ledg
   const methods = vaultMethods(src)
   assert.ok(methods.size > 40 && methods.has('createSession') && methods.has('consumePlaceholder'),
     `the method scan found ${methods.size} methods; it has stopped reading vault.js`)
+  // One-line methods are read too.
+  assert.ok(methods.has('save') && methods.has('listCredentials') && methods.get('save').includes('#persist('),
+    'the method scan does not see one-line methods')
 
   // Every non-durable write sits in an allowed method, and only there. Any
   // spelling of the option counts, not just the one this file uses today.

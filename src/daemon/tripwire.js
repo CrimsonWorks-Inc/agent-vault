@@ -20,7 +20,7 @@ export class Tripwires {
   reset(sessionId) { this.#counts.delete(sessionId) }
 
   observe({ sessionId, credentialId, code, rule, preflight = false }) {
-    const settings = this.vault.getSettings?.()?.tripwires
+    const settings = this.vault.getSettings()?.tripwires
     if (!settings?.enabled || !sessionId || preflight || this.vault.locked) return null
     const session = this.vault.db.sessions[sessionId]
     if (!session || session.state !== 'active') { this.reset(sessionId); return null }
@@ -51,7 +51,7 @@ export class Tripwires {
         this.reset(sessionId)
       } else if (item.action === 'quarantine_credential') {
         if (!cred) continue
-        this.vault.setQuarantine?.(cred.slug, { by: 'tripwire', rule_id: item.id })
+        this.vault.setQuarantine(cred.slug, { by: 'tripwire', rule_id: item.id })
         this.pipeline.denyApprovals({ credentialId }, 'quarantined')
       } else if (item.action === 'panic') {
         // The panic sequence without the lock. Its own steps run before the

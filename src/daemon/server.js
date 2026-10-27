@@ -383,7 +383,7 @@ export class Daemon {
         budget: { unit: profile.defaultBudget.unit, limit: spec.budget ?? profile.defaultBudget.limit },
         approval: spec.approval ?? 'on-write',
       }
-      const problems = policyMod.validate?.(policy) || []
+      const problems = policyMod.validate(policy)
       if (problems.length) throw invalid(problems[0].field, `${problems[0].field}: ${problems[0].message}`)
       return { cred, profile, spec, policy, lint: policyMod.lint(policy, { kind: cred.connector_kind }) }
     })

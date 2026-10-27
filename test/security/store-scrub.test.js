@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { fresh, code, records, onDisk, auditText, refusedCleanly, SECRET, OTHER_SECRET, POLICY } from './store-helpers.js'
 
-const PATTERN = 'acme_[A-Za-z0-9]{20,}'
+const PATTERN = 'acme_[A-Za-z0-9]{20,40}'
 
 test('a scrub pattern is added, listed, persisted and audited by digest only', () => {
   const v = fresh()

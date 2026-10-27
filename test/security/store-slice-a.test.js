@@ -378,9 +378,14 @@ test('chargeGrant charges nothing when the budget, the count or the grant cannot
       if (!ok) assert.equal(JSON.stringify(g), before, 'a refused charge changed the grant')
       return ok
     }
-    for (const limit of ['abc', '', '5.5', '-1', '1e3', -1, 5.5, NaN, null, undefined, {}]) {
+    for (const limit of ['abc', '', '5.5', '-1', '1e3', -1, 5.5, NaN, null, {}]) {
       assert.equal(charge({ unit: 'requests', limit }), false, `limit ${String(limit)}`)
     }
+    // A layer that names no limit constrains nothing at this layer, as the
+    // gateway reads it (C4, one reader): the session's layer, checked by the
+    // gateway before the hop, is what bounds it.
+    assert.equal(charge({ unit: 'requests', limit: undefined }), true)
+    assert.equal(charge({ unit: 'requests' }), true)
     assert.equal(charge({ unit: 'tokens', limit: 10 }), false)
     assert.equal(charge({ unit: 'requests', limit: 10, invalid: true }), false)
     assert.equal(charge('lots'), false)

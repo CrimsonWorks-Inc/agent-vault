@@ -9,8 +9,6 @@
 // tests: every denial returns before an upstream socket exists, and a use is
 // consumed before the first upstream byte.
 
-import { request as httpsRequest } from 'node:https'
-import { request as httpRequest } from 'node:http'
 import * as zlib from 'node:zlib'
 import { pipeline as streamPipeline, PassThrough } from 'node:stream'
 import * as sub from '../core/substitute.js'
@@ -23,6 +21,7 @@ import * as models from '../core/model-usage.js'
 import { Tripwires } from './tripwire.js'
 import { detectAll } from '../core/detect.js'
 import * as profiles from '../connectors/profiles.js'
+import { pinnedRequest, pinsFor, urlIdentity } from '../connectors/pinning.js'
 import { Scrubber, compileScrubPattern } from '../core/scrub.js'
 import { deny, VaultError } from '../core/errors.js'
 import { id } from '../store/ids.js'
@@ -117,11 +116,11 @@ export class Pipeline {
     // in one never changes what this request gets.
     this.onPending = null   // (event) => void, after a request is held (F14)
     this.onPanic = null     // async ({ reason, at_ms }) => { session_requests_denied } (F16)
-    // The store's pure expiry helpers (slice A). Without them preflight
-    // cannot tell a live session from an expired one, so it says expired.
-    this.expiryMs = opts.expiryMs ?? vaultMod.expiryMs ?? (() => -Infinity)
-    this.sessionExpiryMs = opts.sessionExpiryMs ?? vaultMod.sessionExpiryMs ?? (() => -Infinity)
-    // The connectors' header reader (F10). Without it nothing is observed.
+    // The store's pure expiry helpers (slice A), so preflight reads a
+    // session's and a grant's lifetime exactly as the store does.
+    this.expiryMs = opts.expiryMs ?? vaultMod.expiryMs
+    this.sessionExpiryMs = opts.sessionExpiryMs ?? vaultMod.sessionExpiryMs
+    // The connectors' header reader (F10).
     this.extractHealth = opts.extractHealth ?? profiles.extractHealth
     this.tripwires = new Tripwires(vault, this)
     this.#recoverSpend()
@@ -340,16 +339,16 @@ export class Pipeline {
    * constrains nothing, as before.
    */
   #budget(grant, effective) {
-    const b = effective.budget
-    if (b === undefined || (b && !b.invalid && b.limit === undefined)) return
-    if (!b || b.invalid || (b.unit !== undefined && b.unit !== 'requests') || !Number.isSafeInteger(b.limit) || b.limit < 0 || !Number.isSafeInteger(grant.budget_used) || grant.budget_used < 0) {
+    const limit = policyMod.budgetLimit(effective.budget)
+    if (limit === Infinity) return
+    if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used < 0) {
       throw deny('AV_POLICY_DENIED', 'this grant has a budget whose limit is not a whole number of requests, so no request can be counted against it', {
         rule: 'budget_invalid',
         hint: 'Recreate the grant with a numeric budget limit.',
       })
     }
-    if (grant.budget_used >= b.limit) {
-      throw deny('AV_POLICY_DENIED', `grant budget of ${b.limit} requests is spent`, {
+    if (grant.budget_used >= limit) {
+      throw deny('AV_POLICY_DENIED', `grant budget of ${limit} requests is spent`, {
         rule: 'budget',
         hint: 'A human must widen the grant or start a new session.',
       })
@@ -584,14 +583,14 @@ export class Pipeline {
    */
   #observeHealth(route, res) {
     try {
-      const health = this.extractHealth?.(route.profile, res.headers)
+      const health = this.extractHealth(route.profile, res.headers)
       const patch = { source: 'response', checked_at: new Date().toISOString() }
       if (typeof health?.observed_expires_at === 'string') patch.observed_expires_at = health.observed_expires_at
       if (res.status === 401 || res.status === 403) {
         patch.status = res.status === 401 ? 'unauthorized' : 'forbidden'
         patch.http_status = res.status
       }
-      if (patch.status || patch.observed_expires_at) this.vault.recordHealth?.(route.cred.id, patch)
+      if (patch.status || patch.observed_expires_at) this.vault.recordHealth(route.cred.id, patch)
     } catch { /* observation only */ }
   }
 
@@ -730,8 +729,11 @@ export class Pipeline {
       if (!reason) { try { this.#budget(route.grant, effective) } catch { reason = 'budget' } }
       if (!reason) { try { this.#rate(route.grant, effective) } catch { reason = 'rate' } }
       if (!reason) { try { quota = this.#quota(route.grant, effective) } catch { reason = 'quota' } }
-      if (!reason && route.cred.pins?.[hop.host] != null && next.protocol !== 'https:') reason = 'pins'
-      if (!reason && !this.vault.chargeGrant?.(route.grant.id)) reason = 'budget'
+      // Pins by the canonical URL host (C9). A table that cannot be read is
+      // pinned, not unpinned: pinnedRequest refuses it.
+      const hopPins = reason ? null : pinsFor(route.cred, urlIdentity(next))
+      if (!reason && hopPins != null && next.protocol !== 'https:') reason = 'pins'
+      if (!reason && !this.vault.chargeGrant(route.grant.id)) reason = 'budget'
       if (reason) {
         this.vault.audit.write('request.redirect_returned', { request_id: requestId, hop: hops, status: res.status, to_host: hop?.host ?? (next ? this.#safeMessage({ message: next.hostname }) : null), reason })
         return { ...res, redirectStopped: reason }
@@ -741,7 +743,7 @@ export class Pipeline {
       // encoded per segment, and its query byte for byte.
       const hopUrl = `${next.protocol}//${next.host}${policyMod.encodePathForWire(hop.path)}${hopView.query ? `?${hopView.query}` : ''}`
       let following
-      try { following = await this.upstream({ url: hopUrl, method: hopView.method, headers: hopHeaders, body: null, pins: route.cred.pins?.[hop.host] ?? null }) }
+      try { following = await this.upstream({ url: hopUrl, method: hopView.method, headers: hopHeaders, body: null, pins: hopPins }) }
       catch (e) {
         if (e?.code !== 'AV_PIN_MISMATCH') {
           res.res?.destroy()
@@ -898,6 +900,7 @@ export class Pipeline {
     if (token) {
       const session = this.vault.sessionByToken(token.trim())
       if (!session) throw deny('AV_SESSION_REQUIRED', 'session token is not recognised')
+      refuseRemoteInfinite(req, session)
       if (touch) this.vault.assertSessionLive(session)
       else this.#peekSession(session)
       if (touch) this.vault.touchSession(session)
@@ -935,6 +938,7 @@ export class Pipeline {
           hint: 'This placeholder was never issued by this vault, or it was garbage-collected.',
         })
       }
+      refuseRemoteInfinite(req, session)
       if (touch) this.vault.assertSessionLive(session)
       else this.#peekSession(session)
       if (touch) this.vault.touchSession(session)
@@ -1027,12 +1031,12 @@ export class Pipeline {
       const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
       // An expired grant drops out of grantsForSession once the store has
       // noticed. Without this the agent would be told it never had one.
-      if (!grant && this.vault.findGrant?.(session.id, cred.id)?.state === 'expired') throw grantExpired(slug)
+      if (!grant && this.vault.findGrant(session.id, cred.id)?.state === 'expired') throw grantExpired(slug)
       if (!grant) throw deny('AV_NO_GRANT', `this session has no grant for ${slug}`, {
         next: { cli: ['agent-vault cred list --available'], mcp: { tool: 'vault_list_creds' } },
       })
       if (peek) this.#peekGrant(grant)
-      else this.vault.assertGrantLive?.(grant)
+      else this.vault.assertGrantLive(grant)
       const profile = getProfile(cred.connector_kind)
       // A credential may name host:port and a scheme; policy always matches on
       // the hostname alone, while the connection uses the full authority.
@@ -1071,7 +1075,7 @@ export class Pipeline {
           this.#checkQuarantine(cred)
           stage('grant')
           if (peek) this.#peekGrant(g)
-          else this.vault.assertGrantLive?.(g)
+          else this.vault.assertGrantLive(g)
           // If the credential names this exact host with a port, use that port.
           const credRaw = cred.connector.host || ''
           const credHost = policyMod.hostOnly(credRaw)
@@ -1441,7 +1445,7 @@ export class Pipeline {
     const upstreamUrl = `${route.scheme === 'http' ? 'http' : 'https'}://${authority}${wirePath}${outgoing.query ? `?${outgoing.query}` : ''}`
     let res
     try {
-      res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body, pins: cred.pins?.[decision.host] ?? null })
+      res = await this.upstream({ url: upstreamUrl, method: decision.method, headers, body: outgoing.body, pins: pinsFor(cred, urlIdentity(new URL(upstreamUrl))) })
       // A response came back, so the request was certainly delivered and a
       // side effect may have happened. No refund from here on.
       markUpstream()
@@ -1457,6 +1461,12 @@ export class Pipeline {
         const err = deny('AV_PIN_MISMATCH', `${decision.host} presented no pinned key`, { rule: e.reason === 'plaintext' ? 'pin_plaintext' : 'spki_pin', refunded: true })
         err.presented = e.presented ?? []
         throw err
+      }
+      // pinnedRequest's own refusals (host_mismatch, header_format) come
+      // before any connection, so nothing was sent and the use is refunded.
+      // Reported as what they are, not as an unreachable upstream.
+      if (e instanceof VaultError && e.code === 'AV_POLICY_DENIED') {
+        throw deny('AV_POLICY_DENIED', e.detail, { rule: e.rule, refunded: true })
       }
       if (!PRE_CONNECT_ERRORS.has(e?.code)) markUpstream()
       throw deny('AV_UPSTREAM_UNREACHABLE', `could not reach ${decision.host}: ${e.message}`, {
@@ -1891,33 +1901,38 @@ function foldHeaders(headers) {
 }
 
 /**
- * Default upstream: Node's http(s) client, redirects never followed. The
+ * C12: a session that never expires is never reachable from the network. It
+ * cannot be created remote, and this holds at use as well: its token, or its
+ * placeholder, arriving on a non-loopback listener is refused before the
+ * session is touched or anything is sent. Loopback use is unchanged.
+ */
+function refuseRemoteInfinite(req, session) {
+  if (session.infinite === true && req.listener?.remote) {
+    throw deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be used from a network listener', {
+      rule: 'infinite_remote',
+      hint: 'Use it on this machine, or start a session with an expiry for remote use.',
+    })
+  }
+}
+
+/**
+ * Default upstream: the connectors' pinned request (F11), redirects never
+ * followed. With no pins it is Node's own client, certificate checks as Node
+ * makes them; with pins nothing is written until the chain is checked. The
  * response stream is handed back rather than buffered here, so the pipeline
  * can decide between streaming and buffering.
+ *
+ * pinnedRequest takes each header as one string and refuses anything else
+ * (header_format). A list header the pipeline kept as repeated values goes as
+ * one line, joined the way HTTP folds repeated list headers, and every value
+ * the checks and the approval saw is in it.
  */
-// The connectors' pinned request (F11), loaded by its contract name. It is
-// the default upstream once it exists. Until then, a request with no pins
-// goes out as before, and one WITH pins is refused, unsent: a pin nothing can
-// check must not quietly become no pin at all.
-let pinning
-async function defaultUpstream({ url, method, headers, body, pins = null }) {
-  if (pinning === undefined) {
-    try { pinning = await import('../connectors/pinning.js') } catch { pinning = null }
+function defaultUpstream({ url, method, headers, body, pins = null }) {
+  const lines = {}
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    lines[name] = Array.isArray(value) ? value.map(String).join(name.toLowerCase() === 'cookie' ? '; ' : ', ') : String(value)
   }
-  if (typeof pinning?.pinnedRequest === 'function') return pinning.pinnedRequest({ url, method, headers, body, pins })
-  if (pins != null) throw Object.assign(new Error('certificate pins are set and pin checking is not available'), { code: 'AV_PIN_MISMATCH', reason: 'unavailable' })
-  return new Promise((resolve, reject) => {
-    const u = new URL(url)
-    const fn = u.protocol === 'http:' ? httpRequest : httpsRequest
-    const req = fn(
-      { hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443), path: `${u.pathname}${u.search}`, method, headers },
-      (res) => resolve({ status: res.statusCode, headers: res.headers, res }),
-    )
-    req.on('error', reject)
-    req.setTimeout(30_000, () => req.destroy(new Error('upstream timeout')))
-    if (body) req.write(body)
-    req.end()
-  })
+  return pinnedRequest({ url, method, headers: lines, body, pins })
 }
 
 /**

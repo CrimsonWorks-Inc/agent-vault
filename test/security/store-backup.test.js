@@ -39,7 +39,7 @@ function target(prefix = 'av-store-restore-') {
 
 function populated() {
   const v = fresh('av-store-backup-')
-  v.vault.addScrubPattern('demo', 'acme_[A-Za-z0-9]{20,}')
+  v.vault.addScrubPattern('demo', 'acme_[A-Za-z0-9]{20,40}')
   v.vault.setCredentialExpiry('demo', '2031-01-01')
   v.vault.saveTemplate('gh-read', { cred: 'demo', methods: ['GET'], spend_usd: 0.5 })
   const { session, token } = v.vault.createSession({ label: 'live' })
@@ -116,7 +116,7 @@ test('a restore brings back credentials, patterns, expiry and templates, and no 
     assert.equal(t.vault.revealField(demo.id, 'token'), SECRET)
     assert.equal(t.vault.revealField(t.vault.findCredential('other').id, 'token'), OTHER_SECRET)
     assert.deepEqual(demo.fields[0].sites, ['header:authorization:Bearer'])
-    assert.deepEqual(demo.scrub_patterns.map((p) => p.source), ['acme_[A-Za-z0-9]{20,}'])
+    assert.deepEqual(demo.scrub_patterns.map((p) => p.source), ['acme_[A-Za-z0-9]{20,40}'])
     assert.equal(demo.expires_at, '2031-01-01T00:00:00.000Z')
     assert.equal(t.vault.getTemplate('gh-read').hash, v.vault.getTemplate('gh-read').hash)
 
@@ -218,9 +218,8 @@ test('a correctly sealed bundle that carries anything outside the list is refuse
       const b = await sealedBundle(plain)
       await refusedCleanlyAsync(t, () => restoreBackup(t.vault, b, { recoveryPassphrase: RECOVERY }), { code: 'AV_POLICY_DENIED', rule: 'backup_format' }, { audited: 1 })
     }
-    // A pin cannot be restored until this vault can store pins (F11): refused, not dropped.
-    const pinned = await sealedBundle({ credentials: [{ ...cred, pins: { 'api.example.com': [`sha256/${'A'.repeat(43)}=`] } }], templates: [] })
-    await refusedCleanlyAsync(t, () => restoreBackup(t.vault, pinned, { recoveryPassphrase: RECOVERY }), { code: 'AV_POLICY_DENIED', rule: 'backup_format' }, { audited: 1 })
+    // Pins are restored now that the vault stores them (F11); store-pins.test.js
+    // covers that, and the pins a restore refuses.
     // The same bundle without the extra is restored.
     assert.deepEqual((await restoreBackup(t.vault, good, { recoveryPassphrase: RECOVERY })).restored, ['demo'])
   } finally { t.done() }
