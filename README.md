@@ -41,7 +41,7 @@ node demo/demo.js
 The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
 
 ```bash
-npm test          # 458 tests
+npm test          # core and security suites
 ```
 
 ```bash
@@ -51,19 +51,9 @@ npm run test:mutation
 The changelog records what the four independent reviews found, with the
 reproductions: [CHANGELOG.md](CHANGELOG.md).
 
-The second one checks the tests against themselves: it removes each of
-thirty-six critical protections in turn and asserts the suite notices.
-It has already earned its keep twice by catching its own anchors drifting
-after a refactor — it cannot tell a moved line from a deleted one, so it
-reports the drift and fails rather than quietly passing. Deleting the
-human-presence gate fails 6 tests; host confinement, the placeholder checksum
-and the approval's request-hash binding 4 each; the session-token strip, the
-path control-character refusal and non-ASCII scrubbing 2 each; and the
-streaming scrubber, the injection-site encoding check, error-detail scrubbing,
-per-message MCP sessions, the ceiling on a child policy, the gate on Touch ID
-enrollment, the last-unlock-wrap guard and the installer's symlink refusal 1
-each. A mutation that survives means the thing it broke is not really tested,
-whatever the test names say.
+The mutation suite checks the tests against themselves by disabling critical
+protections in turn and requiring a test to notice. It also fails when a mutation
+anchor drifts after a refactor, so a moved check cannot quietly escape coverage.
 
 ## Use it
 
@@ -87,7 +77,7 @@ agent-vault session create --cred gh --infinite                           # no e
 agent-vault session create --cred gh,openai-key                           # one session, two credentials
 ```
 
-`auto` with a write method, and `--infinite`, each take you out of the loop for as long as the session lives, so creating one needs your passphrase (or fingerprint, in the UI) for that one operation — the five-minute confirmation window does not count — and is refused on a vault with no passphrase at all. An agent cannot ask for either one; you can add them when approving its request: `agent-vault approve sr_… --approval auto`. A read-only `auto` session is unaffected, because `on-write` would never ask for GET or HEAD either. An infinite session lasts until `agent-vault session revoke <sid>`, and is never reachable from a network listener.
+`auto` with a write method, and `--infinite`, each take you out of the loop for as long as the session lives, so creating one needs your passphrase (or fingerprint, in the UI) for that one operation — the five-minute confirmation window does not count — and is refused on a vault with no human factor enrolled. An agent cannot ask for either one; you can add them when approving its request: `agent-vault approve sr_… --approval auto`. A read-only `auto` session is unaffected, because `on-write` would never ask for GET, HEAD or OPTIONS either. An infinite session has no idle expiry; it lasts until revoked, shortened to a finite lifetime, or ended by panic. It cannot be created as remote, and its token and placeholders are refused on every non-loopback listener, including MCP and preflight.
 
 After installing, confirm the boundary is real. This should be refused:
 
@@ -105,7 +95,7 @@ Three ways in, in the order to try them.
 agent-vault mcp install --agent claude-code
 ```
 
-`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains seven tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial`, `vault_request_session` and `vault_approval_status` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
+`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains nine tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial`, `vault_request_session`, `vault_approval_status`, `vault_describe_access` and `vault_preflight` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
 
 **MCP over HTTP**, for an agent somewhere else:
 
@@ -162,10 +152,271 @@ export ANTHROPIC_API_KEY="$AGENT_VAULT_PLACEHOLDER"
 ### Docs
 
 ```bash
-agent-vault docs            # or: docs connect | models | locking | refused | commands
+agent-vault docs            # or: docs how | start | connect | models | locking | safety | refused | commands
 ```
 
-That opens the docs inside the web UI, where they are written against your actual install — your port, your credential names — so the commands are yours to paste. Everything below is the design rationale rather than the manual.
+That opens the docs inside the web UI, where they are written against your actual install — your port, your credential names — so the commands are yours to paste. The command workflows below cover policy, daily operation and recovery.
+
+
+### Set limits, inspect access, and reuse policies
+
+Start with a short session and only the methods and paths the task needs:
+
+```bash
+agent-vault session create --cred gh --methods GET,POST --paths '/repos/my-org/**' \
+  --approval on-write --ttl 2 --budget 100 --uses 4 \
+  --rate 60/min --concurrency 2 --quota 1000/day --grant-ttl 30
+agent-vault session list
+agent-vault session show                         # current session; or give a session id
+agent-vault session show <sid> --markdown
+agent-vault report --since 7d --markdown
+agent-vault session revoke <sid>
+```
+
+`--ttl` on **create** is hours; `--grant-ttl` is minutes and expires each grant
+independently (`AV_GRANT_EXPIRED`), without ending other grants. `--uses` sets
+placeholder uses, while `--budget` limits requests. `ph next <cred> [--uses N]`
+issues a successor placeholder. `session show` describes effective access,
+remaining budgets, limits, spend, expiry and activity; `report` reviews access
+across sessions and credentials. Activity comes from the available audit log:
+read any incomplete-history note before treating it as a full review.
+
+These policy flags also work on templates and human session-request approval:
+
+| Flag | Meaning |
+|---|---|
+| `--methods GET,POST`, `--paths '/repos/**'`, `--deny-paths '/admin/**'` | Allowed methods and paths, with explicit denials. |
+| `--approval each\|on-write\|first-use\|auto` | Human approval for every call, writes, first use, or none. Default: `on-write`. |
+| `--budget N`, `--rate 60/min`, `--concurrency N`, `--quota 1000/day` | Request budget, request rate, simultaneous requests and rolling quota. Rate units: second/minute/hour; quota windows: hour/day. |
+| `--route 'GET:/repos/**'` (repeatable) | Bind a method to a path; separate routes are alternatives within a layer. |
+| `--payload-file F`, `--graphql query` | JSON payload rules and permitted GraphQL operation types. |
+| `--redirects N` | Follow at most 0–5 hops; default 0. Every hop is checked again. |
+| `--spend-tokens N`, `--spend-usd X` | Model token or dollar spend ceiling. Unknown models under a dollar ceiling are refused (`spend_unpriced`); token ceilings need no price table. |
+| `--grant-ttl MIN` | Grant lifetime in minutes, capped by the session lifetime. |
+| `--label TEXT`, `--grants-file F` | Session label, or a JSON multi-grant specification. |
+
+Payload files contain a JSON rule set, for example:
+
+```json
+{"json":{"/channel":{"required":true,"one_of":["reviews"]}},"query_strict":true,"query":{},"max_body_bytes":65536}
+```
+
+Available rule groups are `json` (JSON pointers), `form`, `query`, and `graphql`;
+constraints include `required`, `absent`, `one_of`, numeric `min`/`max`, and
+`max_length`. `--graphql query,mutation` sets the allowed operation types and
+checks the whole document, including fragments and batches; persisted queries
+without a document are refused. Checks see placeholders before substitution, so
+do not constrain credential injection sites. `--grants-file` instead takes a
+JSON array of per-credential grant specs and cannot be combined with `--cred`;
+put each grant's limits in that file.
+Policies intersect with profile ceilings and every enclosing layer: a new flag
+cannot grant access a profile forbids. Invalid policy fails closed; budgets are
+non-negative integers (canonical decimal integer strings are also accepted),
+and a zero budget cannot create a usable session. Routes and payload rules from
+different layers must all pass. Spend ceilings reserve before forwarding and
+reconcile with reported usage; they are vault limits, not a provider billing ledger.
+
+```bash
+agent-vault template save repo-review --cred gh --methods GET --paths '/repos/my-org/**'
+agent-vault template save custom --from-file session-spec.json
+agent-vault template list
+agent-vault template show repo-review
+agent-vault session create --template repo-review --budget 20
+agent-vault template rm repo-review
+agent-vault approve sr_… --methods GET --paths '/user' --grant-ttl 10
+```
+
+Template overrides only narrow. An agent can propose a template with
+`vault_request_session`; approval uses the saved snapshot rather than silently
+substituting a later edit. Templates create no session by themselves. Agents cannot add approval or infinite-lifetime overrides to a proposal. A saved
+template may contain those owner-selected settings; approving an elevated template
+request still requires a fresh human proof.
+
+```bash
+agent-vault session narrow <sid> --cred gh --methods GET --budget 10 --ttl 15
+agent-vault session narrow --approval each --redirects 0 --grant-ttl 5
+```
+
+Narrowing works immediately, needs no daemon presence proof, and cannot widen
+access. Omit the id to use the current session and `--cred` to narrow all its
+grants. It accepts the policy limits above; here **`--ttl` is minutes** and only
+shortens the session (including making an infinite one finite). Redirects can
+only be narrowed to 0. A narrow must specify a change.
+
+### Check before sending
+
+```bash
+agent-vault preflight --cred gh --method POST --path /repos/my-org/project/issues \
+  --query 'state=open' --header 'Content-Type: application/json' --body-file issue.json
+```
+
+Preflight reports `allow`, `hold` or `deny` and the checks behind that prediction.
+It sends nothing upstream, mints no placeholder, creates no approval, spends no
+budget or rate capacity, and does not extend the session or trigger tripwires.
+It records a preflight audit event and is limited to 10 calls/second/session and
+1 MiB bodies. It is advisory: a real request checks everything again. Exit codes
+are 0 for allow, 10 for hold, 6 for deny and 9 without a session.
+`vault_preflight` provides the same prediction to MCP agents;
+`vault_describe_access` shows their current effective access without returning
+secrets, tokens or placeholders, consuming capacity, or writing an audit record.
+
+Requests with ambiguous interpretations are refused as `request_ambiguous`.
+Query parameters split on both `&` and `;`; names are decoded once. Query, form,
+multipart and top-level JSON names cannot be empty, contain controls or non-ASCII,
+or have leading/trailing whitespace. Parameter names must start with an ASCII
+letter, digit, `_`, `-`, `.` or `$`; JSON keys are exempt from that first-character
+rule. Matching also accounts for PHP-style space/dot folding and bracket bases.
+Array parameters are lists, and every element must satisfy any single-value rule
+on their base name. Method overrides, duplicate headers and unrepresentable
+queries are also checked; redirects receive the same checks. A caller-supplied
+`Host` that disagrees with the URL is refused (`host_mismatch`).
+
+### Maintain credentials
+
+```bash
+agent-vault cred list
+agent-vault cred add gh --kind github --expires 2027-01-31
+agent-vault cred expiry gh 2027-02-28              # or: none
+agent-vault cred test gh                          # or: cred test --all
+agent-vault cred rotate gh --retire-hours 24      # hidden terminal prompt for new value
+agent-vault cred rotate gh --field token --revoke --expires 2027-02-28
+```
+
+Rotation substitutes the new value immediately. By default existing grants keep
+working; `--revoke` revokes them. Both modes deny pending and granted-but-unspent
+approvals for that credential. The old value remains scrubbed for the retirement
+window (default 24 hours, 0–168 allowed) and is never injected again. Rotation
+clears the old expiry unless `--expires YYYY-MM-DD|none` sets it explicitly.
+Expiry and observed health are warnings, not a local expiry enforcement rule;
+`status` and `doctor` surface them. `cred test [<slug>|--all]` uses the connector's
+read-only probe, can contact the provider, and is throttled; a failing probe exits
+12, while throttled or quarantined probes exit 6.
+
+```bash
+agent-vault cred scrub gh
+agent-vault cred scrub gh --add 'acme_[A-Za-z0-9]{20,40}' --sample 'acme_01234567890123456789'
+agent-vault cred scrub gh --rm sp_…
+agent-vault cred pin gh --host api.github.com --live
+agent-vault cred pin gh --host api.github.com --add 'sha256/…'  # repeat --add for overlap
+agent-vault cred pin gh --host api.github.com --rm 'sha256/…'  # or: --clear
+```
+
+Scrub patterns add response redaction across the vault, including streams and
+error details; they never weaken built-in scrubbing. Samples use your supplied
+text, never a stored secret. The grammar is deliberately bounded: 3–256 source
+characters, at most 16 alternation branches, each starting with three literal
+characters. Atoms may be literals, escaped characters, character classes or
+`\d \w \s \D \W \S`. Each branch permits at most one variable quantifier
+(`?` or `{n,m}` with `n < m`), followed only by literal characters. Before it,
+plain atoms and exact `{n}` repeats are allowed. There are no unbounded
+quantifiers (`*`, `+`, `{n,}`), groups, backreferences, lookarounds or anchors;
+repeat bounds are at most 256 and maximum match length is 512. Patterns matching
+empty or ordinary corpus text, placeholders or stored secrets are refused.
+Limits are 16 patterns per credential and 64 per vault; an invalid stored pattern
+withholds responses rather than bypassing scrubbing.
+
+Pins are human-managed SPKI SHA-256 values; none ship for providers. `--live`
+fetches the certificate chain in the CLI without a credential: verify its pins
+out of band before adding them. With no mutation flag, `cred pin` shows pin
+status. Pinning normally adds to CA and URL-hostname checks. An exact **leaf** pin
+can replace CA trust for a self-signed upstream, but hostname and certificate
+validity still apply; a non-leaf pin never replaces CA verification. Malformed
+pins or a mismatch fail closed before sending the credential (`AV_PIN_MISMATCH`).
+
+### Approvals, notifications, and emergency containment
+
+```bash
+agent-vault approvals
+agent-vault approvals --show <id>
+agent-vault approve <id>                          # deny <id> refuses it
+agent-vault watch --open                          # --quiet and --no-notify are optional
+agent-vault notify set --detail minimal           # hidden prompt for HTTPS webhook URL
+agent-vault notify show
+agent-vault notify test
+agent-vault notify off
+```
+
+Approval previews scrub query, headers, placeholders and up to 4096 bytes of
+body. The list shows an excerpt; `--show` shows the complete bounded preview.
+Treat all agent-written text as unverified, even after scrubbing. Agent polling
+does not expose the human preview. `watch` prints new pending ids, optionally
+shows coalesced desktop notifications, and `--open` opens the UI once.
+Notifications signal work waiting; they cannot approve it and never include the
+agent's stated reason.
+
+The outbound webhook is optional and off until configured. Its URL is a sealed
+secret, entered outside argv; status and audit expose only its host. Default
+`--detail minimal` sends counts and ids, without paths or agent text. Opting into
+`--detail headline` also sends scrubbed headlines, so choose it only if that
+metadata may leave this machine. Approval still needs the normal human proof.
+
+```bash
+agent-vault session revoke <sid>
+agent-vault cred quarantine gh --reason 'unexpected activity'
+agent-vault panic --lock --reason 'stop all agents'
+agent-vault cred release gh
+agent-vault tripwire show
+agent-vault tripwire on
+agent-vault tripwire set --rule replay --codes AV_PH_REPLAY --threshold 3 --window 10m --action revoke_session
+agent-vault tripwire off
+```
+
+Panic revokes every session, denies held requests and pending session requests,
+and optionally locks. Quarantine immediately stops every use of a credential,
+including new proposals for it; only explicit owner release restores use.
+Revocation, panic and quarantine only narrow access and need no daemon presence
+proof. Tripwires are **off by default**. Rules match `--codes A,B` or
+`--rule-prefix P`, count denials within `--window`, and apply `--action`
+`revoke_session`, `quarantine_credential` or `panic`. Editing rules and disabling
+tripwires need human confirmation; installing the default rules on first enable
+is also gated. Preflight denials never feed them.
+
+### Back up, restore, and keep an audit witness
+
+```bash
+agent-vault backup export --out vault-backup.json  # --force permits replacement
+agent-vault backup inspect vault-backup.json
+agent-vault backup restore vault-backup.json --on-conflict skip
+agent-vault audit tail --limit 20
+agent-vault audit export --since-seq 0 --out audit.jsonl  # --force; --follow to keep appending
+agent-vault audit witness --out witness.jsonl
+agent-vault audit verify --witness witness.jsonl
+```
+
+Export asks for a separate recovery passphrase of at least 12 characters twice,
+then requires fresh human proof even within a confirmation window. Keep that
+recovery passphrase separately. Bundle output is encrypted, mode 0600, and
+refuses existing files without `--force` or confirmation; symlinks are refused.
+Inspect decrypts metadata without returning values. Restore offers conflict
+modes `skip` (default), `rename` (`-restored` suffixes), or `fail` (refuse before
+writing), and asks for confirmation on a TTY; `--json` or no TTY skips that
+question, not the presence gate.
+
+Backups carry current credential values, sites, scrub patterns, **pins,
+quarantine**, expiry metadata and templates. They exclude retired values, health,
+sessions, grants, placeholders, approvals, session requests, listeners, factors,
+vault-key wraps, audit history and settings (including webhook configuration).
+Restore creates no session: every agent needs a new one. Quarantine survives
+restore, including any quarantine already on the target credential or renamed
+copy; restore cannot release it. An unreadable quarantine record refuses restore.
+
+Audit export is JSONL with chain fields; `--follow` appends new records until
+Ctrl-C. Witness appends an authenticated checkpoint (default
+`~/.agent-vault/witness.jsonl`) without truncating it. Schedule periodic
+`agent-vault audit witness --out /protected/path/witness.jsonl` and copy the file
+to a location the agent cannot rewrite. Verification detects forged checkpoints,
+mismatched history and witnesses ahead of a truncated or rolled-back log; an
+older checkpoint behind the current head is normal. A writable local witness
+can itself be truncated or rolled back, and HMAC checkpoints are not independent
+third-party signatures. The local anchor alone has the rollback limits below.
+
+Every command accepts `--json` for a machine-readable `{ok, data}` success envelope
+or structured error. Fresh proof requires a new passphrase entry or an
+authenticator assertion bound to the operation; it never opens a shared window.
+Without a terminal the CLI exits 5 when it cannot ask for a passphrase, and only
+suggests the UI when an authenticator is enrolled. Enroll a factor first with
+`agent-vault passphrase set` or the UI. `lock` stops all proxied requests;
+`unlock` resumes live sessions without extending their lifetime.
 
 ## What makes it safe
 
@@ -195,7 +446,7 @@ On a single-user dev install it is mode 0600. On a system install the daemon run
 agent-vault ui        # prints a single-use link and opens it
 ```
 
-It has five pages — Overview, Credentials, Sessions, Approvals, Audit — plus the Docs page that `agent-vault docs` opens directly.
+Its views cover Overview, Credentials, Sessions, Approvals and Audit, plus the Docs page that `agent-vault docs` opens directly.
 
 The link uses `localhost`, not `127.0.0.1`, and arriving by IP redirects. That is
 not cosmetic: WebAuthn requires the relying party to be a registrable domain, and
@@ -395,7 +646,7 @@ Once a vault has a human factor it keeps one. `agent-vault passphrase remove` is
 
 **Crypto substitutions.** ChaCha20-Poly1305 with a 96-bit nonce instead of XChaCha20's 192, and scrypt instead of Argon2id, because Node has neither without a native dependency. Per-field keys keep each key's record count far below the birthday bound, so the nonce size is not a practical problem at this scale, but it is not what the spec specifies.
 
-**The audit log's anchor has two limits.** The head anchor and the stamp in `vault.json` that says "this vault keeps an anchor" catch a truncated or deleted log, but both live in the vault directory. Someone who can write there can save a copy of the anchor and later put it back with the log cut to match (a rollback), or delete the stamp along with the anchor so the vault looks older than anchoring; both verify clean. Binding the stamp cryptographically would mean re-wrapping the vault key, and a rollback needs a high-water mark somewhere the attacker cannot write, which a single-directory vault does not have. Separately, the log and its anchor are not fsynced on every record — that would cost every proxied request several flushes — so a power cut (not a crash; the anchor is replaced by rename) can leave the anchor ahead of the last line, which reads as truncation.
+**The audit log's anchor has two limits.** The head anchor and the stamp in `vault.json` that says "this vault keeps an anchor" catch a truncated or deleted log, but both live in the vault directory. Someone who can write there can save a copy of the anchor and later put it back with the log cut to match (a rollback), or delete the stamp along with the anchor so the vault looks older than anchoring; both verify clean. Binding the stamp cryptographically would mean re-wrapping the vault key, and a rollback needs a high-water mark somewhere the attacker cannot write, which the local anchor alone does not provide. Keep an external witness as described above to detect rollback past its checkpoint. Separately, the log and its anchor are not fsynced on every record — that would cost every proxied request several flushes — so a power cut (not a crash; the anchor is replaced by rename) can leave the anchor ahead of the last line, which reads as truncation.
 
 **Storage is a JSON document, not SQLite.** Same entity model, same invariants, atomic rewrites. Every write rewrites the whole document, so the placeholder ledger is bounded rather than allowed to grow, and the two halves are written differently: key material and credentials are fsynced, the placeholder ledger is not. The rename is atomic either way, so the file is never torn — the most a power cut costs there is one placeholder issuance, which the agent simply asks for again. It will not hold up under concurrent daemons or a large vault.
 
