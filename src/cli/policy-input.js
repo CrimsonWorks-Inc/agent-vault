@@ -67,7 +67,61 @@ export function grantInput(args) {
   }
   return spec
 }
+// Every flag grantInput reads. A flag outside the command's list was ignored,
+// so a typo like --spend_tokens created or narrowed a session without the
+// limit the human typed. Refused instead, before anything is sent.
+export const GRANT_FLAGS = ['hosts', 'methods', 'paths', 'deny-paths', 'approval', 'budget', 'uses', 'concurrency', 'redirects', 'spend-tokens', 'grant-ttl', 'rate', 'quota', 'spend-usd', 'route', 'payload-file', 'graphql']
+export function knownFlags(args, allowed, command) {
+  for (const flag of Object.keys(args)) if (flag !== '_' && !allowed.includes(flag)) usage(`${command} does not take --${flag}; nothing was sent`)
+}
+
+// Each flag `approve` reads, and the override field it becomes: the shared
+// parser's flags, plus the spellings parseOverrides and the generated hint use.
+export const APPROVAL_FLAGS = {
+  hosts: 'hosts', methods: 'methods', paths: 'paths', 'deny-paths': 'deny_paths', approval: 'approval', infinite: 'infinite',
+  budget: 'budget', uses: 'uses', ttl_minutes: 'ttl_minutes', 'ttl-minutes': 'ttl_minutes',
+  concurrency: 'max_concurrent', max_concurrent: 'max_concurrent', redirects: 'redirects',
+  'spend-tokens': 'spend_tokens', spend_tokens: 'spend_tokens', 'spend-usd': 'spend_usd', spend_usd: 'spend_usd',
+  'grant-ttl': 'grant_ttl_minutes', grant_ttl: 'grant_ttl_minutes', grant_ttl_minutes: 'grant_ttl_minutes',
+  rate: 'rate', quota: 'quota', route: 'routes', routes: 'routes', payload: 'payload', 'payload-file': 'payload', graphql: 'payload',
+}
+
+/**
+ * The owner's narrowing of an approval, from `parse` (parseOverrides) and the
+ * shared parser. Every flag that was typed must arrive in the overrides: a
+ * flag parsed into nothing was approved as the agent asked, with the human
+ * believing they had narrowed it. parseOverrides throws a TypeError naming
+ * `.field` on a value it cannot read (C23); that is the human's typo, so it
+ * is a usage error and nothing is sent.
+ */
+export function approvalOverrides(args, parse) {
+  knownFlags(args, Object.keys(APPROVAL_FLAGS), 'approve')
+  const given = Object.keys(args).filter((flag) => flag !== '_')
+  for (const flag of given) if (args[flag] === true && flag !== 'infinite') usage(`--${flag} needs a value; nothing was sent`)
+  // Two spellings of one field: only one of them would be sent.
+  for (const field of new Set(given.map((flag) => APPROVAL_FLAGS[flag]))) {
+    const flags = given.filter((flag) => APPROVAL_FLAGS[flag] === field)
+    const merged = flags.length === 2 && flags.includes('payload-file') && flags.includes('graphql')
+    if (flags.length > 1 && !merged) usage(`give only one of ${flags.map((f) => `--${f}`).join(', ')}; nothing was sent`)
+  }
+  let overrides
+  try {
+    overrides = { ...parse(args), ...grantInput(args) }
+  } catch (e) {
+    if (e instanceof TypeError && typeof e.field === 'string' && e.field) {
+      const why = e.message.startsWith(`${e.field}:`) ? e.message.slice(e.field.length + 1).trim() : e.message
+      usage(`--${e.field}: ${why || 'not a valid value'}; nothing was sent`)
+    }
+    throw e
+  }
+  for (const flag of given) if (!Object.hasOwn(overrides, APPROVAL_FLAGS[flag])) usage(`--${flag} was given but narrows nothing; nothing was sent`)
+  // NaN and Infinity travel as JSON null, which the daemon reads as absent.
+  for (const [field, v] of Object.entries(overrides)) if (typeof v === 'number' && !Number.isFinite(v)) usage(`--${field} must be a number; nothing was sent`)
+  return overrides
+}
+
 export function sessionInput(args) {
+  knownFlags(args, [...GRANT_FLAGS, 'label', 'ttl', 'infinite', 'remote', 'cred', 'grants-file', 'template'], 'session')
   const shared = grantInput(args)
   if (args.infinite !== undefined && args.infinite !== true) usage('--infinite takes no value')
   if (args.infinite && args.ttl !== undefined) usage('--ttl and --infinite cannot be combined')

@@ -22,7 +22,7 @@ import { fetchPending, decision, parseOverrides, describeGranted, collectApprove
 import { elevationOf } from '../daemon/session-requests.js'
 import { APPROVAL_ORDER } from '../core/policy.js'
 import { writeFileExclusive, assertPlaceholderOnly, ENV_NAME } from './files.js'
-import { sessionInput, grantInput, expiryInput, usage as usageError } from './policy-input.js'
+import { sessionInput, approvalOverrides, expiryInput, usage as usageError } from './policy-input.js'
 import { controlCommands, cleanText, SCRUB_HELP, approvalPreviewLines } from './control-commands.js'
 import { watchApprovals } from './watch.js'
 
@@ -1504,12 +1504,14 @@ function parseArgs(argv) {
 async function decide(args, granted) {
   const id = args._[0]
   if (!id) return fail('name the id to answer', EXIT.USAGE, { next: 'agent-vault approvals' })
+  // Read before anything is asked of the daemon: a narrowing that cannot be
+  // read is a usage error, never an approval as the agent proposed it.
+  const overrides = granted ? approvalOverrides(args, parseOverrides) : null
   const pending = await fetchPending((path) => control('GET', path))
   const item = pending.find((p) => p.id === id)
   if (!item) {
     return fail(`nothing waiting with id ${id}`, EXIT.NOT_FOUND, { next: 'agent-vault approvals' })
   }
-  const overrides = granted ? { ...parseOverrides(args), ...grantInput(args) } : null
   const settable = [...item.narrowable, ...(item.owner_settable || [])]
   for (const field of Object.keys(overrides || {})) {
     if (!settable.includes(field)) {

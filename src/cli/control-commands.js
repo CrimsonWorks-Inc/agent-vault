@@ -7,7 +7,7 @@ import { EXIT, CODES } from '../core/errors.js'
 import { fetchChainPins } from '../connectors/pinning.js'
 import { PRICES_VERSION } from '../core/model-usage.js'
 import { writeFileExclusive, appendLineExclusive } from './files.js'
-import { grantInput, sessionInput, readJson, numberFlag, textFlag, listFlag, expiryInput, usage } from './policy-input.js'
+import { grantInput, sessionInput, knownFlags, GRANT_FLAGS, readJson, numberFlag, textFlag, listFlag, expiryInput, usage } from './policy-input.js'
 
 export const cleanText = (value) => String(value ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
 const q = (params) => new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined)).toString()
@@ -203,6 +203,7 @@ export function controlCommands(ctx) {
     async 'template:show'(args) { output(await control('GET', `/v1/templates?${q({ name: required(args, 0, 'template name') })}`)) },
     async 'template:rm'(args) { output(await control('DELETE', `/v1/templates?${q({ name: required(args, 0, 'template name') })}`), 'template removed') },
     async 'session:narrow'(args) {
+      knownFlags(args, [...GRANT_FLAGS, 'cred', 'ttl'], 'session narrow')
       const sid = sidOf(args), narrow = grantInput(args)
       // Grant lifetime is a route attribute, not part of the policy layer.
       const grant_ttl_minutes = narrow.grant_ttl_minutes

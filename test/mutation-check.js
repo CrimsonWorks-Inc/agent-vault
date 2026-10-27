@@ -2909,6 +2909,55 @@ const MUTATIONS = [
     to: "String(value ?? '')",
     tests: ["test/security/control-cli-watch.test.js"],
   },
+  {
+    what: "CLI approve sends an approval when parseOverrides cannot read a narrowing (C23)",
+    file: "src/cli/policy-input.js",
+    from: "if (e instanceof TypeError && typeof e.field === 'string' && e.field) {",
+    to: "if (false) {",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI approve drops a typed narrowing flag that parsed into nothing",
+    file: "src/cli/policy-input.js",
+    from: "for (const flag of given) if (!Object.hasOwn(overrides, APPROVAL_FLAGS[flag])) usage(",
+    to: "for (const flag of given) if (false) usage(",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI approve sends a non-finite number, which JSON turns into an absent narrowing",
+    file: "src/cli/policy-input.js",
+    from: "if (typeof v === 'number' && !Number.isFinite(v)) usage(",
+    to: "if (false) usage(",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI approve reads a bare value flag as true",
+    file: "src/cli/policy-input.js",
+    from: "if (args[flag] === true && flag !== 'infinite') usage(",
+    to: "if (false) usage(",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI approve sends only one of two spellings of a field",
+    file: "src/cli/policy-input.js",
+    from: "if (flags.length > 1 && !merged) usage(",
+    to: "if (false) usage(",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI session and approve commands ignore unknown limit flags",
+    file: "src/cli/policy-input.js",
+    from: "if (flag !== '_' && !allowed.includes(flag)) usage(",
+    to: "if (false) usage(",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
+  {
+    what: "CLI approve reads the daemon before refusing an unreadable narrowing",
+    file: "src/cli/index.js",
+    from: "  const overrides = granted ? approvalOverrides(args, parseOverrides) : null\n  const pending = await fetchPending((path) => control('GET', path))",
+    to: "  const pending = await fetchPending((path) => control('GET', path))\n  const overrides = granted ? approvalOverrides(args, parseOverrides) : null",
+    tests: ["test/security/control-cli-overrides.test.js"],
+  },
 ]
 
 let survived = 0
