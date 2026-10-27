@@ -218,9 +218,9 @@ export class UiServer {
 
   /**
    * The one response that may carry a capability to the page: the hand-off
-   * card for a session the human has just created here. Everything else goes
-   * through #towardPage, which withholds tokens and placeholders wherever
-   * they turn up.
+   * card for a session the human has just created here. Even that answer goes
+   * through towardPage first; only the fields the card renders are put back,
+   * and only on success (see handoffTowardPage).
    */
   static HANDOFF = new Set(['POST sessions'])
 
@@ -228,8 +228,12 @@ export class UiServer {
     const route = url.pathname.slice('/api/'.length)
     const key = `${req.method} ${route}`
     // Every answer to the page passes the same guard, so a route added later
-    // cannot forget it. Only the hand-off for a session made here is exempt.
-    const send = (status, obj) => this.#send(res, status, UiServer.HANDOFF.has(key) ? obj : towardPage(obj))
+    // cannot forget it. An error is never a hand-off, whatever route it is on:
+    // the catch below uses this same send.
+    const send = (status, obj) => this.#send(res, status, towardPage(obj))
+    // The hand-off for a session made here: called from that route's success
+    // line only, and checked against the route again.
+    const handOff = (obj) => this.#send(res, 200, UiServer.HANDOFF.has(key) ? handoffTowardPage(obj) : towardPage(obj))
     const cookie = this.#cookieFrom(req)
     if (!this.sessionCookie || !cookie || !safeEqual(cookie, this.sessionCookie)) {
       return send(401, { error: 'not authenticated' })
@@ -573,7 +577,7 @@ export class UiServer {
             // token on screen either way, and can paste it.
             this.lastStateError = String(e?.message ?? e)
           }
-          return send(200, created)
+          return handOff(created)
         }
         case 'DELETE sessions':
           return send(200, await this.#control('DELETE', `/v1/sessions?sid=${encodeURIComponent(url.searchParams.get('sid'))}`))
@@ -661,7 +665,9 @@ export class UiServer {
           return send(404, { error: `no route ${req.method} ${route}` })
       }
     } catch (e) {
-      return send(e.status || 500, { error: e.message, detail: e.problem })
+      // A VaultError (a reserved operation field, say) carries its status as
+      // `http`; reading only `status` made a refusal look like a crash.
+      return send(e.status || e.http || 500, { error: e.message, detail: e.problem ?? e.toProblem?.() })
     }
   }
 
@@ -855,10 +861,17 @@ export const PARSER_MARKER = '/* parseOverrides: injected by src/ui/server.js fr
  * signed operation with. A page without the marker is a build error, not a
  * page that cannot approve anything.
  */
-export function servedPage() {
+export function servedPage(parser = parseOverrides) {
   const html = readFileSync(join(HERE, 'app.html'), 'utf8')
   if (html.split(PARSER_MARKER).length !== 2) throw new Error('app.html must carry the parseOverrides marker exactly once')
-  return html.replace(PARSER_MARKER, () => parseOverrides.toString())
+  // The source goes into an inline <script> as it is. Text that would end the
+  // script, open an HTML comment, or put the marker back would change what
+  // the page runs, so it stops the server from starting instead.
+  const source = parser.toString()
+  if (/<\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {
+    throw new Error('parseOverrides cannot be put in the page: its source holds </script, <!-- or the marker')
+  }
+  return html.replace(PARSER_MARKER, () => source)
 }
 
 /** The request minus its proof, for a daemon route that does not check one. */
@@ -877,8 +890,9 @@ function queryOf(url, names) {
 
 // What the page never receives, whatever a daemon route returns: a session
 // token, a placeholder, a credential value, an unlock secret, a backup or its
-// passphrase, a webhook URL. Keys with these names are dropped, and any token-
-// or placeholder-shaped text inside a string is replaced. The daemon's routes
+// passphrase, a webhook URL. Keys with these names are dropped at any depth,
+// in any case and with '-' read as '_', and any token- or placeholder-shaped
+// text inside a string is replaced. The daemon's routes
 // are not supposed to return any of it; this is what makes "never sent to the
 // page" hold for a route that slips, including the agent-written text in an
 // approval preview.
@@ -886,6 +900,8 @@ const WITHHELD_KEYS = new Set([
   'token', 'placeholder', 'value', 'secret', 'prf_secret', 'recovery_passphrase', 'bundle', 'webhook_url',
 ])
 const SESSION_TOKEN = /avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
+// Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader.
+const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))
 
 export function towardPage(value, depth = 0) {
   if (depth > 64) return null
@@ -894,12 +910,49 @@ export function towardPage(value, depth = 0) {
   if (value && typeof value === 'object') {
     const out = {}
     for (const [k, v] of Object.entries(value)) {
-      if (WITHHELD_KEYS.has(k)) continue
+      if (withheldKey(k)) continue
       out[k] = towardPage(v, depth + 1)
     }
     return out
   }
   return value
+}
+
+// What the hand-off card renders, and nothing else: the session's own token
+// and the placeholders it was just given. A webhook URL, a value or a bundle
+// in the same answer stays withheld.
+const HANDOFF_FIELDS = ['token', 'session_id', 'expires_at', 'infinite', 'label', 'cli']
+const HANDOFF_GRANT_FIELDS = ['placeholder', 'base_url', 'usage', 'cred', 'sites', 'probe']
+
+/**
+ * A session-create answer for the page: towardPage over all of it, then the
+ * card's fields copied back from the original. A field is copied only when it
+ * is a scalar or a list of scalars, so nothing nested rides along with it.
+ */
+export function handoffTowardPage(created) {
+  const out = towardPage(created)
+  if (!isRecord(created) || !isRecord(out)) return out
+  copyShown(out, created, HANDOFF_FIELDS)
+  // The card reads `s.grants || [s]`, and the daemon repeats grants[0] at the
+  // top for clients written for one grant; so the top is a grant here too.
+  copyShown(out, created, HANDOFF_GRANT_FIELDS)
+  if (Array.isArray(created.grants) && Array.isArray(out.grants)) {
+    created.grants.forEach((g, i) => {
+      if (isRecord(g) && isRecord(out.grants[i])) copyShown(out.grants[i], g, HANDOFF_GRANT_FIELDS)
+    })
+  }
+  return out
+}
+
+const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const isScalar = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v)
+
+function copyShown(to, from, names) {
+  for (const n of names) {
+    if (!Object.hasOwn(from, n)) continue
+    const v = from[n]
+    if (isScalar(v) || (Array.isArray(v) && v.every(isScalar))) to[n] = v
+  }
 }
 
 function withheldText(s) {
