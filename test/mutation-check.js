@@ -2845,6 +2845,454 @@ const MUTATIONS = [
     to: '          })',
     tests: ['test/security/integrate2-c12-surfaces.test.js'],
   },
+  {
+    // control-api (wave 3). C17: refused in #planSession, before anyone is asked for a passphrase.
+    what: "a budget of 0 reaches the presence gate before it is refused (C17)",
+    file: "src/daemon/server.js",
+    from: "      if (budget === 0) {",
+    to: "      if (false) {",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3). Wave 3: every GrantSpec field goes through the one converter (0.6).
+    what: "a session body is converted inline, so its rate, quota, routes and payload rules are dropped",
+    file: "src/daemon/server.js",
+    from: "      const policy = policyMod.grantPolicyFromInput(spec, { profile, ceiling })",
+    to: "      const policy = { hosts: policyMod.confineHosts(spec.hosts, ceiling), methods: spec.methods ?? ['GET', 'HEAD'], paths: spec.paths ?? ['/**'], budget: { unit: profile.defaultBudget.unit, limit: budget ?? profile.defaultBudget.limit }, approval: spec.approval ?? 'on-write' }",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a grant lifetime is accepted and never given to the store (F18)",
+    file: "src/daemon/server.js",
+    from: "          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy, ttlMs,",
+    to: "          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy,",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3). The proposer dry-runs the plan: it is also what refuses a quarantined credential (C12 note).
+    what: "a session request is opened without being built first, so one that could never be created reaches a human",
+    file: "src/daemon/server.js",
+    from: "    this.#planSession(requestSpec(proposal))\n    try {",
+    to: "    try {",
+    tests: ["test/security/control-api-mcp.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a session can be planned for a quarantined credential",
+    file: "src/daemon/server.js",
+    from: "      if (cred.quarantine && !dryRun) throw quarantined(cred)",
+    to: "",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template create is not bound to the hash the human looked at (F17)",
+    file: "src/daemon/server.js",
+    from: "if (typeof input.template_hash !== 'string' || input.template_hash !== template.hash) {",
+    to: "if (false) {",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template create's signed operation binds the name but not template_hash (F17)",
+    file: "src/daemon/server.js",
+    from: "      case 'POST /v1/sessions': return of('session.create', input)",
+    to: "      case 'POST /v1/sessions': return of('session.create', input?.template !== undefined ? { template: input.template } : input)",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a session request from a template is resolved again at approval, not snapshotted (F17)",
+    file: "src/daemon/server.js",
+    from: "      ...requestSpec(final),\n      label: `requested by an agent (${record.id})`,",
+    to: "      ...(final.template ? { template: final.template, template_hash: this.vault.getTemplate(final.template)?.hash } : requestSpec(final)),\n      label: `requested by an agent (${record.id})`,",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a narrowing that names nothing does nothing silently (F15)",
+    file: "src/daemon/server.js",
+    from: "    if (!fields.length && sessionTtl === null && grantTtl === null) {",
+    to: "    if (false) {",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a narrowing that turns redirects on is only refused after the session was shortened (F15)",
+    file: "src/daemon/server.js",
+    from: "    if (Object.hasOwn(narrow, 'redirects') && narrow.redirects !== 0) {",
+    to: "    if (false) {",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a narrowing silently ignores a field it cannot narrow (F15)",
+    file: "src/daemon/server.js",
+    from: "    if (unknown.length) throw bad(`a narrowing cannot carry ${unknown[0]}`)",
+    to: "",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "narrowGrant spreads a narrowing over the grant instead of intersecting (F15, through the route)",
+    file: "src/store/vault.js",
+    from: "    g.policy = policyMod.intersect([g.policy, narrow])",
+    to: "    g.policy = { ...g.policy, ...narrow }",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "rotation keeps the held approvals a human gave against the old key (F7)",
+    file: "src/daemon/server.js",
+    from: "const invalidated = this.pipeline.denyApprovals({ credentialId: this.vault.findCredential(input.slug).id }, 'credential_rotated')",
+    to: "const invalidated = 0",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a rotation retire window is read by coercion",
+    file: "src/daemon/server.js",
+    from: "if (input.retire_hours !== undefined && !(Number.isInteger(input.retire_hours) && input.retire_hours >= 0 && input.retire_hours <= 168)) {",
+    to: "if (false) {",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a scrub pattern is stored without being compiled (F4)",
+    file: "src/daemon/server.js",
+    from: "          const { re } = compileScrubPattern(input.pattern)",
+    to: "          const re = /(?!)/g",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred rotate runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred rotate',",
+    to: "void ('cred rotate',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred scrub add runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred scrub add',",
+    to: "void ('cred scrub add',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred scrub remove runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred scrub remove',",
+    to: "void ('cred scrub remove',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred expiry runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred expiry',",
+    to: "void ('cred expiry',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred pins runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred pins',",
+    to: "void ('cred pins',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred pins remove runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred pins remove',",
+    to: "void ('cred pins remove',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "cred release runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('cred release',",
+    to: "void ('cred release',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "template save runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('template save',",
+    to: "void ('template save',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "backup restore runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('backup restore',",
+    to: "void ('backup restore',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-backup-audit.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "notify set runs with no human (A.2 widening)",
+    file: "src/daemon/server.js",
+    from: "this.#requireHumanForWidening('notify set',",
+    to: "void ('notify set',",
+    tests: ["test/security/control-gate.test.js", "test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "backup export accepts the window instead of a fresh proof (F8)",
+    file: "src/daemon/server.js",
+    from: "this.#requireFreshPresence('backup export',",
+    to: "this.#requireHumanForWidening('backup export',",
+    tests: ["test/security/control-api-backup-audit.test.js", "test/security/control-gate.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a wrong recovery passphrase on inspect is not counted (F8)",
+    file: "src/daemon/server.js",
+    from: "            inspected = await inspectBackup(input.bundle, { recoveryPassphrase: input.recovery_passphrase })\n          } catch (e) {\n            if (e?.rule === 'backup_auth') this.#recordPassphraseAttempt(false)",
+    to: "            inspected = await inspectBackup(input.bundle, { recoveryPassphrase: input.recovery_passphrase })\n          } catch (e) {\n            if (false) this.#recordPassphraseAttempt(false)",
+    tests: ["test/security/control-api-backup-audit.test.js"],
+  },
+  {
+    // control-api (wave 3). An agent could inspect a bundle it made itself to reset the backoff on the passphrase it is guessing.
+    what: "a right recovery passphrase on inspect clears the vault passphrase throttle (F8)",
+    file: "src/daemon/server.js",
+    from: "          this.vault.audit.write('backup.inspected',",
+    to: "          this.#recordPassphraseAttempt(true); this.vault.audit.write('backup.inspected',",
+    tests: ["test/security/control-api-backup-audit.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "POST /v1/tripwires {enabled:false} is open (F16)",
+    file: "src/daemon/server.js",
+    from: "const enableOnly = keys.length === 1 && keys[0] === 'enabled' && body.enabled === true",
+    to: "const enableOnly = keys.length === 1 && keys[0] === 'enabled' && typeof body.enabled === 'boolean'",
+    tests: ["test/security/control-api-containment.test.js", "test/security/control-gate.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "POST /v1/tripwires reads enabled by truthiness, so 'true' and 1 are open (C20)",
+    file: "src/daemon/server.js",
+    from: "const enableOnly = keys.length === 1 && keys[0] === 'enabled' && body.enabled === true",
+    to: "const enableOnly = keys.length === 1 && keys[0] === 'enabled' && !!body.enabled",
+    tests: ["test/security/control-api-containment.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "tripwire changes other than enabling run with no human (F16)",
+    file: "src/daemon/server.js",
+    from: "if (!enableOnly) this.#requireHumanForWidening('tripwires set',",
+    to: "if (false) this.#requireHumanForWidening('tripwires set',",
+    tests: ["test/security/control-api-containment.test.js", "test/security/control-gate.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "panic is never told about session requests (C1)",
+    file: "src/daemon/server.js",
+    from: "    this.pipeline.onPanic = async () => ({ session_requests_denied: this.#denyPendingSessionRequests('panic') })",
+    to: "    this.pipeline.onPanic = null",
+    tests: ["test/security/control-api-containment.test.js", "test/security/integrate2-seams.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a panic that locks leaves the passphrase window open",
+    file: "src/daemon/server.js",
+    from: "          if (result.locked) this.presenceGraceUntil = 0",
+    to: "",
+    tests: ["test/security/control-api-containment.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "panic reads lock by truthiness, so 'true' panics without locking",
+    file: "src/daemon/server.js",
+    from: "          if (input.lock !== undefined && typeof input.lock !== 'boolean') {",
+    to: "          if (false) {",
+    tests: ["test/security/control-api-containment.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "an agent-written quarantine reason is stored with its placeholder and secret in it (F16)",
+    file: "src/daemon/server.js",
+    from: "reason: this.#untrustedText(input.reason) })",
+    to: "reason: input.reason ?? null })",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "the gateway preflight route ignores the listener it arrived on (C18)",
+    file: "src/daemon/server.js",
+    from: "        this.vault.assertSessionUsable(session, req.listener ?? null, { peek: true })\n        const described = preflightRequest(body)\n        return json(200, await this.pipeline.preflight({\n          ...described,\n          headers: [...described.headers, ['av-session', token]],\n          listener: req.listener ?? null,\n        }))",
+    to: "        this.vault.assertSessionUsable(session, null, { peek: true })\n        const described = preflightRequest(body)\n        return json(200, await this.pipeline.preflight({\n          ...described,\n          headers: [...described.headers, ['av-session', token]],\n          listener: null,\n        }))",
+    tests: ["test/security/control-api-c18.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "vault_describe_access checks the session without its listener (C18)",
+    file: "src/daemon/mcp.js",
+    from: "        try { this.vault.assertSessionUsable(session, listener, { peek: true }) } catch (e) {",
+    to: "        try { this.vault.assertSessionUsable(session, null, { peek: true }) } catch (e) {",
+    tests: ["test/security/control-api-c18.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "vault_preflight does not hand its listener to the pipeline (C18)",
+    file: "src/daemon/mcp.js",
+    from: "            // The listener this call arrived on, so the pipeline asks the\n            // same usability question a real request would.\n            listener,\n          }, { assumePlaceholder: true }))",
+    to: "          }, { assumePlaceholder: true }))",
+    tests: ["test/security/control-api-c18.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "vault_request_session drops an owner field instead of refusing it (R3)",
+    file: "src/daemon/mcp.js",
+    from: "        if (owned.length) {\n          return this.#refusal({",
+    to: "        if (false) {\n          return this.#refusal({",
+    tests: ["test/security/requested-r1.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a ninth watcher is let in (F14)",
+    file: "src/daemon/notify.js",
+    from: "    if (this.subscribers.size >= MAX_SUBSCRIBERS) {",
+    to: "    if (false) {",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "the minimal webhook payload carries headlines (F14)",
+    file: "src/daemon/notify.js",
+    from: "  if (detail === 'headline') body.items =",
+    to: "  body.items =",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a notification headline keeps placeholder text (F14)",
+    file: "src/daemon/notify.js",
+    from: "  for (const hit of ph.findAll(s).reverse()) s = `${s.slice(0, hit.offset)}«placeholder»${s.slice(hit.end)}`",
+    to: "",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "the webhook is POSTed for every item, not once per interval (F14)",
+    file: "src/daemon/notify.js",
+    from: "    const wait = Math.max(0, this.lastSent + WEBHOOK_INTERVAL_MS - Date.now())",
+    to: "    const wait = 0",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a test notification is not throttled (F14)",
+    file: "src/daemon/notify.js",
+    from: "    if (now - this.lastTest < TEST_INTERVAL_MS) {",
+    to: "    if (false) {",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "every webhook failure is recorded, so a dead endpoint floods the log (F14)",
+    file: "src/daemon/notify.js",
+    from: "    if (now - this.lastFailureRecorded < FAILURE_RECORD_MS) return",
+    to: "",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a session request never tells the notifier it is waiting (F14)",
+    file: "src/daemon/session-requests.js",
+    from: "    try { this.onPending?.({ kind: 'session',",
+    to: "    try { void ({ kind: 'session',",
+    tests: ["test/security/control-api-notify.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override's methods replace the template's instead of intersecting (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "      g.methods = o.methods.filter((m) => base.includes(m))",
+    to: "      g.methods = o.methods",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override that is not one is ignored instead of refused (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "    if (!TEMPLATE_OVERRIDES.includes(k)) throw refuse(`a template cannot be overridden with ${k}`)",
+    to: "",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override's budget replaces the template's instead of taking the minimum (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "      g.budget = Math.min(baseInt, budget)",
+    to: "      g.budget = budget",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override's approval mode replaces a stricter one (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "g.approval = !order.includes(base) ? 'each' : (order.indexOf(o.approval) > order.indexOf(base) ? o.approval : base)",
+    to: "g.approval = o.approval",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override's lifetime replaces a shorter one (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "      spec.ttl_hours = Math.min(base, o.ttl_hours)",
+    to: "      spec.ttl_hours = o.ttl_hours",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a template override can make a finite template infinite (F17)",
+    file: "src/daemon/session-requests.js",
+    from: "    if (o.infinite === true && spec.infinite !== true) throw refuse('an override cannot remove a template\\'s lifetime')",
+    to: "",
+    tests: ["test/security/control-api-templates.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a human's numeric override is coerced, so a typo becomes null and is dropped",
+    file: "src/pending.js",
+    from: "  const num = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)$/.test(String(v)) ? Number(v) : String(v)))",
+    to: "  const num = (v) => Number(v)",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a held request's preview is dropped from the human's list (F13)",
+    file: "src/pending.js",
+    from: "    preview: raw.preview ?? null,",
+    to: "    preview: null,",
+    tests: ["test/security/control-api-mcp.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a probe refusal (a pin mismatch) is answered as an internal error (F12)",
+    file: "src/daemon/server.js",
+    from: "      if (e instanceof VaultError || typeof e?.code !== 'string' || !Object.hasOwn(CODES, e.code)) throw e",
+    to: "      throw e",
+    tests: ["test/security/control-api-credentials.test.js"],
+  },
+  {
+    // control-api (wave 3).
+    what: "a grant lifetime given twice in a narrowing is taken from one place silently (C22)",
+    file: "src/daemon/server.js",
+    from: "    if (input.grant_ttl_minutes !== undefined && narrow.grant_ttl_minutes !== undefined) {",
+    to: "    if (false) {",
+    tests: ["test/security/control-api-sessions.test.js"],
+  },
 ]
 
 let survived = 0
