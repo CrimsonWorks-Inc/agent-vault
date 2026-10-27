@@ -2863,8 +2863,8 @@ const MUTATIONS = [
   {
     what: 'a daemon answer reaches the page without the token and placeholder guard',
     file: 'src/ui/server.js',
-    from: 'UiServer.HANDOFF.has(key) ? obj : towardPage(obj)',
-    to: 'obj',
+    from: 'const send = (status, obj) => this.#send(res, status, towardPage(obj))',
+    to: 'const send = (status, obj) => this.#send(res, status, obj)',
     tests: ['test/security/control-ui-guard.test.js'],
   },
   {
@@ -2912,7 +2912,7 @@ const MUTATIONS = [
   {
     what: 'the page is served without the one narrowing parser (C21)',
     file: 'src/ui/server.js',
-    from: 'return html.replace(PARSER_MARKER, () => parseOverrides.toString())',
+    from: 'return html.replace(PARSER_MARKER, () => source)',
     to: 'return html',
     tests: ['test/security/control-ui-guard.test.js'],
   },
@@ -2950,6 +2950,55 @@ const MUTATIONS = [
     from: 'try { payload = JSON.parse(raw.payload) } catch (e) { return { error: `The payload rules are not JSON: ${e.message}` } }',
     to: 'payload = raw.payload',
     tests: ['test/security/control-ui-page.test.js'],
+  },
+  {
+    what: 'an error from POST sessions reaches the page as a hand-off, unfiltered',
+    file: 'src/ui/server.js',
+    from: 'const send = (status, obj) => this.#send(res, status, towardPage(obj))',
+    to: 'const send = (status, obj) => this.#send(res, status, UiServer.HANDOFF.has(key) ? obj : towardPage(obj))',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'the session hand-off carries the whole daemon answer, not only the card fields',
+    file: 'src/ui/server.js',
+    from: 'UiServer.HANDOFF.has(key) ? handoffTowardPage(obj) : towardPage(obj))',
+    to: 'UiServer.HANDOFF.has(key) ? obj : towardPage(obj))',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'a hand-off card field is copied back with whatever is nested in it',
+    file: 'src/ui/server.js',
+    from: 'if (isScalar(v) || (Array.isArray(v) && v.every(isScalar))) to[n] = v',
+    to: 'to[n] = v',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'a withheld key in another case reaches the page',
+    file: 'src/ui/server.js',
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k)',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'a hyphenated withheld key reaches the page',
+    file: 'src/ui/server.js',
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase())',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'a parser that can end its own script is served in the page',
+    file: 'src/ui/server.js',
+    from: "if (/<\\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {",
+    to: 'if (false) {',
+    tests: ['test/security/control-ui-handoff.test.js'],
+  },
+  {
+    what: 'a VaultError refusal from the UI is reported as a crash',
+    file: 'src/ui/server.js',
+    from: 'return send(e.status || e.http || 500,',
+    to: 'return send(e.status || 500,',
+    tests: ['test/security/control-ui-handoff.test.js'],
   },
 ]
 
