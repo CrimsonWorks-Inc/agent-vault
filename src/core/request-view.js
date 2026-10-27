@@ -103,16 +103,6 @@ function headerOverrides(headers) {
 const bothReadings = (raw) => [...queryParams(raw), ...(raw.includes(';') ? queryParams(raw, '&') : [])]
 
 /**
- * A multipart `name*` parameter, `utf-8''%5Fmethod`, decoded as RFC 5987
- * writes it and busboy reads it. One that does not decode is read as a name
- * no reader agrees on.
- */
-function extendedName(raw) {
-  const m = /^[^']*'[^']*'(.*)$/s.exec(raw)
-  try { return decodeURIComponent(m ? m[1] : raw) } catch { return '�' }
-}
-
-/**
  * Every field name a framework may read, and every value a method-override
  * field carries: in the query, in a form or multipart body, and at the top
  * level of a JSON body. Each copy of a repeated field is returned, since
@@ -126,13 +116,16 @@ function fields(query, mediaType, body) {
   const text = (Buffer.isBuffer(body) ? body.toString('utf8') : String(body)).replace(/^﻿/, '')
   if (mediaType === 'application/x-www-form-urlencoded') read(bothReadings(text))
   else if (mediaType === 'multipart/form-data') {
-    // Each part's names, every `name` and `name*` in its Content-Disposition,
-    // and its value up to the next delimiter. A part that names an override
-    // and has no readable value counts as naming another method.
-    for (const m of text.matchAll(/content-disposition:([^\r\n]*)\r?\n/gi)) {
-      const partNames = [...m[1].matchAll(/;\s*name(\*?)\s*=\s*(?:"([^"]*)"|([^;]*))/gi)].map(([, star, quoted, bare]) => (star ? extendedName : String)(quoted ?? bare.trim()))
-      const value = /^(?:[^\r\n]+\r?\n)*?\r?\n([\s\S]*?)\r?\n--/.exec(text.slice(m.index + m[0].length))
-      read(partNames.map((name) => ({ name, value: value ? value[1] : '' })))
+    // Each part's names, every `name` in its Content-Disposition with any
+    // line it was folded onto, and its value: what follows the part's
+    // headers up to the next delimiter. A part that names an override and
+    // has no readable value counts as naming another method.
+    for (const m of text.matchAll(/content-disposition:/gi)) {
+      const rest = text.slice(m.index + m[0].length)
+      const end = /\r?\n\r?\n/.exec(rest)
+      const disposition = (end ? rest.slice(0, end.index) : rest).replace(/;[ \t]*\r?\n|\r?\n[ \t]+/g, (s) => (s[0] === ';' ? '; ' : ' ')).split(/\r?\n/)[0]
+      const value = end && /^([\s\S]*?)\r?\n--/.exec(rest.slice(end.index + end[0].length))
+      read([...disposition.matchAll(/;\s*name\*?\s*=\s*(?:"([^"]*)"|([^;]*))/gi)].map(([, quoted, bare]) => ({ name: quoted ?? bare.trim(), value: value ? value[1] : '' })))
     }
   } else if (/[/+]json$/.test(mediaType)) {
     let parsed

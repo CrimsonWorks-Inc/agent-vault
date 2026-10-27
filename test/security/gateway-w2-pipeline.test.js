@@ -1052,7 +1052,8 @@ test('a stray name is refused on every path under any rules, and a hop to one is
     [form, 'a=1&force%00=1', 'request_ambiguous'],
     [multipart, `${part(' force', '1')}--XyZ--\r\n`, 'request_ambiguous'],
     [multipart, `${part('a\x01', '1')}--XyZ--\r\n`, 'request_ambiguous'],
-    [multipart, `--XyZ\r\nContent-Disposition: form-data; name="a"; name*=utf-8''%C3%A9\r\n\r\n1\r\n--XyZ--\r\n`, 'request_ambiguous'],
+    [multipart, `--XyZ\r\nContent-Disposition: form-data; name="a"; name="bé"\r\n\r\n1\r\n--XyZ--\r\n`, 'request_ambiguous'],
+    [multipart, `--XyZ\r\nContent-Disposition: form-data;\r\n name="a\t"\r\n\r\n1\r\n--XyZ--\r\n`, 'request_ambiguous'],
     [json, '{"a":1," force":true}', 'request_ambiguous'],
     [json, '{"force\\u0000":true}', 'request_ambiguous'],
     [json, '{"model":"x","":1}', 'request_ambiguous'],
@@ -1075,11 +1076,22 @@ test('a stray name is refused on every path under any rules, and a hop to one is
   assert.equal(JSON.stringify(g.vault.db), before)
 })
 
-test('a multipart name* is read as busboy decodes it', async t => {
-  const f = fixture(t, { methods: ['GET', 'POST', 'DELETE'] })
-  const body = `--XyZ\r\nContent-Disposition: form-data; name="a"; name*=utf-8''%5Fmethod\r\n\r\nDELETE\r\n--XyZ--\r\n`
-  const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, multipart], body: Buffer.from(body) }))
-  assert.equal(result.status, 403); assert.equal(problem(result).rule, 'method_override'); assert.equal(f.sent.length, 0)
+// A Content-Disposition folded onto a second line, and a second `name` in
+// it, still name the part. `name*` names no form field to any framework,
+// and Grok's round-4 probe holds it to that.
+test('a multipart part is named by every name in its Content-Disposition, folded or not', async t => {
+  for (const [label, disposition, status] of [
+    ['folded', 'form-data;\r\n name="_method"', 403],
+    ['folded with a tab', 'form-data; name="a";\r\n\tname="_method"', 403],
+    ['a second name', 'form-data; name="a"; name="_method"', 403],
+    ['name*', "form-data; name*=utf-8''_method", 200],
+  ]) {
+    const f = fixture(t, { methods: ['GET', 'POST', 'DELETE'] })
+    const body = `--XyZ\r\nContent-Disposition: ${disposition}\r\n\r\nDELETE\r\n--XyZ--\r\n`
+    const result = await f.pipeline.handle(f.req({ method: 'POST', headers: [...f.req().headers, multipart], body: Buffer.from(body) }))
+    assert.equal(result.status, status, label); assert.equal(f.sent.length, status === 200 ? 1 : 0, label)
+    if (status === 403) assert.equal(problem(result).rule, 'method_override', label)
+  }
 })
 
 // The second layer, read without the first: the payload rules and the

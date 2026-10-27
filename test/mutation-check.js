@@ -1645,10 +1645,10 @@ const MUTATIONS = [
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   {
-    what: "a multipart name* is read undecoded",
+    what: 'a folded multipart Content-Disposition is read up to its first line break',
     file: 'src/core/request-view.js',
-    from: '(star ? extendedName : String)',
-    to: 'String',
+    from: ".replace(/;[ \\t]*\\r?\\n|\\r?\\n[ \\t]+/g, (s) => (s[0] === ';' ? '; ' : ' '))",
+    to: '',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
 ]
