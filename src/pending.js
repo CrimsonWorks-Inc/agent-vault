@@ -103,67 +103,93 @@ export function decision(item, { granted, overrides = null }) {
   return { path: item.decide.path, body }
 }
 
-/** Narrowing flags, parsed the same way wherever they are typed. */
+/**
+ * Narrowing flags, parsed the same way wherever they are typed.
+ *
+ * SELF-CONTAINED (C21, C23): the UI server injects this function's source
+ * into the approvals page, so every helper it uses is defined inside it. A
+ * module-scope helper here is a ReferenceError on the page, and a page that
+ * catches that and submits anyway approves the agent's own proposal.
+ *
+ * A value that cannot be a narrowing THROWS, naming the field (`err.field`).
+ * It is never dropped: a dropped narrowing approves what the agent asked for,
+ * with nothing telling the human their flag was ignored.
+ */
 export function parseOverrides(args = {}) {
   const out = {}
+  const fail = (field, why) => Object.assign(new TypeError(`${field}: ${why}`), { field })
   // Split on commas and upper-cased, the way `session create`, the wizard and
   // the UI's new-session form all read them. A narrowing of "/a/**,/b/**" was
   // one glob with a comma in it, and "get" a method nothing sends: both
   // approved a session that matched nothing, with nothing saying why.
   const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
   const given = (v) => v !== undefined && v !== null && v !== ''
+  // A number, or a string that reads as one. Anything else throws: NaN and
+  // Infinity are sent by JSON as null, and a null narrowing is dropped, so
+  // the human's "--budget abc" approved the agent's own budget. A blank
+  // string would be Number('  ') = 0, which nobody typed.
+  const num = (field, v) => {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN)
+    if (!Number.isFinite(n)) throw fail(field, `not a number: ${JSON.stringify(v)}`)
+    return n
+  }
+  // JSON as typed on a command line, or the value itself from a page. A
+  // string that is not JSON, or JSON that is not an object or list, throws.
+  const json = (field, v) => {
+    if (typeof v !== 'string') return v
+    let parsed
+    try { parsed = JSON.parse(v) } catch { throw fail(field, 'not valid JSON') }
+    if (parsed === null || typeof parsed !== 'object') throw fail(field, 'must be a JSON object or list')
+    return parsed
+  }
+  // `GET,HEAD:/repos/**` as a route pair. Split on the first colon; the
+  // methods are comma-separated and upper-cased. Something that is not that
+  // shape is passed on as typed, for the daemon to refuse.
+  const routeOf = (text) => {
+    const s = String(text)
+    const at = s.indexOf(':')
+    if (at <= 0) return s
+    return {
+      methods: s.slice(0, at).split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
+      paths: [s.slice(at + 1).trim()],
+    }
+  }
+  // A string is trimmed; anything else passes through for the daemon to refuse.
+  const shape = (v) => (typeof v === 'string' ? v.trim() : v)
+  const pick = (...names) => names.map((n) => args[n]).find(given)
+
   if (args.methods) out.methods = list(args.methods).map((m) => m.toUpperCase())
   if (args.paths) out.paths = list(args.paths)
-  // A number as typed is a number; anything else is passed on as typed, so the
-  // daemon refuses it. Number('abc') is NaN, which JSON sends as null, and a
-  // null narrowing is dropped: the human's "--budget abc" approved the
-  // agent's own budget with nothing saying so.
-  const num = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)$/.test(String(v)) ? Number(v) : String(v)))
-  const dec = (v) => (typeof v === 'number' ? v : (/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(String(v)) ? Number(v) : String(v)))
-  if (given(args.budget)) out.budget = num(args.budget)
-  if (given(args.uses)) out.uses = num(args.uses)
+  if (given(args.budget)) out.budget = num('budget', args.budget)
+  if (given(args.uses)) out.uses = num('uses', args.uses)
   // The generated hint spells this `--ttl_minutes`, because it is generated
   // from the field name and there is only one list. `--ttl-minutes` is the
   // spelling a hand would reach for, so accept both.
-  const ttl = args.ttl_minutes ?? args['ttl-minutes']
-  if (given(ttl)) out.ttl_minutes = num(ttl)
+  const ttl = pick('ttl_minutes', 'ttl-minutes')
+  if (given(ttl)) out.ttl_minutes = num('ttl_minutes', ttl)
   // The wave-3 limits, by field name or by the CLI's flag. Shapes the daemon
   // understands (`60/min`, `1000/day`) are passed through for it to check.
-  const pick = (...names) => names.map((n) => args[n]).find(given)
   const grantTtl = pick('grant_ttl_minutes', 'grant-ttl', 'grant_ttl')
-  if (given(grantTtl)) out.grant_ttl_minutes = num(grantTtl)
+  if (given(grantTtl)) out.grant_ttl_minutes = num('grant_ttl_minutes', grantTtl)
   const concurrent = pick('max_concurrent', 'concurrency')
-  if (given(concurrent)) out.max_concurrent = num(concurrent)
-  if (given(args.redirects)) out.redirects = num(args.redirects)
+  if (given(concurrent)) out.max_concurrent = num('max_concurrent', concurrent)
+  if (given(args.redirects)) out.redirects = num('redirects', args.redirects)
   const tokens = pick('spend_tokens', 'spend-tokens')
-  if (given(tokens)) out.spend_tokens = num(tokens)
+  if (given(tokens)) out.spend_tokens = num('spend_tokens', tokens)
   const usd = pick('spend_usd', 'spend-usd')
-  if (given(usd)) out.spend_usd = dec(usd)
-  if (given(args.rate)) out.rate = typeof args.rate === 'object' ? args.rate : String(args.rate)
-  if (given(args.quota)) out.quota = typeof args.quota === 'object' ? args.quota : String(args.quota)
-  if (Array.isArray(args.routes)) out.routes = args.routes
+  if (given(usd)) out.spend_usd = num('spend_usd', usd)
+  if (given(args.rate)) out.rate = shape(args.rate)
+  if (given(args.quota)) out.quota = shape(args.quota)
+  // A JSON string is how --routes and --payload arrive from the CLI. It used
+  // to be dropped, and the agent's wider routes were what got approved.
+  if (given(args.routes)) out.routes = json('routes', args.routes)
   else if (given(args.route)) out.routes = (Array.isArray(args.route) ? args.route : [args.route]).map(routeOf)
-  if (given(args.payload) && typeof args.payload === 'object') out.payload = args.payload
+  if (given(args.payload)) out.payload = json('payload', args.payload)
   // Owner fields. The mode is passed through as typed and validated by the
   // daemon, so a typo is refused there rather than quietly meaning something.
   if (typeof args.approval === 'string' && args.approval !== '') out.approval = args.approval
   if (args.infinite === true || args.infinite === 'true') out.infinite = true
   return out
-}
-
-/**
- * `GET,HEAD:/repos/**` as a route pair. Split on the first colon; the
- * methods are comma-separated and upper-cased. Something that is not that
- * shape is passed on as typed, for the daemon to refuse.
- */
-function routeOf(text) {
-  const s = String(text)
-  const at = s.indexOf(':')
-  if (at <= 0) return s
-  return {
-    methods: s.slice(0, at).split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
-    paths: [s.slice(at + 1).trim()],
-  }
 }
 
 /**

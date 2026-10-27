@@ -31,7 +31,7 @@ import { summarizeSession, accessReport } from '../store/activity.js'
 import { exportBackup, inspectBackup, restoreBackup, bundleDigest } from '../store/backup.js'
 import { runProbe } from '../connectors/probe.js'
 import { checkDecisions } from '../pending.js'
-import { Notifier } from './notify.js'
+import { Notifier, redactStored } from './notify.js'
 import { DEFAULT_RULES } from './tripwire.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
@@ -2494,12 +2494,11 @@ export class Daemon {
    */
   #untrustedText(text, max = 200) {
     if (typeof text !== 'string' || !text) return null
-    let out = text.slice(0, max)
+    // Scrubbed whole, then cut: a secret or placeholder across the cut used
+    // to leave its first part behind.
+    let out = redactStored(text, this.vault.allSecrets())
     for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}«placeholder»${out.slice(hit.end)}`
-    for (const { secret, label } of this.vault.allSecrets()) {
-      if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret).join(`[[av:redacted:${label}]]`)
-    }
-    return out
+    return out.slice(0, max)
   }
 
   /**

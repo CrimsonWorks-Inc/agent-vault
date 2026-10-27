@@ -7,8 +7,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { startApi, stream, PASSPHRASE } from './control-api-helpers.js'
-import { webhookPayload, cleanHeadline } from '../../src/daemon/notify.js'
+import { startApi, stream, PASSPHRASE, SECRET } from './control-api-helpers.js'
+import { webhookPayload, cleanHeadline, redactStored } from '../../src/daemon/notify.js'
 
 const HOOK = 'https://hooks.example/services/T000/B000/SECRETPATH?token=QUERYSECRET'
 
@@ -191,4 +191,43 @@ test('a test notification is throttled, a failure is recorded once, and no webho
     assert.equal(failed.length, 1)
     assert.deepEqual({ host: failed[0].host, reason: failed[0].reason }, { host: 'hooks.example', reason: 'status_500' })
   } finally { await a.stop() }
+})
+
+test('a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14)', async () => {
+  const hook = recorder()
+  const a = await startApi({ notifyFetch: hook.fetchImpl })
+  try {
+    a.vault.setNotifyWebhook({ url: HOOK, detail: 'headline' })
+    const watch = await stream(a.sock)
+    try {
+      await watch.wait(1)
+      const asked = await a.control('POST', '/v1/session-requests', { cred: 'demo', paths: [`/${SECRET}`, '/plain/path'], reason: 'x' })
+      assert.equal(asked.status, 200, JSON.stringify(asked.body))
+      await watch.wait(2)
+      await new Promise((r) => setTimeout(r, 50))
+      assert.equal(hook.calls.length, 1)
+      const posted = JSON.stringify(hook.calls[0].body)
+      const streamed = watch.events.map((e) => e.raw).join('\n')
+      for (const [where, text] of [['webhook', posted], ['stream', streamed]]) {
+        assert.ok(!text.includes(SECRET), `the stored secret reached the ${where}`)
+        assert.ok(!text.includes(SECRET.slice(0, 12)), `part of the stored secret reached the ${where}`)
+        assert.match(text, /\[\[av:redacted:demo\]\]/, `the ${where} headline no longer says something was there`)
+        // What is not a secret is still the summary the human reads.
+        assert.match(text, /\/plain\/path/, `the ${where} headline lost the ordinary path`)
+      }
+      // The snapshot a new watcher gets is scrubbed the same way.
+      const late = await stream(a.sock)
+      try {
+        await late.wait(1)
+        assert.ok(!late.events[0].raw.includes(SECRET), 'the snapshot carried the stored secret')
+      } finally { late.close() }
+    } finally { watch.close() }
+  } finally { await a.stop() }
+})
+
+test('a headline with no secret in it is sent as the summary, unchanged (F14)', () => {
+  assert.equal(redactStored('session for demo · GET · /repos/x', [{ secret: SECRET, label: 'demo' }]), 'session for demo · GET · /repos/x')
+  assert.equal(redactStored(`a/${SECRET}/b`, [{ secret: SECRET, label: 'demo' }]), 'a/[[av:redacted:demo]]/b')
+  // Shorter than the scrubber's floor: matching it would redact ordinary words.
+  assert.equal(redactStored('GET /abc', [{ secret: 'abc', label: 'short' }]), 'GET /abc')
 })

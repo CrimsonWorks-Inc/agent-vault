@@ -21,6 +21,7 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { deny } from '../core/errors.js'
 import * as ph from '../core/placeholder.js'
+import { MIN_SECRET_LEN } from '../core/scrub.js'
 
 export const MAX_SUBSCRIBERS = 8
 const KEEPALIVE_MS = 15_000
@@ -32,6 +33,21 @@ const MAX_PAYLOAD_BYTES = 2048
 const MAX_IDS = 10
 const MAX_HEADLINE = 200
 const KINDS = new Set(['request', 'session'])
+
+/**
+ * Text with every stored secret in it replaced, the one scrub for anything an
+ * agent may have written that leaves or is kept by the daemon (quarantine
+ * reasons, notification headlines). `secrets` is `vault.allSecrets()`.
+ * Run it before anything cuts the text, or a secret across the cut leaves
+ * its first half behind.
+ */
+export function redactStored(text, secrets) {
+  let out = typeof text === 'string' ? text : ''
+  for (const { secret, label } of secrets) {
+    if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret).join(`[[av:redacted:${label}]]`)
+  }
+  return out
+}
 
 /**
  * A headline as it may leave the daemon: no control characters (a terminal
@@ -46,13 +62,24 @@ export function cleanHeadline(text) {
   return s.length > MAX_HEADLINE ? `${s.slice(0, MAX_HEADLINE - 1)}…` : s
 }
 
-/** One waiting item in the one shape every surface sends. Null when it cannot be read. */
-function itemOf(event) {
-  if (!event || typeof event !== 'object' || !KINDS.has(event.kind) || typeof event.id !== 'string' || !event.id) return null
+/** Whether an event is one waiting item the notifier can describe. */
+function isItem(event) {
+  return !!event && typeof event === 'object' && KINDS.has(event.kind) && typeof event.id === 'string' && !!event.id
+}
+
+/**
+ * One waiting item in the one shape every surface sends. Null when it cannot
+ * be read. A headline is the daemon's summary, but the paths in it are the
+ * agent's, and an agent that holds a stored secret can put it in one: so
+ * stored secrets are redacted, and with `secrets` null (the vault cannot be
+ * read) there is no headline at all.
+ */
+function itemOf(event, secrets) {
+  if (!isItem(event)) return null
   return {
     kind: event.kind,
     id: event.id.slice(0, 64),
-    headline: cleanHeadline(event.headline),
+    headline: secrets ? cleanHeadline(redactStored(event.headline, secrets)) : '',
     created_at: typeof event.created_at === 'string' ? event.created_at.slice(0, 40) : null,
   }
 }
@@ -122,21 +149,29 @@ export class Notifier {
     this.closed = false
   }
 
+  /** Every stored secret, for redacting headlines; null when the vault cannot give them. */
+  #secrets() {
+    try { return this.vault.allSecrets() } catch { return null }
+  }
+
   /** What is waiting now, cleaned. */
   #waiting() {
     let rows = []
     try { rows = this.snapshot() || [] } catch { rows = [] }
-    return rows.map(itemOf).filter(Boolean)
+    const secrets = rows.length ? this.#secrets() : null
+    return rows.map((r) => itemOf(r, secrets)).filter(Boolean)
   }
 
   /** Something new is waiting. Never throws: the caller is holding a request. */
   pending(event) {
-    if (this.closed) return
-    const item = itemOf(event)
-    if (!item) return
-    const frame = `event: pending\ndata: ${JSON.stringify(item)}\n\n`
-    for (const res of this.subscribers) {
-      try { res.write(frame) } catch { this.subscribers.delete(res) }
+    if (this.closed || !isItem(event)) return
+    // allSecrets() decrypts the whole vault, and a held request is something
+    // an agent can cause at will: only when someone is watching.
+    if (this.subscribers.size) {
+      const frame = `event: pending\ndata: ${JSON.stringify(itemOf(event, this.#secrets()))}\n\n`
+      for (const res of this.subscribers) {
+        try { res.write(frame) } catch { this.subscribers.delete(res) }
+      }
     }
     this.#scheduleWebhook()
   }

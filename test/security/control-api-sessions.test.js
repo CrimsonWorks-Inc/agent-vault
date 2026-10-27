@@ -345,17 +345,19 @@ test('the access report covers every session and credential, and refuses a since
 
 // ------------------------------------------------- the human's overrides
 
-test('a typo in a narrowing is refused by the daemon, never dropped as null', async () => {
+test('a typo in a narrowing is refused, by the parser and by the daemon, never dropped as null', async () => {
   // Number('abc') is NaN, which JSON sends as null, and a null override is
   // dropped: the human's "--budget abc" used to approve the agent's own budget.
-  assert.deepEqual(parseOverrides({ budget: 'abc', uses: '2', 'grant-ttl': 'soon', concurrency: '4', 'spend-usd': '1.25' }), {
-    budget: 'abc', uses: 2, grant_ttl_minutes: 'soon', max_concurrent: 4, spend_usd: 1.25,
-  })
+  // The parser throws (C23); a caller that sends the string anyway is refused.
+  assert.deepEqual(parseOverrides({ uses: '2', concurrency: '4', 'spend-usd': '1.25' }), { uses: 2, max_concurrent: 4, spend_usd: 1.25 })
+  for (const [flag, field] of [['budget', 'budget'], ['grant-ttl', 'grant_ttl_minutes']]) {
+    assert.throws(() => parseOverrides({ [flag]: 'abc' }), (e) => e.field === field)
+  }
   assert.deepEqual(parseOverrides({ route: ['get,head:/repos/**'] }).routes, [{ methods: ['GET', 'HEAD'], paths: ['/repos/**'] }])
   const a = await startApi()
   try {
     const asked = await a.control('POST', '/v1/session-requests', { cred: 'demo', budget: 50, reason: 'x' })
-    const typo = await a.control('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true, overrides: parseOverrides({ budget: 'abc' }) })
+    const typo = await a.control('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true, overrides: { budget: 'abc' } })
     assert.equal(typo.status, 403, JSON.stringify(typo.body))
     assert.equal(typo.body.rule, 'policy_invalid')
     assert.equal(a.daemon.sessionRequests.get(asked.body.id).state, 'pending', 'a refused decision settled the request')

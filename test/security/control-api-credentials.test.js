@@ -313,3 +313,19 @@ test('releasing a quarantine needs a human, and a still-live session works again
     assert.equal((await a.control('POST', '/v1/credentials/quarantine', { slug: 'demo', reason: 7 })).body.rule, 'policy_invalid')
   } finally { await a.stop() }
 })
+
+test('a secret across the 200-character cut of a quarantine reason leaves none of itself behind', async () => {
+  const a = await startApi()
+  try {
+    const reason = `${'x'.repeat(190)}${SECRET}`
+    const r = await a.control('POST', '/v1/credentials/quarantine', { slug: 'demo', reason })
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    const stored = a.audit('cred.quarantined').at(-1).reason_untrusted
+    assert.ok(stored.length <= 200, 'the reason is no longer bounded')
+    assert.ok(!stored.includes(SECRET.slice(0, 10)), `the first half of the secret survived the cut: ${stored}`)
+    // An ordinary reason is kept as written.
+    a.vault.clearQuarantine('demo')
+    assert.equal((await a.control('POST', '/v1/credentials/quarantine', { slug: 'demo', reason: 'rotating after a leak' })).status, 200)
+    assert.equal(a.audit('cred.quarantined').at(-1).reason_untrusted, 'rotating after a leak')
+  } finally { await a.stop() }
+})
