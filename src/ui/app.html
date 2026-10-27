@@ -188,6 +188,39 @@
            background: var(--ink); color: var(--panel); padding: 9px 16px; border-radius: 8px;
            font-size: 13px; opacity: 0; transition: opacity .18s; pointer-events: none; }
   #toast.show { opacity: 1; }
+
+  /* --- wave 3 ----------------------------------------------------------- */
+  /* A class that sets display (.grid) beats the hidden attribute's own rule,
+     which showed the spend limits for a credential that has no spend. */
+  [hidden] { display: none !important; }
+  details.more { border-bottom: 1px solid var(--line); padding: 8px 16px; }
+  details.more:last-child { border-bottom: 0; }
+  details > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+  details.preview { margin: 8px 0 10px; }
+  /* Agent-written bytes, set apart so they never read as the page's own words. */
+  pre.untrusted {
+    font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+    background: color-mix(in srgb, var(--warn) 6%, var(--panel)); border: 1px dashed var(--warn);
+    border-radius: 7px; padding: 8px 10px; max-height: 320px; overflow: auto; margin: 6px 0;
+  }
+  .chip { display: inline-block; font-family: var(--mono); font-size: 11.5px; padding: 1px 7px;
+          border-radius: 999px; border: 1px solid var(--line); margin: 2px 4px 2px 0; }
+  table.kv { border-collapse: collapse; font-size: 12.5px; width: 100%; margin: 6px 0; }
+  table.kv td { padding: 3px 10px 3px 0; vertical-align: top; border-top: 1px solid var(--line); word-break: break-word; }
+  table.kv td:first-child { color: var(--muted); white-space: nowrap; width: 1%; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; margin: 4px 0 8px; }
+  .bar span { position: absolute; top: 0; bottom: 0; left: 0; }
+  .bar .used { background: var(--accent); }
+  .bar .reserved { background: var(--warn); }
+  .highlight { outline: 2px solid var(--warn); outline-offset: 2px; }
+  .actions { flex-wrap: wrap; justify-content: flex-end; }
+  button.action.panic { background: var(--crit); border-color: var(--crit); color: #fff; }
+  textarea {
+    font: inherit; font-family: var(--mono); font-size: 12px; width: 100%; min-height: 70px;
+    padding: 7px 10px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  .routes .route { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .modal { width: min(440px, 92vw); }
 </style>
 
 <nav>
@@ -908,6 +941,769 @@ ${c.cli} ui                         open this page`)}`,
     <div class="cmd"><p class="caption">${esc(label)}</p>
       <pre>${esc(value)}</pre><button class="copy" data-copy="${esc(value)}">Copy</button></div>`
 
+  // ------------------------------------------------------ wave-3 renderers
+  // Pure: each takes what a route returned and gives back HTML or text, so
+  // the tests can run them as they are written here. Anything that came from
+  // an agent goes through esc(), in monospace, under a label that says so.
+
+  const UNTRUSTED = 'written by the agent, not verified'
+
+  /**
+   * What a held request sends, as the gateway previewed it (F13). The
+   * gateway has already put labels where placeholders were and scrubbed any
+   * secret; this paints it, and decides nothing.
+   */
+  function previewBlock(p, id = '') {
+    if (!p || typeof p !== 'object') return ''
+    const body = p.body && typeof p.body === 'object' ? p.body : {}
+    const pairs = (list, where) => (Array.isArray(list) ? list : [])
+      .filter((x) => Array.isArray(x)).map(([k, v]) => [where, k, v])
+    const rows = [...pairs(p.query, 'query'), ...pairs(p.headers, 'header')]
+    const chips = (Array.isArray(p.placeholders) ? p.placeholders : [])
+      .map((x) => `<span class="chip">${esc(x?.label)} @ ${esc(x?.location)}</span>`).join('')
+    const text = typeof body.text === 'string'
+      ? `<pre class="untrusted">${esc(body.text)}</pre>`
+      : `<div class="meta">${body.kind === 'binary' ? 'A binary body, not shown.' : 'No body.'}</div>`
+    return `<details class="preview" data-keep="preview:${esc(id)}"><summary>What it sends (${UNTRUSTED})</summary>
+      <div class="meta mono">${esc(p.method)} ${esc(p.host)}${esc(p.path)}
+        &middot; ${esc(p.content_type || 'no content type')} &middot; ${esc(Number.isInteger(body.bytes) ? body.bytes : 0)} bytes${body.truncated === true ? `, first ${esc(body.shown_bytes)} shown` : ''}</div>
+      ${text}
+      ${rows.length ? `<table class="kv">${rows.map(([where, k, v]) =>
+        `<tr><td>${esc(where)}</td><td class="mono">${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}</table>` : ''}
+      ${chips ? `<div class="meta" style="margin-top:6px">Placeholders: ${chips}</div>` : ''}
+    </details>`
+  }
+
+  /**
+   * A desktop notification's text (F14): the daemon's headline, never the
+   * agent's reason, with control characters out and cut to 120 characters,
+   * as the CLI's `watch` writes it.
+   */
+  function notificationText(item) {
+    const lead = item?.kind === 'request' ? 'Held request: ' : 'Session requested: '
+    const text = `${lead}${String(item?.headline ?? '')}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    return text.length > 120 ? `${text.slice(0, 119)}…` : text
+  }
+
+  /** Pills for what a human should notice about a credential (F10, F16). */
+  function credentialBadges(c) {
+    const out = []
+    if (c?.quarantine) out.push('<span class="pill crit">quarantined</span>')
+    if (c?.expiry_warning === 'expired') out.push('<span class="pill crit">expired</span>')
+    else if (c?.expiry_warning === 'soon') out.push(`<span class="pill warn">${esc(expiresIn(soonestExpiry(c)))}</span>`)
+    const status = c?.health?.status
+    if (status === 'ok') out.push('<span class="pill ok">healthy</span>')
+    else if (typeof status === 'string' && status !== 'unknown') out.push(`<span class="pill warn">${esc(status)}</span>`)
+    return out.join(' ')
+  }
+
+  /** The earlier of the expiry you set and the one the upstream reported. */
+  function soonestExpiry(c) {
+    const at = [c?.expires_at, c?.health?.observed_expires_at]
+      .filter((x) => typeof x === 'string').map((x) => Date.parse(x)).filter(Number.isFinite)
+    return at.length ? Math.min(...at) : null
+  }
+
+  function expiresIn(ms) {
+    if (ms === null) return 'expires soon'
+    const days = Math.ceil((ms - Date.now()) / 86_400_000)
+    return days <= 0 ? 'expired' : `expires in ${days}d`
+  }
+
+  /** `pinned: api.github.com (2)`, read-only: pinning stays in the CLI (F11). */
+  function pinsText(pins) {
+    const hosts = Object.entries(pins && typeof pins === 'object' ? pins : {})
+      .filter(([, n]) => Number.isInteger(n) && n > 0)
+    return hosts.length ? `pinned: ${hosts.map(([h, n]) => `${h} (${n})`).join(', ')}` : ''
+  }
+
+  /** One effective-policy value in words, for the detail view and the narrow result. */
+  function policyValue(v) {
+    if (v === null || v === undefined) return 'none'
+    if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ') : 'none'
+    if (typeof v === 'object') return JSON.stringify(v)
+    return String(v)
+  }
+
+  /**
+   * An effective policy in the Described shape (F20): the same description
+   * the agent gets from vault_describe_access, so the two read one thing.
+   */
+  function describedTable(e) {
+    if (!e || typeof e !== 'object') return ''
+    const rows = [
+      ['hosts', e.hosts], ['methods', e.methods], ['paths', e.paths], ['denied paths', e.deny_paths],
+      ['approval', e.approval], ['routes', (e.routes || []).map((set) => (set || []).map((r) => `${(r.methods || []).join(',')} ${(r.paths || []).join(' ')}`).join(' | '))],
+      ['budget', e.budget?.invalid ? 'invalid: every request is refused' : e.budget?.limit],
+      ['spend', e.spend], ['rate', e.rate ? `${e.rate.count}/${e.rate.per}` : null],
+      ['concurrency', e.max_concurrent], ['quota', e.quota ? `${e.quota.count}/${e.quota.window}` : null],
+      ['redirects', e.redirects?.max ?? 0],
+    ]
+    const payload = Array.isArray(e.payload) && e.payload.length
+      ? `<tr><td>payload</td><td><pre class="untrusted">${esc(JSON.stringify(e.payload, null, 2))}</pre></td></tr>` : ''
+    return `<table class="kv">${rows.map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td class="mono">${esc(policyValue(v))}</td></tr>`).join('')}${payload}</table>`
+  }
+
+  /** Used against limit, with what is reserved in between (F5). */
+  function spendBar(used, reserved, limit) {
+    if (!Number.isFinite(limit) || limit <= 0) return ''
+    const pct = (n) => Math.max(0, Math.min(100, (n / limit) * 100)).toFixed(1)
+    return `<div class="bar"><span class="reserved" style="width:${pct(used + reserved)}%"></span><span class="used" style="width:${pct(used)}%"></span></div>`
+  }
+
+  /** What a narrow changed, grant by grant, from the route's before and after (F15). */
+  function narrowSummary(r) {
+    const grants = Array.isArray(r?.grants) ? r.grants : []
+    const lines = grants.map((g) => {
+      const keys = [...new Set([...Object.keys(g.before || {}), ...Object.keys(g.after || {})])]
+      const changed = keys.filter((k) => canonicalJson(g.before?.[k]) !== canonicalJson(g.after?.[k]))
+      return `<div class="row"><div class="main"><div class="name mono">${esc(g.cred)}</div>
+        <div class="meta">${changed.length
+          ? changed.map((k) => `${esc(k)}: ${esc(policyValue(g.before?.[k]))} &rarr; ${esc(policyValue(g.after?.[k]))}`).join('<br>')
+          : 'already that narrow; nothing changed'}${g.expires_at ? `<br>grant expires ${esc(g.expires_at)}` : ''}</div></div></div>`
+    })
+    const ends = r?.infinite === true ? 'never expires' : r?.expires_at ? `expires ${r.expires_at}` : ''
+    return `${ends ? `<div class="row"><div class="main"><div class="meta">session ${esc(r.session_id)} ${esc(ends)}</div></div></div>` : ''}${lines.join('')}`
+  }
+
+  /** `session show`, as a card (F19). */
+  function detailCard(d) {
+    const s = d?.session || {}
+    const a = d?.activity || {}
+    const kv = (rows) => `<table class="kv">${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="mono">${esc(v)}</td></tr>`).join('')}</table>`
+    const grants = (Array.isArray(d?.grants) ? d.grants : []).map((g) => {
+      const sp = g.spend || null
+      const lim = g.limits || {}
+      return `<div class="body" style="border-top:1px solid var(--line)">
+        <div class="name mono">${esc(g.cred)} <span class="pill ${g.state === 'active' ? 'ok' : ''}">${esc(g.state)}</span>
+          ${g.expires_at ? `<span class="meta">grant ${esc(until(g.expires_at))}</span>` : ''}</div>
+        ${describedTable(g.effective)}
+        ${kv([
+          ['budget', g.budget ? `${policyValue(g.budget.used)} used of ${policyValue(g.budget.limit)}` : 'none'],
+          ...(lim.rate ? [['rate now', `${policyValue(lim.rate.tokens_now)} of ${lim.rate.count} per ${lim.rate.per}`]] : []),
+          ...(lim.max_concurrent ? [['in flight', `${policyValue(lim.max_concurrent.in_flight)} of ${lim.max_concurrent.limit}`]] : []),
+          ...(lim.quota ? [['quota used', `${policyValue(lim.quota.estimate)} of ${lim.quota.count} per ${lim.quota.window}`]] : []),
+        ])}
+        ${sp && Number.isFinite(sp.limit_tokens) ? `<div class="meta">tokens: ${esc(sp.tokens_used)} used, ${esc(sp.reserved_tokens)} reserved, of ${esc(sp.limit_tokens)}</div>${spendBar(sp.tokens_used, sp.reserved_tokens, sp.limit_tokens)}` : ''}
+        ${sp && Number.isFinite(sp.limit_usd_micros) ? `<div class="meta">spend: $${esc((sp.usd_micros_used / 1e6).toFixed(2))} used, $${esc((sp.reserved_usd_micros / 1e6).toFixed(2))} reserved, of $${esc((sp.limit_usd_micros / 1e6).toFixed(2))} (estimate, prices ${esc(sp.prices_version)})</div>${spendBar(sp.usd_micros_used, sp.reserved_usd_micros, sp.limit_usd_micros)}` : ''}
+        ${(g.placeholders || []).length ? `<table class="kv">${g.placeholders.map((p) =>
+          `<tr><td class="mono">${esc(p.id)}</td><td class="mono">${esc(p.field)} &middot; ${esc(p.uses)}/${esc(p.max_uses ?? '∞')} &middot; ${esc(p.state)}${p.dead_reason ? ` (${esc(p.dead_reason)})` : ''} &middot; ${esc(p.expires_at ? until(p.expires_at) : 'no expiry of its own')}</td></tr>`).join('')}</table>` : ''}
+      </div>`
+    }).join('')
+    const req = a.requests || {}
+    const appr = a.approvals || {}
+    return `<div class="card"><h2>Session ${esc(s.id)}</h2>
+      ${a.complete === false ? `<div class="notice" style="margin:12px 16px">History is incomplete: ${esc(a.note || 'the audit log does not cover the whole session')}. Missing records are not zero activity.</div>` : ''}
+      <div class="body">${kv([
+        ['label', s.label], ['state', s.state], ['created', s.created_at],
+        ['expires', s.infinite === true ? 'never' : s.expires_at], ['last seen', s.last_seen_at || 'never'],
+        ['remote', s.remote === true ? 'yes' : 'no'], ['template', s.template || 'none'],
+        ['elevated', (s.elevated || []).join(', ') || 'no'],
+      ])}</div>
+      ${grants}
+      <div class="body" style="border-top:1px solid var(--line)">
+        <div class="name">Activity</div>
+        <div class="meta">${esc(req.allowed ?? 0)} allowed &middot; ${esc(req.denied ?? 0)} refused &middot; ${esc(req.held ?? 0)} held
+          &middot; approvals: ${esc(appr.requested ?? 0)} asked, ${esc(appr.granted ?? 0)} granted, ${esc(appr.denied ?? 0)} denied</div>
+        ${(a.paths || []).length ? `<table class="kv">${a.paths.map((p) =>
+          `<tr><td class="mono">${esc(p.count)}</td><td class="mono">${esc(p.method)} ${esc(p.path)}</td></tr>`).join('')}</table>` : ''}
+        ${(a.denials || []).length ? `<table class="kv">${a.denials.map((x) =>
+          `<tr><td class="mono">${esc(x.count)}</td><td class="mono">${esc(x.code)} ${esc(x.rule || '')}</td></tr>`).join('')}</table>` : ''}
+        ${(a.tripwires || []).length ? `<div class="meta">tripwires: ${a.tripwires.map((t) => `${esc(t.rule_id)} at ${esc(t.at)}`).join(', ')}</div>` : ''}
+        <div class="actions" style="margin-top:10px">
+          <button class="action" data-copy="${esc(detailMarkdown(d))}">Copy as Markdown</button>
+          <button class="action" data-act="close-detail">Close</button>
+        </div>
+      </div></div>`
+  }
+
+  /** The same sections as a Markdown summary, for pasting into a review. */
+  function detailMarkdown(d) {
+    const s = d?.session || {}
+    const a = d?.activity || {}
+    const tick = (v) => `\`${String(v ?? '').replace(/`/g, "'")}\``
+    const lines = [
+      `## Session ${tick(s.id)}${s.label ? ` (${String(s.label).replace(/[\r\n]/g, ' ')})` : ''}`,
+      '',
+      `- state: ${s.state ?? 'unknown'}`,
+      `- expires: ${s.infinite === true ? 'never' : s.expires_at ?? 'unknown'}`,
+      `- elevated: ${(s.elevated || []).join(', ') || 'no'}`,
+    ]
+    if (a.complete === false) lines.push(`- **history incomplete:** ${a.note || 'the audit log does not cover the whole session'}`)
+    for (const g of Array.isArray(d?.grants) ? d.grants : []) {
+      lines.push('', `### ${tick(g.cred)} (${g.state ?? 'unknown'})`, '')
+      const e = g.effective || {}
+      for (const k of ['hosts', 'methods', 'paths', 'deny_paths', 'approval', 'rate', 'max_concurrent', 'quota', 'spend']) {
+        if (e[k] !== null && e[k] !== undefined) lines.push(`- ${k}: ${tick(policyValue(e[k]))}`)
+      }
+      if (e.budget) lines.push(`- budget: ${g.budget?.used ?? 0} used of ${e.budget.limit ?? 'unlimited'}`)
+      if (g.expires_at) lines.push(`- grant expires: ${g.expires_at}`)
+    }
+    const req = a.requests || {}
+    lines.push('', '### Activity', '', `- ${req.allowed ?? 0} allowed, ${req.denied ?? 0} refused, ${req.held ?? 0} held`)
+    for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${p.method} ${p.path}`)}`)
+    for (const x of a.denials || []) lines.push(`- refused ${x.count} × ${tick(`${x.code} ${x.rule || ''}`.trim())}`)
+    return lines.join('\n')
+  }
+
+  /** The access review card on the overview (F19). */
+  function accessReview(report) {
+    if (!report || typeof report !== 'object') return ''
+    const unused = (report.sessions || []).filter((s) => (s.unused_methods || []).length)
+    const flagged = (report.credentials || []).filter((c) => c.quarantined === true || c.expiry_warning)
+    const rows = [
+      ...unused.map((s) => `<div class="row"><div class="main"><div class="name">${esc(s.label || s.id)}</div>
+        <div class="meta">granted but never used: <span class="mono">${esc(s.unused_methods.join(', '))}</span> &middot; narrow it to what it uses</div></div></div>`),
+      ...flagged.map((c) => `<div class="row"><div class="main"><div class="name mono">${esc(c.slug)}</div>
+        <div class="meta">${c.quarantined === true ? 'quarantined' : ''}${c.quarantined === true && c.expiry_warning ? ' &middot; ' : ''}${c.expiry_warning === 'expired' ? 'expired' : c.expiry_warning ? 'expires soon' : ''}</div></div></div>`),
+    ]
+    return `<div class="card"><h2>Access review (7 days)</h2>
+      ${report.complete === false ? '<div class="notice" style="margin:12px 16px">The audit log does not cover the whole period, so this review is incomplete.</div>' : ''}
+      ${rows.length ? rows.join('') : '<div class="empty">Nothing to tighten: every granted method was used, and no credential is expiring or quarantined.</div>'}</div>`
+  }
+
+  /** `replay  AV_PH_REPLAY  1 in 10m  → revoke_session` */
+  function tripwireRuleText(r) {
+    const what = (r?.codes || []).length ? r.codes.join(',') : r?.rule_prefix ? `${r.rule_prefix}*` : '?'
+    const w = Number(r?.window_s)
+    const span = w % 3600 === 0 ? `${w / 3600}h` : w % 60 === 0 ? `${w / 60}m` : `${w}s`
+    return `${r?.id}  ${what}  ${r?.threshold} in ${span}  → ${r?.action}`
+  }
+
+  // --- templates (F17) ----------------------------------------------------
+  // A template's fields are defaults the form can only narrow. The daemon
+  // narrows overrides itself; these keep the form from offering a widening
+  // it would quietly not grant.
+
+  const APPROVAL_ORDER = ['auto', 'first-use', 'on-write', 'each']
+
+  /** What a template allows, per field, over all of its grants. */
+  function templateLimits(spec) {
+    const grants = Array.isArray(spec?.grants) ? spec.grants : [spec || {}]
+    const nums = (k) => grants.map((g) => Number(g[k])).filter((n) => Number.isFinite(n) && n >= 0)
+    const budgets = nums('budget')
+    const ttls = nums('grant_ttl_minutes')
+    const rank = (m) => { const i = APPROVAL_ORDER.indexOf(m ?? 'on-write'); return i < 0 ? APPROVAL_ORDER.length : i }
+    return {
+      creds: grants.map((g) => g.cred).filter(Boolean),
+      methods: [...new Set(grants.flatMap((g) => (Array.isArray(g.methods) ? g.methods : ['GET', 'HEAD'])).map((m) => String(m).toUpperCase()))],
+      // Overrides apply per grant, so the laxest grant is what any choice
+      // can still narrow; a choice laxer than that narrows nothing.
+      approvalFloor: Math.min(...grants.map((g) => rank(g.approval))),
+      budget: budgets.length === grants.length ? Math.max(...budgets) : null,
+      grantTtl: ttls.length === grants.length ? Math.max(...ttls) : null,
+      infinite: spec?.infinite === true,
+      ttlHours: spec?.infinite === true ? null : Number.isFinite(Number(spec?.ttl_hours)) && spec?.ttl_hours != null ? Number(spec.ttl_hours) : 8,
+    }
+  }
+
+  /**
+   * The overrides a form sends on top of a template: only what the human
+   * changed, and only ever narrower. `{ error }` when a value would widen.
+   */
+  function templateOverrides(limits, chosen) {
+    const out = {}
+    if (chosen.label) out.label = chosen.label
+    const methods = (chosen.methods || []).filter((m) => limits.methods.includes(m))
+    if (!methods.length) return { error: 'Pick at least one method the template allows.' }
+    if (methods.length < limits.methods.length) out.methods = methods
+    if (chosen.approval) {
+      if (!APPROVAL_ORDER.includes(chosen.approval) || APPROVAL_ORDER.indexOf(chosen.approval) < limits.approvalFloor) {
+        return { error: 'That approval mode is laxer than the template; a template can only be narrowed.' }
+      }
+      out.approval = chosen.approval
+    }
+    if (chosen.budget !== undefined && chosen.budget !== '') {
+      const n = Number(chosen.budget)
+      if (!Number.isFinite(n) || n < 1 || (limits.budget !== null && n > limits.budget)) {
+        return { error: `The budget can only go down${limits.budget !== null ? ` from ${limits.budget}` : ''}.` }
+      }
+      out.budget = n
+    }
+    if (chosen.lifetime && chosen.lifetime !== 'template') {
+      const h = Number(chosen.lifetime)
+      if (chosen.lifetime === 'never' || !Number.isFinite(h)) {
+        if (!limits.infinite) return { error: 'This template has a lifetime; it cannot be made endless.' }
+      } else {
+        if (!limits.infinite && h > limits.ttlHours) return { error: `The lifetime can only go down from ${limits.ttlHours} hours.` }
+        out.ttl_hours = h
+      }
+    }
+    if (chosen.grantTtl !== undefined && chosen.grantTtl !== '') {
+      const n = Number(chosen.grantTtl)
+      if (!Number.isFinite(n) || n < 1 || (limits.grantTtl !== null && n > limits.grantTtl)) {
+        return { error: 'A grant lifetime can only go down.' }
+      }
+      out.grant_ttl_minutes = n
+    }
+    return { overrides: out }
+  }
+
+  // --- advanced limits on a new session (F1, F2, F3, F5, F6, F18) ----------
+
+  const MODEL_KINDS = ['anthropic', 'openai', 'google-genai']
+  const ROUTE_METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
+  const MAX_ROUTE_ROWS = 16
+
+  /**
+   * GrantSpec fields from the advanced inputs. Rate and quota go as typed,
+   * for the daemon to parse; numbers go as numbers; the payload is parsed
+   * here, before anything is signed, so a typo is said now and not as a
+   * refusal after a fingerprint. Empty means absent.
+   */
+  function advancedFields(raw) {
+    const out = {}
+    const num = (k, v) => {
+      if (v === undefined || v === null || String(v).trim() === '') return true
+      const n = Number(v)
+      if (!Number.isFinite(n)) return false
+      out[k] = n
+      return true
+    }
+    if (raw.rate?.trim()) out.rate = raw.rate.trim()
+    if (raw.quota?.trim()) out.quota = raw.quota.trim()
+    for (const [k, v] of [['max_concurrent', raw.concurrency], ['redirects', raw.redirects],
+      ['grant_ttl_minutes', raw.grantTtl], ['spend_tokens', raw.spendTokens], ['spend_usd', raw.spendUsd]]) {
+      if (!num(k, v)) return { error: `${k} must be a number` }
+    }
+    let payload = null
+    if (raw.payload?.trim()) {
+      try { payload = JSON.parse(raw.payload) } catch (e) { return { error: `The payload rules are not JSON: ${e.message}` } }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { error: 'The payload rules must be a JSON object.' }
+    }
+    if (raw.graphqlQueriesOnly === true) {
+      payload = { ...(payload || {}), graphql: { ...(payload?.graphql || {}), operations: ['query'] } }
+    }
+    if (payload) out.payload = payload
+    const rows = (raw.routes || []).filter((r) => (r.methods || []).length || String(r.paths || '').trim())
+    if (rows.length > MAX_ROUTE_ROWS) return { error: `At most ${MAX_ROUTE_ROWS} routes.` }
+    for (const r of rows) {
+      const paths = String(r.paths || '').split(',').map((p) => p.trim()).filter(Boolean)
+      if (!(r.methods || []).length || !paths.length) return { error: 'Each route needs at least one method and one path.' }
+    }
+    if (rows.length) {
+      out.routes = rows.map((r) => ({ methods: r.methods.slice(), paths: String(r.paths).split(',').map((p) => p.trim()).filter(Boolean) }))
+    }
+    return { fields: out }
+  }
+
+  function routeRow() {
+    return `<div class="route">${ROUTE_METHODS.map((m) =>
+      `<label class="pick"><input type="checkbox" class="route-method" value="${m}"> <span>${m}</span></label>`).join('')}
+      <input class="route-paths" placeholder="/repos/*/issues, /user" autocomplete="off" style="flex:1;min-width:12rem">
+      <button class="action" data-act="rm-route" type="button">Remove</button></div>`
+  }
+
+  /** The last probe of a credential (F12): status, latency, scopes. */
+  function testLine(t) {
+    if (t?.error) return `test: <span class="t-deny">${esc(t.error)}</span>`
+    const scopes = Array.isArray(t?.scopes) && t.scopes.length ? ` &middot; scopes: <span class="mono">${esc(t.scopes.join(', '))}</span>` : ''
+    return `test: <span class="${t?.status === 'ok' ? 't-allow' : 't-deny'}">${esc(t?.status)}</span>
+      &middot; ${esc(t?.http_status ?? 'no answer')} &middot; ${esc(t?.latency_ms)}ms${scopes}`
+  }
+
+  /** Extra token shapes to redact, per credential (F4). */
+  function scrubDetails(c) {
+    const list = Array.isArray(c.scrub_patterns) ? c.scrub_patterns : []
+    const sample = scrubSamples.get(c.slug)
+    return `<details class="more" data-keep="scrub:${esc(c.slug)}"><summary>Scrub patterns (${list.length})</summary>
+      ${list.map((p) => `<div class="row"><div class="main"><code>${esc(p.source)}</code>
+          <div class="meta mono">${esc(p.id)} &middot; added ${esc(ago(p.added_at))}</div></div>
+        <div class="actions"><button class="action danger" data-act="rm-scrub" data-slug="${esc(c.slug)}" data-id="${esc(p.id)}">Remove</button></div></div>`).join('')}
+      <div class="body">
+        <p class="meta">Another shape of token to redact from every response, such as
+          <code>acme_[A-Za-z0-9]{20,40}</code>. A pattern that could match ordinary text or run long is refused.</p>
+        <div class="grid">
+          <div><label>Pattern</label><input class="scrub-pattern" data-slug="${esc(c.slug)}" autocomplete="off" spellcheck="false"></div>
+          <div><label>Try on text (optional)</label><input class="scrub-sample" data-slug="${esc(c.slug)}" autocomplete="off" spellcheck="false"></div>
+        </div>
+        <button class="action" data-act="add-scrub" data-slug="${esc(c.slug)}">Add pattern</button>
+        ${sample ? `<div class="meta" style="margin-top:8px">${esc(sample.matches)} match(es) in your text:
+          <span class="mono">${esc(sample.redacted)}</span></div>` : ''}
+      </div></details>`
+  }
+
+  /** When the token runs out (F10): a note for you, not a lock. */
+  function expiryDetails(c) {
+    const day = typeof c.expires_at === 'string' ? c.expires_at.slice(0, 10) : ''
+    return `<details class="more" data-keep="expiry:${esc(c.slug)}"><summary>Expiry${day ? ` (${esc(day)})` : ''}</summary>
+      <div class="body">
+        <div class="grid"><div><label>Expires on</label>
+          <input type="date" class="expiry-date" data-slug="${esc(c.slug)}" value="${esc(day)}"></div></div>
+        <div class="actions" style="justify-content:flex-start">
+          <button class="action" data-act="set-expiry" data-slug="${esc(c.slug)}">Set expiry</button>
+          ${c.expires_at ? `<button class="action" data-act="clear-expiry" data-slug="${esc(c.slug)}">Clear</button>` : ''}
+        </div>
+        <p class="meta">A reminder, not enforcement: an expired token is still sent until the upstream refuses it.</p>
+      </div></details>`
+  }
+
+  let credKinds = new Map()     // slug -> kind, for which inputs a session form shows
+
+  /** The New session form: free-form, or narrowing a template (F17). */
+  function newSessionCard(creds, templates) {
+    const list = Array.isArray(templates) ? templates : []
+    const pickTemplate = list.length ? `<div style="margin-bottom:12px"><label for="sTemplate">Start from template</label>
+      <select id="sTemplate"><option value="">none: set every field below</option>${list.map((t) =>
+        `<option value="${esc(t.name)}"${formTemplate?.name === t.name ? ' selected' : ''}>${esc(t.name)} v${esc(t.version)}: ${esc(t.summary || '')}</option>`).join('')}</select></div>` : ''
+    return `<div class="card"><h2>New session</h2><div class="body">
+      ${pickTemplate}
+      ${formTemplate ? templateForm(formTemplate) : freeForm(creds)}
+    </div></div>`
+  }
+
+  function freeForm(creds) {
+    const options = creds.map((c, i) => `<option value="${esc(c.slug)}"${i === 0 ? ' selected' : ''}>${esc(c.slug)}</option>`).join('')
+    const models = creds.length && MODEL_KINDS.includes(creds[0].kind)
+    return `
+      <div class="grid">
+        <div><label for="sCred">Credentials</label><select id="sCred" multiple size="${Math.min(4, creds.length)}">${options}</select></div>
+        <div><label for="sLabel">Label</label><input id="sLabel" placeholder="issue triage" autocomplete="off"></div>
+        <div><label for="sMethods">Methods</label><input id="sMethods" value="GET,HEAD" autocomplete="off"></div>
+        <div><label for="sPaths">Paths</label><input id="sPaths" value="/**" autocomplete="off"></div>
+        <div><label for="sBudget">Budget</label><input id="sBudget" type="number" value="500" min="1"></div>
+        <div><label for="sApproval">Approval</label><select id="sApproval">
+          <option value="on-write">ask me before writes (on-write)</option>
+          <option value="each">ask me every time</option>
+          <option value="first-use">ask me the first time</option>
+          <option value="auto">never ask (auto)</option>
+        </select></div>
+        <div><label for="sLifetime">Lifetime</label><select id="sLifetime">
+          <option value="1">1 hour</option>
+          <option value="8" selected>8 hours</option>
+          <option value="24">24 hours</option>
+          <option value="never">No expiry</option>
+        </select></div>
+        <div><label for="sGrantTtl">Grant lifetime (minutes, optional)</label><input id="sGrantTtl" type="number" min="1" placeholder="as long as the session"></div>
+      </div>
+      <details class="more" data-keep="advanced" style="padding:8px 0 12px;border-top:0"><summary>Advanced limits</summary>
+        <div class="grid" style="margin-top:10px">
+          <div><label for="sRate">Rate</label><input id="sRate" placeholder="60/min" autocomplete="off"></div>
+          <div><label for="sConcurrency">Concurrency</label><input id="sConcurrency" type="number" min="1" placeholder="no limit"></div>
+          <div><label for="sQuota">Quota</label><input id="sQuota" placeholder="1000/day" autocomplete="off"></div>
+          <div><label for="sRedirects">Follow redirects (0–5)</label><input id="sRedirects" type="number" min="0" max="5" placeholder="0"></div>
+        </div>
+        <div class="grid" id="spendBox"${models ? '' : ' hidden'}>
+          <div><label for="sSpendTokens">Spend limit: tokens</label><input id="sSpendTokens" type="number" min="0" placeholder="no limit"></div>
+          <div><label for="sSpendUsd">Spend limit: USD (an estimate)</label><input id="sSpendUsd" type="number" min="0" step="0.01" placeholder="no limit"></div>
+        </div>
+        <label for="sPayload">Payload rules (JSON, optional)</label>
+        <textarea id="sPayload" spellcheck="false" placeholder='{ "json": { "/channel": { "one_of": ["#bots"] } } }'></textarea>
+        <label class="pick" style="margin:8px 0 12px"><input type="checkbox" id="sGraphql"> <span>GraphQL: queries only</span></label>
+        <label>Routes: a method may only be used on its paths (up to ${MAX_ROUTE_ROWS})</label>
+        <div class="routes" id="routes"></div>
+        <button class="action" data-act="add-route" type="button">Add route</button>
+      </details>
+      <div class="notice warn" id="sAutoWarn" hidden>No approval prompts for writes. Your authenticator is asked every time you create one.</div>
+      <div class="notice warn" id="sNeverWarn" hidden>This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>
+      <div class="actions" style="justify-content:flex-start">
+        <button class="action primary" data-act="add-session">Create session</button>
+        <button class="action" data-act="save-template">Save as template</button>
+      </div>`
+  }
+
+  /** The same form over a template: its values are the ceiling, and only lower ones are offered. */
+  function templateForm(t) {
+    const L = t.limits
+    const hours = [1, 8, 24]
+    const elevated = t.elevated || []
+    return `
+      <div class="notice">Starting from template <strong>${esc(t.name)}</strong> v${esc(t.version)}
+        for <span class="mono">${esc(L.creds.join(', ') || 'its credentials')}</span>. These fields can only narrow it.</div>
+      <div class="grid">
+        <div><label for="sLabel">Label</label><input id="sLabel" placeholder="from the template" autocomplete="off"></div>
+        <div><label>Methods</label>${L.methods.map((m) =>
+          `<label class="pick"><input type="checkbox" class="t-method" value="${esc(m)}" checked> <span>${esc(m)}</span></label>`).join('')}</div>
+        <div><label for="tApproval">Approval</label><select id="tApproval">
+          <option value="">as the template says</option>
+          ${APPROVAL_ORDER.map((m, i) => `<option value="${m}"${i < L.approvalFloor ? ' disabled' : ''}>${m}</option>`).join('')}
+        </select></div>
+        <div><label for="tBudget">Budget</label><input id="tBudget" type="number" min="1"${L.budget !== null ? ` max="${esc(L.budget)}"` : ''} placeholder="${L.budget !== null ? `up to ${esc(L.budget)}` : 'as the template says'}"></div>
+        <div><label for="tLifetime">Lifetime</label><select id="tLifetime">
+          <option value="template">as the template says (${L.infinite ? 'no expiry' : `${esc(L.ttlHours)} hours`})</option>
+          ${hours.map((h) => `<option value="${h}"${!L.infinite && h > L.ttlHours ? ' disabled' : ''}>${h} hour${h > 1 ? 's' : ''}</option>`).join('')}
+        </select></div>
+        <div><label for="tGrantTtl">Grant lifetime (minutes)</label><input id="tGrantTtl" type="number" min="1"${L.grantTtl !== null ? ` max="${esc(L.grantTtl)}"` : ''} placeholder="${L.grantTtl !== null ? `up to ${esc(L.grantTtl)}` : 'as long as the session'}"></div>
+      </div>
+      ${elevated.includes('approval_auto_writes') ? '<div class="notice warn">No approval prompts for writes. Your authenticator is asked every time you create one.</div>' : ''}
+      ${elevated.includes('infinite') ? '<div class="notice warn">This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>' : ''}
+      <div class="actions" style="justify-content:flex-start">
+        <button class="action primary" data-act="add-session">Create from template</button>
+        <button class="action" data-act="clear-template">Do not use a template</button>
+      </div>`
+  }
+
+  function templatesCard(templates) {
+    const list = Array.isArray(templates) ? templates : []
+    if (!list.length) return ''
+    return `<div class="card"><h2>Templates</h2>${list.map((t) => `
+      <div class="row"><div class="main">
+        <div class="name">${esc(t.name)} <span class="pill">v${esc(t.version)}</span>
+          ${(t.elevated || []).length ? '<span class="pill warn">elevated</span>' : ''}</div>
+        <div class="meta">${esc(t.summary || '')} &middot; creds: <span class="mono">${esc((t.creds || []).join(', '))}</span>
+          &middot; updated ${esc(t.updated_at ? ago(t.updated_at) : '')}</div></div>
+        <div class="actions"><button class="action danger" data-act="rm-template" data-name="${esc(t.name)}">Delete</button></div>
+      </div>`).join('')}</div>`
+  }
+
+  /** What the free-form New session form would create, or `{ error }`. */
+  function readSessionForm() {
+    const picked = [...document.getElementById('sCred').selectedOptions].map((o) => o.value)
+    if (!picked.length) return { error: 'Pick at least one credential' }
+    if (picked.length > 16) return { error: 'A session holds at most 16 credentials' }
+    const value = (id) => document.getElementById(id)?.value ?? ''
+    const models = picked.some((slug) => MODEL_KINDS.includes(credKinds.get(slug)))
+    const adv = advancedFields({
+      rate: value('sRate'), concurrency: value('sConcurrency'), quota: value('sQuota'),
+      redirects: value('sRedirects'), grantTtl: value('sGrantTtl'),
+      // Spend only means something for a model provider; hidden is absent.
+      spendTokens: models ? value('sSpendTokens') : '', spendUsd: models ? value('sSpendUsd') : '',
+      payload: value('sPayload'), graphqlQueriesOnly: document.getElementById('sGraphql')?.checked === true,
+      routes: [...document.querySelectorAll('#routes .route')].map((row) => ({
+        methods: [...row.querySelectorAll('.route-method:checked')].map((b) => b.value),
+        paths: row.querySelector('.route-paths').value,
+      })),
+    })
+    if (adv.error) return { error: adv.error }
+    // The same limits for every credential picked, one grant each.
+    const shared = {
+      methods: value('sMethods').split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
+      paths: value('sPaths').split(',').map((p) => p.trim()).filter(Boolean),
+      budget: Number(value('sBudget')),
+      approval: value('sApproval'),
+      ...adv.fields,
+    }
+    const lifetime = value('sLifetime')
+    return {
+      body: {
+        label: value('sLabel').trim() || 'ui session',
+        grants: picked.map((cred) => ({ cred, ...shared })),
+        // No expiry is no lifetime at all, never a long one.
+        ...(lifetime === 'never' ? { infinite: true } : { ttl_hours: Number(lifetime) }),
+      },
+      picked,
+    }
+  }
+
+  /** Panic, and the tripwires that can pull it for you (F16). */
+  function containmentCard(tw, fired) {
+    const rules = Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []
+    const shown = rules.length ? rules : (Array.isArray(tw?.defaults) ? tw.defaults : [])
+    const on = tw?.enabled === true
+    return `<div class="card"><h2>Containment</h2>
+      <div class="row"><div class="main"><div class="name">Panic</div>
+        <div class="meta">Revoke every session, infinite ones included, and deny everything waiting for you.
+          Nothing comes back by itself. No fingerprint is asked: in an emergency it only slows you down.</div></div>
+        <div class="actions"><button class="action panic" data-act="panic">Panic</button></div></div>
+      ${tw ? `<div class="row"><div class="main">
+        <div class="name">Tripwires <span class="pill ${on ? 'ok' : ''}">${on ? 'on' : 'off'}</span></div>
+        <div class="meta">${on ? 'A session that trips one of these is revoked before its refused request returns.'
+          : `Off. Turning them on uses ${rules.length ? 'your rules' : 'the default rules'} below.`}</div>
+        <pre class="mono" style="margin:6px 0 0;white-space:pre-wrap">${esc(shown.map(tripwireRuleText).join('\n')) || 'no rules'}</pre>
+        ${(Array.isArray(fired) ? fired : []).length ? `<div class="meta" style="margin-top:6px">Fired recently: ${fired.map((r) =>
+          `<span class="mono">${esc(r.rule_id)}</span> ${esc(r.ts ? ago(r.ts) : '')} &rarr; ${esc(r.action || '')}`).join(' &middot; ')}</div>` : ''}
+        <details class="more" data-keep="tripwire-rules" style="padding:8px 0 0;border-top:0"><summary>Edit rules</summary>
+          <textarea id="twRules" spellcheck="false" style="min-height:140px">${esc(JSON.stringify(shown, null, 2))}</textarea>
+          <div class="actions" style="justify-content:flex-start;margin-top:6px">
+            <button class="action" data-act="tripwires-save">Save rules</button></div>
+        </details></div>
+        <div class="actions">${on
+          ? '<button class="action" data-act="tripwires-off">Turn off</button>'
+          : '<button class="action primary" data-act="tripwires-on">Turn on</button>'}</div></div>` : ''}
+    </div>`
+  }
+
+  /** Desktop notifications in this tab, and the webhook, read-only (F14). */
+  function notificationsCard(notify, c) {
+    const supported = typeof Notification !== 'undefined'
+    const on = supported && notificationsOn() && Notification.permission === 'granted'
+    const hook = notify?.webhook
+    return `<div class="card"><h2>Notifications</h2>
+      <div class="row"><div class="main"><div class="name">Desktop notifications</div>
+        <div class="meta">${supported
+          ? 'While this tab is open, say so when something starts waiting for you. The notice only opens Approvals; deciding still needs your fingerprint.'
+          : 'This browser cannot show desktop notifications.'}</div></div>
+        ${supported ? `<div class="actions"><label class="pick"><input type="checkbox" id="notifyToggle"${on ? ' checked' : ''}> <span>${on ? 'on' : 'off'}</span></label></div>` : ''}</div>
+      <div class="row"><div class="main"><div class="name">Webhook</div>
+        <div class="meta">${hook
+          ? `<span class="mono">${esc(hook.host)}</span> &middot; ${esc(hook.detail)} &middot; since ${esc(hook.configured_at ? hook.configured_at.slice(0, 10) : '')}`
+          : `No webhook. Set one from the command line: <code>${esc(c.cli)} notify set</code>`}</div></div></div>
+    </div>`
+  }
+
+  /** Credentials whose tokens are about to run out (F10). */
+  function expiringCard(creds) {
+    const soon = creds.filter((c) => c.expiry_warning === 'expired' || c.expiry_warning === 'soon')
+    if (!soon.length) return ''
+    return `<div class="notice"><strong>${soon.length} credential${soon.length > 1 ? 's' : ''} expiring.</strong>
+      ${soon.map((c) => `<span class="mono">${esc(c.slug)}</span> ${esc(c.expiry_warning === 'expired' ? 'expired' : expiresIn(soonestExpiry(c)))}`).join(' &middot; ')}.
+      Rotate them from Credentials.</div>`
+  }
+
+  /** The three one-click narrowings on a live session (F15). */
+  const NARROWINGS = {
+    'drop-writes': { title: 'Write access dropped', body: (sid) => ({ sid, narrow: { methods: ['GET', 'HEAD'] } }) },
+    'approve-each': { title: 'Every request now needs your approval', body: (sid) => ({ sid, narrow: { approval: 'each' } }) },
+    'end-1h': { title: 'Ends within the hour', body: (sid) => ({ sid, narrow: {}, session_ttl_minutes: 60 }) },
+  }
+
+  async function setExpiry(slug, expiresAt) {
+    const body = { slug, expires_at: expiresAt }
+    await gated(await operationFor('cred.expiry_set', body), (proof) =>
+      api('POST', 'credentials/expiry', { ...body, presence: proof }))
+    toast(expiresAt ? `${slug} expires ${expiresAt.slice(0, 10)}` : `Cleared the expiry on ${slug}`)
+    slow.clear()
+    render()
+  }
+
+  async function setTripwires(body, done) {
+    tripwireState = await gated(await operationFor('tripwires.set', body), (proof) =>
+      api('POST', 'tripwires', { ...body, presence: proof }))
+    toast(done)
+    slow.clear()
+    render()
+  }
+
+  /**
+   * Replace the confirmation authenticator. The new key is registered first;
+   * then the CURRENT key signs the new key's exact public record, and the
+   * daemon enrols it only on that signature. An agent with this page open
+   * reaches the platform dialog for the current key, and stops there.
+   */
+  async function replaceKey() {
+    const opts = await api('POST', 'presence/rotate/begin')
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: b64uToBuf(opts.challenge),
+        rp: opts.rp,
+        user: { id: b64uToBuf(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'preferred' },
+        excludeCredentials: opts.exclude ? [{ id: b64uToBuf(opts.exclude), type: 'public-key' }] : [],
+        timeout: 120000,
+        attestation: 'none',
+      },
+    })
+    const { credential } = await api('POST', 'presence/rotate/register', {
+      attestationObject: bufToB64u(cred.response.attestationObject),
+      clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+    })
+    await gated(await operationFor('presence.enroll', credential), (proof) =>
+      api('POST', 'presence/rotate', { ...credential, presence: proof }))
+    await refreshPresence()
+  }
+
+  // ------------------------------------------------------------ view state
+  // What the human did on a view that a re-render must not throw away.
+
+  let sessionDetail = null      // GET sessions/detail, while its card is open
+  let narrowResult = null       // the before/after of the last narrow
+  let formTemplate = null       // { name, version, hash, spec, limits, elevated } while creating from one
+  let checkpoint = null         // the last audit checkpoint fetched
+  let tripwireState = null      // GET tripwires, for "turn on" to know if rules exist
+  let focusItem = hashView === 'approvals' && hashSection ? decodeURIComponent(hashSection) : null
+  const testResults = new Map() // slug -> the last probe's answer
+  const scrubSamples = new Map() // slug -> the sample the last added pattern was tried on
+
+  // Reads that change slowly, kept for half a minute so the five-second
+  // overview refresh does not ask the daemon for each of them every time.
+  // Anything this page changes clears them.
+  const slow = new Map()
+  async function cached(key, fn, ms = 30_000) {
+    const hit = slow.get(key)
+    if (hit && hit.at > Date.now() - ms) return hit.value
+    const value = await fn()
+    slow.set(key, { at: Date.now(), value })
+    return value
+  }
+
+  // A disclosure the human opened stays open across the re-render.
+  const openDetails = new Set()
+  document.addEventListener('toggle', (e) => {
+    const key = e.target?.dataset?.keep
+    if (!key) return
+    if (e.target.open) openDetails.add(key)
+    else openDetails.delete(key)
+  }, true)
+  function restoreDetails() {
+    for (const d of document.querySelectorAll('details[data-keep]')) d.open = openDetails.has(d.dataset.keep)
+  }
+
+  /**
+   * Desktop notifications (F14): a signal, never an approval channel. No
+   * actions on it; clicking only opens the approvals view, where a decision
+   * still needs your fingerprint. Only while this tab is open.
+   */
+  const NOTIFY_KEY = 'agent-vault.notify'
+  const notificationsOn = () => {
+    try { return localStorage.getItem(NOTIFY_KEY) === 'on' } catch { return false }
+  }
+  const seenPending = new Set()
+  let pendingPrimed = false
+  function notifyNew(pending) {
+    const fresh = pending.filter((p) => !seenPending.has(p.id))
+    for (const p of pending) seenPending.add(p.id)
+    // What was waiting when the page opened is on screen already.
+    if (!pendingPrimed) { pendingPrimed = true; return }
+    if (!fresh.length || !notificationsOn()) return
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+    const body = fresh.length > 1 ? `${notificationText(fresh[0])} (and ${fresh.length - 1} more)` : notificationText(fresh[0])
+    try {
+      const n = new Notification('agent-vault', { body, tag: 'agent-vault-pending' })
+      n.onclick = () => { window.focus(); openApproval(fresh[0].id) }
+    } catch { /* a browser that will not show one has nothing to fall back to */ }
+  }
+
+  /** Open the approvals view on one item: the `#approvals/<id>` deep link. */
+  function openApproval(id) {
+    current = 'approvals'
+    focusItem = id
+    syncNav()
+    render()
+  }
+  function highlightFocus() {
+    if (current !== 'approvals' || !focusItem) return
+    const card = [...document.querySelectorAll('[data-item]')].find((c) => c.dataset.item === focusItem)
+    if (!card) return
+    card.classList.add('highlight')
+    card.scrollIntoView({ block: 'center' })
+    focusItem = null
+  }
+
+  /** A form in a page-drawn dialog: resolves with read(form), or null on cancel. */
+  function dialog(inner, read, { submit = 'OK', danger = false } = {}) {
+    return new Promise((resolve) => {
+      const back = document.createElement('div')
+      back.className = 'modal-back'
+      back.innerHTML = `<form class="modal">${inner}
+        <div class="modal-actions">
+          <button type="button" class="action" data-x="cancel">Cancel</button>
+          <button type="submit" class="action ${danger ? 'panic' : 'primary'}">${esc(submit)}</button>
+        </div></form>`
+      document.body.appendChild(back)
+      const form = back.querySelector('form')
+      const onKey = (e) => { if (e.key === 'Escape') close(null) }
+      const close = (val) => { document.removeEventListener('keydown', onKey); back.remove(); resolve(val) }
+      back.querySelector('[data-x="cancel"]').onclick = () => close(null)
+      back.onclick = (e) => { if (e.target === back) close(null) }
+      form.onsubmit = (e) => { e.preventDefault(); close(read(form)) }
+      document.addEventListener('keydown', onKey)
+      setTimeout(() => form.querySelector('input, select, textarea, button[type=submit]')?.focus(), 20)
+    })
+  }
+
+  const askText = (label, { placeholder = '', submit = 'OK' } = {}) => dialog(
+    `<label for="askText">${esc(label)}</label><input id="askText" autocomplete="off" placeholder="${esc(placeholder)}">`,
+    (f) => f.querySelector('#askText').value.trim(), { submit })
+
+  /** Shown before a signature that the platform dialog cannot describe. */
+  const showOperation = (title, operation) => dialog(
+    `<label>${esc(title)}</label>
+     <p class="meta">This is what your authenticator will sign. The new value is bound by its digest and never shown.</p>
+     <pre class="untrusted" style="border-style:solid;border-color:var(--line)">${esc(JSON.stringify(operation, null, 2))}</pre>`,
+    () => true, { submit: 'Sign it' })
+
   // ------------------------------------------------------------------ views
 
   const views = {
@@ -916,12 +1712,25 @@ ${c.cli} ui                         open this page`)}`,
         api('GET', 'status'), api('GET', 'credentials'), api('GET', 'sessions'), api('GET', 'pending'),
       ])
       const live = sessions.filter((s) => s.state === 'active')
+      // Each card stands alone: a daemon without a route, or a locked vault,
+      // leaves that card out rather than the page blank.
+      const quiet = (p) => p.catch(() => null)
+      const [report, tripwires, fired, notify, c] = await Promise.all([
+        status.locked ? null : quiet(cached('report', () => api('GET', 'report/access?since=7d'))),
+        quiet(cached('tripwires', () => api('GET', 'tripwires'))),
+        status.locked ? null : quiet(cached('fired', () => api('GET', 'audit?kind=tripwire.fired&limit=5'))),
+        quiet(cached('notify', () => api('GET', 'notify'))),
+        loadDocsCtx(),
+      ])
+      tripwireState = tripwires
       await refreshPresence()
       const gate = presenceState.enrolled
         ? `<div class="card"><h2>Confirmation</h2><div class="row">
              <div class="main"><div class="name">Authenticator enrolled <span class="pill ok">active</span></div>
              <div class="meta">Every change asks for Touch ID, and the signature covers that one operation.
-               A browser driven by software reaches the dialog and stops there.</div></div></div></div>`
+               A browser driven by software reaches the dialog and stops there.</div></div>
+             <div class="actions"><button class="action" data-act="replace-key"
+               title="Enrol a new authenticator, confirmed with the one you have now">Replace authenticator</button></div></div></div>`
         : `<div class="notice"><strong>Changes need confirmation.</strong>
              Set up Touch ID to confirm changes — adding a credential, approving a request, revoking a
              session. (This is separate from unlocking the vault, which you set up below.)
@@ -984,25 +1793,50 @@ ${c.cli} ui                         open this page`)}`,
           <div class="row"><div class="main"><div class="name">${status.audit_records ?? '&mdash;'}</div>
             <div class="meta">audit records${status.audit_records == null ? ' (unavailable while locked)' : ''}</div></div>
             <div class="actions"><button class="action" data-act="verify">Verify chain</button></div></div>
-        </div>`
+        </div>
+        ${expiringCard(creds)}
+        ${containmentCard(tripwires, fired)}
+        ${accessReview(report)}
+        ${notificationsCard(notify, c)}`
     },
 
     async credentials() {
       const creds = await api('GET', 'credentials')
-      const rows = creds.length ? creds.map((c) => `
+      const rows = creds.length ? creds.map((c) => {
+        const f = c.fields?.[0] || {}
+        const pins = pinsText(c.pins)
+        const test = testResults.get(c.slug)
+        const q = c.quarantine
+        return `
         <div class="row">
           <div class="main">
-            <div class="name">${esc(c.slug)} <span class="pill">${esc(c.kind)}</span></div>
-            <div class="meta">${esc(c.connector.host || 'no host set')} &middot;
-              fingerprint <span class="mono">${esc(c.fields[0]?.fp8 || '')}</span> &middot;
-              injected at <span class="mono">${esc((c.fields[0]?.sites || []).join(', '))}</span></div>
+            <div class="name">${esc(c.slug)} <span class="pill">${esc(c.kind)}</span> ${credentialBadges(c)}</div>
+            <div class="meta">${esc(c.connector?.host || 'no host set')} &middot;
+              fingerprint <span class="mono">${esc(f.fp8 || '')}</span> &middot;
+              injected at <span class="mono">${esc((f.sites || []).join(', '))}</span> &middot;
+              version ${esc(f.version ?? 1)}${f.rotated_at ? `, rotated ${esc(ago(f.rotated_at))}` : ''}${pins ? ` &middot; ${esc(pins)}` : ''}</div>
+            ${soonestExpiry(c) !== null ? `<div class="meta">${esc(expiresIn(soonestExpiry(c)))} (${esc(new Date(soonestExpiry(c)).toISOString().slice(0, 10))}${c.health?.observed_expires_at ? ', as the upstream reports it' : ''})</div>` : ''}
+            ${q ? `<div class="meta">quarantined ${esc(q.since ? ago(q.since) : '')} by ${esc(q.by)}${q.rule_id ? ` (tripwire ${esc(q.rule_id)})` : ''}${q.reason_untrusted
+              ? `: <span class="mono">${esc(q.reason_untrusted)}</span> (written by whoever quarantined it, not verified)` : ''}</div>` : ''}
+            ${test ? `<div class="meta">${testLine(test)}</div>` : ''}
           </div>
-          <div class="actions"><button class="action danger" data-act="rm-cred" data-slug="${esc(c.slug)}">Remove</button></div>
-        </div>`).join('') : '<div class="empty">No credentials yet. Add one below.</div>'
+          <div class="actions">
+            <button class="action" data-act="test-cred" data-slug="${esc(c.slug)}">Test</button>
+            <button class="action" data-act="rotate-cred" data-slug="${esc(c.slug)}">Rotate</button>
+            ${q
+              ? `<button class="action" data-act="release-cred" data-slug="${esc(c.slug)}">Release</button>`
+              : `<button class="action danger" data-act="quarantine-cred" data-slug="${esc(c.slug)}">Quarantine</button>`}
+            <button class="action danger" data-act="rm-cred" data-slug="${esc(c.slug)}">Remove</button>
+          </div>
+        </div>
+        ${scrubDetails(c)}
+        ${expiryDetails(c)}`
+      }).join('') : '<div class="empty">No credentials yet. Add one below.</div>'
 
       return `
         <header class="page"><h1>Credentials</h1></header>
-        <p class="sub">The value is write-only. It goes straight to the daemon and is never sent back to this page.</p>
+        <p class="sub">The value is write-only. It goes straight to the daemon and is never sent back to this page.
+          Pins are shown here and set from the command line, where the live certificate chain can be checked.</p>
         <div class="card"><h2>Stored</h2>${rows}</div>
         <div class="card"><h2>Add a credential</h2><div class="body">
           <div class="grid">
@@ -1023,7 +1857,11 @@ ${c.cli} ui                         open this page`)}`,
     },
 
     async sessions() {
-      const [sessions, creds] = await Promise.all([api('GET', 'sessions'), api('GET', 'credentials')])
+      const [sessions, creds, templates] = await Promise.all([
+        api('GET', 'sessions'), api('GET', 'credentials'),
+        api('GET', 'templates').catch(() => []),
+      ])
+      credKinds = new Map(creds.map((c) => [c.slug, c.kind]))
       const rows = sessions.length ? sessions.map((s) => `
         <div class="row">
           <div class="main">
@@ -1031,44 +1869,33 @@ ${c.cli} ui                         open this page`)}`,
               <span class="pill ${s.state === 'active' ? 'ok' : ''}">${esc(s.state)}</span>
               ${s.remote ? '<span class="pill warn">remote</span>' : ''}
               ${approvalBadge(s)}
-              ${s.infinite ? '<span class="pill warn">infinite</span>' : ''}</div>
-            <div class="meta"><span class="mono">${esc(s.id)}</span> &middot; ${s.grants} grant(s) &middot;
+              ${s.infinite ? '<span class="pill warn">infinite</span>' : ''}
+              ${(s.elevated || []).length ? `<span class="pill warn" title="${esc(s.elevated.join(', '))}">elevated</span>` : ''}
+              ${s.template ? `<span class="pill">template ${esc(s.template)}</span>` : ''}</div>
+            <div class="meta"><span class="mono">${esc(s.id)}</span> &middot; ${esc(s.grants)} grant(s) &middot;
               ${esc(s.infinite ? 'never' : until(s.expires_at))}</div>
           </div>
-          <div class="actions">${s.state === 'active'
-            ? `<button class="action danger" data-act="revoke" data-sid="${esc(s.id)}">Revoke</button>` : ''}</div>
+          <div class="actions">
+            <button class="action" data-act="detail" data-sid="${esc(s.id)}">Details</button>
+            ${s.state === 'active' ? `
+            <button class="action" data-act="narrow" data-narrow="drop-writes" data-sid="${esc(s.id)}" title="Only GET and HEAD from now on">Drop write access</button>
+            <button class="action" data-act="narrow" data-narrow="approve-each" data-sid="${esc(s.id)}" title="Every request waits for you">Require approval for everything</button>
+            <button class="action" data-act="narrow" data-narrow="end-1h" data-sid="${esc(s.id)}" title="It ends within the hour, whatever lifetime it had">End in 1 hour</button>
+            <button class="action danger" data-act="revoke" data-sid="${esc(s.id)}">Revoke</button>` : ''}
+          </div>
         </div>`).join('') : '<div class="empty">No sessions yet.</div>'
 
-      const options = creds.map((c, i) => `<option value="${esc(c.slug)}"${i === 0 ? ' selected' : ''}>${esc(c.slug)}</option>`).join('')
       return `
         <header class="page"><h1>Sessions</h1></header>
-        <p class="sub">A session is what an agent holds. Revoking one cuts off every placeholder it issued.</p>
+        <p class="sub">A session is what an agent holds. Revoking one cuts off every placeholder it issued.
+          Narrowing one takes capability away while it runs; nothing here can widen a live session.</p>
         ${handoffCard()}
+        ${narrowResult ? `<div class="card"><h2>${esc(narrowResult.title)}</h2>${narrowSummary(narrowResult.result)}
+          <div class="body"><button class="action" data-act="dismiss-narrow">Done</button></div></div>` : ''}
+        ${sessionDetail ? detailCard(sessionDetail) : ''}
         <div class="card"><h2>Sessions</h2>${rows}</div>
-        ${creds.length ? `<div class="card"><h2>New session</h2><div class="body">
-          <div class="grid">
-            <div><label for="sCred">Credentials</label><select id="sCred" multiple size="${Math.min(4, creds.length)}">${options}</select></div>
-            <div><label for="sLabel">Label</label><input id="sLabel" placeholder="issue triage" autocomplete="off"></div>
-            <div><label for="sMethods">Methods</label><input id="sMethods" value="GET,HEAD" autocomplete="off"></div>
-            <div><label for="sPaths">Paths</label><input id="sPaths" value="/**" autocomplete="off"></div>
-            <div><label for="sBudget">Budget</label><input id="sBudget" type="number" value="500" min="1"></div>
-            <div><label for="sApproval">Approval</label><select id="sApproval">
-              <option value="on-write">ask me before writes (on-write)</option>
-              <option value="each">ask me every time</option>
-              <option value="first-use">ask me the first time</option>
-              <option value="auto">never ask (auto)</option>
-            </select></div>
-            <div><label for="sLifetime">Lifetime</label><select id="sLifetime">
-              <option value="1">1 hour</option>
-              <option value="8" selected>8 hours</option>
-              <option value="24">24 hours</option>
-              <option value="never">No expiry</option>
-            </select></div>
-          </div>
-          <div class="notice warn" id="sAutoWarn" hidden>No approval prompts for writes. Your authenticator is asked every time you create one.</div>
-          <div class="notice warn" id="sNeverWarn" hidden>This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>
-          <button class="action primary" data-act="add-session">Create session</button>
-        </div></div>` : ''}`
+        ${creds.length ? newSessionCard(creds, templates) : ''}
+        ${templatesCard(templates)}`
     },
 
     async approvals() {
@@ -1098,7 +1925,7 @@ ${c.cli} ui                         open this page`)}`,
           </div>
         </div></div>
         ${pending.map((item) => `
-          <div class="card"><div class="body">
+          <div class="card" data-item="${esc(item.id)}"><div class="body">
             <label class="meta pick" style="margin-bottom:8px">
               <input type="checkbox" class="bulk-pick" data-id="${esc(item.id)}" data-kind="${esc(item.kind)}">
               <span>select</span></label>
@@ -1107,7 +1934,9 @@ ${c.cli} ui                         open this page`)}`,
               &middot; <span class="mono">${esc(item.id)}</span>
               &middot; asked ${esc(ago(item.created_at))}</div>
             <div class="mono" style="font-size:14px;font-weight:600;margin-bottom:6px">${esc(item.headline)}</div>
+            ${item.proposal?.template ? `<div class="meta">template <span class="mono">${esc(item.proposal.template)}</span> v${esc(item.proposal.template_version ?? '?')}</div>` : ''}
             ${item.claim ? `<div class="notice">Claimed by the agent, unverified: ${esc(item.claim)}</div>` : ''}
+            ${item.kind === 'request' ? previewBlock(item.preview, item.id) : ''}
             ${item.caution ? `<div class="notice warn">${esc(item.caution)}</div>` : ''}
             ${item.narrowable.length ? `
               <div class="meta" style="color:var(--muted);margin:10px 0 6px">Narrow it before approving, if it asks for more than it needs:</div>
@@ -1157,9 +1986,16 @@ ${c.cli} ui                         open this page`)}`,
           <div class="notice"><strong>Unlock to read the audit log.</strong>
             <div style="margin-top:10px"><button class="action primary" data-act="goto-overview">Go to Overview</button></div></div>`
       }
+      const head = rows.reduce((a, r) => (Number.isInteger(r?.seq) && (!a || r.seq > a.seq) ? r : a), null)
       return `
         <header class="page"><h1>Audit</h1></header>
         <p class="sub">Append-only, hash-chained, and anchored at its end. Paths are recorded and scrubbed; no credential value, body, query string or full placeholder ever is.</p>
+        <div class="card"><h2>Witness</h2><div class="row"><div class="main">
+          <div class="name mono">${head ? `head: record ${esc(head.seq)}, ${esc(String(head.hash || '').slice(0, 16))}…` : 'head: no records yet'}</div>
+          <div class="meta">A checkpoint is the head, signed with a key only this vault holds. Kept somewhere an agent
+            cannot write, it shows later whether records were removed.</div></div>
+          <div class="actions"><button class="action" data-act="copy-checkpoint">Copy checkpoint</button></div></div>
+          ${checkpoint ? `<div class="body">${codeRow('Checkpoint', JSON.stringify(checkpoint))}</div>` : ''}</div>
         <div class="card"><h2>Recent</h2><div class="audit">
           ${rows.slice().reverse().map((r) => {
             const cls = r.decision === 'allow' ? 't-allow' : r.decision === 'deny' ? 't-deny' : 't-dim'
@@ -1252,22 +2088,28 @@ ${c.cli} ui                         open this page`)}`,
       render()
     },
     async 'add-session'() {
-      const picked = [...document.getElementById('sCred').selectedOptions].map((o) => o.value)
-      if (!picked.length) return toast('Pick at least one credential')
-      if (picked.length > 16) return toast('A session holds at most 16 credentials')
-      // The same limits for every credential picked, one grant each.
-      const shared = {
-        methods: document.getElementById('sMethods').value.split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
-        paths: document.getElementById('sPaths').value.split(',').map((p) => p.trim()).filter(Boolean),
-        budget: Number(document.getElementById('sBudget').value),
-        approval: document.getElementById('sApproval').value,
-      }
-      const lifetime = document.getElementById('sLifetime').value
-      const body = {
-        label: document.getElementById('sLabel').value.trim() || 'ui session',
-        grants: picked.map((cred) => ({ cred, ...shared })),
-        // No expiry is no lifetime at all, never a long one.
-        ...(lifetime === 'never' ? { infinite: true } : { ttl_hours: Number(lifetime) }),
+      let body
+      let picked
+      if (formTemplate) {
+        const t = formTemplate
+        const chosen = {
+          label: document.getElementById('sLabel').value.trim(),
+          methods: [...document.querySelectorAll('.t-method:checked')].map((b) => b.value),
+          approval: document.getElementById('tApproval').value,
+          budget: document.getElementById('tBudget').value,
+          lifetime: document.getElementById('tLifetime').value,
+          grantTtl: document.getElementById('tGrantTtl').value,
+        }
+        const { overrides, error } = templateOverrides(t.limits, chosen)
+        if (error) return toast(error)
+        // The hash is the one fetched with the template on screen, so an edit
+        // made after you looked is refused by the daemon (template_changed).
+        body = { template: t.name, template_hash: t.hash, ...overrides }
+        picked = t.limits.creds
+      } else {
+        const form = readSessionForm()
+        if (form.error) return toast(form.error)
+        ;({ body, picked } = form)
       }
       const s = await gated(
         await operationFor('session.create', body),
@@ -1276,9 +2118,11 @@ ${c.cli} ui                         open this page`)}`,
       // Carry the first credential's own injection site through, so the
       // example call puts the placeholder where it actually goes.
       const creds = await api('GET', 'credentials').catch(() => [])
-      const cred = creds.find((c) => c.slug === picked[0])
+      const first = s.grants?.[0]?.cred ?? picked[0]
+      const cred = creds.find((c) => c.slug === first)
       const { cli } = await loadDocsCtx()
       lastSession = { ...s, cli, sites: cred?.fields?.[0]?.sites || [], probe: cred?.probe_path || '' }
+      formTemplate = null
       toast(`Session ${s.session_id} created`)
       render()
     },
@@ -1372,6 +2216,195 @@ ${c.cli} ui                         open this page`)}`,
       toast(granted ? 'Approved' : 'Denied')
       render()
     },
+
+    // --- wave 3 -------------------------------------------------------------
+
+    async 'add-route'() {
+      const box = document.getElementById('routes')
+      if (!box) return
+      if (box.querySelectorAll('.route').length >= MAX_ROUTE_ROWS) return toast(`At most ${MAX_ROUTE_ROWS} routes`)
+      box.insertAdjacentHTML('beforeend', routeRow())
+    },
+    'rm-route'(btn) { btn.closest('.route')?.remove() },
+
+    async 'save-template'() {
+      const form = readSessionForm()
+      if (form.error) return toast(form.error)
+      const name = await askText('Template name (lower case, digits and dashes)', { placeholder: 'gh-read', submit: 'Save' })
+      if (!name) return
+      // The spec is the session this form would create, as it would send it.
+      const body = { name, spec: form.body }
+      const saved = await gated(await operationFor('template.save', body), (proof) =>
+        api('POST', 'templates', { ...body, presence: proof }))
+      const problems = (saved.lint || []).length
+      toast(`Saved template ${saved.name} v${saved.version}${problems ? `, ${problems} warning${problems > 1 ? 's' : ''}` : ''}`)
+      render()
+    },
+    async 'rm-template'(btn) {
+      const name = btn.dataset.name
+      await gated(await operationFor('template.delete', { name }), (proof) =>
+        api('DELETE', `templates?name=${encodeURIComponent(name)}`, { presence: proof }))
+      if (formTemplate?.name === name) formTemplate = null
+      toast(`Deleted template ${name}`)
+      render()
+    },
+    async 'clear-template'() {
+      formTemplate = null
+      render()
+    },
+
+    async detail(btn) {
+      sessionDetail = await api('GET', `sessions/detail?sid=${encodeURIComponent(btn.dataset.sid)}`)
+      render()
+      window.scrollTo({ top: 0 })
+    },
+    'close-detail'() { sessionDetail = null; render() },
+
+    /** One of the three one-click narrowings (F15). Each can only take away. */
+    async narrow(btn) {
+      const sid = btn.dataset.sid
+      const which = NARROWINGS[btn.dataset.narrow]
+      if (!which) return
+      const body = which.body(sid)
+      const result = await gated(await operationFor('session.narrow', body), (proof) =>
+        api('POST', 'sessions/narrow', { ...body, presence: proof }))
+      narrowResult = { title: which.title, result }
+      if (sessionDetail?.session?.id === sid) sessionDetail = null
+      toast(which.title)
+      render()
+    },
+    'dismiss-narrow'() { narrowResult = null; render() },
+
+    async 'test-cred'(btn) {
+      const slug = btn.dataset.slug
+      try {
+        testResults.set(slug, await api('POST', 'credentials/test', { slug }))
+      } catch (e) {
+        testResults.set(slug, { error: e.message })
+      }
+      slow.clear()
+      render()
+    },
+
+    /** A new value for a credential (F7): typed here, signed by digest, never echoed. */
+    async 'rotate-cred'(btn) {
+      const slug = btn.dataset.slug
+      const choice = await dialog(`
+        <label for="rotValue">New value for ${esc(slug)} (not echoed)</label>
+        <input id="rotValue" type="password" autocomplete="new-password" spellcheck="false">
+        <label for="rotMode">Sessions using it</label>
+        <select id="rotMode">
+          <option value="keep">keep working, with the new value</option>
+          <option value="revoke">lose their grants now</option>
+        </select>
+        <label for="rotRetire">Keep scrubbing the old value for (hours)</label>
+        <input id="rotRetire" type="number" min="0" max="168" value="24">`,
+      (f) => ({ value: f.querySelector('#rotValue').value, mode: f.querySelector('#rotMode').value, retire: f.querySelector('#rotRetire').value }),
+      { submit: 'Next' })
+      if (!choice) return
+      if (!choice.value) return toast('No value was typed. Nothing was changed.')
+      const body = { slug, value: choice.value, mode: choice.mode, retire_hours: Number(choice.retire) }
+      const operation = await operationFor('cred.rotate', body)
+      if (!(await showOperation(`Rotate ${slug}`, operation))) return toast('Cancelled. Nothing was changed.')
+      const r = await gated(operation, (proof) => api('POST', 'credentials/rotate', { ...body, presence: proof }))
+      const denied = Number(r.invalidated_approvals) || 0
+      toast(`Rotated ${slug} to version ${r.rotated?.version ?? '?'}${denied ? `; ${denied} held request${denied > 1 ? 's' : ''} denied` : ''}`)
+      render()
+    },
+
+    async 'quarantine-cred'(btn) {
+      const slug = btn.dataset.slug
+      const reason = await askText(`Quarantine ${slug}: nothing can use it until you release it. Reason (optional)`, { submit: 'Quarantine' })
+      if (reason === null) return
+      const r = await api('POST', 'credentials/quarantine', { slug, ...(reason ? { reason } : {}) })
+      const denied = Number(r.denied_approvals) || 0
+      toast(`Quarantined ${slug}${denied ? `; ${denied} held request${denied > 1 ? 's' : ''} denied` : ''}`)
+      slow.clear()
+      render()
+    },
+    async 'release-cred'(btn) {
+      const slug = btn.dataset.slug
+      await gated(await operationFor('cred.release', { slug }), (proof) =>
+        api('POST', 'credentials/release', { slug, presence: proof }))
+      toast(`Released ${slug}`)
+      slow.clear()
+      render()
+    },
+
+    async 'add-scrub'(btn) {
+      const slug = btn.dataset.slug
+      const field = (cls) => [...document.querySelectorAll(cls)].find((x) => x.dataset.slug === slug)
+      const pattern = field('.scrub-pattern')?.value.trim()
+      const sample = field('.scrub-sample')?.value
+      if (!pattern) return toast('Type a pattern first')
+      const body = { slug, pattern, ...(sample ? { sample } : {}) }
+      const r = await gated(await operationFor('cred.scrub_add', body), (proof) =>
+        api('POST', 'credentials/scrub', { ...body, presence: proof }))
+      if (r.sample) scrubSamples.set(slug, r.sample)
+      else scrubSamples.delete(slug)
+      openDetails.add(`scrub:${slug}`)
+      toast(`Added ${r.id || 'the pattern'} to ${slug}`)
+      render()
+    },
+    async 'rm-scrub'(btn) {
+      const { slug, id } = btn.dataset
+      await gated(await operationFor('cred.scrub_remove', { slug, id }), (proof) =>
+        api('DELETE', `credentials/scrub?slug=${encodeURIComponent(slug)}&id=${encodeURIComponent(id)}`, { presence: proof }))
+      toast(`Removed ${id}`)
+      render()
+    },
+
+    async 'set-expiry'(btn) {
+      const slug = btn.dataset.slug
+      const day = [...document.querySelectorAll('.expiry-date')].find((x) => x.dataset.slug === slug)?.value
+      if (!day) return toast('Pick a date first')
+      await setExpiry(slug, new Date(`${day}T00:00:00Z`).toISOString())
+    },
+    async 'clear-expiry'(btn) { await setExpiry(btn.dataset.slug, null) },
+
+    /** Panic (F16), confirmed in a dialog this page draws, never window.confirm. */
+    async panic() {
+      const choice = await dialog(`
+        <label>Panic: end every session now</label>
+        <p class="meta">Every session is revoked, infinite ones included, and everything waiting for you is denied.
+          Nothing comes back by itself.</p>
+        <label class="pick"><input type="checkbox" id="panicLock"> <span>Lock the vault too</span></label>
+        <input id="panicReason" maxlength="200" placeholder="reason, for the audit log (optional)" autocomplete="off">`,
+      (f) => ({ lock: f.querySelector('#panicLock').checked === true, reason: f.querySelector('#panicReason').value.trim() }),
+      { submit: 'Panic now', danger: true })
+      if (!choice) return
+      const r = await api('POST', 'panic', { lock: choice.lock, ...(choice.reason ? { reason: choice.reason } : {}) })
+      toast(`Panic: ${r.revoked_sessions ?? 0} sessions revoked · ${r.denied_approvals ?? 0} held requests denied`
+        + ` · ${r.denied_session_requests ?? 0} session requests denied${r.locked ? ' · vault locked' : ''}`)
+      lastSession = null
+      slow.clear()
+      render()
+    },
+
+    async 'tripwires-on'() {
+      // With no rules stored yet, turning them on also stores the defaults,
+      // which makes it a change the daemon gates like any other.
+      const body = (tripwireState?.rules || []).length ? { enabled: true } : { enabled: true, rules: 'defaults' }
+      await setTripwires(body, 'Tripwires on')
+    },
+    async 'tripwires-off'() { await setTripwires({ enabled: false }, 'Tripwires off') },
+    async 'tripwires-save'() {
+      let rules
+      try { rules = JSON.parse(document.getElementById('twRules').value) } catch (e) { return toast(`The rules are not JSON: ${e.message}`) }
+      if (!Array.isArray(rules)) return toast('The rules must be a JSON list')
+      await setTripwires({ rules }, 'Tripwire rules saved')
+    },
+
+    async 'replace-key'() {
+      await replaceKey()
+      toast('Authenticator replaced. The old one no longer confirms anything.')
+      render()
+    },
+
+    async 'copy-checkpoint'() {
+      checkpoint = await api('GET', 'audit/checkpoint')
+      render()
+    },
   }
 
   /** The session's strictest mode, in the warning colour when it never asks about writes. */
@@ -1397,6 +2430,39 @@ ${c.cli} ui                         open this page`)}`,
     if (['sApproval', 'sMethods', 'sLifetime'].includes(e.target?.id)) syncSessionWarnings()
   })
 
+  /** Spend limits mean something only for a model provider's credential (F5). */
+  function syncSpendBox() {
+    const box = document.getElementById('spendBox')
+    const pick = document.getElementById('sCred')
+    if (!box || !pick) return
+    box.hidden = ![...pick.selectedOptions].some((o) => MODEL_KINDS.includes(credKinds.get(o.value)))
+  }
+
+  /** Fill the form from a template: its fields become the ceiling (F17). */
+  async function chooseTemplate(name) {
+    if (!name) { formTemplate = null; return render() }
+    const [t, list] = await Promise.all([
+      api('GET', `templates?name=${encodeURIComponent(name)}`),
+      api('GET', 'templates').catch(() => []),
+    ])
+    const listed = (Array.isArray(list) ? list : []).find((x) => x.name === name)
+    formTemplate = {
+      name: t.name, version: t.version, hash: t.hash, spec: t.spec,
+      limits: templateLimits(t.spec), elevated: listed?.elevated || [],
+    }
+    render()
+  }
+
+  async function toggleNotifications(on) {
+    if (on && typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+      const answer = await Notification.requestPermission()
+      if (answer !== 'granted') on = false
+    }
+    try { localStorage.setItem(NOTIFY_KEY, on ? 'on' : 'off') } catch { /* nothing to remember it in */ }
+    toast(on ? 'Desktop notifications on while this tab is open' : 'Desktop notifications off')
+    render()
+  }
+
   /** The bar appears only when something is ticked, and counts what is. */
   function syncBulkBar() {
     const bar = document.getElementById('bulkBar')
@@ -1410,6 +2476,9 @@ ${c.cli} ui                         open this page`)}`,
   document.addEventListener('change', (e) => {
     const box = e.target
     if (['sApproval', 'sMethods', 'sLifetime'].includes(box?.id)) return syncSessionWarnings()
+    if (box?.id === 'sCred') return syncSpendBox()
+    if (box?.id === 'sTemplate') return chooseTemplate(box.value).catch((err) => toast(err.message))
+    if (box?.id === 'notifyToggle') return toggleNotifications(box.checked).catch((err) => toast(err.message))
     if (!box.classList?.contains('bulk-pick')) return
     if (box.checked) selected.add(box.dataset.id)
     else selected.delete(box.dataset.id)
@@ -1512,6 +2581,8 @@ ${c.cli} ui                         open this page`)}`,
       el.innerHTML = await views[current]()
       restoreSelection()
       restoreDrafts()
+      restoreDetails()
+      highlightFocus()
     } catch (err) {
       el.innerHTML = `<header class="page"><h1>Cannot reach the daemon</h1></header>
         <p class="sub">${esc(err.message)}</p>
@@ -1539,6 +2610,7 @@ ${c.cli} ui                         open this page`)}`,
       const badge = document.getElementById('approvalCount')
       badge.textContent = pending.length ? ` (${pending.length})` : ''
       badge.className = pending.length ? 'pill warn' : ''
+      notifyNew(pending)
     } catch { /* the error is already shown in the main panel */ }
   }
 
@@ -1546,7 +2618,8 @@ ${c.cli} ui                         open this page`)}`,
   function syncNav() {
     document.querySelectorAll('nav button[data-view]').forEach((b) =>
       b.setAttribute('aria-current', String(b.dataset.view === current)))
-    const want = current === 'docs' ? `#docs/${docsSection}` : `#${current}`
+    const want = current === 'docs' ? `#docs/${docsSection}`
+      : current === 'approvals' && focusItem ? `#approvals/${encodeURIComponent(focusItem)}` : `#${current}`
     if (location.hash !== want) history.replaceState(null, '', want)
   }
 
