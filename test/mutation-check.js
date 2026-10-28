@@ -3516,14 +3516,14 @@ const MUTATIONS = [
   {
     what: 'a withheld key in another case reaches the page',
     file: 'src/ui/server.js',
-    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))",
     to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k)',
     tests: ['test/security/control-ui-handoff.test.js'],
   },
   {
     what: 'a hyphenated withheld key reaches the page',
     file: 'src/ui/server.js',
-    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))",
     to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase())',
     tests: ['test/security/control-ui-handoff.test.js'],
   },
@@ -3742,28 +3742,6 @@ const MUTATIONS = [
     tests: ['test/security/integrate3-narrowing.test.js'],
   },
   {
-    what: 'a stored secret in a session request path is copied into the session_request.opened audit record',
-    file: 'src/daemon/session-requests.js',
-    from: 'request_id: record.id, summary: scrubbed(record.summary),',
-    to: 'request_id: record.id, summary: record.summary,',
-    tests: ['test/security/integrate3-seams.test.js'],
-  },
-  {
-    what: "a stored secret in a session request's reason is copied into the session_request.opened audit record",
-    file: 'src/daemon/session-requests.js',
-    from: 'agent_reason_untrusted: scrubbed(record.reason_untrusted),',
-    to: 'agent_reason_untrusted: record.reason_untrusted,',
-    tests: ['test/security/integrate3-seams.test.js'],
-  },
-  {
-    // With nothing to scrub against, the agent's text went in as written.
-    what: 'a session request opened while the secrets cannot be read is audited unscrubbed',
-    file: 'src/daemon/session-requests.js',
-    from: '      return secrets\n    } catch { return null }',
-    to: '      return secrets\n    } catch { return [] }',
-    tests: ['test/security/integrate3-seams.test.js'],
-  },
-  {
     what: 'removing a pin from the UI needs no signature (C22(4))',
     file: 'src/ui/server.js',
     from: "    // Removing a pin takes away a check on the upstream's key (C22(4)).\n    'DELETE credentials/pins',\n",
@@ -3794,35 +3772,6 @@ const MUTATIONS = [
     tests: ['test/security/integrate3-gates.test.js'],
   },
   // ---- integrate-3 fix round 1: the approved-record scrub (F1), unapplied overrides (D1), passphrase (D2) ----
-  {
-    // The human approved the agent's paths; the log kept them as written.
-    what: 'a stored secret in an approved session request is copied into the session_request.approved audit record',
-    file: 'src/daemon/server.js',
-    from: '      granted: this.sessionRequests.forAudit(final, record.id),',
-    to: '      granted: final,',
-    tests: ['test/security/integrate3-fix1.test.js'],
-  },
-  {
-    what: 'the approved-record scrub stops at a list, so a path inside one is kept as written',
-    file: 'src/daemon/session-requests.js',
-    from: '  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets, needles))',
-    to: '  if (Array.isArray(value)) return value',
-    tests: ['test/security/integrate3-fix1.test.js'],
-  },
-  {
-    what: 'the approved-record scrub stops at an object, so routes and payload text are kept as written',
-    file: 'src/daemon/session-requests.js',
-    from: '    return Object.fromEntries(Object.entries(value).map(([k, v]) => [replaceNeedles(k, needles), redactDeep(v, secrets, needles)]))',
-    to: '    return value',
-    tests: ['test/security/integrate3-fix1.test.js'],
-  },
-  {
-    what: 'an approval recorded while the secrets cannot be read keeps the grant text unscrubbed',
-    file: 'src/daemon/session-requests.js',
-    from: '    if (!Array.isArray(asked) || !now) return null',
-    to: '    if (!Array.isArray(asked)) return null; if (!now) return value',
-    tests: ['test/security/integrate3-fix1.test.js'],
-  },
   {
     // D1: a host list in the overrides was dropped and the approval succeeded.
     what: 'the daemon approves a session request whose overrides name a key it does not apply',
@@ -3869,73 +3818,6 @@ const MUTATIONS = [
   },
   // ---- integrate-3 fix round 2: the audit scrub fails closed (F1 rotation, F2 numbers, F3 encodings), C23 unknown keys, pass_phrase ----
   {
-    // F1: the approval re-read the secrets stored now, so one rotated out
-    // (retireMs 0) since the ask was written raw.
-    what: 'the approved record is scrubbed only against the secrets stored at approval, not those captured when it was asked',
-    file: 'src/daemon/session-requests.js',
-    from: '    return auditCopy(value, [...asked, ...now])',
-    to: '    return auditCopy(value, now)',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'the capture taken when a request is asked holds none of the secrets in it',
-    file: 'src/daemon/session-requests.js',
-    from: '    return secrets.filter((s) => holdsSecret(text, needlesOf([s])))',
-    to: '    return []',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'a request with nothing captured (asked before a restart) is checked against the secrets stored now only',
-    file: 'src/daemon/session-requests.js',
-    from: '    const asked = this.asked.get(requestId)',
-    to: '    const asked = this.asked.get(requestId) ?? []',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'an empty or partial secret list is scrubbed against as if it were every stored secret',
-    file: 'src/daemon/session-requests.js',
-    from: "          if (!secrets.some((s) => s?.label === cred.slug && s?.field === f?.name && typeof s?.secret === 'string')) return null",
-    to: '          continue',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    // F2: budget 12345678 is the secret "12345678" written down.
-    what: 'a number in an approved proposal is recorded whatever stored secret its decimal form is',
-    file: 'src/daemon/session-requests.js',
-    from: "  if (typeof value === 'number') {",
-    to: '  if (false) {',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    // F3: only the exact text was matched.
-    what: 'the audit scrub replaces only the exact text of a secret, not the encodings the response scrubber knows',
-    file: 'src/daemon/session-requests.js',
-    from: '    for (const e of encodings(s.secret)) if (!out.has(e)) out.set(e, s.label)',
-    to: '    if (!out.has(s.secret)) out.set(s.secret, s.label)',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'what the audit scrub leaves is recorded without the check that nothing of a secret remains',
-    file: 'src/daemon/session-requests.js',
-    from: "  return typeof text === 'string' && holdsSecret(text, needles) ? null : out",
-    to: '  return out',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'the final audit check does not decode %XX, so a secret encoded in part is recorded',
-    file: 'src/daemon/session-requests.js',
-    from: '      .replace(/%([0-9A-Fa-f]{2})/g,',
-    to: '      .replace(/%(?!)([0-9A-Fa-f]{2})/g,',
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
-    what: 'the session_request.opened summary and reason are written without the audit scrub',
-    file: 'src/daemon/session-requests.js',
-    from: "    const scrubbed = (text) => (typeof text === 'string' ? auditCopy(text, secrets) : null)",
-    to: "    const scrubbed = (text) => (typeof text === 'string' && secrets ? text : null)",
-    tests: ['test/security/integrate3-fix2.test.js'],
-  },
-  {
     // C23: a key the parser copied into nothing was approved as if it narrowed.
     what: 'the shared narrowing parser drops a key it does not read instead of refusing it',
     file: 'src/pending.js',
@@ -3953,13 +3835,141 @@ const MUTATIONS = [
   {
     what: 'towardPage sends a pass-phrase or pass_phrase to the page',
     file: 'src/ui/server.js',
-    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
-    to: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))",
+    to: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_'))",
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  // ---- integrate-3 fix round 3: C25, session-request records hold structure only; F6; separator runs ----
+  {
+    what: "the session_request.opened record quotes the proposal's summary (C25)",
+    file: 'src/daemon/session-requests.js',
+    from: "      proposed: fields, counts,\n    })",
+    to: "      proposed: fields, counts, summary: record.summary,\n    })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the session_request.opened record quotes the agent's reason (C25)",
+    file: 'src/daemon/session-requests.js',
+    from: "      proposed: fields, counts,\n    })",
+    to: "      proposed: fields, counts, agent_reason_untrusted: record.reason_untrusted,\n    })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the session_request.opened record carries a digest of the proposal (C25)",
+    file: 'src/daemon/session-requests.js',
+    from: "      proposed: fields, counts,\n    })",
+    to: "      proposed: fields, counts, fingerprint: record.fingerprint,\n    })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "shapeOf counts a list by copying it (C25)",
+    file: 'src/daemon/session-requests.js',
+    from: "for (const f of fields) if (Array.isArray(p[f])) counts[f] = p[f].length",
+    to: "for (const f of fields) if (Array.isArray(p[f])) counts[f] = p[f]",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "shapeOf names fields from the proposal's own keys, which the agent wrote (C25)",
+    file: 'src/daemon/session-requests.js',
+    from: "const fields = [...FIELDS, ...OWNER_FIELDS].filter((f) => p?.[f] !== undefined && p?.[f] !== null)",
+    to: "const fields = Object.keys(p ?? {}).filter((f) => p?.[f] !== undefined && p?.[f] !== null)",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the session_request.approved record holds the granted values, not their names (C25)",
+    file: 'src/daemon/server.js',
+    from: "granted: shape.fields, counts: shape.counts, narrowed,",
+    to: "granted: final, counts: shape.counts, narrowed,",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the session_request.approved record holds the values a human narrowed to, not their names (C25)",
+    file: 'src/daemon/server.js',
+    from: "granted: shape.fields, counts: shape.counts, narrowed,",
+    to: "granted: shape.fields, counts: shape.counts, narrowed: narrowed.map((f) => final[f]),",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "a decided session-request record holds the proposal, not its field names (C25)",
+    file: 'src/daemon/server.js',
+    from: "      proposed: shapeOf(record.proposal).fields,\n    }",
+    to: "      proposed: record.proposal,\n    }",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "a human denial quotes the proposal's summary (C25)",
+    file: 'src/daemon/server.js',
+    from: "{ ...this.#requestShape(record, 'denied'), actor: 'human' })",
+    to: "{ ...this.#requestShape(record, 'denied'), actor: 'human', summary: record.summary })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "a panic denial quotes the proposal's summary (C25)",
+    file: 'src/daemon/server.js',
+    from: "actor: reason, reason })",
+    to: "actor: reason, reason, summary: record.summary })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "placeholder.issued records the use ceiling, which can be a budget the agent proposed (F6)",
+    file: 'src/store/vault.js',
+    from: "      credential_slug: cred.slug, field: fieldName,\n    })",
+    to: "      credential_slug: cred.slug, field: fieldName, max_uses: maxUses,\n    })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "placeholder.refunded records the use ceiling (C25 addendum)",
+    file: 'src/store/vault.js',
+    from: "      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses,\n    })",
+    to: "      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses, max_uses: row.max_uses,\n    })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "a session or grant made from a request records its end, the approval time plus a lifetime the agent chose (C25 addendum)",
+    file: 'src/store/vault.js',
+    from: "  return requested ? { expires_at: null, has_expiry: expiresAt != null } : { expires_at: expiresAt }",
+    to: "  return { expires_at: expiresAt }",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "a session made by a human loses its end in the log (C25 addendum: human-made sessions are unchanged)",
+    file: 'src/store/vault.js',
+    from: "  return requested ? { expires_at: null, has_expiry: expiresAt != null } : { expires_at: expiresAt }",
+    to: "  return { expires_at: null, has_expiry: expiresAt != null }",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the session made from a request is not marked as one, so session.created records its end (C25 addendum)",
+    file: 'src/daemon/server.js',
+    from: "template: from?.name ?? null, templateVersion: from?.version ?? null, requested,",
+    to: "template: from?.name ?? null, templateVersion: from?.version ?? null,",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "the grant made from a request is not marked as one, so grant.created records its end (C25 addendum)",
+    file: 'src/daemon/server.js',
+    from: "fields: [field.name], policy, ttlMs, requested,",
+    to: "fields: [field.name], policy, ttlMs,",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "an approval does not say its session comes from a request (C25 addendum)",
+    file: 'src/daemon/server.js',
+    from: "{ template: templateOf(record.proposal), requested: true })",
+    to: "{ template: templateOf(record.proposal) })",
+    tests: ['test/security/integrate3-c25.test.js'],
+  },
+  {
+    what: "towardPage keeps pass--phrase, pass__phrase and \"pass phrase\": separator runs are not folded",
+    file: 'src/ui/server.js',
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))",
+    to: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
     tests: ['test/security/integrate3-fix1.test.js'],
   },
 ]
 
 let survived = 0
+let timedOut = 0
 
 // Restore on the way out, however we leave.
 //
@@ -4035,7 +4045,17 @@ for (const m of MUTATIONS) {
     const failed = /^[#ℹ] fail (\d+)/m.exec(res.stdout)
     const count = failed ? Number(failed[1]) : 0
     if (res.timedOut) {
-      console.log(`ok ${m.what}\n   caught: the tests did not finish in ${TIMEOUT_MS / 1000} s under this mutant and were killed`)
+      // A run that never finished proves nothing by itself: the tests may
+      // have been about to pass. It counts as caught only when a test had
+      // already failed before the kill; otherwise it is reported, and fails
+      // the run, so a short timeout cannot hide a surviving protection.
+      const notOk = (res.stdout.match(/^\s*not ok \d+(?![^\n]*# (?:TODO|SKIP))/gm) || []).length
+      if (notOk > 0) {
+        console.log(`ok ${m.what}\n   caught by ${notOk} failing test${notOk > 1 ? 's' : ''} before the run was killed at ${TIMEOUT_MS / 1000} s`)
+      } else {
+        console.log(`TIMEOUT  ${m.what}\n   the tests did not finish in ${TIMEOUT_MS / 1000} s and none had failed; this protection is not shown to be tested`)
+        timedOut++
+      }
     } else if (count > 0) {
       console.log(`ok ${m.what}\n   caught by ${count} test${count > 1 ? 's' : ''}`)
     } else {
@@ -4051,8 +4071,9 @@ for (const m of MUTATIONS) {
 }
 
 console.log()
-if (survived) {
-  console.log(`${survived} mutation${survived > 1 ? 's' : ''} survived. A protection with no test behind it is a claim.`)
+if (survived || timedOut) {
+  if (survived) console.log(`${survived} mutation${survived > 1 ? 's' : ''} survived. A protection with no test behind it is a claim.`)
+  if (timedOut) console.log(`${timedOut} protection${timedOut > 1 ? 's' : ''} timed out with no failing test (MUTATION_TIMEOUT_MS=${TIMEOUT_MS}). Not caught until shown caught.`)
   process.exit(1)
 }
 console.log('Every protection is held up by at least one failing test.')
