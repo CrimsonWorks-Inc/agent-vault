@@ -106,7 +106,14 @@ export function approvalOverrides(args, parse) {
   }
   let overrides
   try {
-    overrides = { ...parse(args), ...grantInput(args) }
+    // Where both read a field, parseOverrides' value is the one sent (C21):
+    // it is the parser the page and the UI server read the same narrowing
+    // with, so all three sign the same operation. grantInput still reads every
+    // flag, so a value it would refuse stays a usage error, and it is the only
+    // reader of --payload-file and --graphql. It used to win, and sent
+    // `--rate 60/min` as an object where the page sent the text.
+    const typed = parse(args)
+    overrides = { ...grantInput(args), ...typed }
   } catch (e) {
     if (e instanceof TypeError && typeof e.field === 'string' && e.field) {
       const why = e.message.startsWith(`${e.field}:`) ? e.message.slice(e.field.length + 1).trim() : e.message
