@@ -196,9 +196,11 @@ test('every request and answer is in the audit log', async () => {
   for (const kind of ['session_request.opened', 'session_request.approved', 'session_request.denied', 'session_request.collected']) {
     assert.ok(kinds.includes(kind), `${kind} was never recorded`)
   }
-  // The agent's stated reason is recorded as a claim, and no token is.
+  // C25: a request's records carry its shape, not the agent's words; no token either.
+  const requests = vault.audit.read({ limit: 400 }).filter((r) => r.kind.startsWith('session_request.'))
+  assert.ok(requests.every((r) => !('agent_reason_untrusted' in r) && !('summary' in r)), JSON.stringify(requests))
+  assert.ok(requests.some((r) => r.kind === 'session_request.opened' && Array.isArray(r.proposed) && r.proposed.includes('paths')))
   const raw = JSON.stringify(vault.audit.read({ limit: 400 }))
-  assert.ok(raw.includes('agent_reason_untrusted'))
   assert.ok(!raw.includes('avs1.'), 'a session token reached the audit log')
 })
 

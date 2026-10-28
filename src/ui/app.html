@@ -2168,7 +2168,7 @@ ${c.cli} ui                         open this page`)}`,
         <div class="card"><h2>Recent</h2><div class="audit">
           ${rows.slice().reverse().map((r) => {
             const cls = r.decision === 'allow' ? 't-allow' : r.decision === 'deny' ? 't-deny' : 't-dim'
-            const note = r.reason_code || r.credential_slug || r.detail || ''
+            const note = r.reason_code || r.credential_slug || r.cred || r.detail || ''
             return `<div class="line"><span class="t-dim">${esc(r.ts.slice(11, 19))}</span>
               <span class="${cls}">${esc(r.decision || '')}</span>
               <span>${esc(r.kind)}</span><span class="t-dim">${esc(note)}</span></div>`

@@ -876,7 +876,8 @@ const COMMANDS = {
     if (JSON_OUT) return out(null, rows)
     for (const r of rows) {
       const decision = r.decision === 'deny' ? C.red('deny') : r.decision === 'allow' ? C.green('allow') : C.dim('-')
-      const detail = r.reason_code || r.credential_slug || r.detail || ''
+      // A session request's records name the credential as `cred` (C25).
+      const detail = r.reason_code || r.credential_slug || r.cred || r.detail || ''
       console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(detail)}`)
     }
   },

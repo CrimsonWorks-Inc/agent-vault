@@ -333,7 +333,8 @@ test('approving a request into auto with writes needs a fresh proof, not the win
     assert.equal(d.vault.db.grants[ok.body.session.grant_id].policy.approval, 'auto')
     assert.ok(ok.body.session.token, 'the deciding client gets the session it made')
     const approved = d.vault.audit.read({ limit: 50 }).find((x) => x.kind === 'session_request.approved')
-    assert.equal(approved.granted.approval, 'auto')
+    // C25: the record names the field the human added, not its value.
+    assert.ok(approved.granted.includes('approval') && approved.narrowed.includes('approval'), JSON.stringify(approved))
   } finally { await d.stop() }
 })
 

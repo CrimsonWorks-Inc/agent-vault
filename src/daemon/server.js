@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN, compileScrubPattern } from '../core/scrub.js'
 import * as ph from '../core/placeholder.js'
 import {
-  SessionRequests, proposalOf, overridesOf, overridesProblem, elevationOf, OWNER_FIELDS,
+  SessionRequests, proposalOf, overridesOf, overridesProblem, elevationOf, OWNER_FIELDS, shapeOf, narrowedOf,
   resolveTemplate, grantSpecsOf, templateCreds, templateSummary,
 } from './session-requests.js'
 import { sessionExpiryMs } from '../store/vault.js'
@@ -203,7 +203,7 @@ export class Daemon {
   #denyPendingSessionRequests(reason) {
     let n = 0
     for (const record of this.sessionRequests.pending()) {
-      this.vault.audit.write('session_request.denied', { request_id: record.id, reason })
+      this.vault.audit.write('session_request.denied', { ...this.#requestShape(record, 'denied'), actor: reason, reason })
       record.state = 'denied'
       record.decided_at = new Date().toISOString()
       n++
@@ -281,6 +281,20 @@ export class Daemon {
     return approvalView(this.pipeline.decideApproval(id, granted))
   }
 
+  /**
+   * What every decided session-request record says about its request (C25):
+   * ids, the vault's own credential slug, and the names of the fields the
+   * agent proposed. No value the agent wrote.
+   */
+  #requestShape(record, decision) {
+    return {
+      request_id: record.id,
+      decision,
+      cred: this.vault.findCredential?.(record.proposal?.cred)?.slug ?? null,
+      proposed: shapeOf(record.proposal).fields,
+    }
+  }
+
   /** The decision itself, after the gate has let it through. */
   #settleSessionRequest(record, granted, final) {
     // Not truthiness, here as in checkDecisions: `granted: "false"` is a
@@ -292,7 +306,7 @@ export class Daemon {
       record.state = 'denied'
       record.decided_at = new Date().toISOString()
       this.sessionRequests.persist()
-      this.vault.audit?.write('session_request.denied', { request_id: record.id })
+      this.vault.audit?.write('session_request.denied', { ...this.#requestShape(record, 'denied'), actor: 'human' })
       return SessionRequests.redact(record)
     }
     // A lifetime and "no lifetime" cannot both be the answer. The owner
@@ -311,20 +325,19 @@ export class Daemon {
     const created = this.#makeSession(this.#planSession({
       ...requestSpec(final),
       label: `requested by an agent (${record.id})`,
-    }), { template: templateOf(record.proposal) })
+    }), { template: templateOf(record.proposal), requested: true })
     record.state = 'approved'
     record.decided_at = new Date().toISOString()
     record.granted_proposal = final
     record.result = created
     this.sessionRequests.persist()
+    // Structure only (C25): the human saw and approved the real values, and
+    // the grant enforces them, but the log outlives both and is exported.
+    const shape = shapeOf(final)
+    const narrowed = narrowedOf(record.proposal, final)
     this.vault.audit?.write('session_request.approved', {
-      request_id: record.id,
-      session_id: created.session_id,
-      // Scrubbed: the human saw and approved the real text, and the grant
-      // enforces it, but the log outlives both and is exported. Null when it
-      // cannot be checked clean.
-      granted: this.sessionRequests.forAudit(final, record.id),
-      edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
+      ...this.#requestShape(record, 'approved'), actor: 'human', session_id: created.session_id,
+      granted: shape.fields, counts: shape.counts, narrowed, edited: narrowed.length > 0,
     })
     return { ...SessionRequests.redact(record), granted: final }
   }
@@ -590,12 +603,12 @@ export class Daemon {
    * `template` names the template a session request was made from, when its
    * snapshot (not the template itself) is what the plan was built from.
    */
-  #makeSession(plan, { template = null } = {}) {
+  #makeSession(plan, { template = null, requested = false } = {}) {
     const from = plan.template ?? template
     const { session, token } = this.vault.createSession({
       label: plan.label, ttlMs: plan.ttlMs, infinite: plan.infinite, elevated: plan.elevated,
       policy: {}, remote: plan.remote,
-      template: from?.name ?? null, templateVersion: from?.version ?? null,
+      template: from?.name ?? null, templateVersion: from?.version ?? null, requested,
     })
     try {
       // A store that cannot keep a session open forever must not hand back
@@ -606,7 +619,7 @@ export class Daemon {
       const grants = plan.grants.map(({ cred, profile, spec, policy, ttlMs, lint }) => {
         const field = cred.fields[0]
         const grant = this.vault.createGrant({
-          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy, ttlMs,
+          sessionId: session.id, credentialId: cred.id, fields: [field.name], policy, ttlMs, requested,
         })
         // The grant's placeholder_policy is a ceiling, not a default. It sat
         // on the right of a `??`, so an agent asking for a million uses got

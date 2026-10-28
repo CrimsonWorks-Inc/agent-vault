@@ -166,7 +166,10 @@ test('a session request with a non-string reason is stored and recorded', async 
     const ok = await d.control('POST', '/v1/session-requests', { cred: 'demo', reason: 'reading issues' })
     assert.equal(ok.status, 200)
     const last = d.vault.audit.read({ limit: 50 }).filter((r) => r.kind === 'session_request.opened').at(-1)
-    assert.equal(last.agent_reason_untrusted, 'reading issues', 'a string reason is recorded verbatim')
+    // C25: the record says a request was opened and its shape, never the
+    // agent's words.
+    assert.equal(last.cred, 'demo')
+    assert.ok(!('agent_reason_untrusted' in last) && !JSON.stringify(last).includes('reading issues'), JSON.stringify(last))
   } finally { await d.stop() }
 })
 

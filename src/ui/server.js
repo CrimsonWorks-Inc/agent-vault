@@ -916,8 +916,9 @@ const WITHHELD_KEYS = new Set([
 ])
 const SESSION_TOKEN = /avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
 // Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader, and
-// so are pass-phrase, Pass_Phrase and passphrase.
-const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))
+// so are pass-phrase, pass--phrase, "pass phrase", Pass_Phrase and passphrase:
+// any run of hyphens, underscores and spaces is one separator.
+const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))
 
 export function towardPage(value, depth = 0) {
   if (depth > 64) return null

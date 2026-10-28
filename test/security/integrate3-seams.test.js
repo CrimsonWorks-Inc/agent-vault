@@ -178,38 +178,40 @@ test('a stored secret an agent puts in a session request path or reason does not
     assert.ok(opened, 'nothing was recorded')
     assert.ok(!auditText(a).includes(SECRET), 'the stored secret is in the audit log')
     assert.ok(!auditText(a).includes(SECRET.slice(0, 12)), 'part of the stored secret is in the audit log')
-    assert.match(opened.summary, /\[\[av:redacted:demo\]\]/, 'the summary no longer says something was there')
-    assert.match(opened.summary, /\/plain\/path/, 'the summary lost the ordinary path')
-    assert.match(opened.agent_reason_untrusted, /^please, my token is \[\[av:redacted:demo\]\]$/)
-    // The human still sees the request as asked: only the log is scrubbed.
+    // C25: the record holds the request's shape, not its paths or reason.
+    assert.deepEqual(opened.proposed, ['cred', 'paths'])
+    assert.deepEqual(opened.counts, { paths: 2 })
+    assert.ok(!('summary' in opened) && !('agent_reason_untrusted' in opened), JSON.stringify(opened))
+    // The human still sees the request as asked: only the log leaves it out.
     assert.ok(a.daemon.sessionRequests.pending()[0].summary.includes(SECRET))
   } finally { await a.stop() }
 })
 
-test('an ordinary session request is recorded in the audit log as asked', async () => {
+test('an ordinary session request is recorded in the audit log by its shape', async () => {
   const a = await startApi()
   try {
     const asked = await a.control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: ['/repos/**'], reason: 'read the repo list' })
     assert.equal(asked.status, 200, JSON.stringify(asked.body))
     const [opened] = a.audit('session_request.opened')
-    assert.equal(opened.summary, a.daemon.sessionRequests.pending()[0].summary)
-    assert.match(opened.summary, /\/repos\/\*\*/)
-    assert.equal(opened.agent_reason_untrusted, 'read the repo list')
+    assert.equal(opened.request_id, asked.body.request_id ?? asked.body.id)
+    assert.deepEqual([opened.actor, opened.cred, opened.template], ['agent', 'demo', null])
+    assert.deepEqual(opened.proposed, ['cred', 'methods', 'paths'])
+    assert.deepEqual(opened.counts, { methods: 1, paths: 1 })
+    assert.ok(!auditText(a).includes('/repos/**') && !auditText(a).includes('read the repo list'))
+    // The pending view still has the real text for the human.
+    assert.match(a.daemon.sessionRequests.pending()[0].summary, /\/repos\/\*\*/)
   } finally { await a.stop() }
 })
 
-test('with no secrets to scrub against, an agent-written summary is not recorded at all', async () => {
+test('with the secrets unreadable, the opened record is the same shape and holds nothing the agent wrote', async () => {
   const a = await startApi()
   try {
     const sr = a.daemon.sessionRequests
-    // The store cannot give its secrets (as when it is locked): nothing it
-    // could not check is written.
     const allSecrets = a.vault.allSecrets
     a.vault.allSecrets = () => { throw new Error('locked') }
     try { sr.propose({ proposal: { cred: 'demo', paths: [`/${SECRET}`] }, reason: SECRET }) } finally { a.vault.allSecrets = allSecrets }
     const [opened] = a.audit('session_request.opened')
-    assert.equal(opened.summary, null)
-    assert.equal(opened.agent_reason_untrusted, null)
+    assert.deepEqual(opened.proposed, ['cred', 'paths'])
     assert.ok(!auditText(a).includes(SECRET))
   } finally { await a.stop() }
 })

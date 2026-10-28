@@ -64,6 +64,16 @@ function rowExpiryMs(row) {
 }
 
 /** `min(a, b)` as an ISO date, or `now` when it is already behind us. */
+/**
+ * A session's or grant's end as its creation record keeps it. One made from
+ * an agent's session request (C25) records only whether it has one: its end
+ * is the approval time plus a lifetime the agent proposed, so the timestamp
+ * is that number written down. The live session and grant keep the real end.
+ */
+function expiryForAudit(expiresAt, requested) {
+  return requested ? { expires_at: null, has_expiry: expiresAt != null } : { expires_at: expiresAt }
+}
+
 function shortenedIso(current, now, ttlMs) {
   const at = Math.min(current, now + ttlMs)
   return new Date(at > now ? at : now).toISOString()
@@ -1625,7 +1635,7 @@ export class Vault {
    * `infinite: 'false'` is truthy, and `ttlMs: NaN` was a session that
    * `new Date(NaN)` threw on halfway through.
    */
-  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], template = null, templateVersion = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], template = null, templateVersion = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null, requested = false }) {
     this.#requireUnlocked()
     if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
       throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
@@ -1672,7 +1682,7 @@ export class Vault {
     this.#persist()
     this.audit.write('session.created', {
       session_id: sid, workspace_id: workspaceId, label, remote,
-      infinite, expires_at: session.expires_at, elevated: session.elevated,
+      infinite, ...expiryForAudit(session.expires_at, requested), elevated: session.elevated,
       template, template_version: templateVersion,
     })
     return { session, token }
@@ -1858,7 +1868,7 @@ export class Vault {
    * session's: a grant of an infinite session still ends. Absent, the grant
    * lives as long as its session, as before.
    */
-  createGrant({ sessionId, credentialId, fields, policy, narrow = null, ttlMs = null }) {
+  createGrant({ sessionId, credentialId, fields, policy, narrow = null, ttlMs = null, requested = false }) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
     // nothing while locked rather than persisting unrecorded.
@@ -1889,7 +1899,7 @@ export class Vault {
     }
     this.db.grants[grantId] = grant
     this.#persist()
-    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug, expires_at })
+    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug, ...expiryForAudit(expires_at, requested) })
     return grant
   }
 
@@ -2116,9 +2126,11 @@ export class Vault {
     // Ledger churn, not key material: the rename is atomic either way, so the
     // worst a power cut costs is one placeholder the agent asks for again.
     this.#persist({ durable: false })
+    // No max_uses (C25): it can be the budget an agent proposed, and a
+    // stored PIN proposed as a budget was written here during the approval.
     this.audit.write('placeholder.issued', {
       placeholder_id: row.id, grant_id: grantId, session_id: session.id,
-      credential_slug: cred.slug, field: fieldName, max_uses: maxUses,
+      credential_slug: cred.slug, field: fieldName,
     })
     return { placeholder: minted.text, row }
   }
@@ -2237,7 +2249,7 @@ export class Vault {
     this.#persist({ durable: false })
     // Recorded, so the ledger and the log agree about how many uses happened.
     this.audit?.write('placeholder.refunded', {
-      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses, max_uses: row.max_uses,
+      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses,
     })
   }
 
