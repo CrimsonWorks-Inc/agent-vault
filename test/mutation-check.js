@@ -3725,6 +3725,68 @@ const MUTATIONS = [
     to: "      const markdown = args.markdown === true\n      const r = await control('GET', `/v1/sessions/detail",
     tests: ["test/security/control-cli-files.test.js"],
   },
+  // ---- integrate-3: the wave-3 seams, C22(4) on the UI, the session-request audit scrub ----
+  {
+    // C21: grantInput's reading of --rate and --quota won over parseOverrides',
+    // so the CLI signed an object where the page signed the text.
+    what: "the CLI's approve sends its own reading of a narrowing, not parseOverrides' (C21)",
+    file: 'src/cli/policy-input.js',
+    from: '    overrides = { ...grantInput(args), ...typed }',
+    to: '    overrides = { ...typed, ...grantInput(args) }',
+    tests: ['test/security/integrate3-narrowing.test.js'],
+  },
+  {
+    what: 'a stored secret in a session request path is copied into the session_request.opened audit record',
+    file: 'src/daemon/session-requests.js',
+    from: 'request_id: record.id, summary: scrubbed(record.summary),',
+    to: 'request_id: record.id, summary: record.summary,',
+    tests: ['test/security/integrate3-seams.test.js'],
+  },
+  {
+    what: "a stored secret in a session request's reason is copied into the session_request.opened audit record",
+    file: 'src/daemon/session-requests.js',
+    from: 'agent_reason_untrusted: scrubbed(record.reason_untrusted),',
+    to: 'agent_reason_untrusted: record.reason_untrusted,',
+    tests: ['test/security/integrate3-seams.test.js'],
+  },
+  {
+    // With nothing to scrub against, the agent's text went in as written.
+    what: 'a session request opened while the secrets cannot be read is audited unscrubbed',
+    file: 'src/daemon/session-requests.js',
+    from: '    try { return this.vault?.allSecrets?.() ?? null } catch { return null }',
+    to: '    try { return this.vault?.allSecrets?.() ?? null } catch { return [] }',
+    tests: ['test/security/integrate3-seams.test.js'],
+  },
+  {
+    what: 'removing a pin from the UI needs no signature (C22(4))',
+    file: 'src/ui/server.js',
+    from: "    // Removing a pin takes away a check on the upstream's key (C22(4)).\n    'DELETE credentials/pins',\n",
+    to: '',
+    tests: ['test/security/integrate3-gates.test.js'],
+  },
+  {
+    what: 'the UI treats the daemon-verified pin removal as its own check only',
+    file: 'src/ui/server.js',
+    from: "    'POST tripwires', 'POST templates', 'DELETE credentials/pins',\n",
+    to: "    'POST tripwires', 'POST templates',\n",
+    tests: ['test/security/integrate3-gates.test.js'],
+  },
+  {
+    // The daemon binds an absent spki as null; omitting it is another operation.
+    what: "the UI binds a pin removal with spki omitted rather than null (C22(4))",
+    file: 'src/ui/server.js',
+    from: "slug: url.searchParams.get('slug'), host: url.searchParams.get('host'), spki: url.searchParams.get('spki'),",
+    to: "slug: url.searchParams.get('slug'), host: url.searchParams.get('host'), ...(url.searchParams.has('spki') ? { spki: url.searchParams.get('spki') } : {}),",
+    tests: ['test/security/integrate3-gates.test.js'],
+  },
+  {
+    // Signed for one pin, executed as "every pin for the host".
+    what: 'the UI forwards a single-pin removal without the pin',
+    file: 'src/ui/server.js',
+    from: "queryOf(url, ['slug', 'host', 'spki'])",
+    to: "queryOf(url, ['slug', 'host'])",
+    tests: ['test/security/integrate3-gates.test.js'],
+  },
 ]
 
 let survived = 0
