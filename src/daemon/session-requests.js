@@ -20,6 +20,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { id } from '../store/ids.js'
 import { deny } from '../core/errors.js'
+import { redactStored } from './notify.js'
 import * as policyMod from '../core/policy.js'
 
 // An agent can ask as often as it likes, so the store is bounded the way the
@@ -379,6 +380,11 @@ export class SessionRequests {
 
   get audit() { return this.vault?.audit ?? null }
 
+  /** Every stored secret, or null when the vault cannot give them. */
+  #secrets() {
+    try { return this.vault?.allSecrets?.() ?? null } catch { return null }
+  }
+
   #sweep() {
     const now = Date.now()
     const sizeBefore = this.items.size
@@ -457,9 +463,16 @@ export class SessionRequests {
     }
     this.items.set(record.id, record)
     this.#save()
+    // The summary quotes the agent's paths and the reason is the agent's own
+    // words, and the audit log outlives the request and is exported. A path
+    // that is a stored secret was copied into it verbatim. Scrubbed the way
+    // notification headlines are; with no secrets to scrub against (a locked
+    // vault), neither is recorded.
+    const secrets = this.#secrets()
+    const scrubbed = (text) => (typeof text === 'string' && secrets ? redactStored(text, secrets) : null)
     this.audit?.write('session_request.opened', {
-      request_id: record.id, summary: record.summary, fingerprint: record.fingerprint,
-      agent_reason_untrusted: record.reason_untrusted,
+      request_id: record.id, summary: scrubbed(record.summary), fingerprint: record.fingerprint,
+      agent_reason_untrusted: scrubbed(record.reason_untrusted),
     })
     try { this.onPending?.({ kind: 'session', id: record.id, headline: record.summary, created_at: record.created_at }) } catch { /* a signal, never the request */ }
     return { record, collectSecret }
