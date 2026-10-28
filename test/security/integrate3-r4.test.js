@@ -106,8 +106,10 @@ test('C27: a secret as the path glob and the route glob is in no gateway row, be
     // The request's own path is the one thing C27 leaves as it was: scrubbed
     // while the value is stored. Once it is not, the path is just a path, so
     // only the first row is held to the full needle list.
-    const globText = (r) => JSON.stringify({ ...r.req, path: null })
-    for (const r of rows) for (const n of NEEDLES) assert.ok(!globText(r).includes(n), `${JSON.stringify(r.req)} holds ${n}`)
+    for (const [where, all] of await surfaces(a)) {
+      const text = JSON.stringify(all.map((r) => (r.kind?.startsWith('request.') && r.req ? { ...r, req: { ...r.req, path: null } } : r)))
+      for (const n of NEEDLES) assert.ok(!text.includes(n), `${where} holds ${JSON.stringify(n)} outside req.path`)
+    }
   } finally { await a.stop() }
 })
 
