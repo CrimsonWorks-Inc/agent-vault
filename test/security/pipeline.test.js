@@ -3,7 +3,7 @@
 // A fake upstream records exactly what reached the wire, so "the secret never
 // left" is checked rather than assumed.
 
-import { test, beforeEach, afterEach } from 'node:test'
+import { test as nodeTest, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,12 @@ import { Readable } from 'node:stream'
 import { Pipeline } from '../../src/daemon/pipeline.js'
 
 const SECRET = 'ghp_REALSECRET0000111122223333444455556666'
+
+// Every test here is bounded: one that stalls under a broken pipeline fails
+// in 30 s instead of holding the file open. The mutation check once waited
+// over an hour on this file; a loop that never yields is beyond any timer in
+// here, and the checker's own timeout kills that run from outside.
+const test = (name, fn) => nodeTest(name, { timeout: 30_000 }, fn)
 
 let dir, vault, pipeline, sent, session, token, placeholder, grant
 

@@ -14,12 +14,18 @@
 // if you happen to be mid-change. That is not hypothetical; it ate a fix.
 
 import { readFileSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const node = process.execPath
+// How long one protection's tests may run. A mutant that sends a test into a
+// loop that never yields cannot be stopped from inside it (no timer fires),
+// so the run is killed from here, and a protection whose tests never finish
+// under its mutant counts as caught: the suite did not pass with it removed.
+// The whole run used to wait on one such test for over an hour.
+const TIMEOUT_MS = Number(process.env.MUTATION_TIMEOUT_MS) || 300_000
 
 /**
  * Each entry breaks one protection by a literal string swap, then names the
@@ -3510,14 +3516,14 @@ const MUTATIONS = [
   {
     what: 'a withheld key in another case reaches the page',
     file: 'src/ui/server.js',
-    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
     to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k)',
     tests: ['test/security/control-ui-handoff.test.js'],
   },
   {
     what: 'a hyphenated withheld key reaches the page',
     file: 'src/ui/server.js',
-    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
     to: 'const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase())',
     tests: ['test/security/control-ui-handoff.test.js'],
   },
@@ -3753,8 +3759,8 @@ const MUTATIONS = [
     // With nothing to scrub against, the agent's text went in as written.
     what: 'a session request opened while the secrets cannot be read is audited unscrubbed',
     file: 'src/daemon/session-requests.js',
-    from: '    try { return this.vault?.allSecrets?.() ?? null } catch { return null }',
-    to: '    try { return this.vault?.allSecrets?.() ?? null } catch { return [] }',
+    from: '      return secrets\n    } catch { return null }',
+    to: '      return secrets\n    } catch { return [] }',
     tests: ['test/security/integrate3-seams.test.js'],
   },
   {
@@ -3792,29 +3798,29 @@ const MUTATIONS = [
     // The human approved the agent's paths; the log kept them as written.
     what: 'a stored secret in an approved session request is copied into the session_request.approved audit record',
     file: 'src/daemon/server.js',
-    from: '      granted: this.sessionRequests.forAudit(final),',
+    from: '      granted: this.sessionRequests.forAudit(final, record.id),',
     to: '      granted: final,',
     tests: ['test/security/integrate3-fix1.test.js'],
   },
   {
     what: 'the approved-record scrub stops at a list, so a path inside one is kept as written',
     file: 'src/daemon/session-requests.js',
-    from: '  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets))',
+    from: '  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets, needles))',
     to: '  if (Array.isArray(value)) return value',
     tests: ['test/security/integrate3-fix1.test.js'],
   },
   {
     what: 'the approved-record scrub stops at an object, so routes and payload text are kept as written',
     file: 'src/daemon/session-requests.js',
-    from: '    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactStored(k, secrets), redactDeep(v, secrets)]))',
+    from: '    return Object.fromEntries(Object.entries(value).map(([k, v]) => [replaceNeedles(k, needles), redactDeep(v, secrets, needles)]))',
     to: '    return value',
     tests: ['test/security/integrate3-fix1.test.js'],
   },
   {
     what: 'an approval recorded while the secrets cannot be read keeps the grant text unscrubbed',
     file: 'src/daemon/session-requests.js',
-    from: '    return secrets ? redactDeep(value, secrets) : null',
-    to: '    return secrets ? redactDeep(value, secrets) : value',
+    from: '    if (!Array.isArray(asked) || !now) return null',
+    to: '    if (!Array.isArray(asked)) return null; if (!now) return value',
     tests: ['test/security/integrate3-fix1.test.js'],
   },
   {
@@ -3861,6 +3867,96 @@ const MUTATIONS = [
     to: "'recovery_passphrase', 'bundle',",
     tests: ['test/security/integrate3-fix1.test.js'],
   },
+  // ---- integrate-3 fix round 2: the audit scrub fails closed (F1 rotation, F2 numbers, F3 encodings), C23 unknown keys, pass_phrase ----
+  {
+    // F1: the approval re-read the secrets stored now, so one rotated out
+    // (retireMs 0) since the ask was written raw.
+    what: 'the approved record is scrubbed only against the secrets stored at approval, not those captured when it was asked',
+    file: 'src/daemon/session-requests.js',
+    from: '    return auditCopy(value, [...asked, ...now])',
+    to: '    return auditCopy(value, now)',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'the capture taken when a request is asked holds none of the secrets in it',
+    file: 'src/daemon/session-requests.js',
+    from: '    return secrets.filter((s) => holdsSecret(text, needlesOf([s])))',
+    to: '    return []',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'a request with nothing captured (asked before a restart) is checked against the secrets stored now only',
+    file: 'src/daemon/session-requests.js',
+    from: '    const asked = this.asked.get(requestId)',
+    to: '    const asked = this.asked.get(requestId) ?? []',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'an empty or partial secret list is scrubbed against as if it were every stored secret',
+    file: 'src/daemon/session-requests.js',
+    from: "          if (!secrets.some((s) => s?.label === cred.slug && s?.field === f?.name && typeof s?.secret === 'string')) return null",
+    to: '          continue',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    // F2: budget 12345678 is the secret "12345678" written down.
+    what: 'a number in an approved proposal is recorded whatever stored secret its decimal form is',
+    file: 'src/daemon/session-requests.js',
+    from: "  if (typeof value === 'number') {",
+    to: '  if (false) {',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    // F3: only the exact text was matched.
+    what: 'the audit scrub replaces only the exact text of a secret, not the encodings the response scrubber knows',
+    file: 'src/daemon/session-requests.js',
+    from: '    for (const e of encodings(s.secret)) if (!out.has(e)) out.set(e, s.label)',
+    to: '    if (!out.has(s.secret)) out.set(s.secret, s.label)',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'what the audit scrub leaves is recorded without the check that nothing of a secret remains',
+    file: 'src/daemon/session-requests.js',
+    from: "  return typeof text === 'string' && holdsSecret(text, needles) ? null : out",
+    to: '  return out',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'the final audit check does not decode %XX, so a secret encoded in part is recorded',
+    file: 'src/daemon/session-requests.js',
+    from: '      .replace(/%([0-9A-Fa-f]{2})/g,',
+    to: '      .replace(/%(?!)([0-9A-Fa-f]{2})/g,',
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    what: 'the session_request.opened summary and reason are written without the audit scrub',
+    file: 'src/daemon/session-requests.js',
+    from: "    const scrubbed = (text) => (typeof text === 'string' ? auditCopy(text, secrets) : null)",
+    to: "    const scrubbed = (text) => (typeof text === 'string' && secrets ? text : null)",
+    tests: ['test/security/integrate3-fix2.test.js'],
+  },
+  {
+    // C23: a key the parser copied into nothing was approved as if it narrowed.
+    what: 'the shared narrowing parser drops a key it does not read instead of refusing it',
+    file: 'src/pending.js',
+    from: "  for (const k of Object.keys(args ?? {})) if (!known.includes(k)) throw fail(k, 'not a narrowing an approval applies')",
+    to: '',
+    tests: ['test/security/integrate3-narrowing.test.js'],
+  },
+  {
+    what: 'the UI server checks the narrowing of an approval only, so a denial carrying an unreadable one is not a 400',
+    file: 'src/ui/server.js',
+    from: "      if (key === 'POST session-requests/decide' && body?.overrides !== undefined) {",
+    to: "      if (key === 'POST session-requests/decide' && body?.granted === true) {",
+    tests: ['test/security/integrate3-narrowing.test.js'],
+  },
+  {
+    what: 'towardPage sends a pass-phrase or pass_phrase to the page',
+    file: 'src/ui/server.js',
+    from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
+    to: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))",
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
 ]
 
 let survived = 0
@@ -3880,9 +3976,44 @@ const restoreAll = () => {
   }
   inFlight.clear()
 }
-process.on('exit', restoreAll)
+
+// The tests run in their own process group, so a timeout or a signal kills
+// every process they started, not only the runner: an orphan left spinning
+// keeps a core busy and the next protection's timings wrong.
+let child = null
+const killChild = () => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return
+  try { process.kill(-child.pid, 'SIGKILL') } catch { try { child.kill('SIGKILL') } catch { /* already gone */ } }
+}
+process.on('exit', () => { killChild(); restoreAll() })
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  process.on(signal, () => { restoreAll(); process.exit(130) })
+  process.on(signal, () => { killChild(); restoreAll(); process.exit(130) })
+}
+
+/**
+ * Run `files` under node --test, asynchronously: a synchronous spawn blocked
+ * the event loop, so neither a timeout nor a signal handler could run until
+ * the tests finished, which under a looping mutant was never.
+ */
+function runTests(files) {
+  return new Promise((resolve) => {
+    let stdout = ''
+    let timedOut = false
+    child = spawn(node, ['--test', ...files], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (d) => { stdout += d })
+    child.stderr.resume()
+    const timer = setTimeout(() => {
+      timedOut = true
+      killChild()
+      // A process outside the group holding the pipe must not hold this up.
+      child?.stdout.destroy()
+      child?.stderr.destroy()
+    }, TIMEOUT_MS)
+    const done = () => { clearTimeout(timer); child = null; resolve({ stdout, timedOut }) }
+    child.on('close', done)
+    child.on('error', done)
+  })
 }
 
 console.log(`Checking ${MUTATIONS.length} protections against the suite.\n`)
@@ -3900,10 +4031,12 @@ for (const m of MUTATIONS) {
   inFlight.set(path, original)
   writeFileSync(path, original.replace(m.from, m.to))
   try {
-    const res = spawnSync(node, ['--test', ...m.tests.map((t) => join(ROOT, t))], { encoding: 'utf8' })
+    const res = await runTests(m.tests.map((t) => join(ROOT, t)))
     const failed = /^[#ℹ] fail (\d+)/m.exec(res.stdout)
     const count = failed ? Number(failed[1]) : 0
-    if (count > 0) {
+    if (res.timedOut) {
+      console.log(`ok ${m.what}\n   caught: the tests did not finish in ${TIMEOUT_MS / 1000} s under this mutant and were killed`)
+    } else if (count > 0) {
       console.log(`ok ${m.what}\n   caught by ${count} test${count > 1 ? 's' : ''}`)
     } else {
       console.log(`SURVIVED  ${m.what}\n   nothing failed — this protection is not really tested`)
