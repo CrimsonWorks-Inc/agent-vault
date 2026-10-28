@@ -252,6 +252,10 @@ test('preflight is observational, peeks limits and reports a hold without creati
 
 test('preflight denial never trips and the eleventh call is throttled', async t => {
   const f = fixture(t)
+  // The bucket is one second of performance.now(). Held still, so a loaded
+  // machine taking a second over ten calls cannot open a fresh bucket.
+  const frozen = performance.now()
+  t.mock.method(performance, 'now', () => frozen)
   let observed = 0; f.pipeline.tripwires.observe = () => { observed++ }
   const request = f.req({ method: 'POST', body: Buffer.from(f.ph) })
   for (let i = 0; i < 10; i++) assert.equal((await f.pipeline.preflight(request)).would, 'deny')

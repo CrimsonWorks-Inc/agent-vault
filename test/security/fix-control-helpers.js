@@ -150,7 +150,9 @@ const BIN = new URL('../../bin/agent-vault.js', import.meta.url).pathname
  * Run the real CLI against `dir`. Resolves with { code, stdout, stderr }
  * whatever the exit code; `input` goes to stdin; `env` is merged in.
  */
-export function cli(dir, args, { input, env = {}, timeout = 15_000 } = {}) {
+// The timeout only stops a hung child; nothing asserts on it. 15 s was hit
+// by an ordinary `session create` on a loaded full run.
+export function cli(dir, args, { input, env = {}, timeout = 60_000 } = {}) {
   return new Promise((resolve, reject) => {
     import('node:child_process').then(({ spawn }) => {
       const child = spawn(process.execPath, [BIN, ...args], {

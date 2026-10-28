@@ -230,9 +230,14 @@ test('a grant with a lifetime ends on its own, kills its placeholders, and leave
   const v = fresh()
   try {
     const { session } = v.vault.createSession({})
+    // Bounded by the clock read on either side of the call, not by a window
+    // after it: a loaded machine took over a second between the two.
+    const before = Date.now()
     const short = grantFor(v, session, v.cred, { ttlMs: 60_000 })
+    const after = Date.now()
     const long = grantFor(v, session, v.other)
-    assert.ok(Math.abs(Date.parse(short.expires_at) - (Date.now() + 60_000)) < 1000)
+    const ends = Date.parse(short.expires_at)
+    assert.ok(ends >= before + 60_000 && ends <= after + 60_000, `${short.expires_at} is not 60 s after the grant was made`)
     assert.equal(long.expires_at, null)
     assert.equal(records(v, 'grant.created')[0].expires_at, short.expires_at)
 
