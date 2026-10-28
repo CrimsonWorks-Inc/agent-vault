@@ -9,6 +9,7 @@ import { Scrubber } from '../../src/core/scrub.js'
 import * as policy from '../../src/core/policy.js'
 import * as sub from '../../src/core/substitute.js'
 import { setup, cleanup, SECRET } from './gateway-helpers.js'
+import { growth } from '../core/linear.js'
 
 afterEach(cleanup)
 
@@ -265,11 +266,16 @@ test('wrapped prose, short lines, ordinary blobs and ordinary mixed-case hex are
 
 test('the wrapped and mixed-case views stay linear on large bodies', () => {
   const sc = scrubber()
-  const bodies = ['ab\n'.repeat(1e6), 'aB'.repeat(2e6), 'The quick brown fox\n'.repeat(2e5), `ghp ${'x\n'.repeat(1e6)}`]
-  for (const body of bodies) {
-    const started = Date.now()
-    assert.equal(sc.scrub(body).redactions, 0)
-    assert.ok(Date.now() - started < 3000, `${body.slice(0, 8)}... took ${Date.now() - started} ms`)
+  const shapes = [(n) => 'ab\n'.repeat(n), (n) => 'aB'.repeat(n * 2), (n) => 'The quick brown fox\n'.repeat(n / 5), (n) => `ghp ${'x\n'.repeat(n)}`]
+  // Every view finishes on a full-size body and finds nothing in it.
+  for (const shape of shapes) assert.equal(sc.scrub(shape(1e6)).redactions, 0)
+  // And the cost grows with the body, judged by the ratio of two sizes
+  // measured in the same run rather than by a wall clock, which a loaded
+  // machine missed (r4 F3). Eight times the body is eight times the work
+  // when linear and sixty-four times when quadratic; the bound sits between.
+  for (const shape of shapes) {
+    const { small, large, ratio } = growth((body) => sc.scrub(body), shape(3e4), shape(2.4e5))
+    assert.ok(ratio < 24, `${shape(1).slice(0, 8)}...: 8x the body took ${ratio.toFixed(1)}x as long (${small.toFixed(1)} ms, ${large.toFixed(1)} ms)`)
   }
 })
 

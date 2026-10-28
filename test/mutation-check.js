@@ -1177,8 +1177,8 @@ const MUTATIONS = [
     // Contract 0.4: unreadable means elevated, whatever the approval mode.
     what: 'elevationOf reads an unreadable methods or routes list as ordinary unless it says auto',
     file: 'src/daemon/session-requests.js',
-    from: 'grants.some((g) => !readable(g) || (g.approval === \'auto\' && permitsWrite(g)))',
-    to: 'grants.some((g) => (g.approval === \'auto\' && permitsWrite(g)))',
+    from: 'grants.some((g) => !readable(g) || (UNASKED.has(g.approval) && permitsWrite(g)))',
+    to: 'grants.some((g) => (UNASKED.has(g.approval) && permitsWrite(g)))',
     tests: ['test/security/requested-r1.test.js'],
   },
   {
@@ -2273,15 +2273,15 @@ const MUTATIONS = [
     // F3: every inherited route set must allow the request.
     what: 'a request allowed by any one route set passes the others',
     file: 'src/core/policy.js',
-    from: "    if (!pair) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
-    to: "    if (!pair && (policy.route_sets ?? []).some((s) => s.some((x) => x.methods.includes(m) && x.paths.some((g) => matchPath(g, p))))) continue\n    if (!pair) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
+    from: "    if (i === -1) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
+    to: "    if (i === -1 && (policy.route_sets ?? []).some((s) => s.some((x) => x.methods.includes(m) && x.paths.some((g) => matchPath(g, p))))) continue\n    if (i === -1) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {",
     tests: ['test/security/gateway-w2-policy.test.js', 'test/security/gateway-w2-pipeline.test.js'],
   },
   {
     what: 'a route pair matches the method from one pair and the path from another',
     file: 'src/core/policy.js',
-    from: '    const pair = set.find((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))',
-    to: '    const pair = set.some((x) => x.methods.includes(m)) && set.some((x) => x.paths.some((glob) => matchPath(glob, p))) ? { paths: set.flatMap((x) => x.paths) } : null',
+    from: '    const i = set.findIndex((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))',
+    to: '    const i = set.some((x) => x.methods.includes(m)) && set.some((x) => x.paths.some((glob) => matchPath(glob, p))) ? 0 : -1',
     tests: ['test/security/gateway-w2-policy.test.js'],
   },
   {
@@ -3965,6 +3965,97 @@ const MUTATIONS = [
     from: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))",
     to: "const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))",
     tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  // --- integrate-3 fix round 4 ---------------------------------------------------
+  {
+    // C27: the rule is named by its place in the grant. Its text can be a
+    // glob an agent proposed, which can be a secret.
+    what: 'request.allowed names the path rule by its glob text, which can be an agent-proposed secret (C27, r4 F1)',
+    file: 'src/core/policy.js',
+    from: '  return { host: h, path: p, method: m, path_rule, route_rule }',
+    to: '  return { host: h, path: p, method: m, path_rule: policy.paths?.[path_rule] ?? null, route_rule }',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'request.allowed names the route by METHOD and glob text, which can be an agent-proposed secret (C27, r4 F1)',
+    file: 'src/core/policy.js',
+    from: '    route_rule = i\n',
+    to: '    route_rule = `${m} ${set[i].paths.find((glob) => matchPath(glob, p))}`\n',
+    tests: ['test/security/integrate3-r4.test.js', 'test/security/gateway-w2-policy.test.js'],
+  },
+  {
+    what: 'a deny-list denial names its pattern, which an open narrowing can set, in the filed rule (C27)',
+    file: 'src/core/policy.js',
+    from: '        rule: `deny_paths:${i}`,',
+    to: '        rule: `deny_paths:${dp}`,',
+    tests: ['test/security/integrate3-r4.test.js', 'test/security/gateway-w2-policy.test.js'],
+  },
+  {
+    // r4 F2: the list is the client's, so an unknown id is any string it chose.
+    what: 'pending.decided_many writes every id the client sent, known or not (r4 F2)',
+    file: 'src/daemon/server.js',
+    from: '          const logged = (d) => known.has(d.id)',
+    to: '          const logged = (d) => true',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'decide-many counts any session-request id as one the daemon minted (r4 F2)',
+    file: 'src/daemon/server.js',
+    from: "    if (d.kind === 'session') return this.sessionRequests.get(d.id) !== null",
+    to: "    if (d.kind === 'session') return true",
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'decide-many counts any held-request id as one the daemon minted (r4 F2)',
+    file: 'src/daemon/server.js',
+    from: '    for (const approval of this.pipeline.approvals.values()) if (approval.id === d.id) return true\n    return false',
+    to: '    return true',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    // C26: one approval of a first GET takes the human out of every later write.
+    what: 'first-use with a write method is not elevated, so the window creates or approves it (C26)',
+    file: 'src/daemon/session-requests.js',
+    from: "const UNASKED = new Set(['auto', 'first-use'])",
+    to: "const UNASKED = new Set(['auto'])",
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'the page does not warn that first-use with writes is elevated (C26)',
+    file: 'src/ui/app.html',
+    from: "    (approval === 'auto' || approval === 'first-use') && (methods",
+    to: "    approval === 'auto' && (methods",
+    tests: ['test/security/requested-ui.test.js'],
+  },
+  {
+    // Coordinator item 5: `--force=false` is the string "false", which is truthy.
+    what: 'a boolean CLI flag reads any value as true, so env --force=false replaces the file',
+    file: 'src/cli/policy-input.js',
+    from: "  if (args[flag] !== undefined && args[flag] !== true) usage(`--${flag} takes no value`)\n  return args[flag] === true",
+    to: '  return !!args[flag]',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    // Coordinator item 6: a valueless flag is `true`, and Number(true) is 1.
+    what: 'a numeric CLI flag with no value reads as 1, so ph next --uses mints a one-use placeholder',
+    file: 'src/cli/policy-input.js',
+    from: 'export const optionalNumber = (args, flag, limits) => (args[flag] === undefined ? undefined : numberFlag(args[flag], `--${flag}`, limits))',
+    to: 'export const optionalNumber = (args, flag, limits) => (args[flag] === undefined ? undefined : Number(args[flag]))',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'env and exec read a valueless --uses as 1 and mint a one-use placeholder',
+    file: 'src/cli/index.js',
+    from: "    if (typeof args.uses !== 'string' || !Number.isInteger(Number(args.uses))",
+    to: '    if (!Number.isInteger(Number(args.uses))',
+    tests: ['test/security/integrate3-r4.test.js'],
+  },
+  {
+    what: 'mcp install reads a valueless --port as port 1',
+    file: 'src/cli/index.js',
+    from: "    const port = args.port === undefined ? 7443 : typeof args.port === 'string' ? Number(args.port) : NaN",
+    to: '    const port = args.port === undefined ? 7443 : Number(args.port)',
+    tests: ['test/security/integrate3-r4.test.js'],
   },
 ]
 
