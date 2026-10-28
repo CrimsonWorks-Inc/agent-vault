@@ -192,6 +192,8 @@ export class UiServer {
     'POST credentials/rotate', 'POST credentials/scrub', 'DELETE credentials/scrub',
     'POST credentials/expiry', 'POST credentials/release',
     'POST tripwires', 'POST templates', 'DELETE templates',
+    // Removing a pin takes away a check on the upstream's key (C22(4)).
+    'DELETE credentials/pins',
     // Replacing the confirmation key, signed by the key being replaced.
     'POST presence/rotate',
   ])
@@ -211,7 +213,7 @@ export class UiServer {
     // capability, so the daemon gates them and checks the signature itself.
     'POST credentials/rotate', 'POST credentials/scrub', 'DELETE credentials/scrub',
     'POST credentials/expiry', 'POST credentials/release',
-    'POST tripwires', 'POST templates',
+    'POST tripwires', 'POST templates', 'DELETE credentials/pins',
     // Enrolling a replacement key is fresh-gated in the daemon.
     'POST presence/rotate',
   ])
@@ -517,6 +519,11 @@ export class UiServer {
             'DELETE', `/v1/credentials/scrub${queryOf(url, ['slug', 'id'])}`,
             { presence: body?.presence },
           ))
+        case 'DELETE credentials/pins':
+          return send(200, await this.#control(
+            'DELETE', `/v1/credentials/pins${queryOf(url, ['slug', 'host', 'spki'])}`,
+            { presence: body?.presence },
+          ))
         case 'POST credentials/expiry':
           return send(200, await this.#control('POST', '/v1/credentials/expiry', body))
         case 'POST credentials/release':
@@ -759,6 +766,12 @@ export class UiServer {
       case 'POST credentials/rotate': return of('cred.rotate', body)
       case 'POST credentials/scrub': return of('cred.scrub_add', body)
       case 'DELETE credentials/scrub': return of('cred.scrub_remove', { slug: url.searchParams.get('slug'), id: url.searchParams.get('id') })
+      // C22(4): read with get(), so an absent spki ("every pin for the host")
+      // is bound as null, never omitted, exactly as the daemon binds it.
+      case 'DELETE credentials/pins':
+        return of('cred.pins_remove', {
+          slug: url.searchParams.get('slug'), host: url.searchParams.get('host'), spki: url.searchParams.get('spki'),
+        })
       case 'POST credentials/expiry': return of('cred.expiry_set', body)
       case 'POST credentials/release': return of('cred.release', body)
       case 'POST tripwires': return of('tripwires.set', body)
