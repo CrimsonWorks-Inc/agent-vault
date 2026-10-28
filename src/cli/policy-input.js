@@ -1,6 +1,7 @@
 // One CLI parser for create, template, narrow and owner approval overrides.
 import { readFileSync } from 'node:fs'
 import { EXIT } from '../core/errors.js'
+import { OVERRIDE_KEYS } from '../pending.js'
 
 export const usage = (message) => { throw Object.assign(new Error(message), { exit: EXIT.USAGE }) }
 export const textFlag = (value, name) => {
@@ -112,7 +113,9 @@ export function approvalOverrides(args, parse) {
     // flag, so a value it would refuse stays a usage error, and it is the only
     // reader of --payload-file and --graphql. It used to win, and sent
     // `--rate 60/min` as an object where the page sent the text.
-    const typed = parse(args)
+    // Only the flags it reads: it refuses any other key, and the rest
+    // (--hosts, --payload-file, --graphql) are grantInput's.
+    const typed = parse(Object.fromEntries(Object.entries(args).filter(([flag]) => OVERRIDE_KEYS.includes(flag))))
     overrides = { ...grantInput(args), ...typed }
   } catch (e) {
     if (e instanceof TypeError && typeof e.field === 'string' && e.field) {

@@ -20,7 +20,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { id } from '../store/ids.js'
 import { deny } from '../core/errors.js'
-import { redactStored } from './notify.js'
+import { encodings, MIN_SECRET_LEN } from '../core/scrub.js'
 import * as policyMod from '../core/policy.js'
 
 // An agent can ask as often as it likes, so the store is bounded the way the
@@ -98,16 +98,79 @@ export function overridesProblem(input) {
 }
 
 /**
- * `value` with every stored secret replaced in every string inside it, keys
- * included, at any depth. For a record that quotes what an agent proposed.
+ * Every form of each stored secret an audit record is scrubbed of: the
+ * encodings the response scrubber already matches (scrub.js encodings()),
+ * longest first, so a longer form is replaced whole before a shorter one
+ * inside it. Matching the exact text alone let a percent-encoded secret
+ * through to the log. A secret under MIN_SECRET_LEN is skipped, the floor
+ * every scrub of stored secrets uses.
  */
-export function redactDeep(value, secrets) {
-  if (typeof value === 'string') return redactStored(value, secrets)
-  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets))
+export function needlesOf(secrets) {
+  const out = new Map()
+  for (const s of Array.isArray(secrets) ? secrets : []) {
+    if (typeof s?.secret !== 'string' || s.secret.length < MIN_SECRET_LEN) continue
+    for (const e of encodings(s.secret)) if (!out.has(e)) out.set(e, s.label)
+  }
+  return [...out].map(([needle, label]) => ({ needle, label })).sort((a, b) => b.needle.length - a.needle.length)
+}
+
+const replaceNeedles = (text, needles) => {
+  let out = text
+  for (const { needle, label } of needles) out = out.split(needle).join(`[[av:redacted:${label}]]`)
+  return out
+}
+
+/**
+ * `value` with every form of every stored secret replaced in every string
+ * inside it, keys included, at any depth. A number is text in the record: a
+ * budget of 12345678 is the secret "12345678" written down, so a number whose
+ * decimal form holds one becomes the redacted text.
+ */
+export function redactDeep(value, secrets, needles = needlesOf(secrets)) {
+  if (typeof value === 'string') return replaceNeedles(value, needles)
+  if (typeof value === 'number') {
+    const text = String(value)
+    const out = replaceNeedles(text, needles)
+    return out === text ? value : out
+  }
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets, needles))
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactStored(k, secrets), redactDeep(v, secrets)]))
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [replaceNeedles(k, needles), redactDeep(v, secrets, needles)]))
   }
   return value
+}
+
+/**
+ * Whether `text` still holds a form of a stored secret: as it is, or with
+ * its %XX and \uXXXX escapes decoded (up to three times over), which is how
+ * a secret encoded only in part, or twice, still reads.
+ */
+export function holdsSecret(text, needles) {
+  let view = String(text)
+  for (let round = 0; round <= 3; round++) {
+    if (needles.some(({ needle }) => view.includes(needle))) return true
+    const next = view
+      .replace(/%([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/\\u([0-9A-Fa-f]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    if (next === view) return false
+    view = next
+  }
+  return false
+}
+
+/**
+ * A value as an audit record may keep it, or null. Scrubbed of every form of
+ * every secret in `secrets`, then serialised and checked again: if anything
+ * is left, or there is no secret list to check against, null. The record
+ * then says what was decided, not what it said.
+ */
+export function auditCopy(value, secrets) {
+  if (!Array.isArray(secrets)) return null
+  const needles = needlesOf(secrets)
+  const out = redactDeep(value, secrets, needles)
+  let text
+  try { text = JSON.stringify(out) } catch { return null }
+  return typeof text === 'string' && holdsSecret(text, needles) ? null : out
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -351,6 +414,10 @@ export class SessionRequests {
    */
   constructor(vault = null) {
     this.items = new Map()
+    // What the audit scrub needs for each pending request, captured when it
+    // was asked (see #capture). Memory only, beside the raw proposal it
+    // describes: it is never part of a record, so never persisted.
+    this.asked = new Map()
     this.vault = vault
     // Told when a request starts waiting (F14), the way the pipeline tells
     // it about a held request. A hook that throws never stops the request.
@@ -409,17 +476,51 @@ export class SessionRequests {
   /**
    * A proposal as the audit log may keep it. What a human approved quotes the
    * agent's paths, routes and payload text, and a stored secret placed there
-   * was written to the log verbatim. With no secrets to scrub against, null:
-   * the record says what was decided, not what it said.
+   * was written to the log verbatim.
+   *
+   * Scrubbed against the secrets stored when the request was asked AND those
+   * stored now. Reading only the second let a value rotated out between the
+   * two (retireMs 0) through. A request with nothing captured (asked before a
+   * restart, or while the secrets could not be read), or no readable secrets
+   * now, is recorded as null: the record says what was decided, not what it
+   * said.
    */
-  forAudit(value) {
-    const secrets = this.#secrets()
-    return secrets ? redactDeep(value, secrets) : null
+  forAudit(value, requestId) {
+    const asked = this.asked.get(requestId)
+    this.asked.delete(requestId)
+    const now = this.#secrets()
+    if (!Array.isArray(asked) || !now) return null
+    return auditCopy(value, [...asked, ...now])
   }
 
-  /** Every stored secret, or null when the vault cannot give them. */
+  /**
+   * Every stored secret, or null when the vault cannot give them all. A list
+   * missing a field of any credential (empty, or partial) is not a list to
+   * scrub against: an empty one scrubbed nothing and the text went through.
+   */
   #secrets() {
-    try { return this.vault?.allSecrets?.() ?? null } catch { return null }
+    try {
+      const secrets = this.vault?.allSecrets?.()
+      if (!Array.isArray(secrets)) return null
+      for (const cred of Object.values(this.vault?.db?.credentials ?? {})) {
+        for (const f of cred?.fields ?? []) {
+          if (!secrets.some((s) => s?.label === cred.slug && s?.field === f?.name && typeof s?.secret === 'string')) return null
+        }
+      }
+      return secrets
+    } catch { return null }
+  }
+
+  /**
+   * The secrets this request's own text holds in any form the audit check
+   * finds, kept for its approval. Only those: a value rotated out before the
+   * approval can only reach the approved record through what the agent asked
+   * for, and the proposal already holds it. Null when they cannot be read.
+   */
+  #capture(record, secrets) {
+    if (!secrets) return null
+    const text = JSON.stringify({ proposal: record.proposal, reason: record.reason_untrusted })
+    return secrets.filter((s) => holdsSecret(text, needlesOf([s])))
   }
 
   #sweep() {
@@ -442,6 +543,8 @@ export class SessionRequests {
         this.audit?.write('session_request.uncollected', { request_id: r.id })
       }
     }
+    // A capture outlives its request only until the next sweep.
+    for (const key of this.asked.keys()) if (this.items.get(key)?.state !== 'pending') this.asked.delete(key)
     if (this.items.size !== sizeBefore
       || [...this.items.values()].map((r) => r.state).join(',') !== statesBefore) this.#save()
   }
@@ -504,9 +607,12 @@ export class SessionRequests {
     // words, and the audit log outlives the request and is exported. A path
     // that is a stored secret was copied into it verbatim. Scrubbed the way
     // notification headlines are; with no secrets to scrub against (a locked
-    // vault), neither is recorded.
+    // vault), neither is recorded. The same scrub and check as the approved
+    // record, so a form the check would find is never written here either.
     const secrets = this.#secrets()
-    const scrubbed = (text) => (typeof text === 'string' && secrets ? redactStored(text, secrets) : null)
+    const captured = this.#capture(record, secrets)
+    if (captured) this.asked.set(record.id, captured)
+    const scrubbed = (text) => (typeof text === 'string' ? auditCopy(text, secrets) : null)
     this.audit?.write('session_request.opened', {
       request_id: record.id, summary: scrubbed(record.summary), fingerprint: record.fingerprint,
       agent_reason_untrusted: scrubbed(record.reason_untrusted),

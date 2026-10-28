@@ -74,10 +74,14 @@ test('F1: an ordinary approval is recorded as decided, and with no secrets to sc
     assert.equal(approved.edited, true)
 
     // The store cannot give its secrets: nothing it could not check is kept.
-    assert.equal(a.daemon.sessionRequests.forAudit({ paths: [`/${SECRET}`] }) !== null, true)
+    const again = await a.control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], paths: [`/${SECRET}`] })
     const allSecrets = a.vault.allSecrets
     a.vault.allSecrets = () => { throw new Error('locked') }
-    try { assert.equal(a.daemon.sessionRequests.forAudit({ paths: [`/${SECRET}`] }), null) } finally { a.vault.allSecrets = allSecrets }
+    try {
+      const r = await a.control('POST', '/v1/session-requests/decide', { id: again.body.request_id ?? again.body.id, granted: true })
+      assert.equal(r.status, 200, JSON.stringify(r.body))
+    } finally { a.vault.allSecrets = allSecrets }
+    assert.equal(a.audit('session_request.approved')[1].granted, null)
   } finally { await a.stop() }
 })
 
@@ -158,9 +162,12 @@ test('D1: nothing the CLI or the page can send on a valid path names a key the d
     methods: 'GET', paths: '/a/**', budget: '5', uses: '2', ttl_minutes: '30', 'ttl-minutes': '30',
     grant_ttl_minutes: '5', max_concurrent: '1', redirects: '0', spend_tokens: '9', spend_usd: '1.5',
     rate: '60/min', quota: '1000/day', routes: '[{"methods":["GET"],"paths":["/x"]}]', payload: '{}',
-    approval: 'each', infinite: true, hosts: 'evil.example', deny_paths: '/admin/**', not_a_field: 'x',
+    approval: 'each', infinite: true,
   })
   assert.equal(overridesProblem(page), null, `the page parser emits a key the daemon refuses: ${Object.keys(page)}`)
+  // A key the parser does not read is refused there, naming it (fix round 2),
+  // as the daemon refuses it.
+  for (const k of ['hosts', 'deny_paths', 'not_a_field']) assert.throws(() => parseOverrides({ budget: '1', [k]: 'x' }), (e) => e.field === k)
   assert.equal(overridesProblem(parseOverrides({ route: ['GET:/x'] })), null)
   // The CLI refuses, before sending, any field outside the item's own list;
   // that list holds only fields the daemon applies.
@@ -177,12 +184,12 @@ test('D1: nothing the CLI or the page can send on a valid path names a key the d
 
 test('D2: towardPage withholds passphrase at any depth, in any case or hyphenation', () => {
   const got = towardPage({
-    passphrase: 'p1', PassPhrase: 'p2', nested: [{ PASSPHRASE: 'p3', 'pass-phrase': 'kept' }],
+    passphrase: 'p1', PassPhrase: 'p2', nested: [{ PASSPHRASE: 'p3', 'pass-phrase': 'p4', pass_phrase: 'p5', 'Pass-Phrase': 'p6', note: 'kept' }],
     has_passphrase: true, passphrase_set_at: '2030-01-01',
   })
-  assert.ok(!JSON.stringify(got).includes('p1') && !JSON.stringify(got).includes('p2') && !JSON.stringify(got).includes('p3'), JSON.stringify(got))
+  for (const p of ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']) assert.ok(!JSON.stringify(got).includes(p), JSON.stringify(got))
   // Only the name itself is withheld: the flags around it still reach the page.
   assert.equal(got.has_passphrase, true)
   assert.equal(got.passphrase_set_at, '2030-01-01')
-  assert.equal(got.nested[0]['pass-phrase'], 'kept')
+  assert.equal(got.nested[0].note, 'kept')
 })

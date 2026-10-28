@@ -321,8 +321,9 @@ export class Daemon {
       request_id: record.id,
       session_id: created.session_id,
       // Scrubbed: the human saw and approved the real text, and the grant
-      // enforces it, but the log outlives both and is exported.
-      granted: this.sessionRequests.forAudit(final),
+      // enforces it, but the log outlives both and is exported. Null when it
+      // cannot be checked clean.
+      granted: this.sessionRequests.forAudit(final, record.id),
       edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
     })
     return { ...SessionRequests.redact(record), granted: final }

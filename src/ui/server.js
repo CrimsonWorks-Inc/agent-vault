@@ -401,9 +401,11 @@ export class UiServer {
         })
       }
 
-      // A narrowing that does not parse (a payload that is not JSON) is the
-      // caller's mistake, said as such before any signature is spent.
-      if (key === 'POST session-requests/decide' && body?.granted === true) {
+      // A narrowing that does not parse (a payload that is not JSON, a key
+      // no approval applies) is the caller's mistake, said as such before any
+      // signature is spent, whatever the verdict: the signed operation reads
+      // the narrowing either way.
+      if (key === 'POST session-requests/decide' && body?.overrides !== undefined) {
         try { parseOverrides(body?.overrides || {}) } catch (e) {
           throw Object.assign(new Error(`the narrowing does not parse: ${e.message}`), {
             status: 400, problem: { code: 'AV_POLICY_DENIED', rule: 'policy_invalid' },
@@ -913,8 +915,9 @@ const WITHHELD_KEYS = new Set([
   'token', 'placeholder', 'value', 'secret', 'prf_secret', 'recovery_passphrase', 'passphrase', 'bundle', 'webhook_url',
 ])
 const SESSION_TOKEN = /avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
-// Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader.
-const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_'))
+// Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader, and
+// so are pass-phrase, Pass_Phrase and passphrase.
+const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replaceAll('-', '_').replaceAll('pass_phrase', 'passphrase'))
 
 export function towardPage(value, depth = 0) {
   if (depth > 64) return null

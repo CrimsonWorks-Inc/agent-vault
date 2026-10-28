@@ -103,6 +103,13 @@ export function decision(item, { granted, overrides = null }) {
   return { path: item.decide.path, body }
 }
 
+/** The keys parseOverrides reads. A caller holding other flags passes only these. */
+export const OVERRIDE_KEYS = Object.freeze([
+  'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'ttl-minutes', 'grant_ttl_minutes', 'grant-ttl', 'grant_ttl',
+  'max_concurrent', 'concurrency', 'redirects', 'spend_tokens', 'spend-tokens', 'spend_usd', 'spend-usd',
+  'rate', 'quota', 'routes', 'route', 'payload', 'approval', 'infinite',
+])
+
 /**
  * Narrowing flags, parsed the same way wherever they are typed.
  *
@@ -118,6 +125,16 @@ export function decision(item, { granted, overrides = null }) {
 export function parseOverrides(args = {}) {
   const out = {}
   const fail = (field, why) => Object.assign(new TypeError(`${field}: ${why}`), { field })
+  // Every key read below. Any other THROWS, naming it: a key copied into
+  // nothing (a host list, a typo) was approved as if it narrowed, where the
+  // daemon refuses it outright. Kept in step with OVERRIDE_KEYS by a test;
+  // it cannot be shared, because this function's source is put in the page.
+  const known = [
+    'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'ttl-minutes', 'grant_ttl_minutes', 'grant-ttl', 'grant_ttl',
+    'max_concurrent', 'concurrency', 'redirects', 'spend_tokens', 'spend-tokens', 'spend_usd', 'spend-usd',
+    'rate', 'quota', 'routes', 'route', 'payload', 'approval', 'infinite',
+  ]
+  for (const k of Object.keys(args ?? {})) if (!known.includes(k)) throw fail(k, 'not a narrowing an approval applies')
   // Split on commas and upper-cased, the way `session create`, the wizard and
   // the UI's new-session form all read them. A narrowing of "/a/**,/b/**" was
   // one glob with a comma in it, and "get" a method nothing sends: both

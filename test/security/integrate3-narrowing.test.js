@@ -18,7 +18,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
-import { parseOverrides } from '../../src/pending.js'
+import { parseOverrides, OVERRIDE_KEYS } from '../../src/pending.js'
 import { startDaemon, cli, PASSPHRASE } from './fix-control-helpers.js'
 import { servedPageSigning, servedSource, startSigned, startCliStub, flagsOf } from './integrate3-helpers.js'
 
@@ -239,4 +239,64 @@ test('a narrowing that cannot be read: the UI server answers 400 and the daemon 
     const r = await c.control('POST', '/v1/session-requests/decide', { id: cid, granted: true, overrides: { budget: 5 } })
     assert.equal(r.status, 200, JSON.stringify(r.body))
   } finally { await t.stop(); await c.stop() }
+})
+
+// Fix round 2: a key no approval applies. The UI server copied known fields
+// only, so `{ hosts, budget }` answered 200 with the budget applied and the
+// host list gone, where the daemon refuses the same body outright.
+const UNAPPLIED = [
+  ['hosts', { hosts: 'evil.test', budget: '6' }],
+  ['deny_paths', { deny_paths: '/admin/**' }],
+  ['not_a_field', { not_a_field: 'x', budget: '6' }],
+]
+
+test('a key no approval applies is refused by the shared parser, the UI server (400), the page and the CLI, as the daemon refuses it', async () => {
+  for (const [field, typed] of UNAPPLIED) {
+    assert.throws(() => parseOverrides(typed), (e) => e instanceof TypeError && e.field === field, JSON.stringify(typed))
+    assert.match(page.readNarrowing(typed).error ?? '', new RegExp(`nothing was sent: ${field}:`), `the page read ${JSON.stringify(typed)}`)
+    const { decide, calls } = pageDecide(typed)
+    await decide()
+    assert.equal(calls.operationFor + calls.gated + calls.api, 0, `${JSON.stringify(typed)}: the page went ahead`)
+  }
+  // Not an object at all: every index is a key nobody reads.
+  for (const bad of ['budget=5', ['budget']]) assert.throws(() => parseOverrides(bad), TypeError)
+
+  const t = await startSigned()
+  const stub = await startCliStub()
+  try {
+    for (const [field, typed] of UNAPPLIED) {
+      const id = await ask(t.d.control)
+      const res = await t.u.api('POST', 'session-requests/decide', { id, granted: true, overrides: typed })
+      const body = await res.json()
+      assert.equal(res.status, 400, `${JSON.stringify(typed)}: ${JSON.stringify(body)}`)
+      assert.match(JSON.stringify(body), new RegExp(field))
+      // A denial reads the narrowing too, so it is refused the same way.
+      const denied = await t.u.api('POST', 'session-requests/decide', { id, granted: false, overrides: typed })
+      assert.equal(denied.status, 400)
+      assert.equal(t.d.daemon.sessionRequests.get(id).state, 'pending', `${JSON.stringify(typed)}: the UI server decided it`)
+      const r = await t.d.control('POST', '/v1/session-requests/decide', { id, granted: true, overrides: { ...typed, budget: 6 } })
+      assert.equal(r.status, 403, `${JSON.stringify(typed)}: the daemon answered ${r.status}`)
+
+      const before = stub.calls.filter((c) => c.method === 'POST').length
+      const cli = await stub.run(['approve', 'sr_x', ...flagsOf(typed)])
+      assert.equal(cli.code, 2, `${JSON.stringify(typed)}: ${cli.stdout}`)
+      assert.match(cli.envelope.error.message, new RegExp(field.replace('_', '[_-]')))
+      assert.equal(stub.calls.filter((c) => c.method === 'POST').length, before, `${JSON.stringify(typed)}: the CLI sent a decision`)
+    }
+    // An ordinary narrowing passes the check and goes on to the signature
+    // the UI server asks for, so the refusals are the keys'.
+    const id = await ask(t.d.control)
+    const res = await t.u.api('POST', 'session-requests/decide', { id, granted: true, overrides: { budget: '6' } })
+    assert.equal(res.status, 401, 'no signature was sent, so presence is what it asks for')
+  } finally { await t.stop(); await stub.stop() }
+})
+
+test('OVERRIDE_KEYS is the list the self-contained parser reads, key for key', () => {
+  const src = parseOverrides.toString()
+  for (const k of OVERRIDE_KEYS) {
+    assert.ok(src.includes(`'${k}'`), `parseOverrides does not list ${k}`)
+    assert.doesNotThrow(() => parseOverrides({ [k]: undefined }), k)
+  }
+  const listed = [...src.slice(src.indexOf('const known = ['), src.indexOf(']', src.indexOf('const known = ['))).matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.deepEqual([...listed].sort(), [...OVERRIDE_KEYS].sort())
 })
