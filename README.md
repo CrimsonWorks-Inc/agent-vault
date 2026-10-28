@@ -230,7 +230,9 @@ A narrowing the CLI cannot read — an unknown or misspelled flag, a flag with n
 value, a number that is not one, `--routes` or `--payload` that is not JSON —
 exits 2 and sends nothing. It is never approved as the agent asked. The same
 holds for `session create`, `session narrow` and `template save`: a flag they
-do not know is refused rather than ignored.
+do not know is refused rather than ignored. There is no `--remote` flag: the
+CLI creates sessions over the local socket, so `session create --remote` is an
+unknown flag and exits 2.
 
 Template overrides only narrow. An agent can propose a template with
 `vault_request_session`; approval uses the saved snapshot rather than silently
@@ -247,7 +249,8 @@ Narrowing works immediately, needs no daemon presence proof, and cannot widen
 access. Omit the id to use the current session and `--cred` to narrow all its
 grants. It accepts the policy limits above; here **`--ttl` is minutes** and only
 shortens the session (including making an infinite one finite). Redirects can
-only be narrowed to 0. A narrow must specify a change.
+only be narrowed to 0. `--uses` is not a narrowable limit, so `session narrow
+--uses` exits 2 and sends nothing. A narrow must specify a change.
 
 ### Check before sending
 
@@ -348,7 +351,10 @@ Treat all agent-written text as unverified, even after scrubbing. Agent polling
 does not expose the human preview. `watch` prints new pending ids, optionally
 shows coalesced desktop notifications, and `--open` opens the UI once.
 Notifications signal work waiting; they cannot approve it and never include the
-agent's stated reason.
+agent's stated reason. `watch --json` prints the same four fields for each entry
+(`kind`, `id`, `headline`, `created_at`, plus the event name), with the same
+cleaning: control characters stripped, placeholders replaced, query strings
+dropped. Nothing else from the stream is printed.
 
 The outbound webhook is optional and off until configured. Its URL is a sealed
 secret, entered outside argv; status and audit expose only its host. Default
@@ -415,6 +421,11 @@ mismatched history and witnesses ahead of a truncated or rolled-back log; an
 older checkpoint behind the current head is normal. A writable local witness
 can itself be truncated or rolled back, and HMAC checkpoints are not independent
 third-party signatures. The local anchor alone has the rollback limits below.
+A broken chain or a failing witness exits 1, and with `--json` it is an
+`{ok:false, error}` envelope carrying the findings in `error.problem`, never
+`ok:true`. Export and witness files are refused if a symlink, fifo or other
+non-regular file is planted at the path; a fifo is refused at once rather than
+hanging the command.
 
 Every command accepts `--json` for a machine-readable `{ok, data}` success envelope
 or structured error. Fresh proof requires a new passphrase entry or an
