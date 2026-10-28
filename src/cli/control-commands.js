@@ -7,17 +7,13 @@ import { EXIT, CODES } from '../core/errors.js'
 import { fetchChainPins } from '../connectors/pinning.js'
 import { PRICES_VERSION } from '../core/model-usage.js'
 import { writeFileExclusive, appendLineExclusive } from './files.js'
-import { grantInput, sessionInput, knownFlags, GRANT_FLAGS, readJson, numberFlag, textFlag, listFlag, expiryInput, usage } from './policy-input.js'
+import { grantInput, sessionInput, knownFlags, GRANT_FLAGS, readJson, numberFlag, textFlag, listFlag, expiryInput, usage, booleanFlag } from './policy-input.js'
 
 export const cleanText = (value) => String(value ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
 const q = (params) => new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined)).toString()
 const pretty = (value) => JSON.stringify(value, null, 2)
 const show = (value) => typeof value === 'object' ? JSON.stringify(value) : String(value ?? 'none')
 const required = (args, i = 0, label = 'credential') => textFlag(args._[i], label)
-const booleanFlag = (args, flag) => {
-  if (args[flag] !== undefined && args[flag] !== true) usage(`--${flag} takes no value`)
-  return args[flag] === true
-}
 
 export const SCRUB_HELP = `cred scrub <slug> [--add PATTERN [--sample TEXT] | --rm ID]
   Patterns are 3–256 characters, with at most 16 alternation branches.

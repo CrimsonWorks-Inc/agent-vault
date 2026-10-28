@@ -72,7 +72,7 @@ test('the decisions that can be elevated are re-verified by the daemon', () => {
 })
 
 test('the page warns before it signs an elevated session', () => {
-  assert.ok(PAGE.includes('No approval prompts for writes. Your authenticator is asked every time you create one.'))
+  assert.ok(PAGE.includes('No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.'))
   assert.ok(PAGE.includes('This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.'))
   const autoWrites = pageArrow('autoWrites')
   // The arrow reads SAFE_METHODS from the page; give it the same list.
@@ -82,6 +82,10 @@ test('the page warns before it signs an elevated session', () => {
     assert.equal(autoWrites('auto', ['get', 'head']), false)
     assert.equal(autoWrites('auto', undefined), false)
     assert.equal(autoWrites('on-write', ['POST']), false)
+    // C26: first-use asks once, then never again, so it warns like auto.
+    assert.equal(autoWrites('first-use', ['GET', 'DELETE']), true)
+    assert.equal(autoWrites('first-use', ['GET', 'HEAD']), false)
+    assert.equal(autoWrites('each', ['POST']), false)
   } finally { delete globalThis.SAFE_METHODS }
 })
 

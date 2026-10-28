@@ -598,7 +598,9 @@
         <p>auto means no approval prompts at all, including for writes. Because that takes you out of the loop for the life of the session, creating one asks for your passphrase or fingerprint every time, even inside the five-minute window, and is refused on a vault with no passphrase. Read-only sessions are unaffected: GET and HEAD never ask under on-write either.</p>
         <p>So a read-only <code>--approval auto</code> session needs no passphrase at all. The
         other modes are <code>each</code> (ask for every request) and <code>first-use</code>
-        (ask once).</p>
+        (ask once). One approval of a first request takes you out of every later write just
+        the same, so <code>first-use</code> with any write method asks for your passphrase or
+        fingerprint every time too.</p>
         <p>A session can also have no expiry: <code>--infinite</code> in place of
         <code>--ttl</code>. It lasts until you revoke it, is never reachable from a network
         listener, and asks for your passphrase or fingerprint every time you create one, for
@@ -1054,9 +1056,12 @@ ${c.cli} ui                         open this page`)}`,
   }
 
   const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
-  /** Auto with any method that writes: the session never asks you again. */
+  /**
+   * Auto or first-use with any method that writes: after at most one request
+   * the session never asks you again (C26), so it is elevated.
+   */
   const autoWrites = (approval, methods) =>
-    approval === 'auto' && (methods || ['GET', 'HEAD']).some((m) => !SAFE_METHODS.includes(String(m).toUpperCase()))
+    (approval === 'auto' || approval === 'first-use') && (methods || ['GET', 'HEAD']).some((m) => !SAFE_METHODS.includes(String(m).toUpperCase()))
   /** The name a tool most likely reads a credential from. */
   const suggestedName = (g) => g.env?.key || `${String(g.cred).toUpperCase().replace(/[^A-Z0-9]/g, '_')}_TOKEN`
 
@@ -1564,7 +1569,7 @@ ${c.cli} ui                         open this page`)}`,
         <div class="routes" id="routes"></div>
         <button class="action" data-act="add-route" type="button">Add route</button>
       </details>
-      <div class="notice warn" id="sAutoWarn" hidden>No approval prompts for writes. Your authenticator is asked every time you create one.</div>
+      <div class="notice warn" id="sAutoWarn" hidden>No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.</div>
       <div class="notice warn" id="sNeverWarn" hidden>This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>
       <div class="actions" style="justify-content:flex-start">
         <button class="action primary" data-act="add-session">Create session</button>
@@ -1595,7 +1600,7 @@ ${c.cli} ui                         open this page`)}`,
         </select></div>
         <div><label for="tGrantTtl">Grant lifetime (minutes)</label><input id="tGrantTtl" type="number" min="1"${L.grantTtl !== null ? ` max="${esc(L.grantTtl)}"` : ''} placeholder="${L.grantTtl !== null ? `up to ${esc(L.grantTtl)}` : 'as long as the session'}"></div>
       </div>
-      ${elevated.includes('approval_auto_writes') ? '<div class="notice warn">No approval prompts for writes. Your authenticator is asked every time you create one.</div>' : ''}
+      ${elevated.includes('approval_auto_writes') ? '<div class="notice warn">No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.</div>' : ''}
       ${elevated.includes('infinite') ? '<div class="notice warn">This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.</div>' : ''}
       <div class="actions" style="justify-content:flex-start">
         <button class="action primary" data-act="add-session">Create from template</button>
@@ -2578,15 +2583,18 @@ ${c.cli} ui                         open this page`)}`,
     },
   }
 
-  /** The session's strictest mode, in the warning colour when it never asks about writes. */
+  /**
+   * The session's strictest mode. When it lets writes through unasked, its
+   * laxest mode instead (auto, or first-use), in the warning colour.
+   */
   function approvalBadge(s) {
     const order = ['auto', 'first-use', 'on-write', 'each']
     const modes = (s.creds || []).map((c) => c.approval ?? 'auto')
     if (!modes.length) return ''
     const rank = (m) => (order.includes(m) ? order.indexOf(m) : order.length)
-    const mode = modes.reduce((a, b) => (rank(b) > rank(a) ? b : a))
     const elevated = (s.elevated || []).includes('approval_auto_writes')
-    return `<span class="pill ${elevated ? 'warn' : ''}">approval: ${esc(elevated ? 'auto' : mode)}</span>`
+    const mode = modes.reduce((a, b) => ((elevated ? rank(b) < rank(a) : rank(b) > rank(a)) ? b : a))
+    return `<span class="pill ${elevated ? 'warn' : ''}">approval: ${esc(mode)}</span>`
   }
 
   /** Show what the new-session form is about to ask for, before anything is signed. */

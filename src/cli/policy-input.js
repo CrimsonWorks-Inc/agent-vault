@@ -8,6 +8,16 @@ export const textFlag = (value, name) => {
   if (typeof value !== 'string' || !value.trim()) usage(`${name} needs a value`)
   return value
 }
+/**
+ * A flag that is there or not. `--force=false` used to be the string "false",
+ * which is truthy, so it forced; any value at all is refused instead.
+ */
+export const booleanFlag = (args, flag) => {
+  if (args[flag] !== undefined && args[flag] !== true) usage(`--${flag} takes no value`)
+  return args[flag] === true
+}
+/** A numeric flag that may be absent. Present with no value is refused, not read as Number(true), which is 1. */
+export const optionalNumber = (args, flag, limits) => (args[flag] === undefined ? undefined : numberFlag(args[flag], `--${flag}`, limits))
 export function numberFlag(value, name, { min = 0, max = Number.MAX_SAFE_INTEGER, integer = true } = {}) {
   textFlag(value, name)
   const n = Number(value)

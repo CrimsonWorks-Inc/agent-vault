@@ -271,6 +271,16 @@ export class Daemon {
   }
 
   /**
+   * Whether a decision names something this daemon minted: a session request
+   * or a held request it still has. Anything else is text the client chose.
+   */
+  #knows(d) {
+    if (d.kind === 'session') return this.sessionRequests.get(d.id) !== null
+    for (const approval of this.pipeline.approvals.values()) if (approval.id === d.id) return true
+    return false
+  }
+
+  /**
    * A held request's decision, after the gate. The pipeline reads the verdict
    * however it likes, so only a real boolean reaches it.
    */
@@ -1604,6 +1614,8 @@ export class Daemon {
             elevated ? ['approval_auto_writes'] : [],
             input.presence,
           )
+          // Which ids name something on record, read before anything settles.
+          const known = new Set(input.decisions.filter((d) => this.#knows(d)).map((d) => d.id))
           const decided = []
           for (const d of input.decisions) {
             try {
@@ -1624,10 +1636,17 @@ export class Daemon {
             const record = this.sessionRequests.get(grantedSessions[0].id)
             if (record?.result) grantedSessions[0].result.session = this.#handOver(record, 'decide')
           }
+          // Only ids this daemon minted reach the log. The list is the
+          // client's, so an id nothing answers to is any string it chose — a
+          // secret included — and it was filed as granted and skipped on every
+          // copy of the log. Those are counted, never written; the response
+          // above still names them to the caller who sent them.
+          const logged = (d) => known.has(d.id)
           this.vault.audit?.write('pending.decided_many', {
-            granted: input.decisions.filter((d) => d.granted).map((d) => d.id),
-            denied: input.decisions.filter((d) => !d.granted).map((d) => d.id),
-            skipped: decided.filter((r) => r.outcome === 'skipped').map((r) => r.id),
+            granted: input.decisions.filter((d) => d.granted && logged(d)).map((d) => d.id),
+            denied: input.decisions.filter((d) => !d.granted && logged(d)).map((d) => d.id),
+            skipped: decided.filter((r) => r.outcome === 'skipped' && logged(r)).map((r) => r.id),
+            unknown: input.decisions.filter((d) => !logged(d)).length,
           })
           return json(200, { decided })
         }

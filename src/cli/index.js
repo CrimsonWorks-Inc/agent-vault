@@ -22,7 +22,7 @@ import { fetchPending, decision, parseOverrides, describeGranted, collectApprove
 import { elevationOf } from '../daemon/session-requests.js'
 import { APPROVAL_ORDER } from '../core/policy.js'
 import { writeFileExclusive, assertPlaceholderOnly, ENV_NAME } from './files.js'
-import { sessionInput, approvalOverrides, expiryInput, usage as usageError } from './policy-input.js'
+import { sessionInput, approvalOverrides, expiryInput, usage as usageError, booleanFlag, optionalNumber } from './policy-input.js'
 import { controlCommands, cleanText, SCRUB_HELP, approvalPreviewLines } from './control-commands.js'
 import { watchApprovals } from './watch.js'
 
@@ -324,7 +324,9 @@ const COMMANDS = {
     // Only report the system install when it is the one actually in use. An
     // explicit AGENT_VAULT_DIR, or --dev, means someone wants a different vault
     // and should not be told about this one instead.
-    if (USING_SYSTEM && !args.dev) {
+    const dev = booleanFlag(args, 'dev'), printOnly = booleanFlag(args, 'print-only')
+    const port = optionalNumber(args, 'port', { min: 1, max: 65535 })
+    if (USING_SYSTEM && !dev) {
       const checkout = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
       const installedApp = join(SYSTEM_ROOT, 'app')
       const installed = appFingerprint(installedApp)
@@ -370,7 +372,7 @@ const COMMANDS = {
     // which an agent cannot edit. Only the first install is trust-on-first-use,
     // which is why it shows the plan and the file to verify before asking for
     // a password.
-    if (!args.dev) {
+    if (!dev) {
       const { existsSync: exists } = await import('node:fs')
       const rootOwnedInstaller = join(SYSTEM_ROOT, 'app', 'bin', 'agent-vault-setup.js')
       const installer = exists(rootOwnedInstaller) ? rootOwnedInstaller : SETUP_BIN
@@ -379,11 +381,11 @@ const COMMANDS = {
       // appear to work and change nothing.
       const checkout = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
       const argv = [process.execPath, installer, 'install', '--from', checkout]
-      if (args.port) argv.push('--port', String(args.port))
+      if (port !== undefined) argv.push('--port', String(port))
       const cmd = `sudo ${argv.join(' ')}`
 
       if (JSON_OUT) return out(null, { mode: 'system', command: cmd, installer, installed: false })
-      if (args['print-only']) return console.log(cmd)
+      if (printOnly) return console.log(cmd)
 
       console.log(`${C.bold('agent-vault needs one privileged step.')}`)
       console.log()
@@ -453,7 +455,7 @@ const COMMANDS = {
       return out(`${C.green('ok')} dev vault already at ${DEV_VAULT_DIR}`, { dir: DEV_VAULT_DIR, existed: true })
     }
     mkdirSync(DEV_VAULT_DIR, { recursive: true, mode: 0o700 })
-    const passphrase = args.passphrase ? await readSecret('passphrase: ') : null
+    const passphrase = booleanFlag(args, 'passphrase') ? await readSecret('passphrase: ') : null
     Vault.create(DEV_VAULT_DIR, { factor: passphrase ? 'passphrase' : 'none', passphrase })
     console.log(`${C.green('created')} ${DEV_VAULT_DIR} ${C.dim('(mode 0700)')}`)
     console.log()
@@ -470,8 +472,10 @@ const COMMANDS = {
         EXIT.USAGE, { next: 'agent-vault status' })
     }
     const vault = Vault.open(VAULT_DIR)
-    const unlocked = vault.startInRecordedState(args.passphrase ? await readSecret('passphrase: ') : null)
-    const daemon = new Daemon(vault, { port: Number(args.port || process.env.AGENT_VAULT_PORT || 7411), socketPath: SOCKET })
+    // 0 asks the system for a free port.
+    const port = optionalNumber(args, 'port', { min: 0, max: 65535 }) ?? Number(process.env.AGENT_VAULT_PORT || 7411)
+    const unlocked = vault.startInRecordedState(booleanFlag(args, 'passphrase') ? await readSecret('passphrase: ') : null)
+    const daemon = new Daemon(vault, { port, socketPath: SOCKET })
     await daemon.start()
     console.log(`${C.green('agent-vault daemon')} listening`)
     console.log(`  gateway  http://127.0.0.1:${daemon.gatewayPort}`)
@@ -520,7 +524,7 @@ const COMMANDS = {
     const argv = [process.execPath, installer, 'install', '--from', checkout]
     const cmd = `sudo ${argv.join(' ')}`
 
-    if (args['print-only'] || JSON_OUT) return out(cmd, { command: cmd })
+    if (booleanFlag(args, 'print-only') || JSON_OUT) return out(cmd, { command: cmd })
     if (!process.stdin.isTTY) {
       console.log(`Run this to update the installed daemon:\n  ${C.cyan(cmd)}`)
       return
@@ -655,7 +659,9 @@ const COMMANDS = {
       if (g.expires_at) console.log(`  expires      ${g.expires_at}`)
       const spec = specs.find((x) => x.cred === g.cred) || specs[0]
       if (elevationOf(spec).includes('approval_auto_writes')) {
-        console.log(`  ${C.yellow('approval')}   auto: writes go through without asking you`)
+        console.log(spec?.approval === 'first-use'
+          ? `  ${C.yellow('approval')}   first-use: after the first request, writes go through without asking you`
+          : `  ${C.yellow('approval')}   auto: writes go through without asking you`)
       }
       for (const p of g.lint || []) console.log(`  ${p.level === 'error' ? C.red('lint') : C.yellow('lint')} ${p.message}`)
     }
@@ -704,7 +710,7 @@ const COMMANDS = {
     const cred = args._[0]
     if (!cred) return fail('usage: agent-vault ph next <cred>', EXIT.USAGE)
     const r = await controlWithPresence('POST', '/v1/placeholders', {
-      cred, sid: args.session || loadState().session_id, uses: args.uses ? Number(args.uses) : undefined,
+      cred, sid: args.session || loadState().session_id, uses: optionalNumber(args, 'uses', { min: 1 }),
     })
     saveState({ placeholder: r.placeholder })
     if (JSON_OUT) return out(null, r)
@@ -730,7 +736,7 @@ const COMMANDS = {
   },
 
   async env(args) {
-    if (args.force && args.out === undefined) return fail('--force needs --out', EXIT.USAGE)
+    if (booleanFlag(args, 'force') && args.out === undefined) return fail('--force needs --out', EXIT.USAGE)
     if (!wantsMapping(args) && args.out === undefined) return legacyEnv()
 
     const format = args.format ?? 'dotenv'
@@ -740,7 +746,7 @@ const COMMANDS = {
     const target = args.out === undefined ? null : resolvePath(String(args.out))
     // Before anything is minted: a file that will not be written should not
     // cost a placeholder, or the passphrase.
-    let force = !!args.force
+    let force = booleanFlag(args, 'force')
     if (target) {
       const there = inspectTarget(target)
       if (there === 'foreign') return fail(`${args.out} is not a regular file you own`, EXIT.CONFLICT)
@@ -872,7 +878,7 @@ const COMMANDS = {
   },
 
   async 'audit:tail'(args) {
-    const rows = await control('GET', `/v1/audit?limit=${args.limit || 20}`)
+    const rows = await control('GET', `/v1/audit?limit=${optionalNumber(args, 'limit', { min: 1 }) ?? 20}`)
     if (JSON_OUT) return out(null, rows)
     for (const r of rows) {
       const decision = r.decision === 'deny' ? C.red('deny') : r.decision === 'allow' ? C.green('allow') : C.dim('-')
@@ -924,12 +930,12 @@ const COMMANDS = {
    * read it and prints the one environment variable that makes it trusted.
    */
   async 'tls:setup'(args) {
-    const info = await controlWithPresence('POST', '/v1/tls/ensure', { force: !!args.force })
+    const port = optionalNumber(args, 'port', { min: 1, max: 65535 }) ?? 7443
+    const info = await controlWithPresence('POST', '/v1/tls/ensure', { force: booleanFlag(args, 'force') })
     const caPath = join(CLI_STATE_DIR, 'agent-vault-ca.pem')
     if (!existsSync(CLI_STATE_DIR)) mkdirSync(CLI_STATE_DIR, { recursive: true, mode: 0o700 })
     writeFileExclusive(caPath, info.certificate, { force: true, mode: 0o644 })
 
-    const port = Number(args.port || 7443)
     if (JSON_OUT) return out(null, { ...info, ca_path: caPath, port })
 
     console.log(`${C.green(info.created ? 'certificate generated' : 'certificate present')}`)
@@ -996,7 +1002,8 @@ const COMMANDS = {
     // `Number('nope')` is NaN, and writing `https://localhost:NaN/mcp` into a
     // config file is a failure the reader only discovers when their agent
     // cannot connect and the URL looks almost right.
-    const port = args.port === undefined ? 7443 : Number(args.port)
+    // `--port` with no value is `true`, and Number(true) is 1.
+    const port = args.port === undefined ? 7443 : typeof args.port === 'string' ? Number(args.port) : NaN
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return fail(`--port must be a number between 1 and 65535, not ${JSON.stringify(args.port)}`, EXIT.USAGE)
     }
@@ -1037,13 +1044,13 @@ const COMMANDS = {
     })
 
     const result = install({
-      agent, scope, name, entry, print: !!args.print,
+      agent, scope, name, entry, print: booleanFlag(args, 'print'),
       cwd: process.cwd(), home: homedir(),
     })
 
     if (JSON_OUT) return out(null, { agent, scope, transport, ...result })
 
-    if (args.print) {
+    if (booleanFlag(args, 'print')) {
       console.log(C.dim(`# ${result.path}`))
       console.log(result.block)
       return
@@ -1243,8 +1250,8 @@ const COMMANDS = {
       // Explicit: in a system install the socket is under run/ and the state
       // belongs beside the human, so the socket's directory is the wrong guess.
       statePath: STATE,
-      port: Number(args.port || trusted?.port || 0),
-      idleMs: (Number(args.idle) || 30) * 60_000,
+      port: optionalNumber(args, 'port', { min: 0, max: 65535 }) ?? Number(trusted?.port || 0),
+      idleMs: (optionalNumber(args, 'idle', { min: 1, integer: false }) ?? 30) * 60_000,
       cli: cliInvocation(),
     })
     try {
@@ -1567,7 +1574,7 @@ function legacyEnv() {
 
 /** Whether `env` or `exec` was asked to map names to placeholders. */
 function wantsMapping(args) {
-  return args.map !== undefined || args['map-file'] !== undefined || !!args['profile-vars']
+  return args.map !== undefined || args['map-file'] !== undefined || booleanFlag(args, 'profile-vars')
 }
 
 const MAX_MAPPINGS = 64
@@ -1629,16 +1636,18 @@ async function resolveMappings(args, mappings, purpose) {
   const sid = args.session || loadState().session_id
   if (!sid) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
   let uses
+  // `--uses` with no value is `true`, and Number(true) is 1: it minted a
+  // one-use placeholder and exited 0. A valueless number is refused.
   if (args.uses !== undefined) {
+    if (typeof args.uses !== 'string' || !Number.isInteger(Number(args.uses)) || Number(args.uses) < 1) return fail('--uses must be a whole number, 1 or more', EXIT.USAGE)
     uses = Number(args.uses)
-    if (!Number.isInteger(uses) || uses < 1) return fail('--uses must be a whole number, 1 or more', EXIT.USAGE)
   }
   const sessions = await control('GET', '/v1/sessions')
   const session = sessions.find((x) => x.id === sid)
   if (!session) return fail(`no session ${sid}`, EXIT.NOT_FOUND, { next: 'agent-vault session list' })
   const slugs = (session.creds || []).map((c) => c.slug).filter(Boolean)
 
-  if (args['profile-vars']) {
+  if (booleanFlag(args, 'profile-vars')) {
     // Each credential whose profile names the variables its SDK reads, as
     // long as the name is not already taken by an explicit mapping.
     const kinds = new Map((await control('GET', '/v1/credentials')).map((c) => [c.slug, c.kind]))
@@ -1854,8 +1863,9 @@ ${C.bold('sessions and placeholders')}
                  [--template NAME] [--rate 60/min] [--concurrency N] [--quota 1000/day]
                  [--route GET:/repos/**]... [--payload-file F] [--graphql query]
                  [--redirects N] [--spend-tokens N] [--spend-usd X] [--grant-ttl MIN]
-                                       --approval auto with writes, and --infinite,
-                                       ask for your passphrase every time
+                                       --approval auto or first-use with writes,
+                                       and --infinite, ask for your passphrase
+                                       every time
   session list | session revoke [<sid>]
   session narrow [<sid>] [--cred S] [any limit above] [--ttl MIN]
                                        tighten a live session; it can never widen

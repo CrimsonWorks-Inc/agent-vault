@@ -153,13 +153,13 @@ test('the log says which resource was reached, not just which rule matched', () 
     denied.some((r) => r.req?.path?.includes('/forbidden/secret-path-name')),
     'a denial did not record what was denied',
   )
-  // And which rule let it through, which is what the field is named for. It
-  // held the literal string "allow" on every record ever written.
-  const withGlob = allowed.find((r) => r.req?.path_glob_matched)
-  assert.ok(withGlob, 'no allowed request recorded a matched path rule')
-  assert.notEqual(withGlob.req.path_glob_matched, 'allow',
-    'path_glob_matched must name the glob that matched, not that something did')
-  assert.match(withGlob.req.path_glob_matched, /\*|\//, 'it should look like a path pattern')
+  // And which rule let it through. The field held the literal string "allow"
+  // on every record ever written; then it held the glob text, which can be a
+  // secret an agent proposed (C27). Now it is the rule's place in the grant.
+  const withRule = allowed.find((r) => r.req?.path?.includes('/allowed/thing/with/a/long/path'))
+  assert.equal(withRule.req.path_rule, 0, 'the grant\'s one path rule let it through')
+  assert.equal(withRule.req.route_rule, null, 'the grant has no routes')
+  assert.ok(!('path_glob_matched' in withRule.req) && !('route_matched' in withRule.req), JSON.stringify(withRule.req))
 
   // The query string stays out: that is where credentials appear in a URL.
   const raw = readFileSync(join(dir, 'audit.jsonl'), 'utf8')

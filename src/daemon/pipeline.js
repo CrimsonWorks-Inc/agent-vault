@@ -173,7 +173,10 @@ export class Pipeline {
         request_id: requestId, session_id: session.id, grant_id: route.grantId,
         credential_slug: route.slug,
         req: {
-          host: result.host, method: req.method, path_glob_matched: result.rule, route_matched: result.routeMatched ?? null, status: result.status,
+          // Which path rule and which route let it through, by index (C27).
+          // Never the glob text: an agent can propose a glob, so it can be a
+          // secret, and the grant holds the text for anyone who needs it.
+          host: result.host, method: req.method, path_rule: result.pathRule ?? null, route_rule: result.routeRule ?? null, status: result.status,
           // The path, which the log used to leave out entirely. Under a grant
           // of /repos/frozencrow/** every request recorded the same glob, so
           // the log could say a credential had been used forty times and not
@@ -1302,7 +1305,7 @@ export class Pipeline {
         return {
           status: 202,
           host: decision.host,
-          rule: decision.rule,
+          pathRule: decision.path_rule, routeRule: decision.route_rule,
           redactions: 0,
           headers: {
             'content-type': 'application/problem+json',
@@ -1540,7 +1543,7 @@ export class Pipeline {
       this.#observeHealth(route, res)
       const streamState = { cut: false }
       return {
-        status: res.status, headers: outHeaders, host: decision.host, rule: decision.rule, auditPath, redactions: headerRedactions,
+        status: res.status, headers: outHeaders, host: decision.host, pathRule: decision.path_rule, routeRule: decision.route_rule, auditPath, redactions: headerRedactions,
         stream: this.#trackStream(scrubEventStream(source, scrubber, {
           // A compressed stream is an amplifier, and zlib's maxOutputLength
           // bounds one chunk, not the stream: 71 KB of gzip streamed out 70
@@ -1551,7 +1554,7 @@ export class Pipeline {
             this.vault.audit?.write('response.stream_cut', { request_id: requestId, reason })
           },
         }), resources.spend, () => source.destroy(), streamState),
-        spend: this.#spendAudit(resources.spend), routeMatched: decision.route_matched ?? null,
+        spend: this.#spendAudit(resources.spend),
       }
     }
 
@@ -1622,9 +1625,9 @@ export class Pipeline {
     const spent = this.#settleSpend(resources.spend, usage)
     this.#observeHealth(route, res)
     const result = {
-      spend: spent, routeMatched: decision.route_matched ?? null,
+      spend: spent,
       status: res.status, headers: outHeaders, body: Buffer.from(text, 'latin1'),
-      host: decision.host, rule: decision.rule, auditPath, redactions,
+      host: decision.host, pathRule: decision.path_rule, routeRule: decision.route_rule, auditPath, redactions,
     }
     // Store the scrubbed response against the approval so a duplicate resend
     // replays it rather than hitting the upstream a second time.

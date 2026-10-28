@@ -120,6 +120,10 @@ export function narrowedOf(proposal, final) {
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+// The modes that let a write through with no human (C26). `auto` never asks;
+// `first-use` asks once, and one approval of a harmless first GET then takes
+// the human out of every later POST and DELETE just the same.
+const UNASKED = new Set(['auto', 'first-use'])
 
 /**
  * Why a session spec needs fresh presence. [] means it does not.
@@ -141,7 +145,7 @@ export function elevationOf(spec) {
     if (spec.infinite === true) out.push('infinite')
     if (spec.grants !== undefined && !Array.isArray(spec.grants)) return [...out, 'approval_auto_writes']
     const grants = spec.grants !== undefined ? spec.grants : [spec]
-    if (grants.some((g) => !readable(g) || (g.approval === 'auto' && permitsWrite(g)))) {
+    if (grants.some((g) => !readable(g) || (UNASKED.has(g.approval) && permitsWrite(g)))) {
       out.push('approval_auto_writes')
     }
     return out

@@ -544,7 +544,8 @@ export function isMultiTenantWildcard(pattern) {
 
 /**
  * Evaluate an HTTP request against an effective policy.
- * Throws a VaultError on denial; returns the matched rule name on success.
+ * Throws a VaultError on denial. On success it returns which path rule and
+ * which route allowed the request, by index, never by their text.
  */
 export function evaluateHttp(policy, { method, host, path }) {
   for (const problem of validate(policy)) {
@@ -569,37 +570,43 @@ export function evaluateHttp(policy, { method, host, path }) {
       hint: `Allowed methods: ${(policy.methods || []).join(', ') || 'none'}.`,
     })
   }
-  for (const dp of policy.deny_paths || []) {
+  // The deny rule is named by its index too (C27): the denial is filed, and a
+  // narrowing, which anyone on the socket may send, can add a deny pattern.
+  for (const [i, dp] of (policy.deny_paths || []).entries()) {
     if (matchPath(dp, p)) {
       throw deny('AV_POLICY_DENIED', `path ${p} is on a deny list`, {
-        rule: `deny_paths:${dp}`,
+        rule: `deny_paths:${i}`,
         hint: 'This path is denied by the connector profile and cannot be granted.',
       })
     }
   }
-  // Which pattern let it through, not merely that something did. The audit
-  // log records this as `path_glob_matched`, and it was the literal string
-  // "allow" on every record ever written — a field named for the glob that
-  // never once held a glob.
-  let matched = null
+  // Which rule let it through, not merely that something did, named by its
+  // place in the effective policy (C27). The audit log used to file the glob
+  // text itself, and a glob can be one an agent proposed — which means it can
+  // be a secret the agent put there. An index says which rule without saying
+  // what it was; the grant itself still holds the text for a human to read.
+  let path_rule = null
   if (policy.paths) {
-    matched = policy.paths.find((pat) => matchPath(pat, p)) ?? null
-    if (matched === null) {
+    path_rule = policy.paths.findIndex((pat) => matchPath(pat, p))
+    if (path_rule === -1) {
       throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
         rule: 'paths',
         hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,
       })
     }
   }
-  let route_matched = null
+  // Every route set must allow the request. The last is the innermost layer
+  // (the grant's own routes, or a narrowing of them), so its route is the one
+  // recorded.
+  let route_rule = null
   for (const set of policy.route_sets ?? (policy.routes ? [policy.routes] : [])) {
-    const pair = set.find((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))
-    if (!pair) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {
+    const i = set.findIndex((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))
+    if (i === -1) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {
       rule: 'routes', hint: `Allowed here: ${set.flatMap((pair) => pair.methods.flatMap((method) => pair.paths.map((glob) => `${method} ${glob}`))).join(' | ')}`,
     })
-    route_matched = `${m} ${pair.paths.find((glob) => matchPath(glob, p))}`
+    route_rule = i
   }
-  return { host: h, path: p, method: m, rule: matched ?? 'allow', matched, route_matched }
+  return { host: h, path: p, method: m, path_rule, route_rule }
 }
 
 /** Does this request need a human approval under the effective policy? */

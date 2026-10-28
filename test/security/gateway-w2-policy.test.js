@@ -13,14 +13,16 @@ test('route pairs bind methods to their own paths and every inherited set applie
   allowed(effective, 'GET', '/repos/o/pulls')
   allowed(effective, 'POST', '/repos/o/issues')
   denied(effective, 'POST', '/repos/o/pulls')
-  assert.equal(evaluateHttp(effective, request('POST', '/repos/o/issues')).route_matched, 'POST /repos/*/issues')
+  // Which route allowed it, by index (C27): never the glob text.
+  assert.equal(evaluateHttp(effective, request('POST', '/repos/o/issues')).route_rule, 1)
+  assert.equal(evaluateHttp(effective, request('GET', '/repos/o/pulls')).route_rule, 0)
   const child = intersect([parent, { routes: [pair(['POST'], ['/repos/**'])] }])
   denied(child, 'POST', '/repos/o/pulls')
   denied(child, 'GET', '/repos/o/pulls')
   allowed(child, 'POST', '/repos/o/issues')
   denied(intersect([{ routes: [] }]), 'GET', '/')
   allowed(intersect([{}]), 'POST', '/')
-  denied(intersect([parent, { deny_paths: ['/repos/o/issues'] }]), 'POST', '/repos/o/issues', 'deny_paths:/repos/o/issues')
+  denied(intersect([parent, { deny_paths: ['/repos/o/issues'] }]), 'POST', '/repos/o/issues', 'deny_paths:0')
 })
 
 test('stored effective route and payload policies retain all ancestor constraints', () => {
