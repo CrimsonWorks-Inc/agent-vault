@@ -176,3 +176,33 @@ test('real Unix socket SSE decodes UTF-8 split across chunks and closes on SIGIN
   assert.match(output, /café\.test/)
   assert.equal(signals.listenerCount('SIGINT'), 0)
 })
+
+test('JSON prints only the cleaned display fields of pending and snapshot entries', async () => {
+  const hostile = {
+    headline: 'POST example.test/p?token=fake-query-secret av1.fakesid.fakecred.tok \u001b[31mred\u0007\u0085',
+    reason: 'fake-agent-reason', body: 'fake-body-secret', token: 'avs1.fake.session-token', extra: { nested: 'fake-extra' },
+  }
+  const h = harness({ json: true })
+  const res = h.respond()
+  res.write(frame('pending', entry('one', hostile)))
+  res.write(frame('snapshot', { items: [entry('two', { ...hostile, kind: 'session' }), { kind: 'other', id: 'x', headline: 'fake-other' }], reason: 'fake-snapshot-reason' }))
+  res.write(frame('pending', { kind: 'request', id: 7, headline: 'fake-bad-id' }))
+  res.write(frame('debug', { body: 'fake-debug-body' }))
+  const out = h.output()
+  for (const leak of ['fake-query-secret', 'av1.', 'fake-agent-reason', 'fake-body-secret', 'avs1.', 'fake-extra', 'fake-other',
+    'fake-snapshot-reason', 'fake-bad-id', 'fake-debug-body', 'token', 'reason', 'body']) assert.ok(!out.includes(leak), `${leak} reached stdout`)
+  assert.doesNotMatch(out.replaceAll('\n', ''), /[\x00-\x1f\x7f-\x9f]|\\u00[0-9a-f]{2}/i)
+  const cleaned = 'POST example.test/p [placeholder] [31mred'
+  assert.deepEqual(out.trim().split('\n').map(JSON.parse), [
+    { ok: true, data: { event: 'pending', kind: 'request', id: 'one', headline: cleaned, created_at: 123 } },
+    { ok: true, data: { event: 'snapshot', items: [{ kind: 'session', id: 'two', headline: cleaned, created_at: 123 }] } },
+  ])
+  h.stop(); await h.done
+})
+
+test('JSON passes an ordinary entry through unchanged', async () => {
+  const h = harness({ json: true })
+  h.respond().write(frame('snapshot', { items: [entry('one', { created_at: '2030-01-01T00:00:00Z' })] }))
+  assert.deepEqual(JSON.parse(h.output()), { ok: true, data: { event: 'snapshot', items: [{ kind: 'request', id: 'one', headline: 'POST example.com/repos', created_at: '2030-01-01T00:00:00Z' }] } })
+  h.stop(); await h.done
+})

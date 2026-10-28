@@ -121,7 +121,8 @@ export function approvalOverrides(args, parse) {
 }
 
 export function sessionInput(args) {
-  knownFlags(args, [...GRANT_FLAGS, 'label', 'ttl', 'infinite', 'remote', 'cred', 'grants-file', 'template'], 'session')
+  // No --remote (R3): the CLI talks to the local socket, and an infinite session can never be remote.
+  knownFlags(args, [...GRANT_FLAGS, 'label', 'ttl', 'infinite', 'cred', 'grants-file', 'template'], 'session')
   const shared = grantInput(args)
   if (args.infinite !== undefined && args.infinite !== true) usage('--infinite takes no value')
   if (args.infinite && args.ttl !== undefined) usage('--ttl and --infinite cannot be combined')
@@ -129,9 +130,7 @@ export function sessionInput(args) {
     ...(args.label !== undefined ? { label: textFlag(args.label, '--label') } : {}),
     ...(args.ttl !== undefined ? { ttl_hours: numberFlag(args.ttl, '--ttl', { min: Number.MIN_VALUE, integer: false }) } : {}),
     ...(args.infinite === true ? { infinite: true } : {}),
-    ...(args.remote === true ? { remote: true } : {}),
   }
-  if (args.remote !== undefined && args.remote !== true) usage('--remote takes no value')
   if ([args.cred !== undefined, args['grants-file'] !== undefined, args.template !== undefined].filter(Boolean).length !== 1) usage('send exactly one of --cred, --grants-file or --template')
   if (args.template !== undefined) return { ...body, ...shared, template: textFlag(args.template, '--template') }
   if (args['grants-file'] !== undefined) {

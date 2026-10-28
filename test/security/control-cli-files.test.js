@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { approvalPreviewLines } from '../../src/cli/control-commands.js'
 import { saveState } from '../../src/client-state.js'
 import { grantInput, sessionInput } from '../../src/cli/policy-input.js'
@@ -118,7 +118,60 @@ test('audit verify combines chain and witness decisions with strict booleans', a
   assert.deepEqual(f.calls[1].body, { checkpoints: [{ seq: 1 }] })
   witnessOk = 'false'
   r = await f.run(['audit', 'verify', '--witness', path, '--json'])
-  assert.equal(r.code, 1); assert.equal(JSON.parse(r.stdout).data.ok, false)
+  assert.equal(r.code, 1)
+  const failed = JSON.parse(r.stdout)
+  assert.equal(failed.ok, false); assert.equal(failed.data, undefined)
+  assert.match(failed.error.message, /does not match the witness: 1 ahead/)
+  assert.equal(failed.error.problem.ok, false); assert.equal(failed.error.problem.witness.ahead.length, 1)
+})
+
+test('audit verify on a broken chain is a failure envelope with exit 1, and an intact one is not', async (t) => {
+  let chain = { ok: false, reason: 'tampered', count: 2, head: 'abcd' }
+  const f = await fixture(t, (c) => c.path === '/v1/audit/verify' ? chain : { ok: true, checked: 1, ahead: [], mismatched: [], forged: [] })
+  const path = join(f.dir, 'witness'); writeFileSync(path, '{"seq":1}\n')
+  for (const extra of [[], ['--witness', path]]) {
+    const r = await f.run(['audit', 'verify', ...extra, '--json'])
+    assert.equal(r.code, 1, r.stderr)
+    const envelope = JSON.parse(r.stdout)
+    assert.equal(envelope.ok, false); assert.equal(envelope.data, undefined)
+    assert.equal(envelope.error.message, 'the audit log cannot be trusted: tampered')
+    assert.equal(envelope.error.problem.ok, false); assert.equal(envelope.error.problem.count, 2)
+    if (extra.length) assert.equal(envelope.error.problem.witness.checked, 1)
+  }
+  let r = await f.run(['audit', 'verify'])
+  assert.equal(r.code, 1); assert.equal(r.stdout, ''); assert.match(r.stderr, /cannot be trusted: tampered/)
+  chain = { ok: false, brokenAt: 7, reason: 'hash mismatch', count: 9 }
+  r = await f.run(['audit', 'verify', '--json'])
+  assert.equal(r.code, 1); assert.equal(JSON.parse(r.stdout).error.message, 'chain broken at record 7: hash mismatch')
+  // A truthy non-boolean is not an intact chain.
+  chain = { ok: 'true', count: 2, head: 'abcd' }
+  r = await f.run(['audit', 'verify', '--json'])
+  assert.equal(r.code, 1); assert.equal(JSON.parse(r.stdout).ok, false)
+  chain = { ok: true, count: 2, head: 'abcd' }
+  r = await f.run(['audit', 'verify', '--json'])
+  assert.equal(r.code, 0); assert.deepEqual(JSON.parse(r.stdout), { ok: true, data: chain })
+})
+
+test('audit witness refuses a planted fifo at once and writes nothing', async (t) => {
+  const f = await fixture(t, () => ({ seq: 3, head: 'a'.repeat(64) }))
+  const path = join(f.dir, 'witness.fifo')
+  execFileSync('mkfifo', [path])
+  const started = Date.now()
+  const r = await Promise.race([f.run(['audit', 'witness', '--out', path, '--json']), new Promise((resolve) => setTimeout(() => resolve({ code: 'timeout' }), 5000))])
+  assert.equal(r.code, 11, r.stdout + r.stderr)
+  assert.ok(Date.now() - started < 5000)
+  assert.equal(JSON.parse(r.stdout).ok, false)
+  assert.ok(lstatSync(path).isFIFO())
+})
+
+test('--markdown takes no value on session show and report', async (t) => {
+  const f = await fixture(t, () => ({}))
+  for (const args of [['session', 'show', 'test', '--markdown=yes'], ['report', '--markdown=no']]) {
+    const r = await f.run([...args, '--json'])
+    assert.equal(r.code, 2, r.stdout + r.stderr)
+    assert.match(JSON.parse(r.stdout).error.message, /--markdown takes no value/)
+  }
+  assert.equal(f.calls.length, 0)
 })
 
 test('state writes cannot follow a symlink and ordinary updates remain private', (t) => {

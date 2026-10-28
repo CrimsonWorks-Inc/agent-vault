@@ -214,3 +214,26 @@ test('control CLI refuses secret-bearing argv flags before sending any request',
   }
   assert.deepEqual(h.calls, [])
 })
+
+test('control CLI has no --remote flag (R3): session create and template save refuse it and send nothing', async (t) => {
+  const h = await harness(t, () => session)
+  for (const flags of [['--remote'], ['--remote', '--infinite'], ['--remote=yes']]) {
+    const r = await h.cli(['session', 'create', '--cred', 'demo', ...flags], '', 2)
+    assert.match(r.envelope.error.message, /does not take --remote; nothing was sent/)
+  }
+  await h.cli(['template', 'save', 'demo-template', '--cred', 'demo', '--remote'], '', 2)
+  assert.deepEqual(h.calls, [])
+  await h.cli(['session', 'create', '--cred', 'demo'])
+  assert.deepEqual(h.calls, [route('POST', '/v1/sessions', { label: 'cli session', cred: 'demo' })])
+})
+
+test('control CLI session narrow refuses --uses (C22) before contacting the daemon', async (t) => {
+  const h = await harness(t, () => ({ grants: [], expires_at: '2030-01-01' }))
+  for (const flags of [['--uses', '3'], ['--uses', '3', '--methods', 'get'], ['--uses']]) {
+    const r = await h.cli(['session', 'narrow', 'testsession', ...flags], '', 2)
+    assert.match(r.envelope.error.message, /cannot change --uses; nothing was sent/)
+  }
+  assert.deepEqual(h.calls, [])
+  await h.cli(['session', 'narrow', 'testsession', '--methods', 'get'])
+  assert.deepEqual(h.calls, [route('POST', '/v1/sessions/narrow', { sid: 'testsession', narrow: { methods: ['GET'] } })])
+})

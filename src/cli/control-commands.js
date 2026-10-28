@@ -45,7 +45,7 @@ export function approvalPreviewLines(p, full = false) {
 }
 
 export function controlCommands(ctx) {
-  const { control, controlWithPresence: gated, readSecret, out, C, loadState, stateDir, gatewayPortOf, ask, isJson } = ctx
+  const { control, controlWithPresence: gated, readSecret, out, fail, C, loadState, stateDir, gatewayPortOf, ask, isJson } = ctx
   const output = (r, human = pretty(r)) => out(String(human).split(/(\x1b\[[0-9;]*m)/).map((part) => /^\x1b\[[0-9;]*m$/.test(part) ? part : cleanText(part)).join(''), r)
   const note = (s) => console.error(`${C.yellow('note')} ${cleanText(s)}`)
   const sidOf = (args) => {
@@ -203,6 +203,8 @@ export function controlCommands(ctx) {
     async 'template:show'(args) { output(await control('GET', `/v1/templates?${q({ name: required(args, 0, 'template name') })}`)) },
     async 'template:rm'(args) { output(await control('DELETE', `/v1/templates?${q({ name: required(args, 0, 'template name') })}`), 'template removed') },
     async 'session:narrow'(args) {
+      // A grant's use count is not a narrowable field (C22): the daemon refuses it, so refuse it here, before sending.
+      if (args.uses !== undefined) usage('session narrow cannot change --uses; nothing was sent')
       knownFlags(args, [...GRANT_FLAGS, 'cred', 'ttl'], 'session narrow')
       const sid = sidOf(args), narrow = grantInput(args)
       // Grant lifetime is a route attribute, not part of the policy layer.
@@ -214,13 +216,15 @@ export function controlCommands(ctx) {
       output(r, r.grants.map((g) => `${C.green('narrowed')} ${g.cred}  ` + Object.keys(g.after).filter((k) => JSON.stringify(g.before[k]) !== JSON.stringify(g.after[k])).map((k) => `${k}: ${show(g.before[k])} → ${show(g.after[k])}`).join(' · ') + (g.expires_at ? ` · expires ${g.expires_at}` : '')).join('\n') + (session_ttl_minutes ? `\n  expires ${r.expires_at}` : ''))
     },
     async 'session:show'(args) {
+      const markdown = booleanFlag(args, 'markdown')
       const r = await control('GET', `/v1/sessions/detail?${q({ sid: sidOf(args) })}`)
-      output(r, sessionSummary(r, args.markdown === true))
+      output(r, sessionSummary(r, markdown))
       if (r.activity?.complete === false && !isJson()) note(r.activity.note || 'history is incomplete')
     },
     async report(args) {
+      const markdown = booleanFlag(args, 'markdown')
       const r = await control('GET', `/v1/report/access?${q({ since: args.since === undefined ? '7d' : textFlag(args.since, '--since') })}`)
-      output(r, reportSummary(r, args.markdown === true))
+      output(r, reportSummary(r, markdown))
       if (r.complete === false && !isJson()) note('history is incomplete')
     },
     async 'backup:export'(args) {
@@ -288,9 +292,16 @@ export function controlCommands(ctx) {
         witness = await control('POST', '/v1/audit/verify-witness', { checkpoints })
       }
       const ok = chain.ok === true && (!witness || witness.ok === true)
-      const message = chain.ok === true ? `chain intact ${chain.count} records, head ${chain.head?.slice(0, 16)}...` : `the audit log cannot be trusted: ${chain.reason}`
-      output(witness ? { ...chain, ok, witness } : chain, message + (witness ? `\n${witness.ok === true ? `witness ok ${witness.checked} checkpoints` : `witness ${witness.ahead.length} ahead of the log (records were removed) · ${witness.mismatched.length} mismatched · ${witness.forged.length} forged · ${(witness.other_vault || []).length} other vault`}` : ''))
-      if (!ok) process.exitCode = EXIT.FAILURE
+      const result = witness ? { ...chain, ok, witness } : chain
+      // A broken chain or witness is a failure envelope, never data inside a
+      // success one: a caller reading only --json must not see ok:true.
+      if (chain.ok !== true) {
+        fail(cleanText(chain.brokenAt ? `chain broken at record ${chain.brokenAt}: ${chain.reason}` : `the audit log cannot be trusted: ${chain.reason}`), EXIT.FAILURE, { problem: result })
+      }
+      if (witness && witness.ok !== true) {
+        fail(cleanText(`the audit log does not match the witness: ${(witness.ahead || []).length} ahead of the log (records were removed) · ${(witness.mismatched || []).length} mismatched · ${(witness.forged || []).length} forged · ${(witness.other_vault || []).length} other vault`), EXIT.FAILURE, { problem: result })
+      }
+      output(result, `chain intact ${chain.count} records, head ${chain.head?.slice(0, 16)}...` + (witness ? `\nwitness ok ${witness.checked} checkpoints` : ''))
     },
     async preflight(args) {
       const cred = textFlag(args.cred, '--cred'), method = textFlag(args.method, '--method').toUpperCase(), path = textFlag(args.path, '--path')

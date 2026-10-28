@@ -5,6 +5,19 @@ import { CODES, EXIT } from '../core/errors.js'
 
 const clean = (value) => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '')
 
+/**
+ * The four display fields of one stream entry, cleaned: control characters
+ * stripped, placeholders replaced and query strings dropped from the headline.
+ * Never the agent's reason or body. null for an entry that is not one.
+ */
+export function safeEntry(entry) {
+  if (!entry || typeof entry !== 'object' || !['request', 'session'].includes(entry.kind) || typeof entry.id !== 'string') return null
+  const headline = clean(entry.headline).replace(/av1\.[A-Za-z0-9_.-]+/g, '[placeholder]').replace(/\?[^\s]*/g, '')
+  const created_at = typeof entry.created_at === 'number' && Number.isFinite(entry.created_at) ? entry.created_at
+    : typeof entry.created_at === 'string' ? clean(entry.created_at) : undefined
+  return { kind: entry.kind, id: clean(entry.id), headline, created_at }
+}
+
 /** Watch the local approval stream until SIGINT. Dependencies are injectable for tests. */
 export async function watchApprovals({ socketPath, json = false, notify = true, open = false,
   onEvent, quiet = false, deps = {} } = {}) {
@@ -52,12 +65,10 @@ export async function watchApprovals({ socketPath, json = false, notify = true, 
         }
       }, 10_000)
     }
-    const item = (entry) => {
-      if (!entry || !['request', 'session'].includes(entry.kind) || typeof entry.id !== 'string' || seen.has(entry.id)) return
-      seen.add(entry.id)
-      // Only the daemon's headline is a display field; never use agent reason/body.
-      const headline = clean(entry.headline).replace(/av1\.[A-Za-z0-9_.-]+/g, '[placeholder]').replace(/\?[^\s]*/g, '')
-      const safe = { kind: entry.kind, id: clean(entry.id), headline, created_at: entry.created_at }
+    const item = (safe) => {
+      if (!safe || seen.has(safe.id)) return
+      seen.add(safe.id)
+      const { headline } = safe
       if (!json && !quiet) {
         const label = safe.kind === 'request' ? 'held' : 'session requested'
         const colored = d.stdout.isTTY && !process.env.NO_COLOR ? `\x1b[33m${label}\x1b[0m` : label
@@ -76,11 +87,18 @@ export async function watchApprovals({ socketPath, json = false, notify = true, 
         } catch { /* The stream remains useful if the UI cannot launch. */ }
       }
     }
-    const event = (name, data) => {
+    const event = (name, raw) => {
       backoff = 1000
+      // Only the projection leaves this function, on every path: --json, the
+      // terminal and the notification. The raw frame may carry more than the
+      // four display fields, and none of the rest is ever printed.
+      let data
+      if (name === 'snapshot' && Array.isArray(raw.items)) data = { items: raw.items.map(safeEntry).filter(Boolean) }
+      else if (name === 'pending') data = safeEntry(raw)
+      if (!data) return
       if (json) d.stdout.write(`${JSON.stringify({ ok: true, data: { ...data, event: name } })}\n`)
-      if (name === 'snapshot' && Array.isArray(data.items)) data.items.forEach(item)
-      else if (name === 'pending') item(data)
+      if (name === 'snapshot') data.items.forEach(item)
+      else item(data)
       onEvent?.({ event: name, data })
     }
     const connect = () => {
