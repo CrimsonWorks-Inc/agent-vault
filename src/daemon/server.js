@@ -23,7 +23,7 @@ import { randomBytes } from 'node:crypto'
 import { MIN_SECRET_LEN, compileScrubPattern } from '../core/scrub.js'
 import * as ph from '../core/placeholder.js'
 import {
-  SessionRequests, proposalOf, overridesOf, elevationOf, OWNER_FIELDS,
+  SessionRequests, proposalOf, overridesOf, overridesProblem, elevationOf, OWNER_FIELDS,
   resolveTemplate, grantSpecsOf, templateCreds, templateSummary,
 } from './session-requests.js'
 import { sessionExpiryMs } from '../store/vault.js'
@@ -320,7 +320,9 @@ export class Daemon {
     this.vault.audit?.write('session_request.approved', {
       request_id: record.id,
       session_id: created.session_id,
-      granted: final,
+      // Scrubbed: the human saw and approved the real text, and the grant
+      // enforces it, but the log outlives both and is exported.
+      granted: this.sessionRequests.forAudit(final),
       edited: JSON.stringify(final) !== JSON.stringify(record.proposal),
     })
     return { ...SessionRequests.redact(record), granted: final }
@@ -1511,6 +1513,8 @@ export class Daemon {
           if (typeof input.granted !== 'boolean') {
             throw deny('AV_POLICY_DENIED', 'the verdict must be true or false', { rule: 'bulk_decision' })
           }
+          const unread = overridesProblem(input.overrides)
+          if (unread) throw deny('AV_POLICY_DENIED', unread, { rule: 'session_overrides' })
           const record = this.sessionRequests.get(input.id)
           if (!record) throw deny('AV_NOT_FOUND', `no session request ${input.id}`)
           if (record.state !== 'pending') {
@@ -1564,6 +1568,14 @@ export class Daemon {
         case 'POST /v1/pending/decide-many': {
           const problem = checkDecisions(input?.decisions)
           if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'bulk_decision' })
+          // A narrowing nothing would apply is refused before anything is
+          // signed for: a held request reads none, a session request its own.
+          for (const d of input.decisions) {
+            const unread = d.kind === 'session'
+              ? overridesProblem(d.overrides)
+              : (d.overrides && Object.keys(d.overrides).length ? `${d.id} is a held request, which takes no narrowing; nothing was decided` : null)
+            if (unread) throw deny('AV_POLICY_DENIED', unread, { rule: 'session_overrides' })
+          }
           // One elevated approval in the list makes the whole list fresh: the
           // signature covers all of it, so it is held to the strictest item.
           const elevated = input.decisions.some((d) => {

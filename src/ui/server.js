@@ -910,7 +910,7 @@ function queryOf(url, names) {
 // page" hold for a route that slips, including the agent-written text in an
 // approval preview.
 const WITHHELD_KEYS = new Set([
-  'token', 'placeholder', 'value', 'secret', 'prf_secret', 'recovery_passphrase', 'bundle', 'webhook_url',
+  'token', 'placeholder', 'value', 'secret', 'prf_secret', 'recovery_passphrase', 'passphrase', 'bundle', 'webhook_url',
 ])
 const SESSION_TOKEN = /avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
 // Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader.

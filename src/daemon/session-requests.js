@@ -84,6 +84,32 @@ export function overridesOf(input = {}) {
   return out
 }
 
+/**
+ * Why a human's overrides cannot be applied as sent, or null. A key the
+ * decision does not read (a host list, deny paths, a typo) used to be dropped
+ * and the approval went through: the caller believed a narrowing applied that
+ * never did. Refused instead, naming the key, so nothing is approved that way.
+ */
+export function overridesProblem(input) {
+  if (input === undefined || input === null) return null
+  if (typeof input !== 'object' || Array.isArray(input)) return 'the narrowing must be an object'
+  const unread = Object.keys(input).filter((k) => !FIELDS.includes(k) && !OWNER_FIELDS.includes(k))
+  return unread.length ? `a decision cannot narrow ${unread.map((k) => JSON.stringify(k)).join(', ')}; nothing was decided` : null
+}
+
+/**
+ * `value` with every stored secret replaced in every string inside it, keys
+ * included, at any depth. For a record that quotes what an agent proposed.
+ */
+export function redactDeep(value, secrets) {
+  if (typeof value === 'string') return redactStored(value, secrets)
+  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactStored(k, secrets), redactDeep(v, secrets)]))
+  }
+  return value
+}
+
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
@@ -379,6 +405,17 @@ export class SessionRequests {
   }
 
   get audit() { return this.vault?.audit ?? null }
+
+  /**
+   * A proposal as the audit log may keep it. What a human approved quotes the
+   * agent's paths, routes and payload text, and a stored secret placed there
+   * was written to the log verbatim. With no secrets to scrub against, null:
+   * the record says what was decided, not what it said.
+   */
+  forAudit(value) {
+    const secrets = this.#secrets()
+    return secrets ? redactDeep(value, secrets) : null
+  }
 
   /** Every stored secret, or null when the vault cannot give them. */
   #secrets() {

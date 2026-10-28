@@ -3787,6 +3787,80 @@ const MUTATIONS = [
     to: "queryOf(url, ['slug', 'host'])",
     tests: ['test/security/integrate3-gates.test.js'],
   },
+  // ---- integrate-3 fix round 1: the approved-record scrub (F1), unapplied overrides (D1), passphrase (D2) ----
+  {
+    // The human approved the agent's paths; the log kept them as written.
+    what: 'a stored secret in an approved session request is copied into the session_request.approved audit record',
+    file: 'src/daemon/server.js',
+    from: '      granted: this.sessionRequests.forAudit(final),',
+    to: '      granted: final,',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'the approved-record scrub stops at a list, so a path inside one is kept as written',
+    file: 'src/daemon/session-requests.js',
+    from: '  if (Array.isArray(value)) return value.map((v) => redactDeep(v, secrets))',
+    to: '  if (Array.isArray(value)) return value',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'the approved-record scrub stops at an object, so routes and payload text are kept as written',
+    file: 'src/daemon/session-requests.js',
+    from: '    return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactStored(k, secrets), redactDeep(v, secrets)]))',
+    to: '    return value',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'an approval recorded while the secrets cannot be read keeps the grant text unscrubbed',
+    file: 'src/daemon/session-requests.js',
+    from: '    return secrets ? redactDeep(value, secrets) : null',
+    to: '    return secrets ? redactDeep(value, secrets) : value',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    // D1: a host list in the overrides was dropped and the approval succeeded.
+    what: 'the daemon approves a session request whose overrides name a key it does not apply',
+    file: 'src/daemon/server.js',
+    from: '          const unread = overridesProblem(input.overrides)',
+    to: '          const unread = null',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'a bulk decision drops a session override key it does not apply',
+    file: 'src/daemon/server.js',
+    from: '              ? overridesProblem(d.overrides)',
+    to: '              ? null',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'a bulk decision drops the narrowing sent with a held request',
+    file: 'src/daemon/server.js',
+    from: '              : (d.overrides && Object.keys(d.overrides).length ? ',
+    to: '              : (false ? ',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'overridesProblem lets through a key no decision reads',
+    file: 'src/daemon/session-requests.js',
+    from: '  const unread = Object.keys(input).filter((k) => !FIELDS.includes(k) && !OWNER_FIELDS.includes(k))',
+    to: '  const unread = []',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    what: 'overridesProblem accepts a narrowing that is not an object',
+    file: 'src/daemon/session-requests.js',
+    from: "  if (typeof input !== 'object' || Array.isArray(input)) return 'the narrowing must be an object'",
+    to: '  if (typeof input !== \'object\' || Array.isArray(input)) return null',
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
+  {
+    // D2: the short name passed the key filter.
+    what: 'towardPage sends a passphrase to the page',
+    file: 'src/ui/server.js',
+    from: "'recovery_passphrase', 'passphrase', 'bundle',",
+    to: "'recovery_passphrase', 'bundle',",
+    tests: ['test/security/integrate3-fix1.test.js'],
+  },
 ]
 
 let survived = 0

@@ -144,9 +144,15 @@ test('approval supplies a human, never permission', async () => {
     cred: 'gh', methods: ['GET'], paths: ['/**'],
   })
   await present()
-  const decided = await ctl('POST', '/v1/session-requests/decide', {
+  // A host list is not a narrowing a decision applies. It used to be dropped
+  // and the approval went through; it is refused, naming the key (D1).
+  const widened = await ctl('POST', '/v1/session-requests/decide', {
     id: asked.body.id, granted: true, overrides: { hosts: ['evil.test'] },
   })
+  assert.equal(widened.status, 403, JSON.stringify(widened.body))
+  assert.match(JSON.stringify(widened.body), /hosts/)
+  assert.ok(!JSON.stringify(vault.db.grants).includes('evil.test'), 'a grant names the host')
+  const decided = await ctl('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true })
   absent()
   const session = vault.sessionByToken(decided.body.session.token)
   const grant = vault.grantsForSession(session.id)[0]
