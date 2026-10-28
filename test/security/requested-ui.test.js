@@ -13,17 +13,19 @@ import { readFileSync } from 'node:fs'
 import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
-import { UiServer } from '../../src/ui/server.js'
+import { UiServer, servedPage } from '../../src/ui/server.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
 
 const PAGE = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
 
 /** A named function from the page's script, as a callable. */
-function pageFunction(name, prelude = '') {
+function pageFunction(name, prelude = '', page = PAGE) {
+  const PAGE = page
   const start = PAGE.indexOf(`function ${name}(`)
   assert.ok(start >= 0, `the page has no ${name}()`)
   let depth = 0
-  let i = PAGE.indexOf('{', start)
+  // The body, not a default parameter's braces: `(args = {}) {`.
+  let i = PAGE.indexOf(') {', start) + 2
   for (; i < PAGE.length; i++) {
     if (PAGE[i] === '{') depth++
     else if (PAGE[i] === '}' && --depth === 0) break
@@ -41,7 +43,8 @@ function pageArrow(name) {
 }
 
 test('the page reads owner options exactly as the CLI and the daemon do', () => {
-  const narrowing = pageFunction('parseNarrowing')
+  // The parser the page runs is the one the server puts in it (C21).
+  const narrowing = pageFunction('parseOverrides', '', servedPage())
   for (const raw of [
     { approval: 'auto' }, { infinite: true }, { approval: 'each', methods: 'get,post', infinite: true },
     { approval: '' }, { infinite: false },

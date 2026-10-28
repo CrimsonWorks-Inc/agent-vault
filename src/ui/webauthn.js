@@ -285,14 +285,33 @@ export function operationFor(op, params = {}) {
         rule: 'reserved_operation_field',
       })
     }
-    if (key === 'value' || key === 'prf_secret') {
-      out[`${key}_sha256`] = createHash('sha256').update(String(v)).digest('hex')
+    if (DIGESTED.has(key)) {
+      out[`${key}_sha256`] = digestOf(v)
       continue
     }
     out[key] = v
   }
   out.op = op
   return out
+}
+
+/**
+ * Request fields that carry a secret, bound by digest rather than in clear: a
+ * credential value, an unlock secret, a backup's recovery passphrase, the
+ * backup bundle itself (every secret, sealed), and a webhook URL, which is a
+ * bearer credential for whoever holds it.
+ */
+export const DIGESTED = new Set(['value', 'prf_secret', 'recovery_passphrase', 'bundle', 'webhook_url'])
+
+/**
+ * A string is digested as its own bytes, as it always was. Anything else is
+ * digested as its canonical form (null is "null" either way): `String()` of a
+ * backup bundle is "[object Object]" for every bundle there is, so a signature
+ * over that digest would bind no bundle at all. Contract C19.
+ */
+function digestOf(v) {
+  const text = typeof v === 'string' ? v : canonicalOperation(v)
+  return createHash('sha256').update(text).digest('hex')
 }
 
 /**

@@ -15,17 +15,20 @@ import { readFileSync } from 'node:fs'
 import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { McpServer } from '../../src/daemon/mcp.js'
+import { servedPage } from '../../src/ui/server.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
 
 const PAGE = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
 const README = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
 
 /** A named function from the page's script, as a callable. */
-function pageFunction(name) {
+function pageFunction(name, page = PAGE) {
+  const PAGE = page
   const start = PAGE.indexOf(`function ${name}(`)
   assert.ok(start >= 0, `the page has no ${name}()`)
   let depth = 0
-  let i = PAGE.indexOf('{', start)
+  // The body, not a default parameter's braces: `(args = {}) {`.
+  let i = PAGE.indexOf(') {', start) + 2
   for (; i < PAGE.length; i++) {
     if (PAGE[i] === '{') depth++
     else if (PAGE[i] === '}' && --depth === 0) break
@@ -42,7 +45,8 @@ const RAW = [
 ]
 
 test('what the page signs for a narrowing is what the server rebuilds', () => {
-  const narrowing = pageFunction('parseNarrowing')
+  // The parser the page runs is the one the server puts in it (C21).
+  const narrowing = pageFunction('parseOverrides', servedPage())
   for (const raw of RAW) {
     const page = narrowing(raw)
     const signed = canonicalOperation(operationFor('session_request.decide', { id: 'sr_x', granted: true, ...page }))
@@ -51,7 +55,7 @@ test('what the page signs for a narrowing is what the server rebuilds', () => {
     assert.equal(signed, rebuilt, `${JSON.stringify(raw)} would be refused as a different operation`)
     assert.deepEqual(page, parseOverrides(raw), 'and it reads the inputs the way the CLI flags are read')
   }
-  assert.match(PAGE, /const overrides = parseNarrowing\(typed\)/, 'the decide action must sign the parsed narrowing')
+  assert.match(PAGE, /const overrides = parseOverrides\(typed\)/, 'the decide action must sign the parsed narrowing')
 })
 
 test('a narrowed approval made the way the page makes it goes through', async () => {
@@ -61,7 +65,7 @@ test('a narrowed approval made the way the page makes it goes through', async ()
     const auth = makeAuthenticator(u.ui.origin)
     enrol(d.vault, auth)
     const asked = (await d.control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET', 'POST'], paths: ['/**'], budget: 500 })).body
-    const overrides = pageFunction('parseNarrowing')({ methods: 'get', paths: '/user,/user/repos', budget: '10' })
+    const overrides = pageFunction('parseOverrides', servedPage())({ methods: 'get', paths: '/user,/user/repos', budget: '10' })
     const presence = await u.presence(auth, operationFor('session_request.decide', { id: asked.id, granted: true, ...overrides }))
     const res = await u.api('POST', 'session-requests/decide', { id: asked.id, granted: true, overrides, presence })
     const body = await res.json()
