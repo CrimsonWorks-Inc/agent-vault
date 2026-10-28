@@ -319,7 +319,6 @@ test('an ambiguous or mixed session body is refused, and leaves nothing behind',
       { grants: Array.from({ length: 17 }, (_, i) => ({ cred: `c${i}` })) },
       { grants: 'demo' },
       { grants: [['demo']] },
-      { template: 'x' },
       { template: 'x', cred: 'demo' },
     ]
     for (const body of shapes) {
@@ -327,6 +326,10 @@ test('an ambiguous or mixed session body is refused, and leaves nothing behind',
       assert.equal(r.status, 403, JSON.stringify(body))
       assert.equal(r.body.rule, 'session_shape', JSON.stringify(r.body))
     }
+    // F17: a template on its own is a template, and this one does not exist.
+    const unknownTemplate = await d.control('POST', '/v1/sessions', { template: 'x' })
+    assert.equal(unknownTemplate.status, 404, JSON.stringify(unknownTemplate.body))
+    assert.equal(unknownTemplate.body.code, 'AV_NOT_FOUND')
     const twice = await d.control('POST', '/v1/sessions', { grants: [{ cred: 'demo' }, { cred: 'demo' }] })
     assert.match(twice.body.detail, /credential demo appears twice/)
     // A credential that does not exist, second in the list: nothing is made.

@@ -369,20 +369,38 @@ test('a held request is recorded as held, and the store report counts it as held
   assert.equal(summary.requests.allowed, 0)
 })
 
-test('panic with the hook unwired reports session_requests_denied: null and leaves session requests pending (C1)', async () => {
+test('panic: the wired hook denies pending session requests, and a throwing hook still completes the panic (C1)', async () => {
+  // Wave 3 (control-api) wires pipeline.onPanic, as C1 says it does.
   const d = await startDaemon()
   try {
     const asked = await d.control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], reason: 'integrate-2 seam' })
     assert.equal(asked.status, 200, JSON.stringify(asked.body))
-    assert.equal(d.daemon.pipeline.onPanic, null)
+    assert.equal(typeof d.daemon.pipeline.onPanic, 'function')
     // The hook answers { session_requests_denied }; the panic reports it as
-    // denied_session_requests (F16's route shape), null while unwired.
+    // denied_session_requests (F16's route shape).
     const result = await d.daemon.pipeline.panic({ reason: null, lock: false })
-    assert.equal(result.denied_session_requests, null)
-    assert.equal(d.vault.audit.read({ limit: 1000 }).find((r) => r.kind === 'panic.triggered').denied_session_requests, null)
+    assert.equal(result.denied_session_requests, 1)
+    assert.equal(d.vault.audit.read({ limit: 1000 }).find((r) => r.kind === 'panic.triggered').denied_session_requests, 1)
     const pending = await d.control('GET', '/v1/session-requests')
-    assert.ok(JSON.stringify(pending.body).includes('integrate-2 seam'), JSON.stringify(pending.body))
+    assert.ok(!JSON.stringify(pending.body).includes('integrate-2 seam'), JSON.stringify(pending.body))
   } finally { await d.stop() }
+
+  // A hook that throws: the panic still completes, reports null rather than
+  // a number nobody counted, and is recorded as partial.
+  const e = await startDaemon()
+  try {
+    const s = e.vault.createSession({ label: 'live' })
+    const asked = await e.control('POST', '/v1/session-requests', { cred: 'demo', methods: ['GET'], reason: 'still waiting' })
+    assert.equal(asked.status, 200)
+    e.daemon.pipeline.onPanic = async () => { throw new Error('hook failed') }
+    const result = await e.daemon.pipeline.panic({ reason: null, lock: false })
+    assert.equal(result.denied_session_requests, null)
+    assert.equal(result.revoked_sessions, 1)
+    assert.equal(e.vault.db.sessions[s.session.id].state, 'revoked')
+    const rows = e.vault.audit.read({ limit: 1000 })
+    assert.equal(rows.filter((r) => r.kind === 'tripwire.panic_partial').length, 1)
+    assert.equal(rows.find((r) => r.kind === 'panic.triggered').denied_session_requests, null)
+  } finally { await e.stop() }
 })
 
 const LOOPBACK = { id: 'local', kind: 'tcp', remote: false, advertise: [] }

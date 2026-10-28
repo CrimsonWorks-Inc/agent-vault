@@ -197,9 +197,10 @@ test('the tool list is exactly the documented tools', async () => {
   // vault_request_session arrived — a tool two error paths had been telling
   // agents to call for months while it did not exist.
   const listed = await mcp.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+  // Wave 3 (contract 0.8) added vault_describe_access and vault_preflight.
   assert.deepEqual(listed.result.tools.map((t) => t.name).sort(), [
-    'vault_approval_status', 'vault_explain_denial', 'vault_get_placeholder', 'vault_http',
-    'vault_list_creds', 'vault_request_session', 'vault_status',
+    'vault_approval_status', 'vault_describe_access', 'vault_explain_denial', 'vault_get_placeholder', 'vault_http',
+    'vault_list_creds', 'vault_preflight', 'vault_request_session', 'vault_status',
   ])
 })
 
@@ -208,9 +209,25 @@ test('the one capability-shaped tool cannot create capability', async () => {
   // it is the one to be sure about: asking must create nothing. A human
   // answers it through the control socket, gated, or it never resolves.
   const before = Object.keys(vault.db.sessions).length
-  const res = await mcp.handle({
+  // Since wave 3 the tool asks through the daemon's one proposer, the same
+  // one the HTTP route uses, so this runs against a real (unstarted) daemon.
+  const { Daemon } = await import('../../src/daemon/server.js')
+  const daemon = new Daemon(vault, { port: 0 })
+  const mcp = new McpServer(vault, daemon.pipeline, () => session, daemon)
+  // A credential that does not exist is refused, as on the HTTP route, and
+  // nothing is opened or recorded for it.
+  const opened = () => vault.audit.read({ limit: 10_000 }).filter((r) => r.kind === 'session_request.opened').length
+  const openedBefore = opened()
+  const unknown = await mcp.handle({
     jsonrpc: '2.0', id: 1, method: 'tools/call',
     params: { name: 'vault_request_session', arguments: { cred: 'gh-frozencrow', reason: 'testing' } },
+  })
+  assert.equal(JSON.parse(unknown.result.content[0].text).code, 'AV_NOT_FOUND')
+  assert.equal(daemon.sessionRequests.pending().length, 0, 'a request was opened for nothing')
+  assert.equal(opened(), openedBefore, 'a request was recorded for nothing')
+  const res = await mcp.handle({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'vault_request_session', arguments: { cred: 'allowed', reason: 'testing' } },
   })
   const payload = JSON.parse(res.result.content[0].text)
   assert.equal(payload.state, 'pending')

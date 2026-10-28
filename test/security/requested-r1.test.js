@@ -267,11 +267,22 @@ test('MCP cannot carry an owner field into a request', async () => {
       jsonrpc: '2.0', id: 1, method: 'tools/call',
       params: { name: 'vault_request_session', arguments: { cred: 'demo', reason: 'x', methods: ['POST'], approval: 'auto', infinite: true } },
     }, null, '')
+    // R3 (MCP, control-api wave 3): refused with owner_only_field, not
+    // trimmed, so the agent never believes it asked for them.
     const answer = JSON.parse(r.result.content[0].text)
-    const record = d.daemon.sessionRequests.get(answer.request_id)
-    assert.ok(record, JSON.stringify(answer))
+    assert.equal(answer.code, 'AV_POLICY_DENIED', JSON.stringify(answer))
+    assert.equal(answer.rule, 'owner_only_field')
+    assert.equal(answer.request_id, undefined)
+    assert.equal(d.daemon.sessionRequests.pending().length, 0, 'nothing was opened')
+    assert.ok(!d.vault.audit.read({ limit: 1000 }).some((x) => x.kind === 'session_request.opened'), 'nothing was recorded as opened')
+    // Asked without them, it is an ordinary session: the window is enough.
+    const plain = await d.daemon.mcp.handle({
+      jsonrpc: '2.0', id: 2, method: 'tools/call',
+      params: { name: 'vault_request_session', arguments: { cred: 'demo', reason: 'x', methods: ['POST'] } },
+    }, null, '')
+    const record = d.daemon.sessionRequests.get(JSON.parse(plain.result.content[0].text).request_id)
+    assert.ok(record)
     for (const f of OWNER_FIELDS) assert.ok(!(f in record.proposal), `${f} reached the proposal`)
-    // Approved as asked, it is an ordinary session: the window is enough.
     openWindow(d)
     const decided = await d.control('POST', '/v1/session-requests/decide', { id: record.id, granted: true })
     assert.equal(decided.status, 200, JSON.stringify(decided.body))
@@ -480,7 +491,9 @@ test('approvals offers the owner options, and approve validates them', async () 
   try {
     const id = await requestFor(d, { methods: ['GET'] })
     const listing = await cli(d.dir, ['approvals'])
-    assert.match(listing.stdout, new RegExp(`approve ${id} .*\\[--ttl_minutes \\.\\.\\.\\] \\[--approval MODE\\] \\[--infinite\\]`))
+    // Wave 3 adds the F1-F6 and F18 limits to `narrowable`, so they are
+    // listed between the lifetime and the owner options.
+    assert.match(listing.stdout, new RegExp(`approve ${id} .*\\[--ttl_minutes \\.\\.\\.\\].*\\[--approval MODE\\] \\[--infinite\\]`))
     const bad = await cli(d.dir, ['approve', id, '--approval', 'sometimes'])
     assert.equal(bad.code, 2, bad.stderr)
     const ok = await cli(d.dir, ['approve', id, '--approval', 'each'])

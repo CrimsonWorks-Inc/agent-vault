@@ -5,13 +5,16 @@
 // the point: if the transports had separate code, they would drift, and the
 // drift would be in policy evaluation and scrubbing rather than in framing.
 //
-// No tool returns a secret, creates a credential, or approves anything.
+// No tool returns a secret, creates a credential, approves anything, or
+// changes a policy.
 
 import { randomUUID } from 'node:crypto'
 import { getProfile } from '../connectors/profiles.js'
 import * as sitesMod from '../core/sites.js'
+import * as policyMod from '../core/policy.js'
 import { VaultError } from '../core/errors.js'
-import { proposalOf as srProposal, SessionRequests } from './session-requests.js'
+import { expiryWarning } from '../store/vault.js'
+import { SessionRequests, OWNER_FIELDS, templateCreds, templateSummary, grantSpecsOf } from './session-requests.js'
 
 export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26']
 export const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
@@ -28,7 +31,12 @@ const INSTRUCTIONS = [
   'Put a placeholder only where the usage field says. A placeholder anywhere else is refused.',
   'On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry.',
   'On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives.',
+  'Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access.',
 ].join(' ')
+
+// What vault_request_session forwards. Everything else an agent sends is not
+// part of what it asked for; `approval` and `infinite` are refused outright.
+const REQUEST_ARGS = ['cred', 'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'routes', 'grant_ttl_minutes', 'template', 'reason']
 
 export class McpServer {
   /**
@@ -122,6 +130,18 @@ export class McpServer {
             // it wanted one, so every request took the eight-hour default and
             // the human was shown no lifetime at all to narrow.
             ttl_minutes: { type: 'number', description: 'how long you need it for; ask for the least you need' },
+            uses: { type: 'number', description: 'optional: n-use placeholders instead of session-lifetime ones' },
+            grant_ttl_minutes: { type: 'number', description: 'how long the access itself is needed, if shorter than the session' },
+            routes: {
+              type: 'array',
+              description: 'optional: method-bound routes, each a set of methods allowed only on these paths',
+              items: {
+                type: 'object',
+                properties: { methods: { type: 'array', items: { type: 'string' } }, paths: { type: 'array', items: { type: 'string' } } },
+                required: ['methods', 'paths'],
+              },
+            },
+            template: { type: 'string', description: 'a template name the human saved; they see the template, not a policy to read' },
             poll_id: { type: 'string', description: 'an id from an earlier call: check whether it has been answered' },
             poll_secret: { type: 'string', description: 'the poll_secret that earlier call returned; only the asker can poll' },
           },
@@ -160,6 +180,27 @@ export class McpServer {
         name: 'vault_explain_denial',
         description: 'Explain why a request was denied and what this session is allowed to do instead.',
         inputSchema: { type: 'object', properties: { request_id: { type: 'string' } }, required: ['request_id'] },
+      },
+      {
+        name: 'vault_describe_access',
+        description: 'What this session may do right now: hosts, methods, paths, approval mode, budgets and limits, lifetimes, and where each placeholder goes.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'vault_preflight',
+        description: 'Check whether a request would be allowed, held for a human, or refused, without sending it or spending anything. Advisory only.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            cred: { type: 'string', description: 'credential slug' },
+            method: { type: 'string' },
+            path: { type: 'string', description: 'the upstream path, as for vault_http' },
+            query: { type: 'string' },
+            headers: { type: 'object' },
+            body: { type: 'string' },
+          },
+          required: ['cred', 'method', 'path'],
+        },
       },
     ]
   }
@@ -232,13 +273,57 @@ export class McpServer {
     return {
       daemon: 'agent-vault', version: SERVER_INFO.version,
       locked: this.vault.locked,
-      session: session ? { id: session.id, label: session.label, expires_at: session.expires_at } : null,
+      session: session
+        ? { id: session.id, label: session.label, expires_at: session.expires_at ?? null, infinite: session.infinite === true }
+        : null,
       // Why there is no session, when there is none. This is the tool an agent
       // reaches for when something stopped working, and "session: null" does
       // not distinguish never-had-one from expired-an-hour-ago.
       session_problem: session ? null : this.#sessionProblem(token, listener, { record: false })?.detail ?? null,
       credentials_available: session ? this.vault.grantsForSession(session.id).length : 0,
+      // Shapes a human saved, so an agent can ask by name (F17).
+      templates: this.#templates(),
     }
+  }
+
+  /** Single-credential templates, as an agent may ask for them. Names and summaries only. */
+  #templates() {
+    try {
+      return (this.vault.listTemplates?.() || [])
+        .filter((t) => templateCreds(t.spec).length === 1 && grantSpecsOf(t.spec).length === 1)
+        .map((t) => ({ name: t.name, cred: templateCreds(t.spec)[0], summary: templateSummary(t.spec) }))
+    } catch { return [] }
+  }
+
+  /**
+   * A refusal as a tool result: `{ error, code, rule?, hint? }`, the shape
+   * every tool error has (0.8), never a JSON-RPC error.
+   */
+  #refusal(e) {
+    const body = { error: e.detail || e.message, code: e.code }
+    if (e.rule) body.rule = e.rule
+    if (e.hint) body.hint = e.hint
+    if (e.retryAfter !== undefined) body.retry_after = e.retryAfter
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] }
+  }
+
+  /**
+   * The session's grant for a credential, or the refusal to give instead:
+   * a grant whose own lifetime ran out (F18) says so, with its own code.
+   */
+  #grantFor(session, cred) {
+    const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
+    if (grant) return { grant }
+    const last = this.vault.findGrant?.(session.id, cred.id)
+    if (last?.state === 'expired') {
+      return {
+        refused: this.#refusal({
+          code: 'AV_GRANT_EXPIRED', detail: `this session's grant for ${cred.slug} expired`,
+          hint: "This grant's lifetime ran out; the session may still hold others. Ask a human for a new grant.",
+        }),
+      }
+    }
+    return { refused: { content: [{ type: 'text', text: JSON.stringify({ error: `this session has no grant for ${cred.slug}` }, null, 2) }] } }
   }
 
   /**
@@ -316,6 +401,11 @@ export class McpServer {
               put_placeholder_at: f.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s))),
             })),
             profile_denies: profile.deny_paths.slice(0, 5),
+            // So an agent can tell the human before a long task (F10), stop
+            // trying a stopped credential (F16), and see a grant's own end (F18).
+            expiry_warning: expiryWarning(cred),
+            quarantined: !!cred.quarantine,
+            expires_at: g.expires_at ?? null,
           }
         })
         return text(out)
@@ -363,18 +453,23 @@ export class McpServer {
           })
         }
         if (!this.daemon?.sessionRequests) return text({ error: 'session requests are not available on this daemon' })
-        if (!args.cred) return text({ error: 'name the credential you need', known: this.vault.listCredentials().map((c) => c.slug) })
-        try {
-          const { record, collectSecret } = this.daemon.sessionRequests.propose({
-            // Every field the schema offers. ttl_minutes and uses were dropped
-            // here, so an agent asking for fifteen minutes got eight hours and
-            // the human was shown a lifetime nobody had asked for.
-            proposal: srProposal({
-              cred: args.cred, methods: args.methods, paths: args.paths, budget: args.budget,
-              uses: args.uses, ttl_minutes: args.ttl_minutes,
-            }),
-            reason: args.reason,
+        // Refused, not dropped: an agent that sent one must not believe it
+        // asked for it. Only the owner sets these.
+        const owned = OWNER_FIELDS.filter((f) => Object.hasOwn(args, f))
+        if (owned.length) {
+          return this.#refusal({
+            code: 'AV_POLICY_DENIED', rule: 'owner_only_field', detail: `a session request cannot carry ${owned.join(' or ')}`,
+            hint: 'Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason.',
           })
+        }
+        if (!args.cred && !args.template) {
+          return text({ error: 'name the credential you need, or a template', known: this.vault.listCredentials().map((c) => c.slug), templates: this.#templates() })
+        }
+        try {
+          // The daemon's one proposer, the same the HTTP route uses. Only the
+          // arguments this tool offers are forwarded.
+          const asked = Object.fromEntries(REQUEST_ARGS.filter((k) => args[k] !== undefined && args[k] !== null).map((k) => [k, args[k]]))
+          const { record, collectSecret } = this.daemon.proposeSessionRequest(asked)
           return text({
             state: 'pending',
             request_id: record.id,
@@ -383,6 +478,7 @@ export class McpServer {
             detail: 'a human must approve this. Poll with vault_request_session { poll_id: request_id, poll_secret }. They may narrow it.',
           })
         } catch (e) {
+          if (e instanceof VaultError) return this.#refusal(e)
           return text({ error: e.message })
         }
       }
@@ -391,14 +487,22 @@ export class McpServer {
         if (!session) return this.#needsSession(token, listener)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}`, known: this.vault.listCredentials().map((c) => c.slug) })
-        const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
-        if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
+        const { grant, refused } = this.#grantFor(session, cred)
+        if (refused) return refused
         const field = cred.fields[0]
         // The grant's ceiling wins over whatever the agent asks for.
         const ceiling = grant.policy?.placeholder_policy?.max_uses
         const asked = args.uses ?? null
         const uses = ceiling == null ? asked : Math.min(asked ?? ceiling, ceiling)
-        const { placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses })
+        let placeholder
+        try {
+          ({ placeholder } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name, uses }))
+        } catch (e) {
+          // An expired grant (F18) or a quarantined credential (F16), with
+          // its own code, so the agent knows which.
+          if (e instanceof VaultError) return this.#refusal(e)
+          throw e
+        }
         this.vault.audit.write('placeholder.issued_via_mcp', { credential_slug: cred.slug, agent_reason_untrusted: args.reason })
         return text({
           placeholder,
@@ -421,14 +525,20 @@ export class McpServer {
         if (!session) return this.#needsSession(token, listener)
         const cred = this.vault.findCredential(args.cred)
         if (!cred) return text({ error: `no credential ${args.cred}` })
-        const grant = this.vault.grantsForSession(session.id).find((g) => g.credential_id === cred.id)
-        if (!grant) return text({ error: `this session has no grant for ${args.cred}` })
+        const { grant, refused } = this.#grantFor(session, cred)
+        if (refused) return refused
         const field = cred.fields[0]
         const site = sitesMod.parseSite(field.sites[0])
         // Minted for this one call and burned after it. Each call used to
         // leave its placeholder active, and a used one is never evicted, so
         // the ledger grew by a live row per request.
-        const { placeholder, row } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name })
+        let placeholder, row
+        try {
+          ({ placeholder, row } = this.vault.issuePlaceholder({ grantId: grant.id, field: field.name }))
+        } catch (e) {
+          if (e instanceof VaultError) return this.#refusal(e)
+          throw e
+        }
 
         // The MCP path runs the identical pipeline: same policy, same site
         // check, same scrubber, same audit. Only the framing differs.
@@ -506,8 +616,99 @@ export class McpServer {
         })
       }
 
+      case 'vault_describe_access': {
+        if (!session) return this.#needsSession(token, listener)
+        // Usable here, on this listener (C18). A peek: describing records
+        // nothing and changes nothing.
+        try { this.vault.assertSessionUsable(session, listener, { peek: true }) } catch (e) {
+          if (e instanceof VaultError) return this.#refusal(e)
+          throw e
+        }
+        return text(this.#describeAccess(session))
+      }
+
+      case 'vault_preflight': {
+        if (!session) return this.#needsSession(token, listener)
+        // Usability on this listener (C18) is asked by the pipeline, which
+        // authenticates the preflight exactly as a real request, as a peek:
+        // the listener goes with the call below, as it does for vault_http.
+        const shape = (detail) => this.#refusal({ code: 'AV_POLICY_DENIED', rule: 'preflight_shape', detail })
+        if (typeof args.cred !== 'string' || !args.cred) return shape('cred is a credential slug')
+        if (typeof args.method !== 'string' || !/^[A-Za-z]{1,16}$/.test(args.method)) return shape('method is an HTTP method name')
+        if (typeof args.path !== 'string' || !args.path.startsWith('/')) return shape('path is the upstream path, starting with /')
+        if (args.query != null && typeof args.query !== 'string') return shape('query is a string')
+        if (args.body != null && typeof args.body !== 'string') return shape('body is a string')
+        if (args.headers != null && (typeof args.headers !== 'object' || Array.isArray(args.headers))) return shape('headers is an object')
+        const cred = this.vault.findCredential(args.cred)
+        if (!cred) return this.#refusal({ code: 'AV_NOT_FOUND', detail: `no credential ${args.cred}` })
+        const headers = [['host', '127.0.0.1']]
+        for (const [k, v] of Object.entries(args.headers || {})) {
+          if (/^av-/i.test(k) || k.toLowerCase() === 'host') continue
+          headers.push([k, String(v)])
+        }
+        headers.push(['av-session', this.#tokenFor(session, token)])
+        try {
+          return text(await this.pipeline.preflight({
+            method: args.method.toUpperCase(), path: `/p/${cred.slug}${args.path}`, query: args.query || '',
+            headers, body: args.body ? Buffer.from(args.body) : null,
+            // The listener this call arrived on, so the pipeline asks the
+            // same usability question a real request would.
+            listener,
+          }, { assumePlaceholder: true }))
+        } catch (e) {
+          if (e instanceof VaultError) return this.#refusal(e)
+          throw e
+        }
+      }
+
       default:
         return text({ error: `unknown tool ${name}` })
+    }
+  }
+
+  /**
+   * What a session may do (F20). Policy, limits, lifetimes and where a
+   * placeholder goes; never a token, a placeholder, a fingerprint or a size.
+   */
+  #describeAccess(session) {
+    const grants = this.vault.grantsForSession(session.id).map((g) => {
+      const cred = this.vault.db.credentials[g.credential_id]
+      const profile = getProfile(cred.connector_kind)
+      const effective = policyMod.intersect([profile.policyCeiling, session.policy, g.policy])
+      const limit = policyMod.budgetLimit(effective.budget)
+      const used = Number.isSafeInteger(g.budget_used) ? g.budget_used : 0
+      let spend = null
+      try {
+        const s = this.pipeline.spendFor(g.id)
+        if (s) {
+          spend = {}
+          if (s.limit_tokens != null) spend.tokens = Math.max(0, s.limit_tokens - s.tokens_used - s.reserved_tokens)
+          if (s.limit_usd_micros != null) spend.usd_micros = Math.max(0, s.limit_usd_micros - s.usd_micros_used - s.reserved_usd_micros)
+        }
+      } catch {
+        // An unreadable spend state refuses every metered call.
+        spend = { tokens: 0, usd_micros: 0 }
+      }
+      return {
+        cred: cred.slug, kind: cred.connector_kind, base_url: `/p/${cred.slug}`,
+        put_it_at: cred.fields.filter((f) => g.fields.includes(f.name))
+          .flatMap((f) => f.sites.map((s) => sitesMod.describeSite(sitesMod.parseSite(s)))),
+        quarantined: !!cred.quarantine,
+        expires_at: g.expires_at ?? null,
+        effective: policyMod.describeEffective(effective),
+        // No limit is null; an unreadable one leaves nothing.
+        budget_remaining: limit === Infinity ? null : (limit === null ? 0 : Math.max(0, limit - used)),
+        spend_remaining: spend,
+      }
+    })
+    return {
+      session: {
+        id: session.id, label: session.label, expires_at: session.expires_at ?? null,
+        infinite: session.infinite === true, remote: session.remote === true,
+      },
+      grants,
+      templates: this.#templates(),
+      next: 'need more? call vault_request_session; it creates nothing until a human approves',
     }
   }
 
