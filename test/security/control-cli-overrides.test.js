@@ -1,7 +1,6 @@
 // C23: an approval narrowing the CLI cannot read is a usage error, and nothing
-// is sent. The throwing parseOverrides belongs to control-api and arrives at
-// integrate-3, so its throw is injected here; the subprocess tests use inputs
-// that both the current and the throwing parser refuse.
+// is sent. The field-error tests inject a throw; the rest run the real C23
+// parseOverrides from src/pending.js.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
@@ -56,14 +55,22 @@ test('approve overrides: a flag that was typed is never treated as nothing sent'
     [{ ttl: '5' }, /approve does not take --ttl;/],
     [{ 'ttl-minutes': true }, /--ttl-minutes needs a value/],
     [{ 'ttl-minutes': '' }, /--ttl-minutes was given but narrows nothing/],
-    [{ 'ttl-minutes': 'abc' }, /--ttl_minutes must be a number/],
+    // C23: the merged parseOverrides throws for this, naming the field.
+    [{ 'ttl-minutes': 'abc' }, /^--ttl_minutes: not a number/],
     [{ infinite: 'yes' }, /--infinite was given but narrows nothing/],
     [{ ttl_minutes: '5', 'ttl-minutes': '6' }, /give only one of --ttl_minutes, --ttl-minutes/],
     [{ concurrency: '2', max_concurrent: '3' }, /give only one of/],
   ]) assert.throws(() => approvalOverrides(args(flags), parseOverrides), (e) => e.exit === 2 && pattern.test(e.message) && /nothing was sent/.test(e.message), JSON.stringify(flags))
   assert.throws(() => approvalOverrides(args({ approval: '' }), parseOverrides), (e) => e.exit === 2 && /--approval/.test(e.message))
-  // Today's parseOverrides drops a JSON --routes; it must not vanish.
-  assert.throws(() => approvalOverrides(args({ routes: '[]' }), parseOverrides), usage(/--routes was given but narrows nothing/))
+  // C23's parser throws before a non-finite number can come back; the CLI's
+  // own check stays behind it for a parser that lets one through.
+  for (const v of [NaN, Infinity]) {
+    assert.throws(() => approvalOverrides(args({ 'ttl-minutes': '5' }), () => ({ ttl_minutes: v })), usage(/--ttl_minutes must be a number/), String(v))
+  }
+  // A JSON --routes must not vanish. With C23's parser it is read and sent
+  // as typed, for the daemon to judge, and unreadable JSON is a usage error.
+  assert.deepEqual(approvalOverrides(args({ routes: '[]' }), parseOverrides), { routes: [] })
+  assert.throws(() => approvalOverrides(args({ routes: '[not json' }), parseOverrides), usage(/^--routes: not valid JSON;/))
 })
 
 test('session create and template flags: an unknown limit is refused, the known ones are not', () => {
