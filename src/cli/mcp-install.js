@@ -11,7 +11,8 @@
 //   Gemini CLI   .gemini/settings.json             same shape, inside other settings
 //   Codex CLI    .codex/config.toml                [mcp_servers.name] TOML table
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs'
+import { writeFileExclusive } from './files.js'
+import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, isAbsolute } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -183,9 +184,9 @@ export function install({ agent, scope, name = 'agent-vault', entry, print = fal
   if (existing) {
     // Keep a copy before editing someone else's config file.
     backup = `${path}.agent-vault-bak`
-    copyFileSync(path, backup)
+    writeFileExclusive(backup, existing, { force: true })
   }
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, merged.text, { mode: 0o600 })
+  writeFileExclusive(path, merged.text, { force: true })
   return { path, scope, block, wrote: true, unchanged: merged.unchanged, backup }
 }

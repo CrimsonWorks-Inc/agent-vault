@@ -6,7 +6,7 @@
 // command rather than just failing.
 
 import { request } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir, constants as osConstants } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -22,6 +22,9 @@ import { fetchPending, decision, parseOverrides, describeGranted, collectApprove
 import { elevationOf } from '../daemon/session-requests.js'
 import { APPROVAL_ORDER } from '../core/policy.js'
 import { writeFileExclusive, assertPlaceholderOnly, ENV_NAME } from './files.js'
+import { sessionInput, approvalOverrides, expiryInput, usage as usageError } from './policy-input.js'
+import { controlCommands, cleanText, SCRUB_HELP, approvalPreviewLines } from './control-commands.js'
+import { watchApprovals } from './watch.js'
 
 // A system install puts the vault behind its own uid. The CLI finds it by the
 // state file the privileged installer writes, and falls back to a dev vault in
@@ -309,7 +312,7 @@ async function runWizard(flow) {
       console.log(`\n${C.dim('cancelled; nothing was changed')}`)
       process.exit(0)
     }
-    if (e.noTty) return fail(e.message, EXIT.USAGE, { next: 'pass the options as flags instead' })
+    if (e.noTty) return fail(e.message, EXIT.USAGE, { next: 'agent-vault help   (pass the options as flags instead)' })
     throw e
   }
 }
@@ -551,6 +554,7 @@ const COMMANDS = {
     console.log(`${C.bold('agent-vault')} ${s.daemon_version}  ${s.locked ? C.red('locked') : C.green('unlocked')}`)
     console.log(`  gateway        http://127.0.0.1:${s.gateway_port}`)
     console.log(`  credentials    ${s.credentials}`)
+    if (s.credentials_expiring > 0) console.log(`  expiring       ${s.credentials_expiring}`)
     console.log(`  sessions       ${s.sessions_active} active`)
     console.log(`  grants         ${s.grants_active} active`)
     console.log(`  placeholders   ${s.placeholders_live} live`)
@@ -585,10 +589,11 @@ const COMMANDS = {
       return runWizard(() => credentialWizard(controlWithPresence))
     }
     if (!slug) return fail('usage: agent-vault cred add <slug> --kind <kind> [--host <host>]', EXIT.USAGE)
+    const expires_at = args.expires === undefined ? undefined : expiryInput(args.expires)
     const value = await readSecret(`value for ${slug} (not echoed): `)
     if (!value) return fail('no value given', EXIT.USAGE)
     const cred = await controlWithPresence('POST', '/v1/credentials', {
-      slug, kind: args.kind || 'http', host: args.host, scheme: args.scheme, value,
+      slug, kind: args.kind || 'http', host: args.host, scheme: args.scheme, value, expires_at,
     })
     out(`${C.green('added')} ${cred.slug} ${C.dim(`(${cred.kind}, fingerprint ${cred.fields[0].fp8})`)}\n` +
         `  placeholder goes at: ${cred.fields[0].sites.join(', ')}`, cred)
@@ -602,6 +607,14 @@ const COMMANDS = {
     if (!creds.length) return console.log(C.dim('no credentials yet'))
     for (const c of creds) {
       console.log(`${C.bold(c.slug)} ${C.dim(c.kind)} ${C.dim(c.connector.host || '')}`)
+      if (c.expiry_warning === 'expired') console.log(`  ${C.red('expired')}`)
+      else if (c.expiry_warning === 'soon') {
+        const dates = [c.expires_at, c.health?.observed_expires_at].filter(Boolean).map(Date.parse).filter(Number.isFinite)
+        console.log(`  ${C.yellow(`expires in ${Math.max(0, Math.ceil((Math.min(...dates) - Date.now()) / 86400000))}d`)}`)
+      }
+      if (c.health) console.log(`  health: ${cleanText(c.health.status)}`)
+      if (c.quarantine) console.log(`  ${C.yellow('quarantined')}`)
+      for (const [host, n] of Object.entries(c.pins || {})) console.log(`  pinned: ${cleanText(host)} (${n})`)
       for (const f of c.fields) console.log(`  ${f.name} ${C.dim(`fp:${f.fp8} -> ${f.sites.join(', ')}`)}`)
     }
   },
@@ -612,61 +625,19 @@ const COMMANDS = {
   },
 
   async 'session:create'(args) {
-    if (!args.cred && !args['grants-file'] && !JSON_OUT && process.stdin.isTTY) {
+    if (!args.cred && !args['grants-file'] && !args.template && !JSON_OUT && process.stdin.isTTY) {
       const { sessionWizard } = await import('./wizards.js')
       return runWizard(() => sessionWizard(controlWithPresence))
     }
     const usage = 'usage: agent-vault session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths "/repos/**"] [--approval MODE] [--ttl HOURS | --infinite]'
-    if (!args.cred && !args['grants-file']) return fail(usage, EXIT.USAGE)
-    // Checked here, because a value that does not parse becomes null on the
-    // wire and null means "the default": `--ttl abc` was an eight-hour
-    // session, and `--approval each-time` was auto.
-    if (args.approval !== undefined && !APPROVAL_MODES.includes(args.approval)) {
-      return fail(`--approval is one of: ${APPROVAL_MODES.join(', ')}`, EXIT.USAGE)
-    }
-    if (args.infinite !== undefined && args.infinite !== true) return fail('--infinite takes no value', EXIT.USAGE)
-    if (args.infinite && args.ttl !== undefined) return fail('--ttl and --infinite cannot be combined', EXIT.USAGE)
-    const number = (flag, ok) => {
-      if (args[flag] === undefined) return undefined
-      const n = Number(args[flag])
-      if (args[flag] === true || !ok(n)) return fail(`--${flag} must be ${ok.what}`, EXIT.USAGE)
-      return n
-    }
-    const positive = Object.assign((n) => Number.isFinite(n) && n > 0, { what: 'a positive number' })
-    const whole = (min) => Object.assign((n) => Number.isInteger(n) && n >= min, { what: `a whole number, ${min} or more` })
-    const list = (flag) => (args[flag] === undefined ? undefined : String(args[flag]).split(',').map((x) => x.trim()).filter(Boolean))
-    const shared = {
-      methods: list('methods'),
-      paths: list('paths'),
-      budget: number('budget', whole(0)),
-      approval: args.approval,
-      uses: number('uses', whole(1)),
-    }
-    const body = {
-      label: args.label || 'cli session',
-      ttl_hours: number('ttl', positive),
-      ...(args.infinite ? { infinite: true } : {}),
-    }
-    if (args['grants-file']) {
-      // Different limits per credential. Mixing it with --cred or the shared
-      // flags would leave it unclear which one wins.
-      if (args.cred) return fail('--grants-file and --cred cannot be combined', EXIT.USAGE)
-      if (Object.values(shared).some((v) => v !== undefined)) {
-        return fail('with --grants-file, put each credential\'s limits in the file', EXIT.USAGE)
-      }
-      let grants
-      try { grants = JSON.parse(readFileSync(args['grants-file'], 'utf8')) } catch (e) {
-        return fail(`cannot read --grants-file: ${e.code || 'not JSON'}`, EXIT.USAGE)
-      }
-      if (!Array.isArray(grants)) return fail('--grants-file must hold a JSON array of grant specs', EXIT.USAGE)
-      body.grants = grants
-    } else {
-      const creds = list('cred')
-      if (!creds?.length) return fail(usage, EXIT.USAGE)
-      // One credential keeps the single-grant body every daemon understands.
-      if (creds.length === 1) Object.assign(body, { cred: creds[0], ...shared })
-      else body.grants = creds.map((cred) => ({ cred, ...shared }))
-    }
+    if (!args.cred && !args['grants-file'] && !args.template) return fail(usage, EXIT.USAGE)
+    const body = sessionInput(args)
+    let template
+    if (body.template) {
+      template = await control('GET', `/v1/templates?name=${encodeURIComponent(body.template)}`)
+      body.template_hash = template.hash
+      if (!JSON_OUT) console.log(cleanText(template.summary || `template ${template.name} v${template.version}`))
+    } else if (body.label === undefined) body.label = 'cli session'
     const s = await controlWithPresence('POST', '/v1/sessions', body)
     rememberSession(s)
     if (JSON_OUT) return out(null, s)
@@ -676,11 +647,12 @@ const COMMANDS = {
     } else {
       console.log(`${C.green('session')} ${s.session_id} ${C.dim(`expires ${s.expires_at}`)}`)
     }
-    const specs = body.grants || [body]
+    const specs = template ? (template.spec.grants || [template.spec]) : body.grants || [body]
     for (const g of s.grants || [s]) {
       console.log(`  base url     ${g.base_url}`)
       console.log(`  placeholder  ${g.placeholder}`)
       console.log(`  put it at    ${g.usage.join(' | ')}`)
+      if (g.expires_at) console.log(`  expires      ${g.expires_at}`)
       const spec = specs.find((x) => x.cred === g.cred) || specs[0]
       if (elevationOf(spec).includes('approval_auto_writes')) {
         console.log(`  ${C.yellow('approval')}   auto: writes go through without asking you`)
@@ -857,20 +829,22 @@ const COMMANDS = {
     child.on('exit', (code, signal) => process.exit(code ?? 128 + (osConstants.signals[signal] || 0)))
   },
 
-  async approvals() {
+  async approvals(args) {
     // What is waiting, and how to describe it, comes from src/pending.js —
     // shared with the web UI, because they are two interfaces to one API. This
     // function decides how it looks in a terminal and nothing else.
     const pending = await fetchPending((path) => control('GET', path))
+    if (args.show && !pending.some((p) => p.id === args.show)) return fail('nothing waiting with that id', EXIT.NOT_FOUND)
     if (JSON_OUT) return out(null, pending)
     if (!pending.length) return console.log(C.dim('nothing waiting'))
 
-    for (const item of pending) {
+    for (const item of pending.filter((p) => !args.show || p.id === args.show)) {
       const label = item.kind === 'session' ? 'session requested' : 'pending'
       console.log(`${C.yellow(label)} ${item.id}`)
-      console.log(`  ${C.bold(item.headline)}`)
-      if (item.claim) console.log(`  ${C.dim(`claimed by the agent (unverified): ${item.claim}`)}`)
+      console.log(`  ${C.bold(cleanText(item.headline))}`)
+      if (item.claim) console.log(`  ${C.dim(`claimed by the agent (unverified): ${cleanText(item.claim)}`)}`)
       if (item.caution) console.log(`  ${C.dim(item.caution)}`)
+      if (item.preview) for (const line of approvalPreviewLines(item.preview, Boolean(args.show))) console.log(line)
       const narrow = item.narrowable.length
         ? ` ${item.narrowable.map((f) => `[--${f} ...]`).join(' ')}`
         : ''
@@ -884,7 +858,7 @@ const COMMANDS = {
   async approve(args) {
     const r = await decide(args, true)
     out(`${C.green('approved')} ${r.summary || describeGranted(r.granted)}`, r)
-    if (r.collected) {
+    if (r.collected && !JSON_OUT) {
       // The store holds one session, so this is now THE session every local
       // client uses. Saying so beats letting someone discover it.
       console.log(C.dim(`  session ${r.collected.session_id} is now the one your agents use`))
@@ -905,17 +879,6 @@ const COMMANDS = {
       const detail = r.reason_code || r.credential_slug || r.detail || ''
       console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(detail)}`)
     }
-  },
-
-  async 'audit:verify'() {
-    const v = await control('GET', '/v1/audit/verify')
-    if (v.ok) out(`${C.green('chain intact')} ${v.count} records, head ${v.head?.slice(0, 16)}...`, v)
-    // Not every finding has a record number: a log that is missing its head
-    // anchor, or that ends short of where it should, is broken between records
-    // rather than at one. "broken at record undefined" would be the daemon
-    // reporting tampering and sounding like a bug instead.
-    else if (v.brokenAt) fail(`chain broken at record ${v.brokenAt}: ${v.reason}`, EXIT.FAILURE, { problem: v })
-    else fail(`the audit log cannot be trusted: ${v.reason}`, EXIT.FAILURE, { problem: v })
   },
 
   async 'listen:add'(args) {
@@ -963,7 +926,7 @@ const COMMANDS = {
     const info = await controlWithPresence('POST', '/v1/tls/ensure', { force: !!args.force })
     const caPath = join(CLI_STATE_DIR, 'agent-vault-ca.pem')
     if (!existsSync(CLI_STATE_DIR)) mkdirSync(CLI_STATE_DIR, { recursive: true, mode: 0o700 })
-    writeFileSync(caPath, info.certificate, { mode: 0o644 })
+    writeFileExclusive(caPath, info.certificate, { force: true, mode: 0o644 })
 
     const port = Number(args.port || 7443)
     if (JSON_OUT) return out(null, { ...info, ca_path: caPath, port })
@@ -1397,13 +1360,15 @@ const COMMANDS = {
   },
 
   async profiles() {
-    const rows = listProfiles()
+    const creds = await control('GET', '/v1/credentials').catch(() => [])
+    const rows = listProfiles().map((p) => ({ ...p, pins: creds.filter((c) => c.kind === p.kind).flatMap((c) => Object.entries(c.pins || {}).map(([host, count]) => ({ cred: c.slug, host, count }))) }))
     if (JSON_OUT) return out(null, rows)
     for (const p of rows) {
       // Say so in the list, rather than letting someone pick one and find out
       // when they try to store a secret in it.
       const note = p.implemented ? '' : C.yellow('  not implemented yet')
       console.log(`${C.bold(p.kind.padEnd(14))} ${C.dim(p.hosts.join(', ') || 'any host you name')}${note}`)
+      for (const pin of p.pins) console.log(`  pinned: ${cleanText(pin.host)} (${pin.count}) · ${cleanText(pin.cred)}`)
     }
   },
 
@@ -1474,14 +1439,26 @@ const COMMANDS = {
         : `none: anything running as you can use every credential, and can claim the vault by setting its own passphrase. Run: agent-vault passphrase set`])
     }
 
+    const credentials = await control('GET', '/v1/credentials').catch(() => [])
+    const expiring = credentials.filter((c) => c.expiry_warning)
+    if (!expiring.length) checks.push(['credential expiry', true, 'no credentials expiring'])
+    for (const c of expiring) checks.push(['credential expiry', false, `${c.slug}: ${c.expiry_warning}`])
+
     if (JSON_OUT) return out(null, checks.map(([name, ok, note]) => ({ name, ok, note })))
     for (const [name, ok, note] of checks) {
       console.log(`${ok ? C.green('ok  ') : C.yellow('warn')} ${name.padEnd(26)} ${C.dim(note)}`)
     }
   },
 
+  async watch(args) {
+    for (const flag of ['no-notify', 'open', 'quiet']) if (args[flag] !== undefined && args[flag] !== true) usageError(`--${flag} takes no value`)
+    await watchApprovals({ socketPath: SOCKET, json: JSON_OUT, notify: args['no-notify'] !== true, open: args.open === true, quiet: args.quiet === true })
+  },
+
   help() { printHelp() },
 }
+
+Object.assign(COMMANDS, controlCommands({ control, controlWithPresence, readSecret, out, fail, C, loadState, stateDir, gatewayPortOf, ask, isJson: () => JSON_OUT }))
 
 // -------------------------------------------------------------------- parsing
 
@@ -1490,7 +1467,7 @@ const COMMANDS = {
  * even when given once, so no reader has to ask which shape it got. Every
  * other flag keeps the last value given.
  */
-const REPEATABLE = new Set(['map'])
+const REPEATABLE = new Set(['map', 'route', 'header', 'add'])
 
 function parseArgs(argv) {
   const args = { _: [] }
@@ -1527,17 +1504,19 @@ function parseArgs(argv) {
 async function decide(args, granted) {
   const id = args._[0]
   if (!id) return fail('name the id to answer', EXIT.USAGE, { next: 'agent-vault approvals' })
+  // Read before anything is asked of the daemon: a narrowing that cannot be
+  // read is a usage error, never an approval as the agent proposed it.
+  const overrides = granted ? approvalOverrides(args, parseOverrides) : null
   const pending = await fetchPending((path) => control('GET', path))
   const item = pending.find((p) => p.id === id)
   if (!item) {
     return fail(`nothing waiting with id ${id}`, EXIT.NOT_FOUND, { next: 'agent-vault approvals' })
   }
-  const overrides = granted ? parseOverrides(args) : null
   const settable = [...item.narrowable, ...(item.owner_settable || [])]
   for (const field of Object.keys(overrides || {})) {
     if (!settable.includes(field)) {
       return fail(`--${field} does not apply to a ${item.kind}`, EXIT.USAGE, {
-        next: settable.length ? `you can set: ${settable.join(', ')}` : 'this decision is yes or no',
+        next: `agent-vault approvals   (${settable.length ? `you can set: ${settable.join(', ')}` : 'this decision is yes or no'})`,
       })
     }
   }
@@ -1841,7 +1820,7 @@ function urlHasPassword(value) {
 }
 
 function printHelp() {
-  console.log(`${C.bold('agent-vault')} - a local credential proxy for agents
+  const help = `${C.bold('agent-vault')} - a local credential proxy for agents
 
 ${C.bold('setup')}
   setup [--dev] [--print-only]         install properly (--dev skips the uid boundary)
@@ -1855,16 +1834,33 @@ ${C.bold('guided')}                               ${C.dim('(run these with no ar
   session create                       walks you through scoping a session
 
 ${C.bold('credentials')}                          ${C.dim('(the value is read from the terminal, never argv)')}
-  cred add <slug> --kind <kind> [--host H]
+  cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
   cred list | cred rm <slug>
+  cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
+                                       replace the value; sessions keep working
+  cred test [<slug> | --all]           run the connector's read-only probe
+  cred expiry <slug> <YYYY-MM-DD|none> record when the token expires
+  cred scrub <slug> [--add PATTERN [--sample TEXT] | --rm ID]
+                                       extra token shapes to redact from responses
+  cred pin <slug> --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
+                                       refuse any TLS key you did not pin
+  cred quarantine <slug> [--reason T]  stop all use at once; cred release <slug> undoes it
 
 ${C.bold('sessions and placeholders')}
   session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths "/repos/**"]
                  [--budget N] [--uses N] [--approval each|on-write|first-use|auto]
                  [--ttl HOURS | --infinite] [--label TEXT] [--grants-file F]
+                 [--template NAME] [--rate 60/min] [--concurrency N] [--quota 1000/day]
+                 [--route GET:/repos/**]... [--payload-file F] [--graphql query]
+                 [--redirects N] [--spend-tokens N] [--spend-usd X] [--grant-ttl MIN]
                                        --approval auto with writes, and --infinite,
                                        ask for your passphrase every time
   session list | session revoke [<sid>]
+  session narrow [<sid>] [--cred S] [any limit above] [--ttl MIN]
+                                       tighten a live session; it can never widen
+  session show [<sid>] [--markdown]    what it may do, and what it did
+  template save <name> --cred <slug> [session flags] | template list
+  template show <name> | template rm <name>
   ph next <cred> [--uses N]            issue a placeholder
   ph check <placeholder> | ph pattern  validate one, or print the scanner regex
   env [--out F [--force]] [--map NAME=<slug>[:base_url]]... [--map-file F] [--profile-vars]
@@ -1872,12 +1868,22 @@ ${C.bold('sessions and placeholders')}
                                        never replaced unless you say so
   exec [--map NAME=<slug>]... -- <command>
                                        run a command with a scrubbed environment
+  preflight --cred S --method M --path P [--body-file F]
+                                       would this request pass? nothing is sent
 
 ${C.bold('approvals, audit, listeners')}
-  approvals | approve <id> | deny <id>
+  approvals [--show <id>] | approve <id> | deny <id>
+  watch [--no-notify] [--open]         tell you the moment something is waiting
+  notify set | notify show | notify off | notify test
+                                       an optional webhook for the same signal
+  panic [--lock] [--reason T]          revoke every session, deny everything waiting
+  tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
-  audit tail [--limit N] | audit verify
+  audit tail [--limit N] | audit verify [--witness F]
+  audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
+  report [--since 7d] [--markdown]     access review across every session
+  backup export --out F | backup inspect F | backup restore F [--on-conflict skip|rename|fail]
   listen add <id> --address <iface:port> [--surfaces gateway,mcp]
                  [--tls managed | --tls-cert F --tls-key F]
   listen list | listen rm <id>
@@ -1900,7 +1906,8 @@ ${C.bold('docs')}
                                        how | start | connect | models | locking
                                        | safety | refused | commands
 
-${C.dim('--json on any command prints a machine-readable envelope.')}`)
+${C.dim('--json on any command prints a machine-readable envelope.')}`
+  out(help, { help })
 }
 
 // --------------------------------------------------------------------- entry
@@ -1934,10 +1941,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const args = parseArgs(argv)
   const [first, second] = args._
+  if (args.help && first === 'cred' && second === 'scrub') { out(SCRUB_HELP, { help: SCRUB_HELP }); return }
   if (!first || first === 'help' || args.help) { printHelp(); return }
 
   // Two-word commands (cred add) resolve to "cred:add"; one-word commands stay.
-  const GROUPS = ['cred', 'session', 'ph', 'audit', 'listen', 'mcp', 'passphrase', 'tls']
+  const GROUPS = ['cred', 'session', 'ph', 'audit', 'listen', 'mcp', 'passphrase', 'tls', 'template', 'backup', 'tripwire', 'notify']
   let name = first
   if (GROUPS.includes(first) && second && COMMANDS[`${first}:${second}`]) {
     name = `${first}:${second}`
@@ -1948,10 +1956,11 @@ export async function main(argv = process.argv.slice(2)) {
 
   const command = COMMANDS[name]
   if (!command) {
-    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: `one of: ${COMMAND_NAMES.join(', ')}` })
+    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: 'agent-vault help' })
   }
 
   try {
+    if (['value', 'webhook-url', 'webhook_url', 'recovery-passphrase', 'recovery_passphrase'].some((key) => Object.hasOwn(args, key))) usageError('secrets are read from the terminal or stdin, never command-line flags')
     await command(args)
   } catch (e) {
     const problem = e.problem || {}

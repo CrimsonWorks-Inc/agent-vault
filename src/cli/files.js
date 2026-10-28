@@ -116,14 +116,16 @@ function isFile(path, st) {
 /**
  * Append one line to `path`, creating it 0600 if it is not there, and making
  * it 0600 if it is. Refuses a symlink (O_NOFOLLOW) and anything that is not a
- * regular file.
+ * regular file. O_NONBLOCK, so a planted fifo with no reader is refused at
+ * once (ENXIO) instead of hanging the open; with a reader it opens and fstat
+ * refuses it before anything is written.
  */
 export function appendLineExclusive(path, line) {
   let fd
   try {
-    fd = openSync(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0o600)
+    fd = openSync(path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK, 0o600)
   } catch (e) {
-    if (e.code === 'ELOOP') throw problem('ENOTREGULAR', `${path} is not a regular file`)
+    if (e.code === 'ELOOP' || e.code === 'ENXIO') throw problem('ENOTREGULAR', `${path} is not a regular file`)
     throw e
   }
   try {

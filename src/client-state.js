@@ -18,7 +18,8 @@
 // The file is still called cli-state.json. Renaming it would strand the state
 // of every existing install for the sake of a tidier name.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileExclusive } from './cli/files.js'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
 
@@ -85,7 +86,7 @@ export function saveState(patch, path = statePath()) {
   const dir = dirname(path)
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
   const current = loadState(path)
-  writeFileSync(path, JSON.stringify({ ...current, ...patch }, null, 2), { mode: 0o600 })
+  writeFileExclusive(path, JSON.stringify({ ...current, ...patch }, null, 2), { force: true })
 }
 
 /**
