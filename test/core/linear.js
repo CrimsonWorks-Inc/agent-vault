@@ -29,3 +29,11 @@ export function growth(run, small, large, rounds = 3) {
   // look like a blow-up.
   return { small: fastSmall, large: fastLarge, ratio: fastLarge / Math.max(fastSmall, 0.5) }
 }
+
+/**
+ * The bound both linearity tests use for sizes eight times apart. Linear is
+ * about 8 and quadratic about 64. 24 sat too close to 8 under a loaded suite:
+ * a linear scrub once measured 26 (r6 F3). 40 keeps 24 of headroom above a
+ * linear reading and is still well short of a quadratic one.
+ */
+export const LINEAR_BOUND = 40

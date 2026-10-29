@@ -178,7 +178,7 @@ export class McpServer {
       },
       {
         name: 'vault_explain_denial',
-        description: 'Explain why a request this session made was denied and what this session is allowed to do instead. The code and rule are always given; the full sentence is kept for an hour (the last 1000 denials) and is null after that or after the daemon restarts.',
+        description: 'Explain why a request this session made was denied and what this session is allowed to do instead. The code and rule are always given; the full sentence is kept for an hour (the last 1000 denials) and is null after that, after the daemon restarts, or for a caller with no session.',
         inputSchema: { type: 'object', properties: { request_id: { type: 'string' } }, required: ['request_id'] },
       },
       {
@@ -606,12 +606,17 @@ export class McpServer {
         // Only the caller's own requests: a request made with no session is
         // explained only to a caller with none.
         const mine = (r) => (r.session_id ?? null) === (session?.id ?? null)
-        const rows = this.vault.audit.read({ limit: 200 }).filter((r) => r.request_id === args.request_id && mine(r))
+        // That request's records from the whole log, not a recent slice: the
+        // code and rule outlive any later traffic, an eviction and a restart.
+        const rows = typeof args.request_id === 'string'
+          ? this.vault.audit.read({ requestId: args.request_id, limit: 100 }).filter(mine) : []
         if (!rows.length) return text({ error: `no record of request ${args.request_id}` })
         const denial = rows.find((r) => r.decision === 'deny') || rows[rows.length - 1]
         // The record holds the code and the rule (C28). The sentence is kept
-        // in memory for a while, and is null after a restart.
-        const said = this.pipeline.explainDenial(args.request_id, session?.id)
+        // in memory for a while, and is null after a restart. Never to a
+        // caller with no session: every such caller looks the same, so an
+        // anonymous denial may have been another agent's.
+        const said = session ? this.pipeline.explainDenial(args.request_id, session.id) : null
         return text({
           request_id: args.request_id,
           decision: denial.decision,

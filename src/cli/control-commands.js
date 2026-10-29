@@ -9,7 +9,10 @@ import { PRICES_VERSION } from '../core/model-usage.js'
 import { writeFileExclusive, appendLineExclusive } from './files.js'
 import { grantInput, sessionInput, knownFlags, GRANT_FLAGS, readJson, numberFlag, textFlag, listFlag, expiryInput, usage, booleanFlag } from './policy-input.js'
 
-export const cleanText = (value) => String(value ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+// Terminal controls, and the Unicode ones a terminal obeys too: bidi
+// embeddings, overrides and isolates (U+202A-202E, U+2066-2069) reorder what
+// is shown, and U+2028/2029 break a line where none is printed.
+export const cleanText = (value) => String(value ?? '').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g, '')
 const q = (params) => new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined)).toString()
 const pretty = (value) => JSON.stringify(value, null, 2)
 const show = (value) => typeof value === 'object' ? JSON.stringify(value) : String(value ?? 'none')
@@ -130,9 +133,12 @@ export function controlCommands(ctx) {
       const all = booleanFlag(args, 'all')
       if (Boolean(args._[0]) === all) usage('usage: agent-vault cred test <slug> | --all')
       const r = await control('POST', '/v1/credentials/test', all ? { all: true } : { slug: required(args) })
+      // With --all, a kind that has no probe (a generic http credential) is
+      // skipped, not a failure: there was nothing to run.
+      const skipped = (v) => all && v.rule === 'no_probe'
       const results = all ? r.results : [{ slug: args._[0], ...r }]
-      output(r, results.map((v) => `${v.ok === true ? C.green('ok  ') : C.yellow('warn')} ${v.slug.padEnd(26)} ${v.error || `${v.http_status} · ${v.latency_ms}ms · scopes: ${(v.scopes || []).join(', ')}`}`).join('\n'))
-      if (results.some((v) => v.ok !== true)) process.exitCode = results.some((v) => ['AV_QUOTA_EXCEEDED', 'AV_QUARANTINED'].includes(v.error)) ? EXIT.POLICY_DENIED : EXIT.UPSTREAM
+      output(r, results.map((v) => `${v.ok === true ? C.green('ok  ') : skipped(v) ? C.dim('skip') : C.yellow('warn')} ${v.slug.padEnd(26)} ${skipped(v) ? 'no probe for this kind' : v.error || `${v.http_status} · ${v.latency_ms}ms · scopes: ${(v.scopes || []).join(', ')}`}`).join('\n'))
+      if (results.some((v) => v.ok !== true && !skipped(v))) process.exitCode = results.some((v) => ['AV_QUOTA_EXCEEDED', 'AV_QUARANTINED'].includes(v.error)) ? EXIT.POLICY_DENIED : EXIT.UPSTREAM
     },
     async 'cred:quarantine'(args) {
       const r = await control('POST', '/v1/credentials/quarantine', { slug: required(args), ...(args.reason !== undefined ? { reason: textFlag(args.reason, '--reason') } : {}) })
@@ -149,11 +155,16 @@ export function controlCommands(ctx) {
     },
     async 'tripwire:show'() {
       const r = await control('GET', '/v1/tripwires')
-      output(r, `tripwires ${r.enabled === true ? 'on' : 'off'}\n` + r.rules.map((v) => `${v.id}  ${v.codes?.join(',') || v.rule_prefix}  ${v.threshold} in ${v.window_s}s  → ${v.action}`).join('\n'))
+      // A daemon from before rules were always a list sends null for "never
+      // saved"; either way those are the defaults.
+      const saved = Array.isArray(r.rules) && r.rules_saved !== false
+      const rules = Array.isArray(r.rules) ? r.rules : Array.isArray(r.defaults) ? r.defaults : []
+      output(r, `tripwires ${r.enabled === true ? 'on' : 'off'}${saved ? '' : r.enabled === true ? ' (the default rules)' : ' (the default rules, used when you turn them on)'}\n` + (rules.map((v) => `${v.id}  ${v.codes?.join(',') || v.rule_prefix}  ${v.threshold} in ${v.window_s}s  → ${v.action}`).join('\n') || 'no rules'))
     },
     async 'tripwire:on'() {
       const current = await control('GET', '/v1/tripwires')
-      output(await gated('POST', '/v1/tripwires', { enabled: true, ...(!current.rules?.length ? { rules: 'defaults' } : {}) }), 'tripwires on')
+      const stored = current.rules_saved !== false && current.rules?.length
+      output(await gated('POST', '/v1/tripwires', { enabled: true, ...(!stored ? { rules: 'defaults' } : {}) }), 'tripwires on')
     },
     async 'tripwire:off'() { output(await gated('POST', '/v1/tripwires', { enabled: false }), 'tripwires off') },
     async 'tripwire:set'(args) {
@@ -166,7 +177,8 @@ export function controlCommands(ctx) {
       const rule = { id, threshold: numberFlag(args.threshold, '--threshold', { min: 1, max: 1000 }), window_s, action: args.action,
         ...(args.codes ? { codes: listFlag(args.codes, '--codes') } : { rule_prefix: textFlag(args['rule-prefix'], '--rule-prefix') }) }
       const current = await control('GET', '/v1/tripwires')
-      const rules = [...(current.rules || []).filter((v) => v.id !== id), rule]
+      // Rules never saved are the defaults in force, so a set edits those.
+      const rules = [...(current.rules || current.defaults || []).filter((v) => v.id !== id), rule]
       output(await gated('POST', '/v1/tripwires', { rules }), `tripwire ${id} set`)
     },
     async 'notify:set'(args) {
@@ -309,7 +321,10 @@ export function controlCommands(ctx) {
       })
       const st = loadState()
       if (!st.token) throw Object.assign(new Error('no session selected'), { exit: EXIT.SESSION, next: 'agent-vault session create --cred <slug>' })
-      const input = { method, path: `/p/${cred}${path}`, headers,
+      // The documented form names no placeholder: judge it as the agent's
+      // request would be, with one at the credential's site (as
+      // vault_preflight does). A placeholder the caller does send is checked.
+      const input = { method, path: `/p/${cred}${path}`, headers, assume_placeholder: true,
         ...(args.query !== undefined ? { query: textFlag(args.query, '--query') } : {}),
         ...(args['body-file'] !== undefined ? { body_base64: readFileSync(textFlag(args['body-file'], '--body-file')).toString('base64') } : {}),
       }

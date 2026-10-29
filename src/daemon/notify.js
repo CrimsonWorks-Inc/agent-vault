@@ -46,6 +46,8 @@ export function cleanHeadline(text) {
   for (const hit of ph.findAll(s).reverse()) s = `${s.slice(0, hit.offset)}«placeholder»${s.slice(hit.end)}`
   // eslint-disable-next-line no-control-regex
   s = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+  // Bidi embeddings, overrides and isolates: they reorder what is shown.
+  s = s.replace(/[\u202a-\u202e\u2066-\u2069]/g, '')
   return s.length > MAX_HEADLINE ? `${s.slice(0, MAX_HEADLINE - 1)}…` : s
 }
 

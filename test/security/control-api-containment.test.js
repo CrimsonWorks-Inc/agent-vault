@@ -70,7 +70,8 @@ test('tripwires: on is open, everything else needs a human (C20)', async () => {
   try {
     const shown = await a.control('GET', '/v1/tripwires')
     assert.equal(shown.body.enabled, false)
-    assert.equal(shown.body.rules, null)
+    assert.equal(shown.body.rules_saved, false)
+    assert.deepEqual(shown.body.rules, shown.body.defaults, 'rules never saved are shown as the defaults in force')
     assert.ok(shown.body.defaults.some((r) => r.id === 'replay'))
     for (const body of [
       { enabled: false }, { enabled: 'true' }, { enabled: 1 }, { enabled: true, extra: 1 },

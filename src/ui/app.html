@@ -471,7 +471,9 @@
     return send(proof)
   }
 
-  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+  // Bidi embeddings, overrides and isolates go too: escaped, they still
+  // reorder what is shown, so "fix\u202Elive" would read as "fixevil".
+  const esc = (s) => String(s ?? '').replace(/[\u202a-\u202e\u2066-\u2069]/g, '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 
   // A masked passphrase prompt. The browser's prompt() shows the passphrase in
   // clear text, which is exactly what this app must not do.
@@ -1155,7 +1157,7 @@ ${c.cli} ui                         open this page`)}`,
    */
   function notificationText(item) {
     const lead = item?.kind === 'request' ? 'Held request: ' : 'Session requested: '
-    const text = `${lead}${String(item?.headline ?? '')}`.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    const text = `${lead}${String(item?.headline ?? '')}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/[\u202a-\u202e\u2066-\u2069]/g, '')
     return text.length > 120 ? `${text.slice(0, 119)}…` : text
   }
 
@@ -1662,7 +1664,7 @@ ${c.cli} ui                         open this page`)}`,
 
   /** Panic, and the tripwires that can pull it for you (F16). */
   function containmentCard(tw, fired) {
-    const rules = Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []
+    const rules = tw?.rules_saved !== false && Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []
     const shown = rules.length ? rules : (Array.isArray(tw?.defaults) ? tw.defaults : [])
     const on = tw?.enabled === true
     return `<div class="card"><h2>Containment</h2>
@@ -2560,7 +2562,8 @@ ${c.cli} ui                         open this page`)}`,
     async 'tripwires-on'() {
       // With no rules stored yet, turning them on also stores the defaults,
       // which makes it a change the daemon gates like any other.
-      const body = (tripwireState?.rules || []).length ? { enabled: true } : { enabled: true, rules: 'defaults' }
+      const stored = tripwireState?.rules_saved !== false && (tripwireState?.rules || []).length
+      const body = stored ? { enabled: true } : { enabled: true, rules: 'defaults' }
       await setTripwires(body, 'Tripwires on')
     },
     async 'tripwires-off'() { await setTripwires({ enabled: false }, 'Tripwires off') },

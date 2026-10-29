@@ -111,6 +111,27 @@ test('control CLI tripwire on installs defaults only for an empty rule set', asy
   assert.deepEqual(h.calls, [route('GET', '/v1/tripwires'), route('POST', '/v1/tripwires', { enabled: true, rules: 'defaults' })])
 })
 
+test('control CLI tripwire show reads a daemon that sends null for rules never saved, as the defaults (r6 B1)', async (t) => {
+  const defaults = [{ id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' }]
+  const h = await harness(t, () => ({ enabled: false, rules: null, defaults }))
+  const shown = await h.cli(['tripwire', 'show'])
+  assert.equal(shown.envelope.data.rules, null)
+  assert.deepEqual(h.calls, [route('GET', '/v1/tripwires')])
+})
+
+test('control CLI tripwire on stores the defaults when the daemon says none were saved (r6 B1)', async (t) => {
+  const defaults = [{ id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' }]
+  const h = await harness(t, () => ({ enabled: false, rules: defaults, rules_saved: false, defaults }))
+  await h.cli(['tripwire', 'on'])
+  assert.deepEqual(h.calls, [route('GET', '/v1/tripwires'), route('POST', '/v1/tripwires', { enabled: true, rules: 'defaults' })])
+})
+
+test('control CLI cred test --all skips a kind with no probe (r6 N2)', async (t) => {
+  const results = [{ slug: 'gh', error: 'AV_NOT_FOUND', rule: 'no_probe' }, { slug: 'ai', ok: true, http_status: 200, latency_ms: 3, scopes: [] }]
+  const h = await harness(t, () => ({ results }))
+  await h.cli(['cred', 'test', '--all'])
+})
+
 test('control CLI template lifecycle and session create bind the reviewed template hash', async (t) => {
   const name = 'read template', spec = { cred: 'demo', methods: ['GET'], ttl_hours: 2 }
   const template = { name, spec, hash: 'a'.repeat(64), version: 1, summary: 'read demo', creds: ['demo'], elevated: [], lint: [], updated_at: '2030-01-01' }

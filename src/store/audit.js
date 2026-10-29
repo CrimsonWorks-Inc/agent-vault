@@ -301,10 +301,11 @@ export class AuditLog {
     this.prevHash = record.hash
   }
 
-  /** Read records, newest last. */
-  read({ limit = 100, kind, sessionId, since } = {}) {
+  /** Read records, newest last. `requestId` picks one request's records from the whole log. */
+  read({ limit = 100, kind, sessionId, since, requestId } = {}) {
     if (!existsSync(this.path)) return []
     let rows = this.#rows().filter((r) => !r.unreadable)
+    if (requestId !== undefined) rows = rows.filter((r) => r.request_id === requestId)
     if (kind) rows = rows.filter((r) => r.kind === kind || r.kind.startsWith(`${kind}.`))
     if (sessionId) rows = rows.filter((r) => r.session_id === sessionId)
     if (since) rows = rows.filter((r) => r.ts >= since)

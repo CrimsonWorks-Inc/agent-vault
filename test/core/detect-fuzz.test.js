@@ -15,7 +15,7 @@ import * as ph from '../../src/core/placeholder.js'
 import { detectAll } from '../../src/core/detect.js'
 import { locate } from '../../src/core/substitute.js'
 import { intersect, evaluateHttp, normalizePath, matchPath } from '../../src/core/policy.js'
-import { growth } from './linear.js'
+import { growth, LINEAR_BOUND } from './linear.js'
 
 function rng(seed) {
   let s = seed
@@ -112,7 +112,7 @@ test('the detector stays linear on a large body', () => {
   // times when quadratic; the bound sits between.
   const body = (bytes) => Buffer.alloc(bytes, 7).toString('base64').replace(/(.{76})/g, '$1\n')
   const { small, large, ratio } = growth(detectAll, body(1 << 19), body(1 << 22))
-  assert.ok(ratio < 24, `4 MiB took ${large.toFixed(1)}ms against ${small.toFixed(1)}ms for 512 KiB (${ratio.toFixed(1)}x); that is not linear`)
+  assert.ok(ratio < LINEAR_BOUND, `4 MiB took ${large.toFixed(1)}ms against ${small.toFixed(1)}ms for 512 KiB (${ratio.toFixed(1)}x); that is not linear`)
 })
 
 test('the detector is a superset of the substituter, structurally', () => {

@@ -107,8 +107,11 @@ test('the daemon reports the version the package actually is', () => {
   assert.match(pkg.version, /^\d+\.\d+\.\d+(-[\w.]+)?$/, `"${pkg.version}" is not a version`)
 
   // The changelog's top entry names it, so a release cannot ship undocumented.
+  // An `Unreleased` section may sit above it: that is work not yet given a
+  // version, and the version below it must still be the package's, so a bump
+  // with no entry of its own still fails here.
   const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8')
-  const firstHeading = /^## +(\S+)/m.exec(changelog)
+  const firstHeading = /^## +(?!Unreleased\b)(\S+)/m.exec(changelog)
   assert.ok(firstHeading, 'the changelog has no version heading')
   assert.equal(firstHeading[1], pkg.version,
     `the changelog's newest entry is ${firstHeading[1]} but the package is ${pkg.version}`)

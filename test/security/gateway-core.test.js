@@ -9,7 +9,7 @@ import { Scrubber } from '../../src/core/scrub.js'
 import * as policy from '../../src/core/policy.js'
 import * as sub from '../../src/core/substitute.js'
 import { setup, cleanup, SECRET } from './gateway-helpers.js'
-import { growth } from '../core/linear.js'
+import { growth, LINEAR_BOUND } from '../core/linear.js'
 
 afterEach(cleanup)
 
@@ -275,7 +275,7 @@ test('the wrapped and mixed-case views stay linear on large bodies', () => {
   // when linear and sixty-four times when quadratic; the bound sits between.
   for (const shape of shapes) {
     const { small, large, ratio } = growth((body) => sc.scrub(body), shape(3e4), shape(2.4e5))
-    assert.ok(ratio < 24, `${shape(1).slice(0, 8)}...: 8x the body took ${ratio.toFixed(1)}x as long (${small.toFixed(1)} ms, ${large.toFixed(1)} ms)`)
+    assert.ok(ratio < LINEAR_BOUND, `${shape(1).slice(0, 8)}...: 8x the body took ${ratio.toFixed(1)}x as long (${small.toFixed(1)} ms, ${large.toFixed(1)} ms)`)
   }
 })
 

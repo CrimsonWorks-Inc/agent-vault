@@ -3,7 +3,9 @@ import { execFile, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { CODES, EXIT } from '../core/errors.js'
 
-const clean = (value) => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+// Controls, bidi embeddings/overrides/isolates and line separators: each
+// changes what a terminal shows (cleanText in control-commands.js).
+const clean = (value) => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g, '')
 
 /**
  * The four display fields of one stream entry, cleaned: control characters

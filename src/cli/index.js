@@ -697,7 +697,7 @@ const COMMANDS = {
         s.infinite ? C.yellow('infinite') : '',
       ].filter(Boolean).map((b) => `${b} `).join('')
       const expiry = s.infinite ? 'never' : s.expires_at
-      console.log(`${s.id}  ${state}  ${s.label} ${badges}${C.dim(`grants:${s.grants} approval:${mode} expires:${expiry}`)}`)
+      console.log(`${s.id}  ${state}  ${cleanText(s.label)} ${badges}${C.dim(`grants:${s.grants} approval:${mode} expires:${expiry}`)}`)
     }
   },
 
@@ -863,7 +863,9 @@ const COMMANDS = {
 
   async approve(args) {
     const r = await decide(args, true)
-    out(`${C.green('approved')} ${r.summary || describeGranted(r.granted)}`, r)
+    // What was granted, never the agent's ask: a narrowed approval of a
+    // GET,POST proposal said "GET,POST" while the session could only GET.
+    out(`${C.green('approved')} ${cleanText(r.granted && typeof r.granted === 'object' ? describeGranted(r.granted) : r.summary || '')}`, r)
     if (r.collected && !JSON_OUT) {
       // The store holds one session, so this is now THE session every local
       // client uses. Saying so beats letting someone discover it.
@@ -874,7 +876,7 @@ const COMMANDS = {
 
   async deny(args) {
     const r = await decide(args, false)
-    out(`${C.red('denied')} ${r.summary || ''}`, r)
+    out(`${C.red('denied')} ${cleanText(r.summary || '')}`, r)
   },
 
   async 'audit:tail'(args) {
@@ -884,7 +886,7 @@ const COMMANDS = {
       const decision = r.decision === 'deny' ? C.red('deny') : r.decision === 'allow' ? C.green('allow') : C.dim('-')
       // A session request's records name the credential as `cred` (C25).
       const detail = r.reason_code || r.credential_slug || r.cred || r.detail || ''
-      console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(detail)}`)
+      console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(cleanText(detail))}`)
     }
   },
 

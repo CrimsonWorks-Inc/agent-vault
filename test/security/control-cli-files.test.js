@@ -209,7 +209,7 @@ test('preflight calls only loopback gateway with session authentication, preserv
     assert.equal(r.code, exit, r.stdout + r.stderr); assert.equal(JSON.parse(r.stdout).data.would, verdict)
     const c = f.calls.at(-1)
     assert.equal(c.path, '/v1/preflight'); assert.equal(c.headers['av-session'], 'avs1.test.fake')
-    assert.deepEqual(c.body, { method: 'POST', path: '/p/demo/messages', query: 'x=1', headers: [['X-Test', 'one'], ['X-Test', 'two']], body_base64: 'AP8q' })
+    assert.deepEqual(c.body, { method: 'POST', path: '/p/demo/messages', query: 'x=1', headers: [['X-Test', 'one'], ['X-Test', 'two']], assume_placeholder: true, body_base64: 'AP8q' })
   }
   rmSync(join(f.dir, 'cli-state.json'))
   assert.equal((await f.run(['preflight', '--cred', 'demo', '--method', 'GET', '--path', '/', '--json'])).code, 9)

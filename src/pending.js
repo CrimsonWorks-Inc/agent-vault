@@ -244,7 +244,9 @@ export function describeGranted(g = {}) {
   if (g.budget) bits.push(`${g.budget} requests`)
   if (g.uses) bits.push(`${g.uses}-use placeholder`)
   if (g.approval) bits.push(`approval ${g.approval}`)
+  if (g.grant_ttl_minutes) bits.push(`grant ends after ${g.grant_ttl_minutes} min`)
   if (g.infinite === true) bits.push('never expires')
+  else if (g.ttl_minutes) bits.push(`lasts ${g.ttl_minutes} min`)
   return bits.join(' · ')
 }
 

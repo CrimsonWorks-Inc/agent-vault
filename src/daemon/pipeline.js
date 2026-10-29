@@ -1562,8 +1562,11 @@ export class Pipeline {
       // from the start — even before anyone reads — and ends the last one with
       // the error, which scrubEventStream turns into a closing error event.
       const source = streamPipeline(res.res, decoder, () => {})
+      // Closed values only (C28): the upstream's own Content-Type carries
+      // parameters it chose, and one that echoed a stored secret there put it
+      // in the log while the agent's copy was scrubbed.
       this.vault.audit.write('response.streamed', {
-        request_id: requestId, content_type: contentType, content_encoding: contentEncoding || null,
+        request_id: requestId, content_type: 'text/event-stream', content_encoding: auditEncoding(contentEncoding),
       })
       // The request has run. There is nothing to store for a replay, but the
       // approval is spent, and a resend has to know that (see #approval).
@@ -1878,6 +1881,13 @@ const AUDIT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH',
 function auditMethod(m) {
   const up = typeof m === 'string' ? m.toUpperCase() : ''
   return AUDIT_METHODS.has(up) ? up : 'OTHER'
+}
+
+/** A Content-Encoding as the log may hold it: one this file decodes, else `other`. */
+const AUDIT_ENCODINGS = new Set(['identity', 'gzip', 'x-gzip', 'deflate', 'br', 'zstd'])
+function auditEncoding(e) {
+  if (!e) return null
+  return AUDIT_ENCODINGS.has(e) ? e : 'other'
 }
 
 const HOP_FORWARDED = new Set([

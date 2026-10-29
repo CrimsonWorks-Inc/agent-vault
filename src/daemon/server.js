@@ -1246,11 +1246,12 @@ export class Daemon {
         if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
         this.vault.assertSessionUsable(session, req.listener ?? null, { peek: true })
         const described = preflightRequest(body)
+        const { assumePlaceholder, ...asked } = described
         return json(200, await this.pipeline.preflight({
-          ...described,
-          headers: [...described.headers, ['av-session', token]],
+          ...asked,
+          headers: [...asked.headers, ['av-session', token]],
           listener: req.listener ?? null,
-        }))
+        }, { assumePlaceholder }))
       }
       if (!session) return json(401, { code: 'AV_SESSION_REQUIRED', hint: 'send Authorization: Bearer <session token>' })
       // The same question /p/ and /mcp ask. Liveness alone let an infinite
@@ -2367,8 +2368,12 @@ export class Daemon {
           return json(200, result)
         }
         case 'GET /v1/tripwires': {
+          // Always a list: the rules in force. Rules never saved are the
+          // defaults, which is what the gateway uses for them; `rules_saved`
+          // says which, so "turn on" knows it must also store them.
           const t = this.vault.getSettings().tripwires || {}
-          return json(200, { enabled: t.enabled === true, rules: Array.isArray(t.rules) ? t.rules : null, defaults: DEFAULT_RULES })
+          const saved = Array.isArray(t.rules)
+          return json(200, { enabled: t.enabled === true, rules: saved ? t.rules : structuredClone(DEFAULT_RULES), rules_saved: saved, defaults: DEFAULT_RULES })
         }
         case 'POST /v1/tripwires': {
           // Turning tripwires on only narrows, so exactly that is open: one
@@ -2720,7 +2725,7 @@ function requestSpec(final) {
 function preflightRequest(raw) {
   const refuse = (detail) => deny('AV_POLICY_DENIED', detail, {
     rule: 'preflight_shape',
-    hint: 'Send { method, path: "/p/<slug>/…", query?, headers?, body? | body_base64? }.',
+    hint: 'Send { method, path: "/p/<slug>/…", query?, headers?, body? | body_base64?, assume_placeholder? }.',
   })
   let input
   try { input = JSON.parse(raw.length ? raw.toString('utf8') : '{}') } catch { throw refuse('the body is not JSON') }
@@ -2728,6 +2733,9 @@ function preflightRequest(raw) {
   if (typeof input.method !== 'string' || !/^[A-Za-z]{1,16}$/.test(input.method)) throw refuse('method is an HTTP method name')
   if (typeof input.path !== 'string' || !/^\/(p|t)\//.test(input.path)) throw refuse('path starts with /p/<slug>/ or /t/<scheme>/<host>/')
   if (input.query !== undefined && typeof input.query !== 'string') throw refuse('query is a string')
+  // As vault_preflight does: a request with no placeholder is judged as if
+  // one were at the credential's site. One that is present is still checked.
+  if (input.assume_placeholder !== undefined && typeof input.assume_placeholder !== 'boolean') throw refuse('assume_placeholder is true or false')
   if (input.body !== undefined && input.body_base64 !== undefined) throw refuse('send body or body_base64, not both')
   if (input.body !== undefined && typeof input.body !== 'string') throw refuse('body is a string')
   if (input.body_base64 !== undefined && (typeof input.body_base64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.body_base64))) {
@@ -2748,7 +2756,7 @@ function preflightRequest(raw) {
   }
   const body = input.body !== undefined ? Buffer.from(input.body, 'utf8')
     : input.body_base64 !== undefined ? Buffer.from(input.body_base64, 'base64') : null
-  return { method: input.method.toUpperCase(), path: input.path, query: input.query ?? '', headers, body: body?.length ? body : null }
+  return { method: input.method.toUpperCase(), path: input.path, query: input.query ?? '', headers, body: body?.length ? body : null, assumePlaceholder: input.assume_placeholder === true }
 }
 
 /** The template a proposal was made from, as `{ name, version }`, or null. */
