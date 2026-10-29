@@ -293,22 +293,24 @@ test('a binary upload passes a grant whose payload rules only constrain the quer
   const f = fixture(t, { payload: { query: { mode: { one_of: ['safe'] } } } })
   const upload = f.req({ method: 'POST', query: 'mode=safe', body: Buffer.from([0xff, 0xfe, 0x00, 0x81]), headers: [...f.req().headers, ['content-type', 'application/octet-stream']] })
   assert.equal((await f.pipeline.handle(upload)).status, 200)
-  assert.equal(problem(await f.pipeline.handle({ ...upload, query: 'mode=unsafe' })).rule, 'payload:query:mode:one_of')
+  assert.equal(problem(await f.pipeline.handle({ ...upload, query: 'mode=unsafe' })).rule, 'payload:query:0:one_of')
 })
 
-test('a strict-query refusal names the parameter safely and never echoes a value', async (t) => {
+test('a strict-query refusal names the parameter by its index and never echoes a name or value', async (t) => {
   const f = fixture(t, { payload: { query: { a: {} }, query_strict: true } })
   const result = await f.pipeline.handle(f.req({ query: `a=1&${encodeURIComponent('evil<> "name"')}=SECRETVALUE` }))
   const p = problem(result)
-  assert.equal(p.rule, `payload:query:${encodeURIComponent('evil<> "name"')}:strict`)
+  // By position, never by the name the agent chose (C28): the rule is recorded.
+  assert.equal(p.rule, 'payload:query:1:strict')
   assert.ok(!JSON.stringify(p).includes('SECRETVALUE'))
+  assert.ok(!JSON.stringify(p).includes('evil'))
   // A name with a line break or non-ASCII is refused by the gateway before
   // the payload rules read it (a stray name), and that refusal echoes
-  // nothing either. The payload rules alone still encode it in the rule.
+  // nothing either. The payload rules alone name it by position too.
   const stray = problem(await f.pipeline.handle(f.req({ query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` })))
   assert.equal(stray.rule, 'request_ambiguous')
   assert.ok(!JSON.stringify(stray).includes('SECRETVALUE') && !JSON.stringify(stray).includes('vil'))
-  assert.throws(() => evaluatePayload([{ query: { a: {} }, query_strict: true }], { query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` }), { rule: `payload:query:${encodeURIComponent('évil\nname')}:strict` })
+  assert.throws(() => evaluatePayload([{ query: { a: {} }, query_strict: true }], { query: `a=1&${encodeURIComponent('évil\nname')}=SECRETVALUE` }), { rule: 'payload:query:1:strict' })
 })
 
 // -------------------------------------------------------------- F5 spend

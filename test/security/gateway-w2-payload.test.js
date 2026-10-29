@@ -6,10 +6,10 @@ const req = (value,extra={}) => ({body:Buffer.from(value),contentType:'applicati
 test('JSON constraints are strict, additive and pointer-aware', () => {
  const sets=[{json:{'/channel':{required:true,one_of:['C1']},'/a~1b/~0':{min:1,max:2},'/missing':{absent:true}}}]
  evaluatePayload(sets,req('{"channel":"C1","a/b":{"~":2}}'))
- refuses(()=>evaluatePayload(sets,req('{"channel":1}')),'payload:json:/channel:one_of')
- refuses(()=>evaluatePayload(sets,{}),'payload:json:/channel:required')
- refuses(()=>evaluatePayload([...sets,{json:{'/channel':{one_of:['C2']}}}],req('{"channel":"C1"}')),'payload:json:/channel:one_of')
- refuses(()=>evaluatePayload([...sets,{json:{'/channel':{one_of:['C2']}}}],req('{"channel":"C2"}')),'payload:json:/channel:one_of')
+ refuses(()=>evaluatePayload(sets,req('{"channel":1}')),'payload:json:0:one_of')
+ refuses(()=>evaluatePayload(sets,{}),'payload:json:0:required')
+ refuses(()=>evaluatePayload([...sets,{json:{'/channel':{one_of:['C2']}}}],req('{"channel":"C1"}')),'payload:json:0:one_of')
+ refuses(()=>evaluatePayload([...sets,{json:{'/channel':{one_of:['C2']}}}],req('{"channel":"C2"}')),'payload:json:0:one_of')
  refuses(()=>evaluatePayload(sets,req('{"channel":"C1"}',{contentType:'text/plain'})),'payload_content_type')
  evaluatePayload([],req('not json'))
 })
@@ -22,7 +22,7 @@ test('JSON parser rejects duplicate decoded names, malformed input and excess de
 test('form/query refuse ambiguity and enforce strict names',()=>{
  refuses(()=>evaluatePayload([{query:{a:{}}}],{query:'a=1&%61=2'}),'payload_duplicate_key')
  refuses(()=>evaluatePayload([{form:{a:{}}}],req('a=1&a=2',{contentType:'application/x-www-form-urlencoded'})),'payload_duplicate_key')
- refuses(()=>evaluatePayload([{query_strict:true,query:{a:{}}}],{query:'b=2'}),'payload:query:b:strict')
+ refuses(()=>evaluatePayload([{query_strict:true,query:{a:{}}}],{query:'b=2'}),'payload:query:0:strict')
  evaluatePayload([{form:{a:{one_of:['1']}}}],req('a=1',{contentType:'application/x-www-form-urlencoded; charset=utf-8'}))
  refuses(()=>evaluatePayload([{max_body_bytes:1}],req('12')),'payload_size')
 })

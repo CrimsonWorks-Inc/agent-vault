@@ -20,8 +20,7 @@ import * as policyMod from '../core/policy.js'
 import * as webauthn from '../ui/webauthn.js'
 import { ensureCertificate, loadMaterial, tlsPaths } from './tls.js'
 import { randomBytes } from 'node:crypto'
-import { MIN_SECRET_LEN, compileScrubPattern } from '../core/scrub.js'
-import * as ph from '../core/placeholder.js'
+import { MIN_SECRET_LEN, compileScrubPattern, untrustedText } from '../core/scrub.js'
 import {
   SessionRequests, proposalOf, overridesOf, overridesProblem, elevationOf, OWNER_FIELDS, shapeOf, narrowedOf,
   resolveTemplate, grantSpecsOf, templateCreds, templateSummary,
@@ -31,7 +30,7 @@ import { summarizeSession, accessReport } from '../store/activity.js'
 import { exportBackup, inspectBackup, restoreBackup, bundleDigest } from '../store/backup.js'
 import { runProbe } from '../connectors/probe.js'
 import { checkDecisions } from '../pending.js'
-import { Notifier, redactStored } from './notify.js'
+import { Notifier } from './notify.js'
 import { DEFAULT_RULES } from './tripwire.js'
 
 // Read from package.json rather than written here twice. Two hardcoded copies
@@ -92,6 +91,17 @@ const PASSPHRASE_MAX_BACKOFF_MS = 30_000
 const RUNNING = new Set()
 
 /**
+ * What kind of failure, as the log may record it (C28): an AV_* code, a
+ * built-in error class, or `other`. The message can quote anything the code
+ * that failed was handed, a request body included, so it stays on stderr.
+ */
+const ERROR_CLASSES = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError', 'AggregateError'])
+export function errorClass(err) {
+  if (err instanceof VaultError && Object.hasOwn(CODES, err.code)) return err.code
+  return ERROR_CLASSES.has(err?.name) ? err.name : 'other'
+}
+
+/**
  * The last line of defence against a fault nothing else caught.
  *
  * #guard covers a request handler's own promise, and nothing else. An error
@@ -112,7 +122,7 @@ function onProcessFault(kind) {
       // Never throw from here: an exception inside this handler is the one
       // thing that still ends the process.
       try {
-        daemon.vault.audit?.write('daemon.uncaught', { fault: kind, detail: String(err?.message ?? err).slice(0, 200) })
+        daemon.vault.audit?.write('daemon.uncaught', { fault: kind, error: errorClass(err) })
       } catch { /* the stderr line above is the record */ }
     }
   }
@@ -823,7 +833,9 @@ export class Daemon {
       }
       return true
     } catch (e) {
-      this.vault.audit?.write('presence.denied', { reason: e.message })
+      // A code, never e.message (C28): the message quotes the client's own
+      // clientDataJSON, its type and origin, and none of that is signed yet.
+      this.vault.audit?.write('presence.denied', { reason: webauthn.failureOf(e) })
       return false
     }
   }
@@ -938,7 +950,9 @@ export class Daemon {
         // A listener that cannot bind must be loud. Silently running with one
         // fewer surface than configured is how a machine ends up unreachable
         // for reasons nothing explains.
-        this.vault.audit?.write('listen.bind_failed', { listener_id: entry.id, reason: e.message })
+        // The system code (EADDRINUSE), never the message, which is the
+        // stderr line's business.
+        this.vault.audit?.write('listen.bind_failed', { listener_id: entry.id, reason: typeof e?.code === 'string' && /^E[A-Z0-9_]{1,39}$/.test(e.code) ? e.code : 'other' })
         console.error(`agent-vault: listener ${entry.id} (${entry.address}) did not bind: ${e.message}`)
       }
     }
@@ -1169,7 +1183,7 @@ export class Daemon {
     try {
       await fn()
     } catch (e) {
-      this.vault.audit?.write('daemon.handler_error', { detail: String(e?.message ?? e).slice(0, 200) })
+      this.vault.audit?.write('daemon.handler_error', { error: errorClass(e) })
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'application/problem+json' })
         res.end(JSON.stringify({ code: 'AV_INTERNAL', detail: 'the request could not be handled' }))
@@ -2538,12 +2552,7 @@ export class Daemon {
    * no stored secret, bounded. It is recorded as `*_untrusted` either way.
    */
   #untrustedText(text, max = 200) {
-    if (typeof text !== 'string' || !text) return null
-    // Scrubbed whole, then cut: a secret or placeholder across the cut used
-    // to leave its first part behind.
-    let out = redactStored(text, this.vault.allSecrets())
-    for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}«placeholder»${out.slice(hit.end)}`
-    return out.slice(0, max)
+    return untrustedText(text, this.vault.allSecrets(), max)
   }
 
   /**

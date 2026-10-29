@@ -55,6 +55,12 @@ const PENDING_TTL_MS = 15 * 60_000   // a human who has not answered by now will
 const REPLAY_TTL_MS = 5 * 60_000     // long enough for a retrying SDK, not for a process lifetime
 const DECIDED_TTL_MS = 60 * 60_000   // keep decisions visible for an hour, then forget
 const MAX_APPROVALS = 1000
+// The sentence each recent denial was given, for vault_explain_denial (C28).
+// The audit row keeps the code and the rule. The sentence quotes what the
+// request carried (its host, a header, a payload key), so it is kept here, in
+// memory, bounded by count and age, and never written anywhere.
+const MAX_DENIALS = 1000
+const DENIAL_TTL_MS = 60 * 60_000
 
 // The most a response may expand to once decompressed. A compressed body is an
 // amplifier and the daemon is single-threaded, so this is the ceiling on what
@@ -97,6 +103,7 @@ export class Pipeline {
   #inFlight = new Map()
   #preflightBuckets = new Map()
   #patterns = new Map()
+  #denials = new Map()
   #spendRecovered = false
 
   /**
@@ -176,7 +183,7 @@ export class Pipeline {
           // Which path rule and which route let it through, by index (C27).
           // Never the glob text: an agent can propose a glob, so it can be a
           // secret, and the grant holds the text for anyone who needs it.
-          host: result.host, method: req.method, path_rule: result.pathRule ?? null, route_rule: result.routeRule ?? null, status: result.status,
+          host: result.host, method: auditMethod(req.method), path_rule: result.pathRule ?? null, route_rule: result.routeRule ?? null, status: result.status,
           // The path, which the log used to leave out entirely. Under a grant
           // of /repos/frozencrow/** every request recorded the same glob, so
           // the log could say a credential had been used forty times and not
@@ -240,9 +247,10 @@ export class Pipeline {
       }
       err.requestId = requestId
       if (this.vault.audit) {
+        // The code and the rule, never the sentence (C28): `detail` and
+        // `hint` quote the request, and the caller already has them.
         this.vault.audit.write(err.auditKind, {
           request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule,
-          detail: err.detail,
           ...(err.retryAfter !== undefined ? { retry_after: err.retryAfter } : {}),
           ...(err.code === 'AV_PIN_MISMATCH' ? { presented_spki: e.presented ?? [] } : {}),
           // Whoever got this far. Null before authentication, which is itself
@@ -258,12 +266,13 @@ export class Pipeline {
           // request as it ARRIVED, which is the point: a denial often happens
           // before there is any decision to read it from.
           req: {
-            method: req.method,
+            method: auditMethod(req.method),
             path: this.#safePath(req.path, scrubber),
           },
           peer: { kind: req.listener?.kind || 'loopback', listener_id: req.listener?.id || 'local' },
         })
       }
+      this.#rememberDenial(requestId, session?.id ?? null, err)
       if (!upstreamOpened) {
         for (const row of consumed) this.vault.refundPlaceholder(row.id)
         if (resources.quota && route?.grant.state === 'active' && session?.state === 'active') {
@@ -351,6 +360,27 @@ export class Pipeline {
     const value = effective[field]
     if (value === undefined) return
     if (policyMod.validate({ [field]: value }).length) throw deny('AV_POLICY_DENIED', `the ${field} limit is invalid`, { rule: `${field}_invalid` })
+  }
+
+  /** Keep a denial's sentence for explain-denial: newest last, oldest dropped first. */
+  #rememberDenial(requestId, sessionId, err) {
+    const now = Date.now()
+    for (const [id, d] of this.#denials) {
+      if (this.#denials.size < MAX_DENIALS && now - d.at < DENIAL_TTL_MS) break
+      this.#denials.delete(id)
+    }
+    this.#denials.set(requestId, { at: now, session_id: sessionId, detail: err.detail ?? null, hint: err.hint ?? null })
+  }
+
+  /**
+   * The sentence a recent denial was given, to the session it was given to
+   * (null for a request that had none). Null once it is forgotten: after a
+   * restart, an hour, or a thousand later denials.
+   */
+  explainDenial(requestId, sessionId) {
+    const d = typeof requestId === 'string' ? this.#denials.get(requestId) : undefined
+    if (!d || Date.now() - d.at >= DENIAL_TTL_MS || d.session_id !== (sessionId ?? null)) return null
+    return { detail: d.detail, hint: d.hint }
   }
 
   #prune(map, sessions = false) {
@@ -727,7 +757,7 @@ export class Pipeline {
       if (!reason && hopPins != null && next.protocol !== 'https:') reason = 'pins'
       if (!reason && !this.vault.chargeGrant(route.grant.id)) reason = 'budget'
       if (reason) {
-        this.vault.audit.write('request.redirect_returned', { request_id: requestId, hop: hops, status: res.status, to_host: hop?.host ?? (next ? this.#safeMessage({ message: next.hostname }) : null), reason })
+        this.vault.audit.write('request.redirect_returned', { request_id: requestId, hop: hops, status: res.status, to_host: hop?.host ?? null, reason })
         return { ...res, redirectStopped: reason }
       }
       if (quota) { quota.count += 1; route.grant.quota_state = quota; this.vault.save({ durable: false }) }
@@ -851,7 +881,8 @@ export class Pipeline {
         this.vault.audit.write('tripwire.panic_partial', { step: 'session_requests' })
       }
     }
-    const reasonText = typeof reason === 'string' ? this.#safeMessage({ message: reason.slice(0, 200) }) : null
+    // Scrubbed whole, then cleaned and cut like every *_untrusted field.
+    const reasonText = typeof reason === 'string' ? this.vault.untrustedText(this.#safeMessage({ message: reason })) : null
     // Before the lock: the audit key goes with it.
     this.vault.audit.write('panic.triggered', {
       revoked_sessions: revoked, denied_approvals: deniedApprovals, denied_session_requests: sessionRequests,
@@ -1714,7 +1745,7 @@ export class Pipeline {
       summary: overrides.length
         ? `${decision.method} (overridden to ${overrides.join(', ')}) ${decision.host}${decision.path}`
         : `${decision.method} ${decision.host}${decision.path}`,
-      reason: reason ? this.#safeMessage({ message: reason }) : null,
+      reason: reason ? this.vault.untrustedText(this.#safeMessage({ message: reason })) : null,
       preview: this.#previewOf(req, substitutions, decision),
       state: 'pending',
       created_at: new Date().toISOString(),
@@ -1838,6 +1869,17 @@ function checkOverrides(effective, view, { host, path }) {
  * No connector profile declares a header it needs on every request, so there
  * is nothing to add from there.
  */
+/**
+ * A method as the log records it: one of the methods a policy can name, or
+ * `OTHER`. MCP's vault_http passes the agent's string through, and a denial
+ * is recorded before anything has checked it.
+ */
+const AUDIT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'TRACE', 'CONNECT'])
+function auditMethod(m) {
+  const up = typeof m === 'string' ? m.toUpperCase() : ''
+  return AUDIT_METHODS.has(up) ? up : 'OTHER'
+}
+
 const HOP_FORWARDED = new Set([
   'accept', 'user-agent', 'accept-language', 'cache-control', 'if-none-match', 'if-modified-since',
   'anthropic-version', 'anthropic-beta', 'openai-beta', 'openai-organization', 'openai-project',

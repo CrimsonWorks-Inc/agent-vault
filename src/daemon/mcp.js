@@ -178,7 +178,7 @@ export class McpServer {
       },
       {
         name: 'vault_explain_denial',
-        description: 'Explain why a request was denied and what this session is allowed to do instead.',
+        description: 'Explain why a request this session made was denied and what this session is allowed to do instead. The code and rule are always given; the full sentence is kept for an hour (the last 1000 denials) and is null after that or after the daemon restarts.',
         inputSchema: { type: 'object', properties: { request_id: { type: 'string' } }, required: ['request_id'] },
       },
       {
@@ -503,7 +503,7 @@ export class McpServer {
           if (e instanceof VaultError) return this.#refusal(e)
           throw e
         }
-        this.vault.audit.write('placeholder.issued_via_mcp', { credential_slug: cred.slug, agent_reason_untrusted: args.reason })
+        this.vault.audit.write('placeholder.issued_via_mcp', { credential_slug: cred.slug, agent_reason_untrusted: this.vault.untrustedText(args.reason) })
         return text({
           placeholder,
           usage: {
@@ -603,15 +603,22 @@ export class McpServer {
       }
 
       case 'vault_explain_denial': {
-        const rows = this.vault.audit.read({ limit: 200 }).filter((r) => r.request_id === args.request_id)
+        // Only the caller's own requests: a request made with no session is
+        // explained only to a caller with none.
+        const mine = (r) => (r.session_id ?? null) === (session?.id ?? null)
+        const rows = this.vault.audit.read({ limit: 200 }).filter((r) => r.request_id === args.request_id && mine(r))
         if (!rows.length) return text({ error: `no record of request ${args.request_id}` })
         const denial = rows.find((r) => r.decision === 'deny') || rows[rows.length - 1]
+        // The record holds the code and the rule (C28). The sentence is kept
+        // in memory for a while, and is null after a restart.
+        const said = this.pipeline.explainDenial(args.request_id, session?.id)
         return text({
           request_id: args.request_id,
           decision: denial.decision,
           code: denial.reason_code,
           rule: denial.rule,
-          detail: denial.detail,
+          detail: said?.detail ?? null,
+          ...(said?.hint ? { hint: said.hint } : {}),
           allowed_here: session ? this.vault.grantsForSession(session.id).map((g) => g.policy) : [],
         })
       }

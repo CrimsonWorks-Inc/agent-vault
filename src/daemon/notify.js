@@ -21,7 +21,9 @@ import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { deny } from '../core/errors.js'
 import * as ph from '../core/placeholder.js'
-import { MIN_SECRET_LEN } from '../core/scrub.js'
+import { redactStored } from '../core/scrub.js'
+
+export { redactStored }
 
 export const MAX_SUBSCRIBERS = 8
 const KEEPALIVE_MS = 15_000
@@ -33,21 +35,6 @@ const MAX_PAYLOAD_BYTES = 2048
 const MAX_IDS = 10
 const MAX_HEADLINE = 200
 const KINDS = new Set(['request', 'session'])
-
-/**
- * Text with every stored secret in it replaced, the one scrub for anything an
- * agent may have written that leaves or is kept by the daemon (quarantine
- * reasons, notification headlines). `secrets` is `vault.allSecrets()`.
- * Run it before anything cuts the text, or a secret across the cut leaves
- * its first half behind.
- */
-export function redactStored(text, secrets) {
-  let out = typeof text === 'string' ? text : ''
-  for (const { secret, label } of secrets) {
-    if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret).join(`[[av:redacted:${label}]]`)
-  }
-  return out
-}
 
 /**
  * A headline as it may leave the daemon: no control characters (a terminal
@@ -243,7 +230,8 @@ export class Notifier {
       this.#failed(hook.host, `status_${status}`)
       return { sent: false, status }
     } catch (e) {
-      const reason = typeof e?.code === 'string' ? e.code.slice(0, 40) : 'error'
+      // A system error code (ECONNREFUSED) or `error`, never free text.
+      const reason = typeof e?.code === 'string' && /^E[A-Z0-9_]{1,39}$/.test(e.code) ? e.code : 'error'
       this.#failed(hook.host, reason)
       return { sent: false, error: reason }
     }

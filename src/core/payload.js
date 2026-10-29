@@ -225,8 +225,11 @@ const BROKE = {
   max: 'is above the maximum this grant allows, or is not a number',
   max_length: 'is longer than this grant allows, or is not a string or list',
 }
-function check(kind,key,c,present,v) {
-  const no = constraint => { throw deny('AV_POLICY_DENIED', `${WHERE[kind]} ${key} ${BROKE[constraint]}`, { rule: `payload:${kind}:${key}:${constraint}` }) }
+// The rule names the key by its index in the rule set, never by its text
+// (C28): a grant's payload rules can be proposed by an agent, and the rule
+// is recorded. The sentence, which goes only to the caller, names it.
+function check(kind,key,index,c,present,v) {
+  const no = constraint => { throw deny('AV_POLICY_DENIED', `${WHERE[kind]} ${key} ${BROKE[constraint]}`, { rule: `payload:${kind}:${index}:${constraint}` }) }
   if (c.absent && present) no('absent')
   if (c.required && !present) no('required')
   if (!present) return
@@ -234,13 +237,6 @@ function check(kind,key,c,present,v) {
   for (const k of ['min','max']) if (own(c,k) && (!finite(v) || (k === 'min' ? v < c[k] : v > c[k]))) no(k)
   if (own(c,'max_length') && (!(typeof v === 'string' || Array.isArray(v)) || v.length > c.max_length)) no('max_length')
 }
-
-/**
- * A query parameter name the agent chose, as it may appear in a rule name.
- * Rule names reach the audit log, so this one is bounded and printable
- * rather than the agent's text verbatim.
- */
-const nameForRule = name => encodeURIComponent(name).slice(0, 64)
 
 /**
  * Every payload rule, against the request's one view (request-view.js). A
@@ -288,22 +284,22 @@ export function evaluatePayload(sets, input = {}) {
     // A repeated name is refused first, as the duplicate it is.
     if (set.query) { getQuery(); respelled(set.query, view.params) }
     if (set.form && bytes && isForm) { getForm(); respelled(set.form, getFormList()) }
-    if (set.query_strict) { getQuery(); for (const p of view.params) if (!Object.keys(set.query ?? {}).some(key => element(p,key))) fail(`payload:query:${nameForRule(p.name)}:strict`) }
+    if (set.query_strict) { getQuery(); for (const [i,p] of view.params.entries()) if (!Object.keys(set.query ?? {}).some(key => element(p,key))) fail(`payload:query:${i}:strict`) }
     for (const kind of ['json','form','query']) {
       if (!set[kind]) continue
       let data
       if (kind === 'json' && bytes) { if (!isJson) fail('payload_content_type'); data=getJson() }
       if (kind === 'form' && bytes) { if (!isForm) fail('payload_content_type'); data=getForm() }
       if (kind === 'query') data=getQuery()
-      for (const [key,c] of Object.entries(set[kind])) {
+      for (const [index,[key,c]] of Object.entries(set[kind]).entries()) {
         if (kind !== 'json') {
           // Every entry the key names is checked, `expand[]` as well as
           // `expand`: a reader keeps the list, and any entry may be the one
           // it acts on. `absent` refuses any entry at all.
           const list = data === undefined ? [] : kind === 'query' ? view.params : getFormList()
           const values = list.filter(p => element(p,key)).map(p => p.value)
-          if (!values.length) check(kind,key,c,false)
-          for (const v of values) check(kind,key,c,true,v)
+          if (!values.length) check(kind,key,index,c,false)
+          for (const v of values) check(kind,key,index,c,true,v)
           continue
         }
         let v=data, present=data !== undefined
@@ -315,7 +311,7 @@ export function evaluatePayload(sets, input = {}) {
           if (v === null || typeof v !== 'object' || !own(v,k) || Array.isArray(v) && !/^(0|[1-9]\d*)$/.test(k)) { present=false; v=undefined; break }
           v=v[k]
         }
-        check(kind,key,c,present,v)
+        check(kind,key,index,c,present,v)
       }
     }
     if (set.graphql) {

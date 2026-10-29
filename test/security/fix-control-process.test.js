@@ -54,7 +54,10 @@ test('an uncaught error in the daemon is recorded, and the daemon keeps answerin
   const out = JSON.parse(r.stdout.trim().split('\n').pop())
   assert.equal(out.after, 200, 'the control socket should still answer')
   assert.equal(out.audited.length, 2, 'each fault is recorded in the audit log')
-  assert.match(out.audited[0].detail, /ECONNRESET/)
+  // A class, never the message (C28): the message can quote what the
+  // failing code was handed. The words are on stderr.
+  assert.deepEqual(out.audited.map((x) => x.error), ['Error', 'Error'])
+  assert.ok(out.audited.every((x) => !('detail' in x) && !JSON.stringify(x).includes('ECONNRESET')))
   // Not swallowed: the operator sees it on stderr too.
   assert.match(r.stderr, /ECONNRESET/)
 })

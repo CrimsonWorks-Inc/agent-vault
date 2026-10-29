@@ -19,7 +19,7 @@ import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
 import { PIN_RE, pinListState, urlHostOf } from '../connectors/pinning.js'
-import { compileScrubPattern } from '../core/scrub.js'
+import { compileScrubPattern, untrustedText } from '../core/scrub.js'
 import { canonicalOperation } from '../ui/webauthn.js'
 
 export const SCHEMA_VERSION = 1
@@ -956,6 +956,11 @@ export class Vault {
    * that echoes the old token for a while is still scrubbed. Read-only: an
    * expired retired value is skipped here and dropped at the next rotation.
    */
+  /** `untrustedText` over this vault's stored secrets; while locked, placeholders and the bound only. */
+  untrustedText(text, max = 200) {
+    return untrustedText(text, this.locked ? [] : this.allSecrets(), max)
+  }
+
   allSecrets() {
     this.#requireUnlocked()
     const out = []
@@ -1560,7 +1565,9 @@ export class Vault {
       for (const [host, list] of Object.entries(cred.pins ?? {})) this.audit.write('cred.pins_set', { credential_slug: cred.slug, host, pins: list.length })
       if (cred.quarantine) {
         const { since, by, rule_id, reason_untrusted } = cred.quarantine
-        this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted, since, restored: true })
+        // From a bundle, which anyone could have written: cleaned like any
+        // other agent text before it is recorded (C28).
+        this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted: this.untrustedText(reason_untrusted), since, restored: true })
       }
     }
     for (const name of restoredTemplates) {
@@ -1681,7 +1688,9 @@ export class Vault {
     this.db.sessions[sid] = session
     this.#persist()
     this.audit.write('session.created', {
-      session_id: sid, workspace_id: workspaceId, label, remote,
+      // Whether it has a label, not the label: free text from whoever
+      // created it (C28). The session itself keeps it, and readers use that.
+      session_id: sid, workspace_id: workspaceId, has_label: !!label, remote,
       infinite, ...expiryForAudit(session.expires_at, requested), elevated: session.elevated,
       template, template_version: templateVersion,
     })
@@ -1744,7 +1753,7 @@ export class Vault {
       })
       if (record && !peek) {
         this.audit?.write(e.auditKind, {
-          decision: 'deny', reason_code: e.code, rule: e.rule, detail: e.detail, session_id: session.id,
+          decision: 'deny', reason_code: e.code, rule: e.rule, session_id: session.id,
           peer: { kind: listener.kind || 'remote', listener_id: listener.id || null },
         })
       }

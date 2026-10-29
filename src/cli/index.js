@@ -998,6 +998,9 @@ const COMMANDS = {
     }
     const transport = args.transport || 'stdio'
     const name = args.name || 'agent-vault'
+    // Present or absent: `--tls=false` is refused rather than read as a
+    // non-empty string, which picked the https URL.
+    const tls = booleanFlag(args, 'tls')
 
     // `Number('nope')` is NaN, and writing `https://localhost:NaN/mcp` into a
     // config file is a failure the reader only discovers when their agent
@@ -1038,7 +1041,7 @@ const COMMANDS = {
       // A connector URL must be https: Claude Desktop and Claude Code refuse
       // plain http, and there is no exemption for loopback. --tls points at the
       // TLS listener instead of the plain gateway.
-      url: args.tls
+      url: tls
         ? `https://localhost:${port}/mcp`
         : `http://127.0.0.1:${gatewayPortOf(loadState())}/mcp`,
     })
@@ -1068,7 +1071,7 @@ const COMMANDS = {
     } else {
       console.log(C.dim(`  HTTP transport reads the token from $AGENT_VAULT_SESSION at launch.`))
       console.log(`    ${C.cyan('eval "$(agent-vault env)"')}`)
-      if (args.tls) {
+      if (tls) {
         console.log()
         console.log(C.dim('  The certificate is self-signed, so the client will refuse it until'))
         console.log(C.dim('  it is told to trust it. Node does not read the keychain by default:'))

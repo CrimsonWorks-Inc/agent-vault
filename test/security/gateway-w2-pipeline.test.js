@@ -107,7 +107,7 @@ test('SSE slots release on completion, immediate close and scrubber cut', async 
 test('payload and method-bound routes run before approval and consume', async t => {
   const f = fixture(t, { approval: 'each', routes: [{ methods: ['GET'], paths: ['/ok'] }, { methods: ['POST'], paths: ['/comment'] }], payload: { json: { '/channel': { one_of: ['safe'] } } } })
   const result = await f.pipeline.handle(f.req({ method: 'POST', path: '/p/test/comment', body: Buffer.from('{"channel":"bad"}'), headers: [...f.req().headers, ['content-type', 'application/json']] }))
-  assert.equal(problem(result).rule, 'payload:json:/channel:one_of')
+  assert.equal(problem(result).rule, 'payload:json:0:one_of')
   assert.equal(f.pipeline.pendingApprovals().length, 0); assert.equal(f.row.uses, 0)
   assert.equal(problem(await f.pipeline.handle(f.req({ method: 'POST' }))).rule, 'routes')
   assert.equal((await f.pipeline.handle(f.req())).status, 202)
@@ -789,7 +789,7 @@ test('a name a server could fold onto a rule\'s name is refused, and a repeated 
     ['dry_run=true&FORCE=true', 'request_ambiguous'],
     ['dry_run=true&%66orce=true', 'request_ambiguous'],
     // An entry under the rule's name is read as the rule's parameter.
-    ['dry_run=true&force[]=true', 'payload:query:force:absent'],
+    ['dry_run=true&force[]=true', 'payload:query:0:absent'],
     ['dry_run=true&Force=1', 'request_ambiguous'],
     // Satisfied for this reader and missing for one that does not decode
     // names, or that does not fold `.` into `_`.
@@ -1308,14 +1308,14 @@ test('a repeated list name is sent under unrelated rules, and a rule on its base
   for (const [policy, query, rule] of [
     [FORCE, 'dry_run=true&force=1&force=2', 'payload_duplicate_key'],
     [{ payload: { query: { limit: { required: true } } } }, 'limit=10&limit=20', 'payload_duplicate_key'],
-    [{ payload: { query: { expand: { one_of: ['customer', 'invoice'] } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:expand:one_of'],
-    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand=customer&expand[]=invoice', 'payload:query:expand:one_of'],
-    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand%5B%5D=customer&expand%5B%5D=invoice', 'payload:query:expand:one_of'],
-    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand[x]=invoice', 'payload:query:expand:one_of'],
-    [{ payload: { query: { expand: { max_length: 8 } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:expand:max_length'],
-    [{ payload: { query: { expand: { absent: true } } } }, 'expand[]=customer', 'payload:query:expand:absent'],
+    [{ payload: { query: { expand: { one_of: ['customer', 'invoice'] } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:0:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand=customer&expand[]=invoice', 'payload:query:0:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand%5B%5D=customer&expand%5B%5D=invoice', 'payload:query:0:one_of'],
+    [{ payload: { query: { expand: { one_of: ['customer'] } } } }, 'expand[x]=invoice', 'payload:query:0:one_of'],
+    [{ payload: { query: { expand: { max_length: 8 } } } }, 'expand[]=customer&expand[]=balance_transaction', 'payload:query:0:max_length'],
+    [{ payload: { query: { expand: { absent: true } } } }, 'expand[]=customer', 'payload:query:0:absent'],
     [{ payload: { query: { expand: { one_of: ['customer'] } } } }, '%65xpand[]=invoice', 'request_ambiguous'],
-    [{ payload: { query: { expand: {} }, query_strict: true } }, 'expand[]=customer&other[]=x', 'payload:query:other%5B%5D:strict'],
+    [{ payload: { query: { expand: {} }, query_strict: true } }, 'expand[]=customer&other[]=x', 'payload:query:1:strict'],
   ]) {
     const f = fixture(t, policy)
     const result = await f.pipeline.handle(f.req({ query }))
@@ -1329,5 +1329,5 @@ test('a repeated list name is sent under unrelated rules, and a rule on its base
   }
   // The payload rules alone, without the gateway.
   assert.doesNotThrow(() => evaluatePayload([{ query: { limit: { required: true } } }], { query: 'limit=1&expand[]=a&expand[]=b' }))
-  assert.throws(() => evaluatePayload([{ query: { expand: { one_of: ['a'] } } }], { query: 'expand[]=a&expand[]=b' }), { rule: 'payload:query:expand:one_of' })
+  assert.throws(() => evaluatePayload([{ query: { expand: { one_of: ['a'] } } }], { query: 'expand[]=a&expand[]=b' }), { rule: 'payload:query:0:one_of' })
 })

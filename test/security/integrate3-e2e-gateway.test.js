@@ -66,7 +66,7 @@ test('A.7 4 (F2): a JSON payload rule refuses a value outside it before anything
     const s = await create(e, ['--cred', 'gh', '--methods', 'GET,POST', '--approval', 'auto', '--payload-file', join(e.dir, 'payload.json')])
     const refused = await call(e, s, { cred: 'gh', method: 'POST', path: '/issues', body: '{"state":"closed"}' })
     assert.equal(refused.body.status, 403, refused.text)
-    assert.equal(JSON.parse(refused.body.body).rule, 'payload:json:/state:one_of')
+    assert.equal(JSON.parse(refused.body.body).rule, 'payload:json:0:one_of')
     assert.ok(!refused.text.includes('closed'), 'the refusal never echoes the value')
     assert.equal(hitsTo(e, '/issues'), 0)
     const allowed = await call(e, s, { cred: 'gh', method: 'POST', path: '/issues', body: '{"state":"open"}' })

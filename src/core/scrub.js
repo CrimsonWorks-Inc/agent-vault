@@ -20,8 +20,39 @@
 // caught. That is stated as a non-guarantee rather than papered over.
 
 import { deny } from './errors.js'
+import * as ph from './placeholder.js'
 
 export const MIN_SECRET_LEN = 8
+
+/**
+ * Text with every stored secret in it replaced, the one scrub for anything an
+ * agent may have written that leaves or is kept by the daemon (quarantine
+ * reasons, notification headlines). `secrets` is `vault.allSecrets()`.
+ * Run it before anything cuts the text, or a secret across the cut leaves
+ * its first half behind.
+ */
+export function redactStored(text, secrets) {
+  let out = typeof text === 'string' ? text : ''
+  for (const { secret, label } of secrets) {
+    if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret).join(`[[av:redacted:${label}]]`)
+  }
+  return out
+}
+
+/**
+ * Text an agent may have written, as it may be stored: no placeholder and no
+ * stored secret, bounded. Every `*_untrusted` field goes through this (C28).
+ * The match is exact, so a secret re-encoded by the agent is not caught: a
+ * stated limit of these fields, not of the records that carry codes.
+ */
+export function untrustedText(text, secrets, max = 200) {
+  if (typeof text !== 'string' || !text) return null
+  // Scrubbed whole, then cut: a secret or placeholder across the cut used
+  // to leave its first part behind.
+  let out = redactStored(text, secrets)
+  for (const hit of ph.findAll(out).reverse()) out = `${out.slice(0, hit.offset)}«placeholder»${out.slice(hit.end)}`
+  return out.slice(0, max)
+}
 
 /**
  * Token shapes worth redacting even when the vault never stored them.
