@@ -2711,8 +2711,8 @@ const MUTATIONS = [
   {
     what: 'a rule on a list name checks only its first entry',
     file: 'src/core/payload.js',
-    from: 'for (const v of values) check(kind,key,c,true,v)',
-    to: 'for (const v of values.slice(0,1)) check(kind,key,c,true,v)',
+    from: 'for (const v of values) check(kind,key,index,c,true,v)',
+    to: 'for (const v of values.slice(0,1)) check(kind,key,index,c,true,v)',
     tests: ['test/security/gateway-w2-pipeline.test.js'],
   },
   // ---- integrate-2: the wave-2 seams, F11 pin storage, C12, one budget reader ----
@@ -3373,7 +3373,7 @@ const MUTATIONS = [
   {
     // control-api (wave 3, fix round 1).
     what: "the stored-secret scrub matches values under the scrubber's floor (F14)",
-    file: "src/daemon/notify.js",
+    file: "src/core/scrub.js",
     from: "    if (typeof secret === 'string' && secret.length >= MIN_SECRET_LEN) out = out.split(secret)",
     to: "    if (typeof secret === 'string') out = out.split(secret)",
     tests: ["test/security/control-api-notify.test.js"],
@@ -3381,9 +3381,9 @@ const MUTATIONS = [
   {
     // control-api (wave 3, fix round 1).
     what: "an agent-written reason is cut before it is scrubbed, so a secret across the cut leaves half behind (F16)",
-    file: "src/daemon/server.js",
-    from: "    let out = redactStored(text, this.vault.allSecrets())",
-    to: "    let out = redactStored(text.slice(0, max), this.vault.allSecrets())",
+    file: "src/core/scrub.js",
+    from: "  let out = redactStored(text, secrets)",
+    to: "  let out = redactStored(text.slice(0, max), secrets)",
     tests: ["test/security/control-api-credentials.test.js"],
   },
   // control-ui (wave 3): the UI proxy routes, what reaches the page, and the page itself.
@@ -4056,6 +4056,143 @@ const MUTATIONS = [
     from: "    const port = args.port === undefined ? 7443 : typeof args.port === 'string' ? Number(args.port) : NaN",
     to: '    const port = args.port === undefined ? 7443 : Number(args.port)',
     tests: ['test/security/integrate3-r4.test.js'],
+  },
+  // --- integrate-3 fix round 5 ---------------------------------------------------
+  {
+    // r5 F1: the message quotes the client's clientDataJSON, unsigned.
+    what: 'presence.denied records the assertion error message, which quotes the client data type and origin (r5 F1)',
+    file: 'src/daemon/server.js',
+    from: "this.vault.audit?.write('presence.denied', { reason: webauthn.failureOf(e) })",
+    to: "this.vault.audit?.write('presence.denied', { reason: e.message })",
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a clientDataJSON that is not JSON is recorded as other, not malformed (r5 F1)',
+    file: 'src/ui/webauthn.js',
+    from: "    throw fail('malformed', `clientDataJSON is not JSON: ${e.message}`)",
+    to: '    throw e',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    // C28: the sentence quotes the request; the caller already has it.
+    what: 'a gateway denial row keeps the free-text detail (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: "          request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule,\n",
+    to: "          request_id: requestId, decision: 'deny', reason_code: err.code, rule: err.rule, detail: err.detail,\n",
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a denial row records the method the agent sent, whatever it is (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: "  return AUDIT_METHODS.has(up) ? up : 'OTHER'",
+    to: '  return m',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'explain-denial answers about another session\'s request (C28)',
+    file: 'src/daemon/mcp.js',
+    from: 'const mine = (r) => (r.session_id ?? null) === (session?.id ?? null)',
+    to: 'const mine = () => true',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'the explain-denial sentences are not bounded by count (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (this.#denials.size < MAX_DENIALS && now - d.at < DENIAL_TTL_MS) break',
+    to: 'if (now - d.at < DENIAL_TTL_MS) break',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'an explain-denial sentence is served past its hour (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: 'if (!d || Date.now() - d.at >= DENIAL_TTL_MS || d.session_id',
+    to: 'if (!d || d.session_id',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a payload rule names its key by the key text, which can be agent-proposed (C28)',
+    file: 'src/core/payload.js',
+    from: "{ rule: `payload:${kind}:${index}:${constraint}` }",
+    to: "{ rule: `payload:${kind}:${key}:${constraint}` }",
+    tests: ['test/security/integrate3-r5.test.js', 'test/security/gateway-w2-payload.test.js'],
+  },
+  {
+    what: 'a strict-query refusal names the parameter the agent chose (C28)',
+    file: 'src/core/payload.js',
+    from: 'fail(`payload:query:${i}:strict`)',
+    to: 'fail(`payload:query:${encodeURIComponent(p.name).slice(0, 64)}:strict`)',
+    tests: ['test/security/integrate3-r5.test.js', 'test/security/gateway-w2-seams.test.js'],
+  },
+  {
+    what: 'a refused redirect records the host the upstream named (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: 'to_host: hop?.host ?? null, reason })',
+    to: 'to_host: hop?.host ?? next?.hostname ?? null, reason })',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a fault is recorded by its message (C28)',
+    file: 'src/daemon/server.js',
+    from: "  return ERROR_CLASSES.has(err?.name) ? err.name : 'other'",
+    to: '  return String(err?.message ?? err)',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'daemon.uncaught keeps the fault message (C28)',
+    file: 'src/daemon/server.js',
+    from: "write('daemon.uncaught', { fault: kind, error: errorClass(err) })",
+    to: "write('daemon.uncaught', { fault: kind, error: errorClass(err), detail: String(err?.message ?? err).slice(0, 200) })",
+    tests: ['test/security/fix-control-process.test.js'],
+  },
+  {
+    what: 'listen.bind_failed records the bind error message (C28)',
+    file: 'src/daemon/server.js',
+    from: "reason: typeof e?.code === 'string' && /^E[A-Z0-9_]{1,39}$/.test(e.code) ? e.code : 'other' })",
+    to: 'reason: e.message })',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'notify.failed records any string an error carries as its code (C28)',
+    file: 'src/daemon/notify.js',
+    from: "typeof e?.code === 'string' && /^E[A-Z0-9_]{1,39}$/.test(e.code) ? e.code : 'error'",
+    to: "typeof e?.code === 'string' ? e.code.slice(0, 40) : 'error'",
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'session.created records the label text (C28)',
+    file: 'src/store/vault.js',
+    from: 'session_id: sid, workspace_id: workspaceId, has_label: !!label, remote,',
+    to: 'session_id: sid, workspace_id: workspaceId, label, remote,',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'vault_get_placeholder records the agent\'s reason as sent (C28)',
+    file: 'src/daemon/mcp.js',
+    from: 'agent_reason_untrusted: this.vault.untrustedText(args.reason) })',
+    to: 'agent_reason_untrusted: args.reason })',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a held request\'s reason is recorded unbounded (C28)',
+    file: 'src/daemon/pipeline.js',
+    from: 'reason: reason ? this.vault.untrustedText(this.#safeMessage({ message: reason })) : null,',
+    to: 'reason: reason ? this.#safeMessage({ message: reason }) : null,',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    what: 'a quarantine reason restored from a bundle is recorded uncleaned (C28)',
+    file: 'src/store/vault.js',
+    from: 'reason_untrusted: this.untrustedText(reason_untrusted), since, restored: true })',
+    to: 'reason_untrusted, since, restored: true })',
+    tests: ['test/security/integrate3-r5.test.js'],
+  },
+  {
+    // r5 item 3: `--tls=false` is the string "false", which is truthy.
+    what: 'mcp install reads --tls=false as --tls and writes the https URL',
+    file: 'src/cli/index.js',
+    from: "    const tls = booleanFlag(args, 'tls')",
+    to: '    const tls = !!args.tls',
+    tests: ['test/security/integrate3-r5.test.js'],
   },
 ]
 
