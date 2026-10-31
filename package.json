@@ -1,6 +1,6 @@
 {
   "name": "agent-vault",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-trust local credential proxy for LLM agents: the agent sends placeholders, the daemon injects real secrets only at declared sites for granted destinations.",
   "homepage": "https://iolitelabs.com/agent-vault",
   "repository": {
