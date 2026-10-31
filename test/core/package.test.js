@@ -102,6 +102,9 @@ test('the daemon reports the version the package actually is', () => {
     'the version is hardcoded in server.js again')
   assert.match(server, /JSON\.parse\(readFileSync\(new URL\('\.\.\/\.\.\/package\.json'/,
     'the daemon should read its version from package.json')
+  // MCP's serverInfo is the same version, from the same file.
+  const mcp = readFileSync(join(ROOT, 'src/daemon/mcp.js'), 'utf8')
+  assert.ok(!/version: *'[\d.]/.test(mcp), 'the version is hardcoded in mcp.js again')
 
   // And the version itself is a real one.
   assert.match(pkg.version, /^\d+\.\d+\.\d+(-[\w.]+)?$/, `"${pkg.version}" is not a version`)

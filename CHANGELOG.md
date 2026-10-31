@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 Three things users asked for, twenty features, and the security work they
 needed. As in 0.1.0, the findings come with what was actually wrong. Each one was
