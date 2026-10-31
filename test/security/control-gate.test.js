@@ -99,12 +99,19 @@ test('an agent cannot approve its own held request', async () => {
   assert.deepEqual(seen, [], 'the credential must not have reached the upstream')
 })
 
-test('denying is left open, because it only narrows', async () => {
-  // An agent abandoning its own request gains nothing, and refusing to let it
-  // would be gating something that fails safe.
+test('denying needs a human too, because it did not only narrow', async () => {
+  // Denying was left open on the theory that it fails safe. It did not: a
+  // deny of an approval that had already run returned its cached response,
+  // av-placeholder-next included. An answer of either kind is the human's.
   const held = await gateway('/p/prod/y', { authorization: `Bearer ${placeholder}` })
   const { approval_id: id } = JSON.parse(held.text)
+  const refused = await ctl('POST', '/v1/approvals', { id, granted: false })
+  assert.equal(refused.status, 401)
+  assert.equal(refused.body.code, 'AV_PRESENCE_REQUIRED')
+
+  assert.equal((await ctl('POST', '/v1/presence/window', { passphrase: PASS })).status, 200)
   const denied = await ctl('POST', '/v1/approvals', { id, granted: false })
+  daemon.presenceGraceUntil = 0
   assert.equal(denied.status, 200)
   assert.equal(denied.body.state, 'denied')
 })
@@ -195,6 +202,8 @@ test('no mutating control route widens capability without a human', async () => 
     ['DELETE', '/v1/credentials?slug=prod', null],
     ['POST', '/v1/sessions', { cred: 'prod' }],
     ['POST', '/v1/placeholders', { cred: 'prod' }],
+    // Several placeholders in one call are as many fresh authorizations.
+    ['POST', '/v1/placeholders/batch', { sid: session.id, items: [{ cred: 'prod' }] }],
     ['POST', '/v1/approvals', { id: 'whatever', granted: true }],
     ['POST', '/v1/listeners', { id: 'n', address: '127.0.0.1:7998', surfaces: ['mcp'] }],
     ['POST', '/v1/presence', { credentialId: 'c', publicKeySpki: 'k' }],
@@ -208,16 +217,168 @@ test('no mutating control route widens capability without a human', async () => 
     // And the mirror: stripping the human's unlock factor is a capability
     // change in the other direction.
     ['POST', '/v1/factors/webauthn', { action: 'remove' }],
+    // Wave 3 (contract A.2). Every write to a credential record but
+    // quarantine: each one changes what a credential is or where it goes.
+    ['POST', '/v1/credentials/rotate', { slug: 'prod', value: 'ROTATED-GATE-VALUE-0099887766' }],
+    ['POST', '/v1/credentials/scrub', { slug: 'prod', pattern: 'acme_[a-z0-9]{20}' }],
+    ['DELETE', '/v1/credentials/scrub?slug=prod&id=sp_x', null],
+    ['POST', '/v1/credentials/expiry', { slug: 'prod', expires_at: null }],
+    ['POST', '/v1/credentials/pins', { slug: 'prod', host: '127.0.0.1', pins: [`sha256/${'A'.repeat(43)}=`] }],
+    ['DELETE', '/v1/credentials/pins?slug=prod&host=127.0.0.1', null],
+    // Releasing a quarantine undoes a human's (or a tripwire's) stop.
+    ['POST', '/v1/credentials/release', { slug: 'prod' }],
+    // Tripwires: anything but turning them on.
+    ['POST', '/v1/tripwires', { enabled: false }],
+    ['POST', '/v1/tripwires', { enabled: true, rules: 'defaults' }],
+    ['POST', '/v1/tripwires', { rules: [] }],
+    // The next human may trust a template's name.
+    ['POST', '/v1/templates', { name: 'gate', spec: { cred: 'prod' } }],
+    // A restore writes credentials; the bundle is checked after the gate.
+    ['POST', '/v1/backup/restore', { bundle: { format: 'agent-vault-backup' }, recovery_passphrase: 'a recovery passphrase' }],
+    // The webhook URL decides where the signal goes, and is a credential.
+    ['POST', '/v1/notify', { webhook_url: 'https://hooks.example/abc' }],
   ]
+  const before = JSON.stringify({ c: vault.db.credentials, s: vault.getSettings(), t: vault.db.templates ?? null, n: vault.db.kv.notify ?? null })
   for (const [method, path, body] of widening) {
     const res = await ctl(method, path, body)
     assert.equal(res.status, 401, `${method} ${path} answered ${res.status}, not a presence refusal`)
     assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED', `${method} ${path}`)
   }
+  assert.equal(
+    JSON.stringify({ c: vault.db.credentials, s: vault.getSettings(), t: vault.db.templates ?? null, n: vault.db.kv.notify ?? null }),
+    before, 'a refused widening route changed something',
+  )
 
   // Reads never need a human: the unlock screen depends on them.
-  for (const path of ['/v1/status', '/v1/lockstate', '/v1/credentials', '/v1/sessions', '/v1/listeners', '/v1/approvals']) {
+  for (const path of [
+    '/v1/status', '/v1/lockstate', '/v1/credentials', '/v1/sessions', '/v1/listeners', '/v1/approvals',
+    // Wave 3 reads: none exposes more than `audit tail` and `session list`.
+    '/v1/tripwires', '/v1/templates', '/v1/notify', '/v1/audit/checkpoint', '/v1/audit/export',
+    '/v1/report/access', `/v1/sessions/detail?sid=${session.id}`,
+  ]) {
     assert.equal((await ctl('GET', path)).status, 200, `GET ${path} should stay open`)
+  }
+})
+
+test('the wave-3 routes that only narrow or read stay open, even with the gate on (A.2)', async () => {
+  // A vault of its own: these change things (a panic revokes every session),
+  // and the rest of this file shares one.
+  const d2 = mkdtempSync(join(tmpdir(), 'av-open-'))
+  const v2 = Vault.create(d2, { factor: 'none' })
+  const c2 = v2.addCredential({
+    slug: 'prod', kind: 'http', connector: { host: 'api.example.com', scheme: 'https' },
+    fields: { token: 'OPEN-ROUTES-SECRET-0001112' }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  const made = v2.createSession({ label: 'agent' })
+  v2.createGrant({
+    sessionId: made.session.id, credentialId: c2.id, fields: ['token'],
+    policy: { hosts: ['api.example.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'on-write' },
+  })
+  v2.setPassphrase(PASS)
+  const s2 = join(d2, 'c.sock')
+  const dm = await new Daemon(v2, { port: 0, socketPath: s2 }).start()
+  const call = (m, p, b) => new Promise((resolve) => {
+    const req = unixRequest({ socketPath: s2, path: p, method: m, headers: { 'content-type': 'application/json' } }, (res) => {
+      const c = []
+      res.on('data', (x) => c.push(x))
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+    })
+    req.on('error', () => resolve({ status: 0, body: {} }))
+    req.end(b ? JSON.stringify(b) : undefined)
+  })
+  try {
+    const open = [
+      // Each of these can only take capability away, or reads.
+      ['POST', '/v1/sessions/narrow', { sid: made.session.id, narrow: { methods: ['GET'] } }, 200],
+      ['POST', '/v1/tripwires', { enabled: true }, 200],
+      ['POST', '/v1/credentials/test', { slug: 'prod' }, 404], // http has no probe; not a presence refusal
+      ['DELETE', '/v1/templates?name=none', null, 200],
+      ['DELETE', '/v1/notify', null, 200],
+      ['POST', '/v1/notify/test', {}, 404], // none configured; not a presence refusal
+      ['POST', '/v1/backup/inspect', { bundle: { format: 'other' }, recovery_passphrase: 'a recovery passphrase' }, 403],
+      ['POST', '/v1/audit/verify-witness', { checkpoints: [] }, 200],
+      ['POST', '/v1/credentials/quarantine', { slug: 'prod' }, 200],
+      // Last: it revokes every session.
+      ['POST', '/v1/panic', {}, 200],
+    ]
+    for (const [method, path, body, status] of open) {
+      const res = await call(method, path, body)
+      assert.notEqual(res.body.code, 'AV_PRESENCE_REQUIRED', `${method} ${path} asked for presence`)
+      assert.equal(res.status, status, `${method} ${path}: ${JSON.stringify(res.body)}`)
+    }
+    assert.equal(v2.db.sessions[made.session.id].state, 'revoked')
+    assert.ok(v2.findCredential('prod').quarantine)
+  } finally {
+    await dm.stop()
+    rmSync(d2, { recursive: true, force: true })
+  }
+})
+
+// ------------------------------------------------------ the fresh routes
+
+/**
+ * The `fresh` routes (contract A.2): a session that writes without asking, or
+ * never expires, takes the human out for as long as it lives. A window someone
+ * opened for something else must not be enough, and with no factor there is
+ * nothing to prove, so it is refused rather than open.
+ */
+async function freshRoutes(call) {
+  const ask = async (body) => (await call('POST', '/v1/session-requests', { cred: 'prod', reason: 'gate', ...body })).body.id
+  const one = await ask({ methods: ['GET', 'POST'] })
+  const two = await ask({ methods: ['GET'] })
+  return [
+    ['POST', '/v1/sessions', { cred: 'prod', methods: ['GET', 'POST'], approval: 'auto' }],
+    ['POST', '/v1/sessions', { cred: 'prod', infinite: true }],
+    ['POST', '/v1/session-requests/decide', { id: one, granted: true, overrides: { approval: 'auto', methods: ['POST'] } }],
+    ['POST', '/v1/pending/decide-many', {
+      decisions: [{ id: two, kind: 'session', granted: true }, { id: one, kind: 'session', granted: true, overrides: { approval: 'auto' } }],
+    }],
+    // A backup is every secret under a passphrase whoever runs this chooses.
+    ['POST', '/v1/backup/export', { recovery_passphrase: 'a long enough recovery passphrase' }],
+  ]
+}
+
+test('an elevated session is refused inside an open window without a fresh proof', async () => {
+  assert.equal((await ctl('POST', '/v1/presence/window', { passphrase: PASS })).status, 200)
+  try {
+    for (const [method, path, body] of await freshRoutes(ctl)) {
+      const res = await ctl(method, path, body)
+      assert.equal(res.status, 401, `${path} ${JSON.stringify(body)} answered ${res.status}`)
+      assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED', path)
+      assert.equal(res.body.rule, 'fresh_presence', path)
+    }
+  } finally { daemon.presenceGraceUntil = 0 }
+})
+
+test('an elevated session is refused on a vault with no factor, where ordinary ones are open', async () => {
+  const d2 = mkdtempSync(join(tmpdir(), 'av-fresh-'))
+  const v2 = Vault.create(d2, { factor: 'none' })
+  v2.addCredential({
+    slug: 'prod', kind: 'http', connector: { host: 'api.example.com', scheme: 'https' },
+    fields: { token: 'FRESH-SECRET-000111222' }, sites: { token: ['header:authorization:Bearer'] },
+  })
+  const s2 = join(d2, 'c.sock')
+  const dm = await new Daemon(v2, { port: 0, socketPath: s2 }).start()
+  const call = (m, p, b) => new Promise((resolve) => {
+    const req = unixRequest({ socketPath: s2, path: p, method: m, headers: { 'content-type': 'application/json' } }, (res) => {
+      const c = []
+      res.on('data', (x) => c.push(x))
+      res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }))
+    })
+    req.on('error', () => resolve({ status: 0, body: {} }))
+    req.end(b ? JSON.stringify(b) : undefined)
+  })
+  try {
+    for (const [method, path, body] of await freshRoutes(call)) {
+      const res = await call(method, path, body)
+      assert.equal(res.status, 401, `${path} ${JSON.stringify(body)} answered ${res.status}`)
+      assert.equal(res.body.rule, 'factor_required', path)
+    }
+    // The ordinary shapes of the same routes stay open on this vault.
+    assert.equal((await call('POST', '/v1/sessions', { cred: 'prod', approval: 'auto' })).status, 200)
+  } finally {
+    await dm.stop()
+    rmSync(d2, { recursive: true, force: true })
   }
 })
 

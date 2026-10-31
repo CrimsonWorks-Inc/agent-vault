@@ -132,7 +132,9 @@ test('the handshake works without a session, and says what is missing', async ()
 test('asking for a session needs no session, exactly as the HTTP route does not', async () => {
   // `POST /v1/session-requests` is ungated by design: asking is not getting,
   // and nothing exists until a human answers. The MCP tool is the same door.
-  const res = await callTool('vault_request_session', { cred: 'gh', reason: 'no session yet' }, { auth: false })
+  // The credential this file created: since wave 3 MCP asks through the
+  // daemon's one proposer, which refuses a credential that does not exist.
+  const res = await callTool('vault_request_session', { cred: 'demo-gh', reason: 'no session yet' }, { auth: false })
   assert.notEqual(res.body.result.isError, true, `an agent with no session cannot ask for one: ${res.body.result.content[0].text}`)
   const asked = JSON.parse(res.body.result.content[0].text)
   assert.equal(asked.state, 'pending')

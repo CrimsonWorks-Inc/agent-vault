@@ -1,9 +1,17 @@
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
+import { randomBytes, generateKeyPairSync } from 'node:crypto'
+
+/** A presence authenticator record, as the web UI hands the daemon one. */
+const presenceKey = () => ({
+  credentialId: randomBytes(16).toString('base64url'),
+  publicKeySpki: generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
+  signCount: 0,
+})
 
 let dir
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'av-pp-')) })
@@ -45,6 +53,9 @@ test('changing a passphrase requires the current one', () => {
 test('removing a passphrase requires the current one, then unlock needs no secret', () => {
   const v = Vault.create(dir, { factor: 'none' })
   v.setPassphrase('the-passphrase')
+  // Removing it needs another human factor to take over: here a presence
+  // authenticator, which keeps the control socket gated.
+  v.setPresenceKey(presenceKey())
   assert.throws(() => v.removePassphrase('wrong'), /current passphrase is required/)
   v.removePassphrase('the-passphrase')
   assert.equal(v.hasPassphrase, false)
@@ -52,12 +63,22 @@ test('removing a passphrase requires the current one, then unlock needs no secre
   assert.equal(Vault.open(dir).unlock(null), true)
 })
 
+test('the passphrase cannot be removed while it is the last human factor', () => {
+  const v = Vault.create(dir, { factor: 'none' })
+  v.setPassphrase('the-passphrase')
+  const before = readFileSync(join(dir, 'vault.json'), 'utf8')
+  assert.throws(() => v.removePassphrase('the-passphrase'), (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'last_factor' && /agent-vault ui/.test(e.hint))
+  assert.equal(v.hasPassphrase, true)
+  assert.equal(readFileSync(join(dir, 'vault.json'), 'utf8'), before, 'a refusal must not write anything')
+  v.lock()
+  assert.throws(() => Vault.open(dir).unlock(null), /AV_LOCKED/)
+})
+
 test('a passphrase under 8 characters is refused', () => {
   const v = Vault.create(dir, { factor: 'none' })
   assert.throws(() => v.setPassphrase('short'), /at least 8/)
 })
 
-import { randomBytes } from 'node:crypto'
 
 test('Touch ID (a PRF secret) unlocks the vault, alongside the passphrase', () => {
   const v = Vault.create(dir, { factor: 'none' })
@@ -87,9 +108,12 @@ test('the passphrase cannot be removed while Touch ID is the other factor', () =
   const v = Vault.create(dir, { factor: 'none' })
   v.setPassphrase('recovery-passphrase')
   v.addWebauthnUnlock('cred-1', randomBytes(32).toString('base64'))
-  assert.throws(() => v.removePassphrase('recovery-passphrase'), /remove Touch ID unlock first/)
-  // Removing Touch ID first, then the passphrase, is allowed.
+  assert.throws(() => v.removePassphrase('recovery-passphrase'), (e) => e.rule === 'last_factor' && /remove Touch ID unlock first/.test(e.message))
+  // Removing Touch ID first is allowed. The passphrase then goes only if a
+  // presence authenticator is left to gate the socket.
   v.removeWebauthnUnlock()
+  assert.throws(() => v.removePassphrase('recovery-passphrase'), (e) => e.rule === 'last_factor')
+  v.setPresenceKey(presenceKey())
   assert.equal(v.removePassphrase('recovery-passphrase'), true)
 })
 
@@ -194,12 +218,12 @@ test('a failed unlock leaves nothing half-open', () => {
     // The path that matters is the one where the passphrase is RIGHT and
     // something afterwards fails — opening the audit log. A wrong passphrase
     // fails before the key is ever assigned, so it never reached this state.
-    // A corrupt line in the MIDDLE of the log does: that is real corruption,
-    // not a torn tail, and it is not something to read past.
+    // A log that cannot be read at all does. (A corrupt line in the middle
+    // used to be the example, and was itself a bug: it locked the owner out
+    // for good. The chain reports that now, and the vault still opens.)
     const path = join(fresh, 'audit.jsonl')
-    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
-    lines[1] = '{"seq":2,"this is not'
-    writeFileSync(path, `${lines.join('\n')}\n`)
+    rmSync(path)
+    mkdirSync(path)
 
     const reopened = Vault.open(fresh)
     assert.throws(() => reopened.unlockWith({ passphrase: 'the-owners-passphrase' }),
@@ -278,17 +302,119 @@ test('the placeholder ledger does not grow without bound', () => {
   }
 })
 
-test('key material is still written durably, whatever the ledger does', () => {
-  // The fsync split is only safe if the half that matters keeps it. A lost
-  // placeholder is one the agent asks for again; a lost credential is gone.
-  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
-  const nonDurable = [...src.matchAll(/#persist\(\{ durable: false \}\)/g)].length
-  assert.ok(nonDurable > 0 && nonDurable <= 4,
-    `${nonDurable} non-durable writes: this should be the placeholder ledger and nothing else`)
+/**
+ * Every method of the Vault class, by name, with its source. A method starts
+ * at a two-space-indented header and ends at the first line that is exactly
+ * two spaces and a closing brace. A method written on one line (`save(opts) {
+ * this.#persist(opts) }`) is its own body: the scan used to skip those, so a
+ * one-line writer was on no list and no check read it.
+ */
+function vaultMethods(src) {
+  const methods = new Map()
+  const lines = src.split('\n')
+  const header = /^  (?:static |async |get |set )*(#?[A-Za-z_$][\w$]*)\s*\(.*\{\s*$/
+  const oneLine = /^  (?:static |async |get |set )*(#?[A-Za-z_$][\w$]*)\s*\(.*\)\s*\{.*\}\s*$/
+  const keyword = (name) => ['if', 'for', 'while', 'switch', 'catch'].includes(name)
+  for (let i = 0; i < lines.length; i++) {
+    const single = oneLine.exec(lines[i])
+    if (single && !keyword(single[1])) { methods.set(single[1], lines[i]); continue }
+    const m = header.exec(lines[i])
+    if (!m || keyword(m[1])) continue
+    let j = i + 1
+    while (j < lines.length && lines[j] !== '  }') j++
+    methods.set(m[1], lines.slice(i, j + 1).join('\n'))
+    i = j
+  }
+  return methods
+}
 
-  // The credential and factor paths must not be among them.
-  for (const fn of ['addCredential', 'setPassphrase', 'removePassphrase', 'addWebauthnUnlock', 'removeWebauthnUnlock']) {
-    const body = new RegExp(`${fn}\\\\([^)]*\\\\) \\\\{[\\\\s\\\\S]*?\\\\n  \\\\}`).exec(src)?.[0] || ''
-    assert.ok(!body.includes('durable: false'), `${fn} writes key material without an fsync`)
+// The writes allowed to skip the fsync: ledger churn an agent can simply ask
+// for again, a redirect hop's budget charge (F6) and a health observation
+// (F10), both coordinator-approved. Nothing that records a security decision.
+// `save` is the pipeline's write for its own counters (quota windows, approval
+// state), which passes the option through; a one-line method, so the scan only
+// sees it since it reads those too.
+const NON_DURABLE_ALLOWED = new Set(['issuePlaceholder', 'consumePlaceholder', 'refundPlaceholder', 'chargeGrant', 'recordHealth', 'save'])
+
+// Every other method that writes the vault, each of which must write durably.
+// A method that writes and is on neither list fails the test below, so a new
+// writer is classified when it is added, not when someone notices.
+const DURABLE = new Set([
+  // key material and the factors
+  'create', '#anchorStamp', '#openWith', 'setPassphrase', '#commitFactors', 'addWebauthnUnlock', 'removeWebauthnUnlock',
+  'setPresenceKey', 'prfSalt', 'removePassphrase', 'lock', 'startInRecordedState',
+  // credentials and their settings
+  'addCredential', 'deleteCredential', 'setCredentialExpiry', 'setQuarantine', 'clearQuarantine', 'updateSettings',
+  // sessions, grants and the placeholders a human acts on
+  'addWorkspace', 'createSession', 'assertSessionLive', 'shortenSession', 'revokeSession', 'forkSession',
+  'createGrant', 'assertGrantLive', 'revokeGrant', 'shortenGrant', 'narrowGrant', 'burnPlaceholder', 'nextPlaceholder',
+  'addListener', 'removeListener',
+  // slice B: scrub patterns (F4), rotation (F7), the webhook (F14), templates (F17), restore (F8)
+  'addScrubPattern', 'removeScrubPattern', 'rotateCredential', 'setNotifyWebhook', 'clearNotifyWebhook',
+  'saveTemplate', 'deleteTemplate', 'restoreEntries',
+  // F11: pins (integrate-2)
+  'setPins', 'clearPins',
+])
+
+test('key material and security decisions are written durably, whatever the ledger does', () => {
+  // The fsync split is only safe if the half that matters keeps it. A lost
+  // placeholder is one the agent asks for again; a lost credential is gone,
+  // and a lost revocation, shortening or quarantine is access a human took
+  // away coming back after a power cut.
+  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
+  const methods = vaultMethods(src)
+  assert.ok(methods.size > 40 && methods.has('createSession') && methods.has('consumePlaceholder'),
+    `the method scan found ${methods.size} methods; it has stopped reading vault.js`)
+  // One-line methods are read too.
+  assert.ok(methods.has('save') && methods.has('listCredentials') && methods.get('save').includes('#persist('),
+    'the method scan does not see one-line methods')
+
+  // Every non-durable write sits in an allowed method, and only there. Any
+  // spelling of the option counts, not just the one this file uses today.
+  const nonDurable = /#persist\(\s*\{[^}]*durable[^}]*\}\s*\)/
+  let found = 0
+  for (const [name, body] of methods) {
+    if (!nonDurable.test(body)) continue
+    found++
+    assert.ok(NON_DURABLE_ALLOWED.has(name), `${name} writes without an fsync; only ${[...NON_DURABLE_ALLOWED].join(', ')} may`)
+  }
+  assert.ok(found > 0, 'the ledger is expected to skip the fsync; finding none means this scan is broken')
+  // And none outside a method, where the scan above would not see it.
+  const inMethods = [...methods.values()].reduce((n, body) => n + (body.match(new RegExp(nonDurable, 'g'))?.length ?? 0), 0)
+  assert.equal([...src.matchAll(new RegExp(nonDurable, 'g'))].length, inMethods, 'a non-durable write outside any method')
+
+  // The credential and factor paths, and every write that records a security
+  // decision, persist durably: they write, and never with the option.
+  for (const fn of DURABLE) {
+    const body = methods.get(fn)
+    assert.ok(body, `${fn} is not in vault.js any more; update this list`)
+    // The factor paths write through #commitFactors, which is on this list.
+    assert.ok(body.includes('#persist(') || body.includes('#commitFactors('), `${fn} no longer writes through #persist`)
+    assert.ok(!/durable/.test(body), `${fn} writes without an fsync`)
+  }
+})
+
+test('every method that writes the vault is classified as durable or as allowed to skip the fsync', () => {
+  // The list above used to name only the methods someone thought of. The
+  // slice B writers (rotation, scrub patterns, the webhook, templates) were
+  // durable, and on no list, so a `durable: false` planted in one of them was
+  // caught only by the general scan. Now every write site is on a list.
+  const src = readFileSync(new URL('../../src/store/vault.js', import.meta.url).pathname, 'utf8')
+  const methods = vaultMethods(src)
+  const writers = [...methods].filter(([name, body]) => name !== '#persist' && /#persist\(|#commitFactors\(/.test(body)).map(([name]) => name)
+  assert.ok(writers.length > 40 && writers.includes('rotateCredential') && writers.includes('restoreEntries'),
+    `the scan found ${writers.length} writers; it has stopped reading vault.js`)
+  const unclassified = writers.filter((n) => !DURABLE.has(n) && !NON_DURABLE_ALLOWED.has(n))
+  assert.deepEqual(unclassified, [], `these write the vault and are on no list: ${unclassified.join(', ')}`)
+  for (const name of [...DURABLE, ...NON_DURABLE_ALLOWED]) {
+    assert.ok(writers.includes(name), `${name} is listed but does not write the vault; update the list`)
+    assert.ok(!(DURABLE.has(name) && NON_DURABLE_ALLOWED.has(name)), `${name} is on both lists`)
+  }
+  // A durable method writes only as `#persist()`: no option, in any spelling.
+  for (const name of DURABLE) {
+    const body = methods.get(name)
+    const calls = body.match(/#persist\(/g)?.length ?? 0
+    const plain = body.match(/#persist\(\)/g)?.length ?? 0
+    assert.equal(calls, plain, `${name} passes an option to #persist`)
   }
 })

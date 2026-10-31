@@ -33,6 +33,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import * as webauthn from './webauthn.js'
 import { rememberSession } from '../client-state.js'
 import { fetchPending, parseOverrides, collectApproved } from '../pending.js'
+import { overridesOf } from '../daemon/session-requests.js'
+import { findAll as findPlaceholders } from '../core/placeholder.js'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -62,7 +64,7 @@ export class UiServer {
     this.sessionCookie = null // set when the launch token is claimed
     this.claimedAt = null
     this.lastSeen = Date.now()
-    this.html = readFileSync(join(HERE, 'app.html'), 'utf8')
+    this.html = servedPage()
     // Outstanding presence challenges, each bound to one operation and good
     // for one use within a minute.
     this.challenges = new Map()
@@ -75,7 +77,12 @@ export class UiServer {
 
   async start() {
     this.server = createServer((req, res) => this.#handle(req, res))
-    await new Promise((resolve) => this.server.listen(this.port, '127.0.0.1', resolve))
+    // Rejected, not thrown from an event: the UI now has a fixed default port,
+    // so "already in use" is an ordinary answer the caller can explain.
+    await new Promise((resolve, reject) => {
+      this.server.once('error', reject)
+      this.server.listen(this.port, '127.0.0.1', () => { this.server.removeListener('error', reject); resolve() })
+    })
     this.boundPort = this.server.address().port
     this.origin = `http://localhost:${this.boundPort}`
 
@@ -105,7 +112,9 @@ export class UiServer {
   // ------------------------------------------------------------------ routing
 
   async #handle(req, res) {
-    this.lastSeen = Date.now()
+    // Not marked as activity here. Counting every request kept the server up
+    // on the strength of the page's own refused polls once its cookie had
+    // expired; only a caller holding the session counts (see #touch).
     const url = new URL(req.url, this.origin)
 
     // Arriving by IP would put the page on an origin whose domain cannot be a
@@ -140,13 +149,14 @@ export class UiServer {
     const cookie = this.#cookieFrom(req)
 
     if (cookie && this.sessionCookie && safeEqual(cookie, this.sessionCookie)) {
+      this.#touch(res)
       return this.#sendHtml(res, this.html)
     }
 
     if (offered && !this.sessionCookie && safeEqual(offered, this.launchToken)) {
       this.sessionCookie = randomBytes(32).toString('base64url')
       this.claimedAt = new Date().toISOString()
-      res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+      this.#touch(res)
       // Redirect so the token leaves the address bar, browser history and any
       // Referer header the page might later send.
       res.writeHead(302, { Location: '/' })
@@ -175,6 +185,17 @@ export class UiServer {
     'DELETE sessions', 'POST approvals', 'POST session-requests/decide',
     'POST pending/decide-many', 'POST lock',
     'POST touchid/enroll', 'POST touchid/remove',
+    // Wave 3 (contract A.6). Narrowing and deleting a template only take
+    // something away, and the daemon leaves them open; the page signs them
+    // anyway, because it signs every change it makes.
+    'POST sessions/narrow',
+    'POST credentials/rotate', 'POST credentials/scrub', 'DELETE credentials/scrub',
+    'POST credentials/expiry', 'POST credentials/release',
+    'POST tripwires', 'POST templates', 'DELETE templates',
+    // Removing a pin takes away a check on the upstream's key (C22(4)).
+    'DELETE credentials/pins',
+    // Replacing the confirmation key, signed by the key being replaced.
+    'POST presence/rotate',
   ])
 
   /**
@@ -183,19 +204,47 @@ export class UiServer {
    * counter as well, so this process must not advance it first and make the
    * daemon's own check look like a cloned credential.
    */
-  static DAEMON_VERIFIED = new Set(['POST credentials', 'DELETE credentials', 'POST sessions'])
+  static DAEMON_VERIFIED = new Set([
+    'POST credentials', 'DELETE credentials', 'POST sessions',
+    // A decision that makes an elevated session (auto-approved writes, or no
+    // expiry) needs a fresh proof, which the daemon checks for itself.
+    'POST session-requests/decide', 'POST pending/decide-many',
+    // Credential-record writes, rule changes and templates widen or restore
+    // capability, so the daemon gates them and checks the signature itself.
+    'POST credentials/rotate', 'POST credentials/scrub', 'DELETE credentials/scrub',
+    'POST credentials/expiry', 'POST credentials/release',
+    'POST tripwires', 'POST templates', 'DELETE credentials/pins',
+    // Enrolling a replacement key is fresh-gated in the daemon.
+    'POST presence/rotate',
+  ])
+
+  /**
+   * The one response that may carry a capability to the page: the hand-off
+   * card for a session the human has just created here. Even that answer goes
+   * through towardPage first; only the fields the card renders are put back,
+   * and only on success (see handoffTowardPage).
+   */
+  static HANDOFF = new Set(['POST sessions'])
 
   async #serveApi(req, res, url) {
-    const cookie = this.#cookieFrom(req)
-    if (!this.sessionCookie || !cookie || !safeEqual(cookie, this.sessionCookie)) {
-      return this.#send(res, 401, { error: 'not authenticated' })
-    }
-    // Requiring a header a form post cannot set is the CSRF defence.
-    if (req.headers['x-av-ui'] !== '1') return this.#send(res, 403, { error: 'missing X-AV-UI header' })
-
-    const body = await readBody(req)
     const route = url.pathname.slice('/api/'.length)
     const key = `${req.method} ${route}`
+    // Every answer to the page passes the same guard, so a route added later
+    // cannot forget it. An error is never a hand-off, whatever route it is on:
+    // the catch below uses this same send.
+    const send = (status, obj) => this.#send(res, status, towardPage(obj))
+    // The hand-off for a session made here: called from that route's success
+    // line only, and checked against the route again.
+    const handOff = (obj) => this.#send(res, 200, UiServer.HANDOFF.has(key) ? handoffTowardPage(obj) : towardPage(obj))
+    const cookie = this.#cookieFrom(req)
+    if (!this.sessionCookie || !cookie || !safeEqual(cookie, this.sessionCookie)) {
+      return send(401, { error: 'not authenticated' })
+    }
+    // Requiring a header a form post cannot set is the CSRF defence.
+    if (req.headers['x-av-ui'] !== '1') return send(403, { error: 'missing X-AV-UI header' })
+    this.#touch(res)
+
+    const body = await readBody(req)
 
     try {
       // Presence ceremonies first: they are how a caller earns the right to
@@ -204,23 +253,23 @@ export class UiServer {
       // unlocking is the whole point; they carry no capability of their own.
       if (key === 'GET unlock/state') {
         const ls = await this.#control('GET', '/v1/lockstate')
-        return this.#send(res, 200, {
+        return send(200, {
           locked: ls.locked, has_passphrase: ls.has_passphrase, has_touchid: ls.has_touchid,
         })
       }
       if (key === 'GET unlock/webauthn-params') {
-        return this.#send(res, 200, await this.#control('GET', '/v1/unlock/webauthn-params'))
+        return send(200, await this.#control('GET', '/v1/unlock/webauthn-params'))
       }
       if (key === 'POST unlock/touchid') {
         // The PRF secret self-verifies: a wrong one fails the unwrap. No proof
         // to trust here beyond the crypto.
-        return this.#send(res, 200, await this.#control('POST', '/v1/unlock', { prf_secret: body?.prf_secret }))
+        return send(200, await this.#control('POST', '/v1/unlock', { prf_secret: body?.prf_secret }))
       }
       if (key === 'POST unlock/passphrase') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/unlock', { passphrase: body?.passphrase }))
+        return send(200, await this.#control('POST', '/v1/unlock', { passphrase: body?.passphrase }))
       }
       if (key === 'GET touchid/enroll-params') {
-        return this.#send(res, 200, await this.#control('GET', '/v1/factors/webauthn-enroll-params'))
+        return send(200, await this.#control('GET', '/v1/factors/webauthn-enroll-params'))
       }
 
       // What the docs page needs to print commands that actually work on this
@@ -229,7 +278,7 @@ export class UiServer {
         const st = await this.#control('GET', '/v1/status').catch(() => ({}))
         const creds = await this.#control('GET', '/v1/credentials').catch(() => [])
         const port = st.gateway_port || 7411
-        return this.#send(res, 200, {
+        return send(200, {
           version: st.daemon_version || null,
           gateway_port: port,
           gateway_url: `http://127.0.0.1:${port}`,
@@ -244,14 +293,14 @@ export class UiServer {
       // short window and nothing else; the fingerprint is what every later
       // change uses.
       if (key === 'POST presence/window') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/presence/window', {
+        return send(200, await this.#control('POST', '/v1/presence/window', {
           passphrase: body?.passphrase || '',
         }))
       }
 
       if (key === 'GET presence/state') {
         const enrolled = await this.#control('GET', '/v1/presence')
-        return this.#send(res, 200, {
+        return send(200, {
           enrolled: !!enrolled,
           credentialId: enrolled?.credentialId || null,
           rpId: this.rpId,
@@ -260,10 +309,10 @@ export class UiServer {
       }
       if (key === 'POST presence/enroll/begin') {
         const existing = await this.#control('GET', '/v1/presence')
-        if (existing) throw Object.assign(new Error('already enrolled; re-enrolling needs the CLI'), { status: 409 })
+        if (existing) throw Object.assign(new Error('already enrolled; replace it with Replace authenticator, confirming with the one you have'), { status: 409 })
         const challenge = webauthn.newChallenge()
         this.challenges.set('enroll', { challenge, expires: Date.now() + 120_000, operation: { op: 'enroll' } })
-        return this.#send(res, 200, {
+        return send(200, {
           challenge: webauthn.b64url(challenge),
           rp: { id: this.rpId, name: 'agent-vault' },
           user: { id: webauthn.b64url(Buffer.from('agent-vault-operator')), name: 'operator', displayName: 'Vault operator' },
@@ -280,9 +329,51 @@ export class UiServer {
           expectedOrigins: [this.origin],
           rpId: this.rpId,
         })
-        await this.#control('POST', '/v1/presence', credential)
-        return this.#send(res, 200, { ok: true, credentialId: credential.credentialId })
+        // The passphrase goes with the enrolment itself, as fresh presence.
+        // The daemon no longer accepts a passphrase window for this, because a
+        // window admits every caller on the socket while it is open, not only
+        // this page.
+        await this.#control('POST', '/v1/presence', {
+          ...credential,
+          ...(typeof body?.passphrase === 'string' ? { presence: { passphrase: body.passphrase } } : {}),
+        })
+        return send(200, { ok: true, credentialId: credential.credentialId })
       }
+      // Replacing the confirmation key. The first enrolment is passphrase-only,
+      // because an assertion cannot vouch for the key that would make it. A
+      // replacement is the opposite: a signature from the key being replaced
+      // is the best proof there is that the human holding it wants this. So
+      // the new key is registered here first, shown to the page, and enrolled
+      // only with the CURRENT key's signature over exactly that record, which
+      // this process and then the daemon each verify (POST presence/rotate).
+      if (key === 'POST presence/rotate/begin') {
+        const existing = await this.#control('GET', '/v1/presence')
+        if (!existing) throw Object.assign(new Error('nothing to replace; set up change confirmation first'), { status: 412 })
+        const challenge = webauthn.newChallenge()
+        this.challenges.set('rotate', { challenge, expires: Date.now() + 120_000, operation: { op: 'rotate' } })
+        return send(200, {
+          challenge: webauthn.b64url(challenge),
+          rp: { id: this.rpId, name: 'agent-vault' },
+          user: { id: webauthn.b64url(Buffer.from('agent-vault-operator')), name: 'operator', displayName: 'Vault operator' },
+          exclude: existing.credentialId,
+        })
+      }
+      if (key === 'POST presence/rotate/register') {
+        const pending = this.challenges.get('rotate')
+        this.challenges.delete('rotate')
+        if (!pending || pending.expires < Date.now()) throw Object.assign(new Error('the replacement challenge expired; start again'), { status: 401 })
+        const credential = webauthn.verifyRegistration({
+          attestationObject: body?.attestationObject,
+          clientDataJSON: body?.clientDataJSON,
+          expectedChallenge: pending.challenge,
+          expectedOrigins: [this.origin],
+          rpId: this.rpId,
+        })
+        // Public key material only; the page signs over exactly this.
+        this.rotation = { credential, expires: Date.now() + 120_000 }
+        return send(200, { credential })
+      }
+
       if (key === 'POST presence/challenge') {
         const enrolled = await this.#control('GET', '/v1/presence')
         if (!enrolled) throw Object.assign(new Error('no authenticator enrolled'), { status: 412 })
@@ -298,7 +389,51 @@ export class UiServer {
           operation,
           expires: Date.now() + 60_000,
         })
-        return this.#send(res, 200, { ...minted, rpId: this.rpId })
+        return send(200, { ...minted, rpId: this.rpId })
+      }
+
+      // A verdict is true or false, nothing else. `!!"false"` is true, so a
+      // string verdict used to reach the daemon as an approval. Refused before
+      // the signature check, as the daemon refuses it before its gate.
+      if ((key === 'POST approvals' || key === 'POST session-requests/decide') && typeof body?.granted !== 'boolean') {
+        throw Object.assign(new Error('the verdict must be true or false'), {
+          status: 403, problem: { code: 'AV_POLICY_DENIED', rule: 'bulk_decision' },
+        })
+      }
+
+      // A narrowing that does not parse (a payload that is not JSON, a key
+      // no approval applies) is the caller's mistake, said as such before any
+      // signature is spent, whatever the verdict: the signed operation reads
+      // the narrowing either way.
+      if (key === 'POST session-requests/decide' && body?.overrides !== undefined) {
+        try { parseOverrides(body?.overrides || {}) } catch (e) {
+          throw Object.assign(new Error(`the narrowing does not parse: ${e.message}`), {
+            status: 400, problem: { code: 'AV_POLICY_DENIED', rule: 'policy_invalid' },
+          })
+        }
+      }
+
+      // A replacement key is the one this process just registered, or
+      // nothing. Checked before the signature is spent, so a wrong record
+      // costs the human no tap.
+      if (key === 'POST presence/rotate') {
+        const pending = this.rotation
+        if (!pending || pending.expires < Date.now()) {
+          this.rotation = null
+          throw Object.assign(new Error('no replacement key is waiting; register it again'), { status: 409 })
+        }
+        const { presence: _proof, ...record } = body || {}
+        if (canonical(record) !== canonical(pending.credential)) {
+          throw Object.assign(new Error('that is not the key registered for this replacement'), { status: 409 })
+        }
+      }
+
+      // Panic's one option is a lock, and only `true` means lock. A string
+      // "false" is not a verdict, so it is refused rather than read.
+      if (key === 'POST panic' && body?.lock !== undefined && typeof body.lock !== 'boolean') {
+        throw Object.assign(new Error('lock must be true or false'), {
+          status: 400, problem: { code: 'AV_POLICY_DENIED', rule: 'panic_shape' },
+        })
       }
 
       // Everything that widens or changes capability stops here unless the
@@ -307,38 +442,130 @@ export class UiServer {
         await this.#requirePresence(key, url, body, req)
       }
 
+      // The proof is forwarded, because the daemon checks it again for itself.
+      // It used to be dropped here, so a vault with any factor refused every
+      // Touch ID change made from this page as having no human behind it.
       if (key === 'POST touchid/enroll') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', {
-          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret,
+        return send(200, await this.#control('POST', '/v1/factors/webauthn', {
+          action: 'enroll', credential_id: body?.credential_id, prf_secret: body?.prf_secret, presence: body?.presence,
         }))
       }
       if (key === 'POST touchid/remove') {
-        return this.#send(res, 200, await this.#control('POST', '/v1/factors/webauthn', { action: 'remove' }))
+        return send(200, await this.#control('POST', '/v1/factors/webauthn', {
+          action: 'remove', presence: body?.presence,
+        }))
+      }
+      if (key === 'POST presence/rotate') {
+        // Exactly the record that was signed, and the signature with it: the
+        // daemon verifies it against the key being replaced.
+        const { credential } = this.rotation
+        this.rotation = null
+        return send(200, await this.#control('POST', '/v1/presence', {
+          ...credential, presence: body.presence,
+        }))
       }
 
       switch (key) {
-        case 'GET status': return this.#send(res, 200, await this.#control('GET', '/v1/status'))
-        case 'GET credentials': return this.#send(res, 200, await this.#control('GET', '/v1/credentials'))
-        case 'GET sessions': return this.#send(res, 200, await this.#control('GET', '/v1/sessions'))
+        case 'GET status': return send(200, await this.#control('GET', '/v1/status'))
+        case 'GET credentials': return send(200, await this.#control('GET', '/v1/credentials'))
+        case 'GET sessions': return send(200, await this.#control('GET', '/v1/sessions'))
         // Everything waiting for a human, normalised by src/pending.js — the
         // same module the CLI renders from. The page paints whatever this
         // returns and decides nothing, so a new kind of decision appears in
         // both interfaces at once instead of in whichever one someone
         // remembered.
         case 'GET pending':
-          return this.#send(res, 200, await fetchPending((path) => this.#control('GET', path)))
-        case 'GET listeners': return this.#send(res, 200, await this.#control('GET', '/v1/listeners'))
-        case 'GET audit': return this.#send(res, 200, await this.#control('GET', `/v1/audit?limit=${Number(url.searchParams.get('limit') || 40)}`))
+          return send(200, await fetchPending((path) => this.#control('GET', path)))
+        case 'GET listeners': return send(200, await this.#control('GET', '/v1/listeners'))
+        case 'GET audit': {
+          // `kind` narrows the rows to one record kind (the tripwires card
+          // reads tripwire.fired). Filtered here too, so a daemon that ignores
+          // the parameter still answers the question that was asked.
+          const kind = url.searchParams.get('kind')
+          if (kind !== null && !/^[a-z_]+(\.[a-z_]+)*$/.test(kind)) {
+            throw Object.assign(new Error('kind is a record kind, like tripwire.fired'), { status: 400 })
+          }
+          const limit = Number(url.searchParams.get('limit') || 40)
+          const path = kind === null ? `/v1/audit?limit=${limit}` : `/v1/audit?limit=${Math.max(limit, 500)}&kind=${encodeURIComponent(kind)}`
+          const rows = await this.#control('GET', path)
+          return send(200, kind === null ? rows : (Array.isArray(rows) ? rows.filter((r) => r?.kind === kind).slice(-limit) : []))
+        }
+        case 'GET audit/checkpoint': return send(200, await this.#control('GET', '/v1/audit/checkpoint'))
+
+        // Reads (F19, F16, F17, F14). Open in the daemon as well.
+        case 'GET sessions/detail':
+          return send(200, await this.#control('GET', `/v1/sessions/detail?sid=${encodeURIComponent(url.searchParams.get('sid') ?? '')}`))
+        case 'GET report/access':
+          return send(200, await this.#control('GET', `/v1/report/access?since=${encodeURIComponent(url.searchParams.get('since') || '7d')}`))
+        case 'GET tripwires': return send(200, await this.#control('GET', '/v1/tripwires'))
+        case 'GET templates': {
+          const name = url.searchParams.get('name')
+          return send(200, await this.#control('GET', name === null ? '/v1/templates' : `/v1/templates?name=${encodeURIComponent(name)}`))
+        }
+        case 'GET notify': return send(200, await this.#control('GET', '/v1/notify'))
+
+        // Narrowing (F15). Signed above; the daemon leaves it open because it
+        // can only take capability away, so the proof is not passed on.
+        case 'POST sessions/narrow':
+          return send(200, await this.#control('POST', '/v1/sessions/narrow', withoutProof(body)))
+
+        // Credential-record writes. The whole signed body goes on, proof
+        // included, because the daemon re-verifies it over the same body. A
+        // rotation's new value passes through once and is never echoed.
+        case 'POST credentials/rotate':
+          return send(200, await this.#control('POST', '/v1/credentials/rotate', body))
+        case 'POST credentials/scrub':
+          return send(200, await this.#control('POST', '/v1/credentials/scrub', body))
+        case 'DELETE credentials/scrub':
+          return send(200, await this.#control(
+            'DELETE', `/v1/credentials/scrub${queryOf(url, ['slug', 'id'])}`,
+            { presence: body?.presence },
+          ))
+        case 'DELETE credentials/pins':
+          return send(200, await this.#control(
+            'DELETE', `/v1/credentials/pins${queryOf(url, ['slug', 'host', 'spki'])}`,
+            { presence: body?.presence },
+          ))
+        case 'POST credentials/expiry':
+          return send(200, await this.#control('POST', '/v1/credentials/expiry', body))
+        case 'POST credentials/release':
+          return send(200, await this.#control('POST', '/v1/credentials/release', body))
+        // Open: the probe's method and path are the profile's own, so nothing
+        // the page sends besides the name can steer it.
+        case 'POST credentials/test':
+          return send(200, await this.#control('POST', '/v1/credentials/test',
+            body?.all === true ? { all: true } : { slug: body?.slug }))
+
+        // Containment (F16). Open on purpose: in an emergency a fingerprint
+        // prompt only slows things down, and each of these only takes away.
+        case 'POST credentials/quarantine':
+          return send(200, await this.#control('POST', '/v1/credentials/quarantine', {
+            slug: body?.slug, ...(typeof body?.reason === 'string' && body.reason ? { reason: body.reason } : {}),
+          }))
+        case 'POST panic':
+          return send(200, await this.#control('POST', '/v1/panic', {
+            lock: body?.lock === true,
+            ...(typeof body?.reason === 'string' && body.reason ? { reason: body.reason } : {}),
+          }))
+        case 'POST tripwires':
+          return send(200, await this.#control('POST', '/v1/tripwires', body))
+
+        // Templates (F17). Saving is gated in the daemon; deleting only
+        // removes a shape and grants nothing, so it is signed here alone.
+        case 'POST templates':
+          return send(200, await this.#control('POST', '/v1/templates', body))
+        case 'DELETE templates':
+          return send(200, await this.#control('DELETE', `/v1/templates${queryOf(url, ['name'])}`))
 
         case 'POST credentials': {
           // The value arrives once, is forwarded straight to the daemon, and is
           // never stored here or echoed back in the response.
           const created = await this.#control('POST', '/v1/credentials', body)
-          return this.#send(res, 200, created)
+          return send(200, created)
         }
         case 'DELETE credentials':
           // The signature travels with it: the daemon verifies this one too.
-          return this.#send(res, 200, await this.#control(
+          return send(200, await this.#control(
             'DELETE', `/v1/credentials?slug=${encodeURIComponent(url.searchParams.get('slug'))}`,
             { presence: body?.presence },
           ))
@@ -359,12 +586,12 @@ export class UiServer {
             // token on screen either way, and can paste it.
             this.lastStateError = String(e?.message ?? e)
           }
-          return this.#send(res, 200, created)
+          return handOff(created)
         }
         case 'DELETE sessions':
-          return this.#send(res, 200, await this.#control('DELETE', `/v1/sessions?sid=${encodeURIComponent(url.searchParams.get('sid'))}`))
+          return send(200, await this.#control('DELETE', `/v1/sessions?sid=${encodeURIComponent(url.searchParams.get('sid'))}`))
         case 'POST approvals':
-          return this.#send(res, 200, await this.#control('POST', '/v1/approvals', body))
+          return send(200, await this.#control('POST', '/v1/approvals', body))
         // A session request is settled by its own control route, which verifies
         // its own operation shape — so this mirrors it rather than merging the
         // two behind one endpoint and having to guess which signature to make.
@@ -387,60 +614,69 @@ export class UiServer {
           const grantedSessions = (answered?.decided || []).filter(
             (r) => r.kind === 'session' && r.outcome === 'decided' && r.result?.state === 'approved',
           )
-          if (grantedSessions.length === 1) {
-            await collectApproved(
-              { id: grantedSessions[0].id, kind: 'session' },
-              { get: (p) => this.#control('GET', p), remember: (sn) => rememberSession(sn, this.statePath) },
-            ).catch(() => null)
-            answered.recorded = grantedSessions[0].id
-          } else if (grantedSessions.length > 1) {
+          // The daemon hands the session to the approving client only when the
+          // batch granted exactly one. It never goes on to the page.
+          for (const r of answered?.decided || []) {
+            const session = r.result?.session
+            if (!session) continue
+            delete r.result.session
+            try {
+              collectApproved({ id: r.id, kind: 'session' }, {
+                answered: { session }, remember: (sn) => rememberSession(sn, this.statePath),
+              })
+              answered.recorded = r.id
+            } catch (e) { this.lastStateError = String(e?.message ?? e) }
+          }
+          if (grantedSessions.length > 1) {
             answered.recorded = null
             answered.note = 'several sessions were approved, so each agent collects its own; this page records one at a time'
           }
-          return this.#send(res, 200, answered)
+          return send(200, answered)
         }
 
         case 'POST session-requests/decide': {
           const answered = await this.#control('POST', '/v1/session-requests/decide', {
             id: body?.id,
-            granted: !!body?.granted,
+            granted: body.granted,
             overrides: body?.granted ? parseOverrides(body?.overrides || {}) : undefined,
             presence: body?.presence,
           })
-          if (!body?.granted) return this.#send(res, 200, answered)
+          const { session, ...decision } = answered || {}
+          if (!body?.granted) return send(200, decision)
           // Recorded here for the same reason the CLI does it: the daemon runs
           // as its own uid and cannot write the human's state file. This process
           // can, and the MCP bridge re-reads that file per request — so a
           // session approved in this page reaches a running agent on its next
           // call without anyone copying a token.
-          const collected = await collectApproved(
-            { id: body.id, kind: 'session' },
-            {
-              get: (p) => this.#control('GET', p),
-              remember: (s) => rememberSession(s, this.statePath),
-            },
-          ).catch(() => null)
+          let collected = null
+          try {
+            collected = collectApproved({ id: body.id, kind: 'session' }, {
+              answered: { session }, remember: (s) => rememberSession(s, this.statePath),
+            })
+          } catch (e) { this.lastStateError = String(e?.message ?? e) }
           // The token itself never goes to the page. It went to the state file,
           // which is where local clients look; showing it here would put a live
           // capability in a browser for no reason.
-          return this.#send(res, 200, {
-            ...answered,
+          return send(200, {
+            ...decision,
             recorded: collected ? { session_id: collected.session_id, expires_at: collected.expires_at } : null,
           })
         }
         case 'POST lock':
-          return this.#send(res, 200, await this.#control('POST', '/v1/lock', {}))
+          return send(200, await this.#control('POST', '/v1/lock', {}))
         case 'POST unlock':
-          return this.#send(res, 200, await this.#control('POST', '/v1/unlock', { passphrase: body?.passphrase || null }))
+          return send(200, await this.#control('POST', '/v1/unlock', { passphrase: body?.passphrase || null }))
         case 'GET lockstate':
-          return this.#send(res, 200, await this.#control('GET', '/v1/lockstate'))
+          return send(200, await this.#control('GET', '/v1/lockstate'))
         case 'GET audit/verify':
-          return this.#send(res, 200, await this.#control('GET', '/v1/audit/verify'))
+          return send(200, await this.#control('GET', '/v1/audit/verify'))
         default:
-          return this.#send(res, 404, { error: `no route ${req.method} ${route}` })
+          return send(404, { error: `no route ${req.method} ${route}` })
       }
     } catch (e) {
-      return this.#send(res, e.status || 500, { error: e.message, detail: e.problem })
+      // A VaultError (a reserved operation field, say) carries its status as
+      // `http`; reading only `status` made a refusal look like a crash.
+      return send(e.status || e.http || 500, { error: e.message, detail: e.problem ?? e.toProblem?.() })
     }
   }
 
@@ -517,18 +753,51 @@ export class UiServer {
         // The same fields the daemon binds its own check to: the id, the
         // verdict and any narrowing. A signature for "approve, narrowed to GET
         // /user" therefore cannot be replayed to grant the wide original.
+        // overridesOf is the daemon's own reader of a decision's overrides,
+        // owner fields included, so the two cannot bind different things.
         return of('session_request.decide', {
-          id: body?.id, granted: !!body?.granted, ...parseOverrides(body?.overrides || {}),
+          id: body?.id, granted: body?.granted, ...overridesOf(parseOverrides(body?.overrides || {})),
         })
       case 'POST lock': return of('vault.lock', {})
-      case 'POST touchid/enroll': return of('touchid.enroll', body)
+      // Only the fields that are forwarded, which is what the daemon binds.
+      case 'POST touchid/enroll': return of('touchid.enroll', { credential_id: body?.credential_id, prf_secret: body?.prf_secret })
       case 'POST touchid/remove': return of('touchid.remove', {})
+      // Wave 3: the same op names as the daemon (contract A.2), each over the
+      // whole body, or over the query for a DELETE.
+      case 'POST sessions/narrow': return of('session.narrow', body)
+      case 'POST credentials/rotate': return of('cred.rotate', body)
+      case 'POST credentials/scrub': return of('cred.scrub_add', body)
+      case 'DELETE credentials/scrub': return of('cred.scrub_remove', { slug: url.searchParams.get('slug'), id: url.searchParams.get('id') })
+      // C22(4): read with get(), so an absent spki ("every pin for the host")
+      // is bound as null, never omitted, exactly as the daemon binds it.
+      case 'DELETE credentials/pins':
+        return of('cred.pins_remove', {
+          slug: url.searchParams.get('slug'), host: url.searchParams.get('host'), spki: url.searchParams.get('spki'),
+        })
+      case 'POST credentials/expiry': return of('cred.expiry_set', body)
+      case 'POST credentials/release': return of('cred.release', body)
+      case 'POST tripwires': return of('tripwires.set', body)
+      case 'POST templates': return of('template.save', body)
+      case 'DELETE templates': return of('template.delete', { name: url.searchParams.get('name') })
+      // What the daemon binds for an enrolment: the whole record.
+      case 'POST presence/rotate': return of('presence.enroll', body)
       default: return { op: key }
     }
   }
 
 
   // ------------------------------------------------------------------ helpers
+
+  /**
+   * Activity by the holder of the session: it keeps the server up, and it
+   * slides the cookie. The cookie was set once at claim with Max-Age equal to
+   * the IDLE timeout and never refreshed, so it expired thirty minutes into
+   * active use and the page could not get back in — the launch link was spent.
+   */
+  #touch(res) {
+    this.lastSeen = Date.now()
+    res.setHeader('Set-Cookie', `av_ui=${this.sessionCookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(this.idleMs / 1000)}`)
+  }
 
   #cookieFrom(req) {
     const raw = req.headers.cookie || ''
@@ -597,6 +866,120 @@ export class UiServer {
 }
 
 const canonical = webauthn.canonicalOperation
+
+/** Where app.html takes the one parser of typed narrowing (contract C21). */
+export const PARSER_MARKER = '/* parseOverrides: injected by src/ui/server.js from src/pending.js */'
+
+/**
+ * The page as served: app.html with parseOverrides put in at the marker, so
+ * the page reads a narrowing with the same function this server rebinds the
+ * signed operation with. A page without the marker is a build error, not a
+ * page that cannot approve anything.
+ */
+export function servedPage(parser = parseOverrides) {
+  const html = readFileSync(join(HERE, 'app.html'), 'utf8')
+  if (html.split(PARSER_MARKER).length !== 2) throw new Error('app.html must carry the parseOverrides marker exactly once')
+  // The source goes into an inline <script> as it is. Text that would end the
+  // script, open an HTML comment, or put the marker back would change what
+  // the page runs, so it stops the server from starting instead.
+  const source = parser.toString()
+  if (/<\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {
+    throw new Error('parseOverrides cannot be put in the page: its source holds </script, <!-- or the marker')
+  }
+  return html.replace(PARSER_MARKER, () => source)
+}
+
+/** The request minus its proof, for a daemon route that does not check one. */
+function withoutProof(body) {
+  const { presence: _proof, ...rest } = body || {}
+  return rest
+}
+
+/** The named query parameters that were given, passed on exactly as given. */
+function queryOf(url, names) {
+  const q = new URLSearchParams()
+  for (const n of names) if (url.searchParams.has(n)) q.set(n, url.searchParams.get(n))
+  const text = q.toString()
+  return text ? `?${text}` : ''
+}
+
+// What the page never receives, whatever a daemon route returns: a session
+// token, a placeholder, a credential value, an unlock secret, a backup or its
+// passphrase, a webhook URL. Keys with these names are dropped at any depth,
+// in any case and with '-' read as '_', and any token- or placeholder-shaped
+// text inside a string is replaced. The daemon's routes
+// are not supposed to return any of it; this is what makes "never sent to the
+// page" hold for a route that slips, including the agent-written text in an
+// approval preview.
+const WITHHELD_KEYS = new Set([
+  'token', 'placeholder', 'value', 'secret', 'prf_secret', 'recovery_passphrase', 'passphrase', 'bundle', 'webhook_url',
+])
+const SESSION_TOKEN = /avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
+// Webhook_URL, webhook-url and WEBHOOK_URL are the same key to a reader, and
+// so are pass-phrase, pass--phrase, "pass phrase", Pass_Phrase and passphrase:
+// any run of hyphens, underscores and spaces is one separator.
+const withheldKey = (k) => WITHHELD_KEYS.has(k.toLowerCase().replace(/[-_\s]+/g, '_').replaceAll('pass_phrase', 'passphrase'))
+
+export function towardPage(value, depth = 0) {
+  if (depth > 64) return null
+  if (typeof value === 'string') return withheldText(value)
+  if (Array.isArray(value)) return value.map((v) => towardPage(v, depth + 1))
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const [k, v] of Object.entries(value)) {
+      if (withheldKey(k)) continue
+      out[k] = towardPage(v, depth + 1)
+    }
+    return out
+  }
+  return value
+}
+
+// What the hand-off card renders, and nothing else: the session's own token
+// and the placeholders it was just given. A webhook URL, a value or a bundle
+// in the same answer stays withheld.
+const HANDOFF_FIELDS = ['token', 'session_id', 'expires_at', 'infinite', 'label', 'cli']
+const HANDOFF_GRANT_FIELDS = ['placeholder', 'base_url', 'usage', 'cred', 'sites', 'probe']
+
+/**
+ * A session-create answer for the page: towardPage over all of it, then the
+ * card's fields copied back from the original. A field is copied only when it
+ * is a scalar or a list of scalars, so nothing nested rides along with it.
+ */
+export function handoffTowardPage(created) {
+  const out = towardPage(created)
+  if (!isRecord(created) || !isRecord(out)) return out
+  copyShown(out, created, HANDOFF_FIELDS)
+  // The card reads `s.grants || [s]`, and the daemon repeats grants[0] at the
+  // top for clients written for one grant; so the top is a grant here too.
+  copyShown(out, created, HANDOFF_GRANT_FIELDS)
+  if (Array.isArray(created.grants) && Array.isArray(out.grants)) {
+    created.grants.forEach((g, i) => {
+      if (isRecord(g) && isRecord(out.grants[i])) copyShown(out.grants[i], g, HANDOFF_GRANT_FIELDS)
+    })
+  }
+  return out
+}
+
+const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const isScalar = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v)
+
+function copyShown(to, from, names) {
+  for (const n of names) {
+    if (!Object.hasOwn(from, n)) continue
+    const v = from[n]
+    if (isScalar(v) || (Array.isArray(v) && v.every(isScalar))) to[n] = v
+  }
+}
+
+function withheldText(s) {
+  let out = s.replace(SESSION_TOKEN, '«token»')
+  // Last to first, so earlier offsets stay right.
+  for (const p of findPlaceholders(out).reverse()) {
+    out = `${out.slice(0, p.offset)}«placeholder»${out.slice(p.end)}`
+  }
+  return out
+}
 
 function safeEqual(a, b) {
   const ba = Buffer.from(String(a))

@@ -63,12 +63,20 @@ test('an encoded fragment or query cannot truncate the path after the check', ()
   }
 })
 
-test('percent-encoding is resolved however many layers deep it goes', () => {
+test('percent-encoding is resolved once, and a path that would decode again is refused', () => {
   // Decoding ran a fixed two rounds, so a third layer left a live escape in
-  // the output and the upstream resolved it to something else again.
-  assert.equal(normalizePath('/repos/%252e%252e/admin'), '/admin')
-  assert.equal(normalizePath('/repos/%25252e%25252e/admin'), '/admin')
+  // the output and the upstream resolved it to something else again. Then it
+  // decoded to a fixed point, which still left an upstream that decodes
+  // twice reading a path between the two that were checked. An escape that
+  // was itself encoded is now refused, whatever it decodes to.
+  for (const spelled of ['/repos/%252e%252e/admin', '/repos/%25252e%25252e/admin']) {
+    assert.throws(() => normalizePath(spelled), (e) => e.code === 'AV_POLICY_DENIED' && e.rule === 'path_ambiguous_encoding', spelled)
+  }
   assert.equal(allows('/user/%25256beys'), false, 'a thrice-encoded deny path slipped past')
+  // Encoded once, a dot segment is still resolved and a deny path still denied.
+  assert.equal(normalizePath('/repos/%2e%2e/admin'), '/admin')
+  assert.equal(allows('/user/%6beys'), false, 'a once-encoded deny path slipped past')
+  assert.equal(allows('/repos/%6f/r/issues'), true)
   // A decode bomb is refused rather than followed forever.
   const deep = `/user/${'%25'.repeat(12)}6beys`
   assert.throws(() => normalizePath(deep), /too many times|invalid percent-escape/)

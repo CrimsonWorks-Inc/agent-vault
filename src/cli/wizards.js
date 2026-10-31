@@ -28,7 +28,7 @@ export const ACCESS_LEVELS = {
   },
   full: {
     label: 'Read and write freely, including delete',
-    hint: 'no approval prompts; only for things you can afford to lose',
+    hint: 'no approval prompts; only for things you can afford to lose; asks for your passphrase every time',
     methods: ['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE'],
     approval: 'auto',
   },
@@ -39,14 +39,19 @@ export function buildPolicy({ kind, access, paths, budget, ttlHours }) {
   const level = ACCESS_LEVELS[access]
   if (!level) throw new Error(`unknown access level: ${access}`)
   const profile = PROFILES[kind]
+  // "No expiry" is a session with no lifetime at all, not a long one.
+  const infinite = ttlHours === NO_EXPIRY
   return {
     methods: [...level.methods],
     paths: paths && paths.length ? [...paths] : ['/**'],
     budget: Number(budget ?? profile?.defaultBudget?.limit ?? 500),
     approval: level.approval,
-    ttl_hours: Number(ttlHours ?? 8),
+    ...(infinite ? { infinite: true } : { ttl_hours: Number(ttlHours ?? 8) }),
   }
 }
+
+/** The lifetime choice that means a session never expires. */
+export const NO_EXPIRY = 'never'
 
 /** A slug that is valid, descriptive, and not already taken. */
 export function suggestSlug(kind, existing = []) {
@@ -246,6 +251,7 @@ export async function sessionWizard(control, { cred: presetCred } = {}) {
     { value: 8, label: '8 hours', hint: 'a working day' },
     { value: 1, label: '1 hour', hint: 'a quick task' },
     { value: 24, label: '24 hours' },
+    { value: NO_EXPIRY, label: 'No expiry (asks for your passphrase)', hint: 'lasts until you revoke it' },
   ])
 
   p.step(5, 5, 'Confirm')
@@ -256,7 +262,7 @@ export async function sessionWizard(control, { cred: presetCred } = {}) {
     ['on paths', policy.paths.join('\n' + ' '.repeat(18))],
     ['budget', `${policy.budget} requests`],
     ['writes', policy.approval === 'on-write' ? 'ask me first' : 'no approval'],
-    ['expires', `${policy.ttl_hours}h from now`],
+    ['expires', policy.infinite ? 'never; revoke it when you are done' : `${policy.ttl_hours}h from now`],
   ])
   if (!await p.confirm('Create the session?', { defaultYes: true })) throw new p.Cancelled()
 
@@ -267,7 +273,7 @@ export async function sessionWizard(control, { cred: presetCred } = {}) {
     paths: policy.paths,
     budget: policy.budget,
     approval: policy.approval,
-    ttl_hours: policy.ttl_hours,
+    ...(policy.infinite ? { infinite: true } : { ttl_hours: policy.ttl_hours }),
   })
 
   console.log(`\n${C.green('session created')} ${C.dim(session.session_id)}\n`)

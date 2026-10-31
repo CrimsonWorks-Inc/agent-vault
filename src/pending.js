@@ -40,7 +40,16 @@ function describe(kind, raw) {
       // honours it, but no interface could set it and no human could narrow it.
       // The one dimension a session request states in plain minutes could only
       // be reached by hand-writing the HTTP body.
-      narrowable: ['methods', 'paths', 'budget', 'uses', 'ttl_minutes'],
+      narrowable: [
+        'methods', 'paths', 'budget', 'uses', 'ttl_minutes',
+        // Wave 3: the grant limits an agent may also ask for. Each only
+        // narrows, and each is a dimension a human can tighten when answering.
+        'rate', 'max_concurrent', 'quota', 'routes', 'payload', 'redirects',
+        'spend_tokens', 'spend_usd', 'grant_ttl_minutes',
+      ],
+      // What only the owner can add, never narrow: an agent cannot propose
+      // either one, so they are offered here as the human's own choices.
+      owner_settable: ['approval', 'infinite'],
       proposal: raw.proposal || {},
       decide: { path: '/v1/session-requests/decide', idField: 'id' },
     }
@@ -53,7 +62,11 @@ function describe(kind, raw) {
     created_at: raw.created_at,
     caution: null,
     narrowable: [],
+    owner_settable: [],
     grant_id: raw.grant_id || null,
+    // What the held request would send, scrubbed by the gateway (F13). The
+    // agent wrote it: it is shown as untrusted text, never acted on.
+    preview: raw.preview ?? null,
     decide: { path: '/v1/approvals', idField: 'id' },
   }
 }
@@ -82,45 +95,143 @@ export async function fetchPending(get) {
  * proposal; the daemon binds its presence check to exactly what is sent here.
  */
 export function decision(item, { granted, overrides = null }) {
-  const body = { [item.decide.idField]: item.id, granted: !!granted }
+  // Not coerced: `!!"false"` is true, and a verdict that is not a boolean is a
+  // caller's bug to surface, never an approval.
+  if (typeof granted !== 'boolean') throw new TypeError('the verdict must be true or false')
+  const body = { [item.decide.idField]: item.id, granted }
   if (overrides && Object.keys(overrides).length) body.overrides = overrides
   return { path: item.decide.path, body }
 }
 
-/** Narrowing flags, parsed the same way wherever they are typed. */
+/** The keys parseOverrides reads. A caller holding other flags passes only these. */
+export const OVERRIDE_KEYS = Object.freeze([
+  'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'ttl-minutes', 'grant_ttl_minutes', 'grant-ttl', 'grant_ttl',
+  'max_concurrent', 'concurrency', 'redirects', 'spend_tokens', 'spend-tokens', 'spend_usd', 'spend-usd',
+  'rate', 'quota', 'routes', 'route', 'payload', 'approval', 'infinite',
+])
+
+/**
+ * Narrowing flags, parsed the same way wherever they are typed.
+ *
+ * SELF-CONTAINED (C21, C23): the UI server injects this function's source
+ * into the approvals page, so every helper it uses is defined inside it. A
+ * module-scope helper here is a ReferenceError on the page, and a page that
+ * catches that and submits anyway approves the agent's own proposal.
+ *
+ * A value that cannot be a narrowing THROWS, naming the field (`err.field`).
+ * It is never dropped: a dropped narrowing approves what the agent asked for,
+ * with nothing telling the human their flag was ignored.
+ */
 export function parseOverrides(args = {}) {
   const out = {}
-  if (args.methods) out.methods = String(args.methods).split(',').map((m) => m.trim()).filter(Boolean)
-  if (args.paths) out.paths = Array.isArray(args.paths) ? args.paths : [String(args.paths)]
-  if (args.budget !== undefined && args.budget !== null && args.budget !== '') out.budget = Number(args.budget)
-  if (args.uses !== undefined && args.uses !== null && args.uses !== '') out.uses = Number(args.uses)
+  const fail = (field, why) => Object.assign(new TypeError(`${field}: ${why}`), { field })
+  // Every key read below. Any other THROWS, naming it: a key copied into
+  // nothing (a host list, a typo) was approved as if it narrowed, where the
+  // daemon refuses it outright. Kept in step with OVERRIDE_KEYS by a test;
+  // it cannot be shared, because this function's source is put in the page.
+  const known = [
+    'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'ttl-minutes', 'grant_ttl_minutes', 'grant-ttl', 'grant_ttl',
+    'max_concurrent', 'concurrency', 'redirects', 'spend_tokens', 'spend-tokens', 'spend_usd', 'spend-usd',
+    'rate', 'quota', 'routes', 'route', 'payload', 'approval', 'infinite',
+  ]
+  for (const k of Object.keys(args ?? {})) if (!known.includes(k)) throw fail(k, 'not a narrowing an approval applies')
+  // Split on commas and upper-cased, the way `session create`, the wizard and
+  // the UI's new-session form all read them. A narrowing of "/a/**,/b/**" was
+  // one glob with a comma in it, and "get" a method nothing sends: both
+  // approved a session that matched nothing, with nothing saying why.
+  const list = (v) => (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean)
+  const given = (v) => v !== undefined && v !== null && v !== ''
+  // A number, or a string that reads as one. Anything else throws: NaN and
+  // Infinity are sent by JSON as null, and a null narrowing is dropped, so
+  // the human's "--budget abc" approved the agent's own budget. A blank
+  // string would be Number('  ') = 0, which nobody typed.
+  const num = (field, v) => {
+    const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN)
+    if (!Number.isFinite(n)) throw fail(field, `not a number: ${JSON.stringify(v)}`)
+    return n
+  }
+  // JSON as typed on a command line, or the value itself from a page. A
+  // string that is not JSON, or JSON that is not an object or list, throws.
+  const json = (field, v) => {
+    if (typeof v !== 'string') return v
+    let parsed
+    try { parsed = JSON.parse(v) } catch { throw fail(field, 'not valid JSON') }
+    if (parsed === null || typeof parsed !== 'object') throw fail(field, 'must be a JSON object or list')
+    return parsed
+  }
+  // `GET,HEAD:/repos/**` as a route pair. Split on the first colon; the
+  // methods are comma-separated and upper-cased. Something that is not that
+  // shape is passed on as typed, for the daemon to refuse.
+  const routeOf = (text) => {
+    const s = String(text)
+    const at = s.indexOf(':')
+    if (at <= 0) return s
+    return {
+      methods: s.slice(0, at).split(',').map((m) => m.trim().toUpperCase()).filter(Boolean),
+      paths: [s.slice(at + 1).trim()],
+    }
+  }
+  // A string is trimmed; anything else passes through for the daemon to refuse.
+  const shape = (v) => (typeof v === 'string' ? v.trim() : v)
+  const pick = (...names) => names.map((n) => args[n]).find(given)
+
+  if (args.methods) out.methods = list(args.methods).map((m) => m.toUpperCase())
+  if (args.paths) out.paths = list(args.paths)
+  if (given(args.budget)) out.budget = num('budget', args.budget)
+  if (given(args.uses)) out.uses = num('uses', args.uses)
   // The generated hint spells this `--ttl_minutes`, because it is generated
   // from the field name and there is only one list. `--ttl-minutes` is the
   // spelling a hand would reach for, so accept both.
-  const ttl = args.ttl_minutes ?? args['ttl-minutes']
-  if (ttl !== undefined && ttl !== null && ttl !== '') out.ttl_minutes = Number(ttl)
+  const ttl = pick('ttl_minutes', 'ttl-minutes')
+  if (given(ttl)) out.ttl_minutes = num('ttl_minutes', ttl)
+  // The wave-3 limits, by field name or by the CLI's flag. Shapes the daemon
+  // understands (`60/min`, `1000/day`) are passed through for it to check.
+  const grantTtl = pick('grant_ttl_minutes', 'grant-ttl', 'grant_ttl')
+  if (given(grantTtl)) out.grant_ttl_minutes = num('grant_ttl_minutes', grantTtl)
+  const concurrent = pick('max_concurrent', 'concurrency')
+  if (given(concurrent)) out.max_concurrent = num('max_concurrent', concurrent)
+  if (given(args.redirects)) out.redirects = num('redirects', args.redirects)
+  const tokens = pick('spend_tokens', 'spend-tokens')
+  if (given(tokens)) out.spend_tokens = num('spend_tokens', tokens)
+  const usd = pick('spend_usd', 'spend-usd')
+  if (given(usd)) out.spend_usd = num('spend_usd', usd)
+  if (given(args.rate)) out.rate = shape(args.rate)
+  if (given(args.quota)) out.quota = shape(args.quota)
+  // A JSON string is how --routes and --payload arrive from the CLI. It used
+  // to be dropped, and the agent's wider routes were what got approved.
+  if (given(args.routes)) out.routes = json('routes', args.routes)
+  else if (given(args.route)) out.routes = (Array.isArray(args.route) ? args.route : [args.route]).map(routeOf)
+  if (given(args.payload)) out.payload = json('payload', args.payload)
+  // Owner fields. The mode is passed through as typed and validated by the
+  // daemon, so a typo is refused there rather than quietly meaning something.
+  if (typeof args.approval === 'string' && args.approval !== '') out.approval = args.approval
+  if (args.infinite === true || args.infinite === 'true') out.infinite = true
   return out
 }
 
 /**
- * Collecting an approved session, and recording it where local clients look.
+ * Recording an approved session where local clients look.
  *
  * The daemon cannot do this. It runs as its own uid and the state file belongs
  * to the human — that is the boundary the whole design rests on. So whichever
- * client the human approved with collects the token and records it: the CLI and
- * the web UI both run as them.
+ * client the human approved with records it: the CLI and the web UI both run
+ * as them.
  *
  * That is better than the agent collecting it anyway. The MCP bridge re-reads
  * the state file on every request, so a session recorded here reaches a RUNNING
  * agent on its next call, with no restart and nothing copied by hand.
  *
- * The token is handed out once, so this is the one collection. `remember` is the
+ * The session comes from the gated decision itself (`answered.session`), which
+ * the daemon counts as the one collection. It used to be fetched from the
+ * collect route by request id, which is what let any agent that read the id
+ * off the pending list take a session meant for another; that route now wants
+ * the asker's secret, which the human's client never had. `remember` is the
  * caller's writer, already bound to the right path.
  */
-export async function collectApproved(item, { get, remember }) {
+export function collectApproved(item, { answered, remember }) {
   if (item.kind !== 'session') return null
-  const got = await get(`/v1/session-requests/collect?id=${encodeURIComponent(item.id)}`).catch(() => null)
-  if (!got || got.state !== 'approved' || !got.token) return null
+  const got = answered?.session
+  if (!got?.token) return null
   remember(got)
   return got
 }
@@ -132,6 +243,10 @@ export function describeGranted(g = {}) {
   if (g.paths) bits.push(g.paths.join(' '))
   if (g.budget) bits.push(`${g.budget} requests`)
   if (g.uses) bits.push(`${g.uses}-use placeholder`)
+  if (g.approval) bits.push(`approval ${g.approval}`)
+  if (g.grant_ttl_minutes) bits.push(`grant ends after ${g.grant_ttl_minutes} min`)
+  if (g.infinite === true) bits.push('never expires')
+  else if (g.ttl_minutes) bits.push(`lasts ${g.ttl_minutes} min`)
   return bits.join(' · ')
 }
 

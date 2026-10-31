@@ -17,17 +17,38 @@
 // and the policy intersection, which can only narrow. A human approving a
 // greedy proposal cannot widen it past what the credential allows.
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { id } from '../store/ids.js'
+import { deny } from '../core/errors.js'
+import * as policyMod from '../core/policy.js'
 
 // An agent can ask as often as it likes, so the store is bounded the way the
 // approvals map is. A flood must not push out a request a human is reading.
 const MAX_PENDING = 64
 const PENDING_TTL_MS = 30 * 60_000
 const COLLECT_TTL_MS = 5 * 60_000
+// How long a settled request is kept so its asker can poll the outcome. Past
+// this it is forgotten: a finished request is history, and history belongs in
+// the audit log, not in the waiting room.
+const SETTLED_TTL_MS = 30 * 60_000
+// Everything held, pending or settled. Settled ones are evicted first.
+const MAX_ITEMS = MAX_PENDING * 4
 
-/** The fields a proposal may name. Anything else is not part of the offer. */
-const FIELDS = ['cred', 'methods', 'paths', 'budget', 'uses', 'ttl_minutes']
+const sha256 = (s) => createHash('sha256').update(String(s)).digest('hex')
+
+/**
+ * The fields a proposal may name. Anything else is not part of the offer.
+ *
+ * Every one of the later ones only narrows a grant (a rate, a quota, routes,
+ * payload rules, a spend limit, a shorter grant), so an agent may ask for
+ * them; a human still answers. `approval` and `infinite` are not here: only
+ * the owner sets those (OWNER_FIELDS).
+ */
+const FIELDS = [
+  'cred', 'methods', 'paths', 'budget', 'uses', 'ttl_minutes',
+  'rate', 'max_concurrent', 'quota', 'routes', 'payload', 'redirects',
+  'spend_tokens', 'spend_usd', 'grant_ttl_minutes',
+]
 
 /**
  * A stable description of exactly what was proposed.
@@ -43,6 +64,114 @@ export function proposalOf(input = {}) {
   return out
 }
 
+/**
+ * The fields only the owner may set: an approval mode and an unlimited
+ * lifetime. Either one can take the human out of the loop for good, so an
+ * agent may not ask for them at all — a proposal carrying one is refused, not
+ * trimmed, so the agent never believes it asked for something it did not.
+ */
+export const OWNER_FIELDS = ['approval', 'infinite']
+
+/**
+ * A human's overrides, read once. The daemon's binding, its settle path and
+ * the web UI's signed operation all call this, so none of them can disagree
+ * about which fields a decision carried.
+ */
+export function overridesOf(input = {}) {
+  const out = proposalOf(input)
+  for (const f of OWNER_FIELDS) if (input?.[f] !== undefined && input?.[f] !== null) out[f] = input[f]
+  return out
+}
+
+/**
+ * Why a human's overrides cannot be applied as sent, or null. A key the
+ * decision does not read (a host list, deny paths, a typo) used to be dropped
+ * and the approval went through: the caller believed a narrowing applied that
+ * never did. Refused instead, naming the key, so nothing is approved that way.
+ */
+export function overridesProblem(input) {
+  if (input === undefined || input === null) return null
+  if (typeof input !== 'object' || Array.isArray(input)) return 'the narrowing must be an object'
+  const unread = Object.keys(input).filter((k) => !FIELDS.includes(k) && !OWNER_FIELDS.includes(k))
+  return unread.length ? `a decision cannot narrow ${unread.map((k) => JSON.stringify(k)).join(', ')}; nothing was decided` : null
+}
+
+/**
+ * What a session-request audit record may say about a proposal (C25): the
+ * names of the fields it set, and how many entries each list holds. Never a
+ * value. The agent wrote every value in a proposal, and a stored secret
+ * placed in one, in any encoding anyone could think of, went to the log and
+ * its export. Scrubbing by listing encodings never closed that, so the
+ * record holds nothing the agent wrote. The names come from the lists here,
+ * not from the proposal's keys; the counts are lengths this code measured.
+ * The human sees the real values in the pending view, and the grant
+ * enforces them.
+ */
+export function shapeOf(p) {
+  const fields = [...FIELDS, ...OWNER_FIELDS].filter((f) => p?.[f] !== undefined && p?.[f] !== null)
+  const counts = {}
+  for (const f of fields) if (Array.isArray(p[f])) counts[f] = p[f].length
+  return { fields, counts }
+}
+
+/** The names of the fields whose value a human's decision changed (C25). */
+export function narrowedOf(proposal, final) {
+  return [...FIELDS, ...OWNER_FIELDS].filter((f) => JSON.stringify(proposal?.[f]) !== JSON.stringify(final?.[f]))
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+// The modes that let a write through with no human (C26). `auto` never asks;
+// `first-use` asks once, and one approval of a harmless first GET then takes
+// the human out of every later POST and DELETE just the same.
+const UNASKED = new Set(['auto', 'first-use'])
+
+/**
+ * Why a session spec needs fresh presence. [] means it does not.
+ *
+ * `spec` is a session-create input: `{cred, …}` or `{grants: […]}`. One
+ * function decides this for creating, deciding and bulk-deciding, so no path
+ * can call an elevated session ordinary.
+ *
+ * Fail-closed: anything it cannot read counts as elevated, whatever its
+ * approval mode. `methods` absent or null is the creation default, GET and
+ * HEAD, which is how #createSession reads it too; `methods` or `routes`
+ * present as anything but a list of method names is unreadable. An unknown
+ * approval mode is not read here at all: #planSession refuses it.
+ */
+export function elevationOf(spec) {
+  const out = []
+  try {
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return ['approval_auto_writes']
+    if (spec.infinite === true) out.push('infinite')
+    if (spec.grants !== undefined && !Array.isArray(spec.grants)) return [...out, 'approval_auto_writes']
+    const grants = spec.grants !== undefined ? spec.grants : [spec]
+    if (grants.some((g) => !readable(g) || (UNASKED.has(g.approval) && permitsWrite(g)))) {
+      out.push('approval_auto_writes')
+    }
+    return out
+  } catch {
+    return [...new Set([...out, 'approval_auto_writes'])]
+  }
+}
+
+const names = (v) => Array.isArray(v) && v.every((m) => typeof m === 'string')
+
+/** Whether elevationOf can tell what a grant spec permits. */
+function readable(g) {
+  if (!g || typeof g !== 'object' || Array.isArray(g)) return false
+  if (g.methods != null && !names(g.methods)) return false
+  // Method-bound routes (F3) name methods of their own.
+  if (g.routes != null && !(Array.isArray(g.routes) && g.routes.every((r) => r && names(r.methods)))) return false
+  return true
+}
+
+/** Whether a readable grant spec permits a method outside GET, HEAD and OPTIONS. */
+function permitsWrite(g) {
+  const named = [...(g.methods == null ? ['GET', 'HEAD'] : g.methods)]
+  for (const r of g.routes || []) named.push(...r.methods)
+  return named.some((m) => !SAFE_METHODS.has(m.toUpperCase()))
+}
+
 export function fingerprint(proposal) {
   const canonical = JSON.stringify(proposal, Object.keys(proposal).sort())
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
@@ -51,12 +180,173 @@ export function fingerprint(proposal) {
 /** One line a human can read without knowing the schema. */
 export function summarize(p) {
   const bits = [`session for ${p.cred}`]
-  bits.push((p.methods || ['GET']).join(','))
-  bits.push((p.paths || ['/**']).join(' '))
+  bits.push(listOf(p.methods, ['GET']).join(','))
+  bits.push(listOf(p.paths, ['/**']).join(' '))
   if (p.budget) bits.push(`${p.budget} requests`)
   if (p.uses) bits.push(`${p.uses}-use placeholder`)
   if (p.ttl_minutes) bits.push(`${p.ttl_minutes}m`)
-  return bits.join(' · ')
+  // The narrowing fields an agent may also ask for. Each is shown, because a
+  // human approves the summary; a field missing here is one nobody read.
+  if (Array.isArray(p.routes)) {
+    bits.push(`routes ${p.routes.map((r) => `${listOf(r?.methods, []).join(',')} ${listOf(r?.paths, []).join(' ')}`).join(' | ')}`)
+  }
+  if (p.rate != null) bits.push(`rate ${windowText(p.rate, 'per')}`)
+  if (p.max_concurrent != null) bits.push(`${p.max_concurrent} at once`)
+  if (p.quota != null) bits.push(`quota ${windowText(p.quota, 'window')}`)
+  if (p.redirects != null) bits.push(`follows ${p.redirects} redirects`)
+  if (p.spend_tokens != null) bits.push(`${p.spend_tokens} tokens`)
+  if (p.spend_usd != null) bits.push(`$${p.spend_usd}`)
+  if (p.grant_ttl_minutes != null) bits.push(`grant ${p.grant_ttl_minutes}m`)
+  if (p.payload != null) bits.push('payload rules')
+  if (p.approval != null) bits.push(`approval ${p.approval}`)
+  if (p.infinite === true) bits.push('never expires')
+  const line = bits.join(' · ')
+  // A request that came from a template says which one, first.
+  return typeof p.template === 'string' ? `template ${p.template} v${p.template_version} · ${line}` : line
+}
+
+const listOf = (v, fallback) => (Array.isArray(v) ? v.map(String) : fallback)
+const windowText = (w, key) => (w && typeof w === 'object' ? `${w.count}/${w[key]}` : String(w))
+
+// ------------------------------------------------------------- templates
+
+/** What a template override may name (F17). Every one of them only narrows. */
+const TEMPLATE_OVERRIDES = ['methods', 'paths', 'budget', 'uses', 'grant_ttl_minutes', 'approval', 'ttl_hours', 'infinite', 'label']
+const APPROVAL_MODES = ['each', 'on-write', 'first-use', 'auto']
+// What a session without ttl_hours lives for: the store's default lifetime.
+// An override is held to it, so "12 hours" on a template that named none
+// cannot outlast the session the template would have made.
+const DEFAULT_TTL_HOURS = 8
+
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const isNames = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string' && x)
+
+/**
+ * A template with a human's overrides on top, as a session-create input (F17).
+ *
+ * A template is configuration, not standing approval, and its overrides can
+ * only narrow it: applied to every grant, methods are intersected, paths are
+ * intersected the way policy layers are, budget, uses and grant_ttl_minutes
+ * take the minimum, approval takes the stricter mode, ttl_hours takes the
+ * minimum (an infinite template given one becomes finite), infinite can only
+ * be cleared, and label may be replaced. Any other key is refused, never
+ * ignored, so nobody believes they narrowed something they did not.
+ *
+ * `budgetDefault(grantSpec)`, when given, is the budget a grant gets when the
+ * template names none (the profile's default). Without it, a budget override
+ * on such a grant is refused: there is nothing to take the minimum with, and
+ * taking the override as given could raise the default.
+ */
+export function resolveTemplate(template, overrides = {}, { budgetDefault = null } = {}) {
+  const refuse = (detail, rule = 'template_override') => deny('AV_POLICY_DENIED', detail, {
+    rule, hint: `A template can only be narrowed. Overrides are: ${TEMPLATE_OVERRIDES.join(', ')}.`,
+  })
+  if (!isObject(template) || !isObject(template.spec)) throw refuse('that template has no readable spec', 'session_shape')
+  if (!isObject(overrides)) throw refuse('overrides must be an object')
+  for (const k of Object.keys(overrides)) {
+    if (!TEMPLATE_OVERRIDES.includes(k)) throw refuse(`a template cannot be overridden with ${k}`)
+  }
+  const o = overrides
+  const has = (k) => o[k] !== undefined
+  const spec = structuredClone(template.spec)
+  const grants = spec.grants !== undefined ? spec.grants : [spec]
+  if (!Array.isArray(grants) || !grants.every(isObject)) throw refuse('the template\'s grants cannot be read', 'session_shape')
+
+  if (has('methods') && !isNames(o.methods)) throw refuse('methods must be a list of method names', 'policy_invalid')
+  if (has('paths') && !isNames(o.paths)) throw refuse('paths must be a list of path globs', 'policy_invalid')
+  if (has('approval') && !APPROVAL_MODES.includes(o.approval)) {
+    throw deny('AV_POLICY_DENIED', 'approval is not one of the four modes', { rule: 'approval', hint: 'approval is one of: each, on-write, first-use, auto' })
+  }
+  const budget = has('budget') ? policyMod.budgetInteger(o.budget) : null
+  if (has('budget') && budget === null) throw refuse('budget must be a whole number of requests, 0 or more', 'policy_invalid')
+  for (const k of ['uses', 'grant_ttl_minutes']) {
+    if (has(k) && !(Number.isInteger(o[k]) && o[k] >= 1)) throw refuse(`${k} must be a whole number, 1 or more`, k === 'uses' ? 'policy_invalid' : 'grant_ttl')
+  }
+  const min = (a, b) => (a == null ? b : Math.min(a, b))
+
+  for (const g of grants) {
+    if (has('methods')) {
+      const base = g.methods == null ? ['GET', 'HEAD'] : g.methods
+      if (!isNames(base)) throw refuse('the template\'s methods cannot be read', 'policy_invalid')
+      g.methods = o.methods.filter((m) => base.includes(m))
+    }
+    if (has('paths')) {
+      const base = g.paths == null ? ['/**'] : g.paths
+      if (!isNames(base)) throw refuse('the template\'s paths cannot be read', 'policy_invalid')
+      // The containment policy layers use, so a path survives only where the
+      // template already allowed it.
+      g.paths = policyMod.intersect([{ paths: base }, { paths: o.paths }]).paths
+    }
+    if (has('budget')) {
+      let base = g.budget
+      if (base == null) {
+        base = typeof budgetDefault === 'function' ? budgetDefault(g) : null
+        if (!Number.isInteger(base)) throw refuse('this template names no budget to narrow', 'policy_invalid')
+      }
+      const baseInt = policyMod.budgetInteger(base)
+      if (baseInt === null) throw refuse('the template\'s budget cannot be read', 'policy_invalid')
+      g.budget = Math.min(baseInt, budget)
+    }
+    for (const k of ['uses', 'grant_ttl_minutes']) {
+      if (!has(k)) continue
+      if (g[k] != null && !(Number.isInteger(g[k]) && g[k] >= 1)) throw refuse(`the template's ${k} cannot be read`, 'policy_invalid')
+      g[k] = min(g[k], o[k])
+    }
+    if (has('approval')) {
+      const base = g.approval ?? 'on-write'
+      const order = policyMod.APPROVAL_ORDER
+      // An unknown stored mode is the strictest, never auto.
+      g.approval = !order.includes(base) ? 'each' : (order.indexOf(o.approval) > order.indexOf(base) ? o.approval : base)
+    }
+  }
+
+  if (has('infinite')) {
+    if (typeof o.infinite !== 'boolean') throw refuse('infinite is true or false', 'ttl')
+    // Only cleared: an override never makes a session last longer.
+    if (o.infinite === true && spec.infinite !== true) throw refuse('an override cannot remove a template\'s lifetime')
+    if (o.infinite === false) delete spec.infinite
+  }
+  if (has('ttl_hours')) {
+    if (typeof o.ttl_hours !== 'number' || !Number.isFinite(o.ttl_hours) || !(o.ttl_hours > 0)) {
+      throw deny('AV_POLICY_DENIED', 'ttl_hours must be a positive number of hours', { rule: 'ttl' })
+    }
+    if (spec.infinite === true) {
+      delete spec.infinite
+      spec.ttl_hours = o.ttl_hours
+    } else {
+      const base = spec.ttl_hours ?? DEFAULT_TTL_HOURS
+      if (typeof base !== 'number' || !Number.isFinite(base) || !(base > 0)) throw refuse('the template\'s ttl_hours cannot be read', 'ttl')
+      spec.ttl_hours = Math.min(base, o.ttl_hours)
+    }
+  }
+  if (has('label')) {
+    if (typeof o.label !== 'string' || o.label.length > 80) throw refuse('label is a string of at most 80 characters', 'policy_invalid')
+    spec.label = o.label
+  }
+  return spec
+}
+
+/** The grant specs of a session-create input, whichever form it has. */
+export function grantSpecsOf(spec) {
+  if (!isObject(spec)) return []
+  if (spec.grants !== undefined) return Array.isArray(spec.grants) ? spec.grants.filter(isObject) : []
+  return [spec]
+}
+
+/** The credentials a template covers, in order. */
+export function templateCreds(spec) {
+  return grantSpecsOf(spec).map((g) => g.cred).filter((c) => typeof c === 'string')
+}
+
+/** One line per template, in the words a session request summary uses. */
+export function templateSummary(spec) {
+  const grants = grantSpecsOf(spec)
+  const lines = grants.map((g) => summarize({
+    ...g,
+    infinite: spec.infinite === true ? true : undefined,
+    ttl_minutes: typeof spec.ttl_hours === 'number' ? Math.round(spec.ttl_hours * 60) : undefined,
+  }))
+  return lines.join(' + ')
 }
 
 export class SessionRequests {
@@ -75,6 +365,9 @@ export class SessionRequests {
   constructor(vault = null) {
     this.items = new Map()
     this.vault = vault
+    // Told when a request starts waiting (F14), the way the pipeline tells
+    // it about a held request. A hook that throws never stops the request.
+    this.onPending = null
     this.#load()
   }
 
@@ -133,6 +426,10 @@ export class SessionRequests {
     for (const [key, r] of this.items) {
       const age = now - Date.parse(r.created_at)
       if (r.state === 'pending' && age > PENDING_TTL_MS) { this.items.delete(key); continue }
+      // Settled and seen out. Nothing deleted these, and denied ones are
+      // persisted, so they piled up for the life of the vault.
+      const settledFor = now - Date.parse(r.decided_at || r.created_at)
+      if (r.state !== 'pending' && !r.result && settledFor > SETTLED_TTL_MS) { this.items.delete(key); continue }
       // An approved request holds a live token until the agent collects it.
       // Uncollected, that is a capability sitting in memory with nobody
       // waiting for it, so it does not sit there indefinitely.
@@ -150,17 +447,43 @@ export class SessionRequests {
    * Record a proposal. Creates nothing: no session, no token, no grant. The
    * only thing that exists afterwards is a question for a human.
    */
-  propose({ proposal, reason }) {
+  propose({ proposal, reason, fromTemplate = false }) {
+    // The route refuses these before it gets here; this is for any other
+    // caller. An agent's proposal never carries an owner field. The one
+    // exception is a template's own (F17): the owner wrote it, and the daemon
+    // copied it into a proposal that names that template.
+    const templated = fromTemplate === true && typeof proposal?.template === 'string'
+    if (!templated && OWNER_FIELDS.some((f) => proposal?.[f] !== undefined)) {
+      const err = new Error('only the owner can choose the approval mode or an unlimited lifetime')
+      err.code = 'AV_OWNER_ONLY'
+      throw err
+    }
     this.#sweep()
-    if (this.items.size >= MAX_PENDING) {
+    // Only what is actually waiting counts. This counted every record in
+    // every state, and settled ones were never removed, so after 64 decisions
+    // in a vault's life — denials survive restarts — no agent could ask for a
+    // session again: a bound on the wrong thing.
+    const waiting = [...this.items.values()].filter((r) => r.state === 'pending').length
+    if (waiting >= MAX_PENDING) {
       // Refuse rather than evict, so a flood cannot push out the request a
       // human is in the middle of reading.
       const err = new Error('too many session requests are already waiting')
       err.code = 'AV_TOO_MANY_REQUESTS'
       throw err
     }
+    // Memory stays bounded by forgetting the oldest SETTLED requests, never a
+    // pending one.
+    for (const [key, r] of this.items) {
+      if (this.items.size < MAX_ITEMS) break
+      if (r.state !== 'pending') this.items.delete(key)
+    }
+    // Handed to the asker once and stored only as a hash. The request id is
+    // listed to anyone on the socket, so the id alone let one agent collect
+    // the session a human had granted to another.
+    const collectSecret = randomBytes(24).toString('base64url')
     const record = {
       id: id.sessionRequest(),
+      collect_hash: sha256(collectSecret),
       proposal,
       fingerprint: fingerprint(proposal),
       summary: summarize(proposal),
@@ -174,11 +497,30 @@ export class SessionRequests {
     }
     this.items.set(record.id, record)
     this.#save()
+    // Structure only (C25): the summary quotes the agent's paths and the
+    // reason is the agent's own words, and the log outlives the request and
+    // is exported. The credential is named by the vault's own slug.
+    const { fields, counts } = shapeOf(proposal)
     this.audit?.write('session_request.opened', {
-      request_id: record.id, summary: record.summary, fingerprint: record.fingerprint,
-      agent_reason_untrusted: record.reason_untrusted,
+      request_id: record.id, actor: 'agent', cred: this.vault?.findCredential?.(proposal?.cred)?.slug ?? null,
+      template: typeof proposal?.template === 'string' ? proposal.template : null,
+      proposed: fields, counts,
     })
-    return record
+    try { this.onPending?.({ kind: 'session', id: record.id, headline: record.summary, created_at: record.created_at }) } catch { /* a signal, never the request */ }
+    return { record, collectSecret }
+  }
+
+  /**
+   * Whether `secret` is the one this request was opened with. Compared in
+   * constant time over digests; a request with no stored hash — one opened
+   * before secrets existed — can be collected by nobody but the human's own
+   * decision.
+   */
+  static mayCollect(record, secret) {
+    if (!record?.collect_hash || typeof secret !== 'string' || !secret) return false
+    const want = Buffer.from(record.collect_hash, 'hex')
+    const got = Buffer.from(sha256(secret), 'hex')
+    return want.length === got.length && timingSafeEqual(want, got)
   }
 
   get(id_) { this.#sweep(); return this.items.get(id_) || null }
@@ -206,4 +548,4 @@ export class SessionRequests {
   }
 }
 
-export { MAX_PENDING, PENDING_TTL_MS, COLLECT_TTL_MS }
+export { MAX_PENDING, PENDING_TTL_MS, COLLECT_TTL_MS, SETTLED_TTL_MS }

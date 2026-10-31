@@ -6,19 +6,25 @@
 // command rather than just failing.
 
 import { request } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { homedir, constants as osConstants } from 'node:os'
 import { join, resolve as resolvePath } from 'node:path'
 import { createInterface } from 'node:readline'
 import { createHash } from 'node:crypto'
 import * as nodeFs from 'node:fs'
 import { Vault } from '../store/vault.js'
 import { Daemon } from '../daemon/server.js'
-import { listProfiles } from '../connectors/profiles.js'
-import { EXIT } from '../core/errors.js'
+import { listProfiles, getProfile } from '../connectors/profiles.js'
+import { EXIT, CODES } from '../core/errors.js'
 import * as ph from '../core/placeholder.js'
 import { loadState, saveState, rememberSession, statePath, stateDir } from '../client-state.js'
 import { fetchPending, decision, parseOverrides, describeGranted, collectApproved } from '../pending.js'
+import { elevationOf } from '../daemon/session-requests.js'
+import { APPROVAL_ORDER } from '../core/policy.js'
+import { writeFileExclusive, assertPlaceholderOnly, ENV_NAME } from './files.js'
+import { sessionInput, approvalOverrides, expiryInput, usage as usageError, booleanFlag, optionalNumber } from './policy-input.js'
+import { controlCommands, cleanText, SCRUB_HELP, approvalPreviewLines } from './control-commands.js'
+import { watchApprovals } from './watch.js'
 
 // A system install puts the vault behind its own uid. The CLI finds it by the
 // state file the privileged installer writes, and falls back to a dev vault in
@@ -98,7 +104,11 @@ function control(method, path, body) {
           ))
         }
         if (res.statusCode >= 400) {
-          reject(Object.assign(new Error(parsed.detail || parsed.message || text), { problem: parsed, exit: EXIT.FAILURE }))
+          // The code's own exit, so a script can tell "not found" from
+          // "refused by policy" from "needs a human" without parsing text.
+          reject(Object.assign(new Error(parsed.detail || parsed.message || text), {
+            problem: parsed, exit: CODES[parsed.code]?.exit ?? EXIT.FAILURE,
+          }))
         } else resolve(parsed)
       })
     })
@@ -125,6 +135,12 @@ async function controlWithPresence(method, path, body) {
         exit: EXIT.LOCKED, next: 'agent-vault unlock',
       })
     }
+    // No factor at all, and the change needs a fresh one: nothing to ask for.
+    if (e.problem?.rule === 'factor_required') {
+      throw Object.assign(new Error(e.problem.detail || 'this change needs a human factor, and none is enrolled'), {
+        exit: EXIT.PRESENCE, next: 'agent-vault passphrase set',
+      })
+    }
     // Work out what would actually satisfy this before deciding how to ask.
     // Checking the terminal first meant a vault whose only factor is an
     // authenticator reported "needs your passphrase" — naming a secret that
@@ -137,9 +153,19 @@ async function controlWithPresence(method, path, body) {
       })
     }
     if (!process.stdin.isTTY) {
+      // The UI can confirm it only with an authenticator, so it is named only
+      // when there is one: a passphrase-only vault would be sent to a page
+      // that cannot help.
       throw Object.assign(new Error('this change needs your passphrase, and there is no terminal to ask on'), {
         exit: EXIT.PRESENCE,
+        ...(factors.includes('authenticator') ? { next: 'agent-vault ui   (confirm it there with your authenticator)' } : {}),
       })
+    }
+    // Fresh presence: the passphrase goes with this one request and opens no
+    // window. The routes that need it do not accept a window at all.
+    if (e.problem?.rule === 'fresh_presence') {
+      const passphrase = await readSecret('passphrase (for this change only): ')
+      return control(method, path, { ...body, presence: { passphrase } })
     }
     console.error(`${C.dim('This change needs a human.')}`)
     const passphrase = await readSecret('passphrase: ')
@@ -286,7 +312,7 @@ async function runWizard(flow) {
       console.log(`\n${C.dim('cancelled; nothing was changed')}`)
       process.exit(0)
     }
-    if (e.noTty) return fail(e.message, EXIT.USAGE, { next: 'pass the options as flags instead' })
+    if (e.noTty) return fail(e.message, EXIT.USAGE, { next: 'agent-vault help   (pass the options as flags instead)' })
     throw e
   }
 }
@@ -298,7 +324,9 @@ const COMMANDS = {
     // Only report the system install when it is the one actually in use. An
     // explicit AGENT_VAULT_DIR, or --dev, means someone wants a different vault
     // and should not be told about this one instead.
-    if (USING_SYSTEM && !args.dev) {
+    const dev = booleanFlag(args, 'dev'), printOnly = booleanFlag(args, 'print-only')
+    const port = optionalNumber(args, 'port', { min: 1, max: 65535 })
+    if (USING_SYSTEM && !dev) {
       const checkout = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
       const installedApp = join(SYSTEM_ROOT, 'app')
       const installed = appFingerprint(installedApp)
@@ -344,7 +372,7 @@ const COMMANDS = {
     // which an agent cannot edit. Only the first install is trust-on-first-use,
     // which is why it shows the plan and the file to verify before asking for
     // a password.
-    if (!args.dev) {
+    if (!dev) {
       const { existsSync: exists } = await import('node:fs')
       const rootOwnedInstaller = join(SYSTEM_ROOT, 'app', 'bin', 'agent-vault-setup.js')
       const installer = exists(rootOwnedInstaller) ? rootOwnedInstaller : SETUP_BIN
@@ -353,11 +381,11 @@ const COMMANDS = {
       // appear to work and change nothing.
       const checkout = new URL('../..', import.meta.url).pathname.replace(/\/$/, '')
       const argv = [process.execPath, installer, 'install', '--from', checkout]
-      if (args.port) argv.push('--port', String(args.port))
+      if (port !== undefined) argv.push('--port', String(port))
       const cmd = `sudo ${argv.join(' ')}`
 
       if (JSON_OUT) return out(null, { mode: 'system', command: cmd, installer, installed: false })
-      if (args['print-only']) return console.log(cmd)
+      if (printOnly) return console.log(cmd)
 
       console.log(`${C.bold('agent-vault needs one privileged step.')}`)
       console.log()
@@ -427,7 +455,7 @@ const COMMANDS = {
       return out(`${C.green('ok')} dev vault already at ${DEV_VAULT_DIR}`, { dir: DEV_VAULT_DIR, existed: true })
     }
     mkdirSync(DEV_VAULT_DIR, { recursive: true, mode: 0o700 })
-    const passphrase = args.passphrase ? await readSecret('passphrase: ') : null
+    const passphrase = booleanFlag(args, 'passphrase') ? await readSecret('passphrase: ') : null
     Vault.create(DEV_VAULT_DIR, { factor: passphrase ? 'passphrase' : 'none', passphrase })
     console.log(`${C.green('created')} ${DEV_VAULT_DIR} ${C.dim('(mode 0700)')}`)
     console.log()
@@ -444,8 +472,10 @@ const COMMANDS = {
         EXIT.USAGE, { next: 'agent-vault status' })
     }
     const vault = Vault.open(VAULT_DIR)
-    const unlocked = vault.startInRecordedState(args.passphrase ? await readSecret('passphrase: ') : null)
-    const daemon = new Daemon(vault, { port: Number(args.port || process.env.AGENT_VAULT_PORT || 7411), socketPath: SOCKET })
+    // 0 asks the system for a free port.
+    const port = optionalNumber(args, 'port', { min: 0, max: 65535 }) ?? Number(process.env.AGENT_VAULT_PORT || 7411)
+    const unlocked = vault.startInRecordedState(booleanFlag(args, 'passphrase') ? await readSecret('passphrase: ') : null)
+    const daemon = new Daemon(vault, { port, socketPath: SOCKET })
     await daemon.start()
     console.log(`${C.green('agent-vault daemon')} listening`)
     console.log(`  gateway  http://127.0.0.1:${daemon.gatewayPort}`)
@@ -494,7 +524,7 @@ const COMMANDS = {
     const argv = [process.execPath, installer, 'install', '--from', checkout]
     const cmd = `sudo ${argv.join(' ')}`
 
-    if (args['print-only'] || JSON_OUT) return out(cmd, { command: cmd })
+    if (booleanFlag(args, 'print-only') || JSON_OUT) return out(cmd, { command: cmd })
     if (!process.stdin.isTTY) {
       console.log(`Run this to update the installed daemon:\n  ${C.cyan(cmd)}`)
       return
@@ -528,6 +558,7 @@ const COMMANDS = {
     console.log(`${C.bold('agent-vault')} ${s.daemon_version}  ${s.locked ? C.red('locked') : C.green('unlocked')}`)
     console.log(`  gateway        http://127.0.0.1:${s.gateway_port}`)
     console.log(`  credentials    ${s.credentials}`)
+    if (s.credentials_expiring > 0) console.log(`  expiring       ${s.credentials_expiring}`)
     console.log(`  sessions       ${s.sessions_active} active`)
     console.log(`  grants         ${s.grants_active} active`)
     console.log(`  placeholders   ${s.placeholders_live} live`)
@@ -562,10 +593,11 @@ const COMMANDS = {
       return runWizard(() => credentialWizard(controlWithPresence))
     }
     if (!slug) return fail('usage: agent-vault cred add <slug> --kind <kind> [--host <host>]', EXIT.USAGE)
+    const expires_at = args.expires === undefined ? undefined : expiryInput(args.expires)
     const value = await readSecret(`value for ${slug} (not echoed): `)
     if (!value) return fail('no value given', EXIT.USAGE)
     const cred = await controlWithPresence('POST', '/v1/credentials', {
-      slug, kind: args.kind || 'http', host: args.host, scheme: args.scheme, value,
+      slug, kind: args.kind || 'http', host: args.host, scheme: args.scheme, value, expires_at,
     })
     out(`${C.green('added')} ${cred.slug} ${C.dim(`(${cred.kind}, fingerprint ${cred.fields[0].fp8})`)}\n` +
         `  placeholder goes at: ${cred.fields[0].sites.join(', ')}`, cred)
@@ -579,6 +611,14 @@ const COMMANDS = {
     if (!creds.length) return console.log(C.dim('no credentials yet'))
     for (const c of creds) {
       console.log(`${C.bold(c.slug)} ${C.dim(c.kind)} ${C.dim(c.connector.host || '')}`)
+      if (c.expiry_warning === 'expired') console.log(`  ${C.red('expired')}`)
+      else if (c.expiry_warning === 'soon') {
+        const dates = [c.expires_at, c.health?.observed_expires_at].filter(Boolean).map(Date.parse).filter(Number.isFinite)
+        console.log(`  ${C.yellow(`expires in ${Math.max(0, Math.ceil((Math.min(...dates) - Date.now()) / 86400000))}d`)}`)
+      }
+      if (c.health) console.log(`  health: ${cleanText(c.health.status)}`)
+      if (c.quarantine) console.log(`  ${C.yellow('quarantined')}`)
+      for (const [host, n] of Object.entries(c.pins || {})) console.log(`  pinned: ${cleanText(host)} (${n})`)
       for (const f of c.fields) console.log(`  ${f.name} ${C.dim(`fp:${f.fp8} -> ${f.sites.join(', ')}`)}`)
     }
   },
@@ -589,29 +629,42 @@ const COMMANDS = {
   },
 
   async 'session:create'(args) {
-    if (!args.cred && !JSON_OUT && process.stdin.isTTY) {
+    if (!args.cred && !args['grants-file'] && !args.template && !JSON_OUT && process.stdin.isTTY) {
       const { sessionWizard } = await import('./wizards.js')
       return runWizard(() => sessionWizard(controlWithPresence))
     }
-    if (!args.cred) return fail('usage: agent-vault session create --cred <slug> [--methods GET,POST] [--paths "/repos/**"]', EXIT.USAGE)
-    const body = {
-      cred: args.cred,
-      label: args.label || 'cli session',
-      ttl_hours: args.ttl ? Number(args.ttl) : undefined,
-      methods: args.methods ? args.methods.split(',') : undefined,
-      paths: args.paths ? args.paths.split(',') : undefined,
-      budget: args.budget ? Number(args.budget) : undefined,
-      approval: args.approval,
-      uses: args.uses ? Number(args.uses) : undefined,
-    }
+    const usage = 'usage: agent-vault session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths "/repos/**"] [--approval MODE] [--ttl HOURS | --infinite]'
+    if (!args.cred && !args['grants-file'] && !args.template) return fail(usage, EXIT.USAGE)
+    const body = sessionInput(args)
+    let template
+    if (body.template) {
+      template = await control('GET', `/v1/templates?name=${encodeURIComponent(body.template)}`)
+      body.template_hash = template.hash
+      if (!JSON_OUT) console.log(cleanText(template.summary || `template ${template.name} v${template.version}`))
+    } else if (body.label === undefined) body.label = 'cli session'
     const s = await controlWithPresence('POST', '/v1/sessions', body)
     rememberSession(s)
     if (JSON_OUT) return out(null, s)
-    console.log(`${C.green('session')} ${s.session_id} ${C.dim(`expires ${s.expires_at}`)}`)
-    console.log(`  base url     ${s.base_url}`)
-    console.log(`  placeholder  ${s.placeholder}`)
-    console.log(`  put it at    ${s.usage.join(' | ')}`)
-    for (const p of s.lint || []) console.log(`  ${p.level === 'error' ? C.red('lint') : C.yellow('lint')} ${p.message}`)
+    if (s.infinite) {
+      console.log(`${C.green('session')} ${s.session_id} ${C.yellow('never expires')}`)
+      console.log(`  ${C.dim(`revoke it with: agent-vault session revoke ${s.session_id}`)}`)
+    } else {
+      console.log(`${C.green('session')} ${s.session_id} ${C.dim(`expires ${s.expires_at}`)}`)
+    }
+    const specs = template ? (template.spec.grants || [template.spec]) : body.grants || [body]
+    for (const g of s.grants || [s]) {
+      console.log(`  base url     ${g.base_url}`)
+      console.log(`  placeholder  ${g.placeholder}`)
+      console.log(`  put it at    ${g.usage.join(' | ')}`)
+      if (g.expires_at) console.log(`  expires      ${g.expires_at}`)
+      const spec = specs.find((x) => x.cred === g.cred) || specs[0]
+      if (elevationOf(spec).includes('approval_auto_writes')) {
+        console.log(spec?.approval === 'first-use'
+          ? `  ${C.yellow('approval')}   first-use: after the first request, writes go through without asking you`
+          : `  ${C.yellow('approval')}   auto: writes go through without asking you`)
+      }
+      for (const p of g.lint || []) console.log(`  ${p.level === 'error' ? C.red('lint') : C.yellow('lint')} ${p.message}`)
+    }
     // Build the example from this credential's own declared site. A hardcoded
     // Authorization header was telling the reader to do the one thing the
     // vault refuses, directly under the line saying where it actually goes.
@@ -620,7 +673,11 @@ const COMMANDS = {
     console.log()
     console.log(C.dim('  try:'))
     console.log(C.dim(`    curl "${s.base_url}${s.probe_path || '/'}" \\`))
-    console.log(C.dim(`      -H "Authorization: Bearer ${s.token}" \\`))
+    // The token rides in AV-Session, not Authorization. For every Bearer-site
+    // credential the placeholder goes in Authorization too, and a server keeps
+    // only the first of two — so this example dropped the placeholder and
+    // failed for the most common credential there is.
+    console.log(C.dim(`      -H "AV-Session: ${s.token}" \\`))
     if (asHeader) console.log(C.dim(`      -H "${asHeader}"`))
     else console.log(C.dim(`      # then put the placeholder at: ${site}`))
   },
@@ -630,7 +687,17 @@ const COMMANDS = {
     if (JSON_OUT) return out(null, sessions)
     for (const s of sessions) {
       const state = s.state === 'active' ? C.green(s.state) : C.dim(s.state)
-      console.log(`${s.id}  ${state}  ${s.label} ${C.dim(`grants:${s.grants} expires:${s.expires_at}`)}`)
+      // The strictest mode across its grants: what the session will ask at
+      // the least. A mode this CLI does not know ranks strictest.
+      const rank = (m) => (APPROVAL_ORDER.includes(m) ? APPROVAL_ORDER.indexOf(m) : APPROVAL_ORDER.length)
+      const modes = (s.creds || []).map((c) => c.approval ?? 'auto')
+      const mode = modes.length ? modes.reduce((a, b) => (rank(b) > rank(a) ? b : a)) : '-'
+      const badges = [
+        s.elevated?.length ? C.yellow('elevated') : '',
+        s.infinite ? C.yellow('infinite') : '',
+      ].filter(Boolean).map((b) => `${b} `).join('')
+      const expiry = s.infinite ? 'never' : s.expires_at
+      console.log(`${s.id}  ${state}  ${cleanText(s.label)} ${badges}${C.dim(`grants:${s.grants} approval:${mode} expires:${expiry}`)}`)
     }
   },
 
@@ -643,7 +710,7 @@ const COMMANDS = {
     const cred = args._[0]
     if (!cred) return fail('usage: agent-vault ph next <cred>', EXIT.USAGE)
     const r = await controlWithPresence('POST', '/v1/placeholders', {
-      cred, sid: args.session || loadState().session_id, uses: args.uses ? Number(args.uses) : undefined,
+      cred, sid: args.session || loadState().session_id, uses: optionalNumber(args, 'uses', { min: 1 }),
     })
     saveState({ placeholder: r.placeholder })
     if (JSON_OUT) return out(null, r)
@@ -668,67 +735,138 @@ const COMMANDS = {
     out(ph.SCANNER_PATTERN, { pattern: ph.SCANNER_PATTERN })
   },
 
-  async env() {
-    const st = loadState()
-    if (!st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
+  async env(args) {
+    if (booleanFlag(args, 'force') && args.out === undefined) return fail('--force needs --out', EXIT.USAGE)
+    if (!wantsMapping(args) && args.out === undefined) return legacyEnv()
+
+    const format = args.format ?? 'dotenv'
+    if (!['dotenv', 'shell'].includes(format)) return fail('--format is dotenv or shell', EXIT.USAGE)
+    if (args.out === true) return fail('--out needs a file name', EXIT.USAGE)
+    const mappings = parseMappings(args)
+    const target = args.out === undefined ? null : resolvePath(String(args.out))
+    // Before anything is minted: a file that will not be written should not
+    // cost a placeholder, or the passphrase.
+    let force = booleanFlag(args, 'force')
+    if (target) {
+      const there = inspectTarget(target)
+      if (there === 'foreign') return fail(`${args.out} is not a regular file you own`, EXIT.CONFLICT)
+      if (there === 'file' && !force) {
+        if (process.stdin.isTTY && !JSON_OUT && /^y(es)?$/i.test((await ask(`${args.out} exists. Replace it? [y/N] `)).trim())) {
+          force = true
+        } else {
+          return fail(`${args.out} exists; pass --force to replace it`, EXIT.CONFLICT)
+        }
+      }
+    }
+    const { sid, entries } = await resolveMappings(args, mappings, 'env')
+
     const lines = [
-      `export AGENT_VAULT=1`,
-      `export AGENT_VAULT_URL=http://127.0.0.1:${st.gateway_port || 7411}`,
-      `export AGENT_VAULT_SESSION=${st.token}`,
-      `export AGENT_VAULT_PLACEHOLDER=${st.placeholder}`,
-      `export AGENT_VAULT_HINT="Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>"`,
+      '# agent-vault env file: these are placeholders, not secrets.',
+      `# session ${sid}, written ${new Date().toISOString()} by agent-vault env`,
+      ...entries.map((e) => `${format === 'shell' ? 'export ' : ''}${e.name}=${e.value}`),
     ]
-    out(lines.join('\n'), { env: lines })
+    const text = `${lines.join('\n')}\n`
+    const described = entries.map(({ name, kind, cred, field }) => ({ name, kind, cred, ...(field ? { field } : {}) }))
+
+    if (!target) {
+      if (JSON_OUT) {
+        return out(null, {
+          path: null, session_id: sid, format, mode: null, replaced: false,
+          entries: entries.map(({ name, kind, cred, field, value }) => ({ name, kind, cred, ...(field ? { field } : {}), value })),
+        })
+      }
+      return process.stdout.write(text)
+    }
+    let replaced
+    try {
+      ({ replaced } = writeFileExclusive(target, text, { force }))
+    } catch (e) {
+      if (e.code === 'EEXIST') return fail(`${args.out} exists; pass --force to replace it`, EXIT.CONFLICT)
+      if (e.code === 'ENOTREGULAR') return fail(`${args.out} is not a regular file you own`, EXIT.CONFLICT)
+      throw e
+    }
+    if (replaced) console.error(`replaced ${args.out}`)
+    if (await gitWouldCommit(target)) {
+      console.error(`${C.yellow('note')} ${args.out} is inside a git repository and is not ignored`)
+    }
+    out(`${C.green('wrote')} ${args.out} ${C.dim(`(${entries.length} entries, mode 0600)`)}`, {
+      path: target, session_id: sid, format, mode: '0600', replaced, entries: described,
+    })
   },
 
   async exec(args) {
-    const st = loadState()
-    if (!st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
     const { spawn } = await import('node:child_process')
     const argv = args._
-    if (!argv.length) return fail('usage: agent-vault exec -- <command>', EXIT.USAGE)
-    // The child gets a scrubbed environment: known credential variables are
-    // dropped so a stale real token cannot shadow the vault.
-    const env = { ...process.env }
-    for (const k of Object.keys(env)) {
-      if (/_(TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)$/.test(k)) delete env[k]
+    const mapping = wantsMapping(args)
+    const st = loadState()
+    if (!mapping && !st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
+    if (!argv.length) return fail('usage: agent-vault exec [--map NAME=<slug>]... -- <command>', EXIT.USAGE)
+    const mapped = mapping ? await resolveMappings(args, parseMappings(args), 'exec') : null
+    // The child gets a scrubbed environment: credential variables are dropped
+    // so a stale real token cannot shadow the vault. The list used to be five
+    // exact uppercase suffixes, which kept AWS_SECRET_ACCESS_KEY, STRIPE_KEY,
+    // any lowercase name and every DATABASE_URL with a password in it — the
+    // AWS SDK then used the real key directly, past the vault.
+    const env = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!VAULT_GENERATED.includes(k) && !looksLikeCredential(k, v)) env[k] = v
     }
+    // The state file's token only belongs to the session it was recorded
+    // for. Mapping another session's credentials must not hand the child a
+    // token for a different one.
+    const sameSession = !mapped || mapped.sid === st.session_id
     Object.assign(env, {
       AGENT_VAULT: '1',
-      AGENT_VAULT_URL: `http://127.0.0.1:${st.gateway_port || 7411}`,
-      AGENT_VAULT_SESSION: st.token,
-      AGENT_VAULT_PLACEHOLDER: st.placeholder,
+      AGENT_VAULT_URL: `http://127.0.0.1:${mapped ? mapped.port : gatewayPortOf(st)}`,
+      ...(sameSession && st.token ? { AGENT_VAULT_SESSION: st.token } : {}),
+      ...(sameSession && st.placeholder ? { AGENT_VAULT_PLACEHOLDER: st.placeholder } : {}),
     })
+    // Set after the scrub on purpose: GH_TOKEN=<placeholder> is the point, and
+    // the scrub would drop it by name.
+    for (const e of mapped?.entries || []) env[e.name] = e.value
     const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env })
-    child.on('exit', (code) => process.exit(code ?? 0))
+    // A missing binary is an 'error' event, and with no listener it crashed
+    // the CLI with a stack trace instead of saying what was not found.
+    child.on('error', (e) => (e.code === 'ENOENT'
+      ? fail(`command not found: ${argv[0]}`, 127)
+      : fail(`could not run ${argv[0]}: ${e.message}`, 126)))
+    // A child killed by a signal has no exit code, and `code ?? 0` reported
+    // that as success. The shell convention is 128 + the signal number.
+    child.on('exit', (code, signal) => process.exit(code ?? 128 + (osConstants.signals[signal] || 0)))
   },
 
-  async approvals() {
+  async approvals(args) {
     // What is waiting, and how to describe it, comes from src/pending.js —
     // shared with the web UI, because they are two interfaces to one API. This
     // function decides how it looks in a terminal and nothing else.
     const pending = await fetchPending((path) => control('GET', path))
+    if (args.show && !pending.some((p) => p.id === args.show)) return fail('nothing waiting with that id', EXIT.NOT_FOUND)
     if (JSON_OUT) return out(null, pending)
     if (!pending.length) return console.log(C.dim('nothing waiting'))
 
-    for (const item of pending) {
+    for (const item of pending.filter((p) => !args.show || p.id === args.show)) {
       const label = item.kind === 'session' ? 'session requested' : 'pending'
       console.log(`${C.yellow(label)} ${item.id}`)
-      console.log(`  ${C.bold(item.headline)}`)
-      if (item.claim) console.log(`  ${C.dim(`claimed by the agent (unverified): ${item.claim}`)}`)
+      console.log(`  ${C.bold(cleanText(item.headline))}`)
+      if (item.claim) console.log(`  ${C.dim(`claimed by the agent (unverified): ${cleanText(item.claim)}`)}`)
       if (item.caution) console.log(`  ${C.dim(item.caution)}`)
+      if (item.preview) for (const line of approvalPreviewLines(item.preview, Boolean(args.show))) console.log(line)
       const narrow = item.narrowable.length
         ? ` ${item.narrowable.map((f) => `[--${f} ...]`).join(' ')}`
         : ''
-      console.log(`  ${C.dim(`agent-vault approve ${item.id}${narrow}`)}`)
+      // What only you can add. Never something the agent asked for.
+      const owner = (item.owner_settable || []).length ? ' [--approval MODE] [--infinite]' : ''
+      console.log(`  ${C.dim(`agent-vault approve ${item.id}${narrow}${owner}`)}`)
       console.log(`  ${C.dim(`agent-vault deny ${item.id}`)}`)
     }
   },
 
   async approve(args) {
     const r = await decide(args, true)
-    out(`${C.green('approved')} ${r.summary || describeGranted(r.granted)}`, r)
-    if (r.collected) {
+    // What was granted, never the agent's ask: a narrowed approval of a
+    // GET,POST proposal said "GET,POST" while the session could only GET.
+    out(`${C.green('approved')} ${cleanText(r.granted && typeof r.granted === 'object' ? describeGranted(r.granted) : r.summary || '')}`, r)
+    if (r.collected && !JSON_OUT) {
       // The store holds one session, so this is now THE session every local
       // client uses. Saying so beats letting someone discover it.
       console.log(C.dim(`  session ${r.collected.session_id} is now the one your agents use`))
@@ -738,28 +876,18 @@ const COMMANDS = {
 
   async deny(args) {
     const r = await decide(args, false)
-    out(`${C.red('denied')} ${r.summary || ''}`, r)
+    out(`${C.red('denied')} ${cleanText(r.summary || '')}`, r)
   },
 
   async 'audit:tail'(args) {
-    const rows = await control('GET', `/v1/audit?limit=${args.limit || 20}`)
+    const rows = await control('GET', `/v1/audit?limit=${optionalNumber(args, 'limit', { min: 1 }) ?? 20}`)
     if (JSON_OUT) return out(null, rows)
     for (const r of rows) {
       const decision = r.decision === 'deny' ? C.red('deny') : r.decision === 'allow' ? C.green('allow') : C.dim('-')
-      const detail = r.reason_code || r.credential_slug || r.detail || ''
-      console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(detail)}`)
+      // A session request's records name the credential as `cred` (C25).
+      const detail = r.reason_code || r.credential_slug || r.cred || r.detail || ''
+      console.log(`${C.dim(r.ts.slice(11, 19))} ${String(r.seq).padStart(4)} ${decision.padEnd(16)} ${C.bold(r.kind)} ${C.dim(cleanText(detail))}`)
     }
-  },
-
-  async 'audit:verify'() {
-    const v = await control('GET', '/v1/audit/verify')
-    if (v.ok) out(`${C.green('chain intact')} ${v.count} records, head ${v.head?.slice(0, 16)}...`, v)
-    // Not every finding has a record number: a log that is missing its head
-    // anchor, or that ends short of where it should, is broken between records
-    // rather than at one. "broken at record undefined" would be the daemon
-    // reporting tampering and sounding like a bug instead.
-    else if (v.brokenAt) fail(`chain broken at record ${v.brokenAt}: ${v.reason}`, EXIT.FAILURE, { problem: v })
-    else fail(`the audit log cannot be trusted: ${v.reason}`, EXIT.FAILURE, { problem: v })
   },
 
   async 'listen:add'(args) {
@@ -786,8 +914,12 @@ const COMMANDS = {
       entry.tls = { cert: resolvePath(args['tls-cert']), key: resolvePath(args['tls-key']) }
     }
     if (!entry.id || !entry.address) return fail('usage: agent-vault listen add <id> --address <iface:port|ip:port>', EXIT.USAGE)
-    const r = await control('POST', '/v1/listeners', entry)
+    // Gated like every other widening, so it asks for the passphrase the way
+    // they do. Plain control() could only fail, and the daemon's hint told
+    // the reader to run it again when running it again failed the same way.
+    const r = await controlWithPresence('POST', '/v1/listeners', entry)
     out(`${C.green('listener')} ${r.id} ${r.address} ${C.dim(`surfaces: ${r.surfaces.join(',')}`)}`, r)
+    if (!JSON_OUT) console.log(C.dim('  it binds when the daemon next starts; listen rm stops it at once'))
   },
 
   /**
@@ -800,12 +932,12 @@ const COMMANDS = {
    * read it and prints the one environment variable that makes it trusted.
    */
   async 'tls:setup'(args) {
-    const info = await controlWithPresence('POST', '/v1/tls/ensure', { force: !!args.force })
+    const port = optionalNumber(args, 'port', { min: 1, max: 65535 }) ?? 7443
+    const info = await controlWithPresence('POST', '/v1/tls/ensure', { force: booleanFlag(args, 'force') })
     const caPath = join(CLI_STATE_DIR, 'agent-vault-ca.pem')
     if (!existsSync(CLI_STATE_DIR)) mkdirSync(CLI_STATE_DIR, { recursive: true, mode: 0o700 })
-    writeFileSync(caPath, info.certificate, { mode: 0o644 })
+    writeFileExclusive(caPath, info.certificate, { force: true, mode: 0o644 })
 
-    const port = Number(args.port || 7443)
     if (JSON_OUT) return out(null, { ...info, ca_path: caPath, port })
 
     console.log(`${C.green(info.created ? 'certificate generated' : 'certificate present')}`)
@@ -868,11 +1000,15 @@ const COMMANDS = {
     }
     const transport = args.transport || 'stdio'
     const name = args.name || 'agent-vault'
+    // Present or absent: `--tls=false` is refused rather than read as a
+    // non-empty string, which picked the https URL.
+    const tls = booleanFlag(args, 'tls')
 
     // `Number('nope')` is NaN, and writing `https://localhost:NaN/mcp` into a
     // config file is a failure the reader only discovers when their agent
     // cannot connect and the URL looks almost right.
-    const port = args.port === undefined ? 7443 : Number(args.port)
+    // `--port` with no value is `true`, and Number(true) is 1.
+    const port = args.port === undefined ? 7443 : typeof args.port === 'string' ? Number(args.port) : NaN
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return fail(`--port must be a number between 1 and 65535, not ${JSON.stringify(args.port)}`, EXIT.USAGE)
     }
@@ -907,19 +1043,19 @@ const COMMANDS = {
       // A connector URL must be https: Claude Desktop and Claude Code refuse
       // plain http, and there is no exemption for loopback. --tls points at the
       // TLS listener instead of the plain gateway.
-      url: args.tls
+      url: tls
         ? `https://localhost:${port}/mcp`
-        : `http://127.0.0.1:${loadState().gateway_port || 7411}/mcp`,
+        : `http://127.0.0.1:${gatewayPortOf(loadState())}/mcp`,
     })
 
     const result = install({
-      agent, scope, name, entry, print: !!args.print,
+      agent, scope, name, entry, print: booleanFlag(args, 'print'),
       cwd: process.cwd(), home: homedir(),
     })
 
     if (JSON_OUT) return out(null, { agent, scope, transport, ...result })
 
-    if (args.print) {
+    if (booleanFlag(args, 'print')) {
       console.log(C.dim(`# ${result.path}`))
       console.log(result.block)
       return
@@ -937,7 +1073,7 @@ const COMMANDS = {
     } else {
       console.log(C.dim(`  HTTP transport reads the token from $AGENT_VAULT_SESSION at launch.`))
       console.log(`    ${C.cyan('eval "$(agent-vault env)"')}`)
-      if (args.tls) {
+      if (tls) {
         console.log()
         console.log(C.dim('  The certificate is self-signed, so the client will refuse it until'))
         console.log(C.dim('  it is told to trust it. Node does not read the keychain by default:'))
@@ -954,7 +1090,7 @@ const COMMANDS = {
 
   async 'mcp:url'() {
     const st = loadState()
-    const url = `http://127.0.0.1:${st.gateway_port || 7411}/mcp`
+    const url = `http://127.0.0.1:${gatewayPortOf(st)}/mcp`
     if (JSON_OUT) return out(null, { url, header: `Authorization: Bearer ${st.token}` })
     console.log(url)
     console.error(C.dim(`header: Authorization: Bearer ${st.token || '<session token>'}`))
@@ -1027,7 +1163,7 @@ const COMMANDS = {
         buffer = buffer.slice(nl + 1)
         if (!line) continue
         try {
-          const send = (tok) => fetch(endpoint, {
+          const send = (tok, body = line) => fetch(endpoint, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
@@ -1035,18 +1171,41 @@ const COMMANDS = {
               authorization: `Bearer ${tok}`,
               ...(mcpSessionId ? { 'mcp-session-id': mcpSessionId } : {}),
             },
-            body: line,
+            body,
           })
           let res = await send(currentToken())
-          if (res.status === 401) {
-            // The session ended mid-flight. If a human has since created a new
-            // one, pick it up and retry rather than making them restart the
-            // client to collect a token that is already sitting on disk.
+          // The body, once something has had to read it before it is written.
+          let answer = null
+          // The session ended mid-flight. If a human has since created a new
+          // one, pick it up rather than making them restart the client to
+          // collect a token that is already sitting on disk.
+          //
+          // The daemon stopped answering 401 for a dead token (the handshake
+          // has to work without a session), so it says so in a header instead;
+          // waiting for a 401 left an agent launched with AGENT_VAULT_SESSION
+          // on the dead session for good.
+          if (res.status === 401 || res.headers.get('av-session-invalid')) {
             const fresh = (loadState().token || null)
             if (fresh && fresh !== currentToken()) {
               delete process.env.AGENT_VAULT_SESSION
-              mcpSessionId = null
-              res = await send(fresh)
+              if (res.status === 401) {
+                // Refused before anything ran.
+                mcpSessionId = null
+                res = await send(fresh)
+              } else {
+                // Resent only what was refused for want of a session. A tool
+                // that runs without one — asking for a session — has already
+                // happened, and the whole line used to go again whenever the
+                // answer CONTAINED that phrase: a batch of a request and a
+                // refusal asked the human twice, and lost the first answer.
+                answer = await res.text()
+                const redo = sessionRetry(line, answer)
+                if (redo) {
+                  mcpSessionId = null
+                  res = await send(fresh, redo.line)
+                  answer = redo.merge(await res.text())
+                }
+              }
             }
           }
           if (res.status === 404 && mcpSessionId) {
@@ -1058,15 +1217,16 @@ const COMMANDS = {
             // the same papercut the per-request token lookup exists to avoid,
             // one layer up. Drop the id and let the next request open a new
             // one.
-            const body = await res.clone().text().catch(() => '')
+            const body = answer ?? await res.clone().text().catch(() => '')
             if (body.includes('AV_MCP_SESSION_UNKNOWN')) {
               mcpSessionId = null
               res = await send(currentToken())
+              answer = null
             }
           }
           const sid = res.headers.get('mcp-session-id')
           if (sid) mcpSessionId = sid
-          const text = await res.text()
+          const text = answer ?? await res.text()
           if (text) process.stdout.write(`${asRpc(text, line, res.status)}\n`)
         } catch (e) {
           const parsed = (() => { try { return JSON.parse(line) } catch { return {} } })()
@@ -1087,15 +1247,37 @@ const COMMANDS = {
   async ui(args, { hash = '' } = {}) {
     const { UiServer } = await import('../ui/server.js')
     await control('GET', '/v1/status') // fail fast if the daemon is not up
+    // The daemon only accepts fingerprints from UI origins it trusts, and by
+    // default that is one port. Listen there unless told otherwise. An older
+    // daemon has no such list, and any port works with it.
+    const trusted = await control('GET', '/v1/ui').catch(() => null)
     const ui = new UiServer(SOCKET, {
       // Explicit: in a system install the socket is under run/ and the state
       // belongs beside the human, so the socket's directory is the wrong guess.
       statePath: STATE,
-      port: Number(args.port || 0),
-      idleMs: (Number(args.idle) || 30) * 60_000,
+      port: optionalNumber(args, 'port', { min: 0, max: 65535 }) ?? Number(trusted?.port || 0),
+      idleMs: (optionalNumber(args, 'idle', { min: 1, integer: false }) ?? 30) * 60_000,
       cli: cliInvocation(),
     })
-    await ui.start()
+    try {
+      await ui.start()
+    } catch (e) {
+      if (e.code !== 'EADDRINUSE') throw e
+      return fail(`port ${ui.port} is in use; is another agent-vault ui running?`, EXIT.FAILURE, {
+        next: 'agent-vault ui --port <free port> --allow-origin',
+      })
+    }
+    if (trusted && !trusted.origins.includes(ui.origin)) {
+      if (args['allow-origin']) {
+        // Owner-proved, with the passphrase in the request: trusting an
+        // origin is trusting every page served there to ask for a fingerprint.
+        await controlWithPresence('POST', '/v1/ui/origins', { origin: ui.origin })
+        if (!JSON_OUT) console.log(C.dim(`  trusted ${ui.origin} for Touch ID confirmations`))
+      } else if (!JSON_OUT) {
+        console.log(C.yellow(`  ${ui.origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page.`))
+        console.log(C.dim(`  Run without --port, or add --allow-origin to trust it (asks for your passphrase).`))
+      }
+    }
     // A fragment survives the redirect that burns the launch token, so it is
     // how we open the page on something other than Overview.
     const url = `${ui.url}${hash}`
@@ -1126,7 +1308,7 @@ const COMMANDS = {
    * install. This is the same page, opened on the right section.
    */
   async docs(args) {
-    const sections = ['how', 'start', 'connect', 'models', 'locking', 'refused', 'commands']
+    const sections = ['how', 'start', 'connect', 'models', 'locking', 'safety', 'refused', 'commands']
     const asked = args._[0]
     if (asked && !sections.includes(asked)) {
       return fail(`no docs section named ${asked}`, EXIT.USAGE, {
@@ -1156,7 +1338,7 @@ const COMMANDS = {
     if (!state.has_passphrase) return out(`${C.green('ok')} no passphrase is set`, { removed: false })
     const current = await readSecret('current passphrase: ')
     await control('POST', '/v1/passphrase', { action: 'remove', current })
-    console.log(`${C.yellow('passphrase removed')} ${C.dim('the vault is back to UID-boundary-only protection')}`)
+    console.log(`${C.yellow('passphrase removed')} ${C.dim('unlocking needs no secret now; your authenticator still confirms changes')}`)
   },
 
   async lock() {
@@ -1191,13 +1373,15 @@ const COMMANDS = {
   },
 
   async profiles() {
-    const rows = listProfiles()
+    const creds = await control('GET', '/v1/credentials').catch(() => [])
+    const rows = listProfiles().map((p) => ({ ...p, pins: creds.filter((c) => c.kind === p.kind).flatMap((c) => Object.entries(c.pins || {}).map(([host, count]) => ({ cred: c.slug, host, count }))) }))
     if (JSON_OUT) return out(null, rows)
     for (const p of rows) {
       // Say so in the list, rather than letting someone pick one and find out
       // when they try to store a secret in it.
       const note = p.implemented ? '' : C.yellow('  not implemented yet')
       console.log(`${C.bold(p.kind.padEnd(14))} ${C.dim(p.hosts.join(', ') || 'any host you name')}${note}`)
+      for (const pin of p.pins) console.log(`  pinned: ${cleanText(pin.host)} (${pin.count}) · ${cleanText(pin.cred)}`)
     }
   },
 
@@ -1268,20 +1452,43 @@ const COMMANDS = {
         : `none: anything running as you can use every credential, and can claim the vault by setting its own passphrase. Run: agent-vault passphrase set`])
     }
 
+    const credentials = await control('GET', '/v1/credentials').catch(() => [])
+    const expiring = credentials.filter((c) => c.expiry_warning)
+    if (!expiring.length) checks.push(['credential expiry', true, 'no credentials expiring'])
+    for (const c of expiring) checks.push(['credential expiry', false, `${c.slug}: ${c.expiry_warning}`])
+
     if (JSON_OUT) return out(null, checks.map(([name, ok, note]) => ({ name, ok, note })))
     for (const [name, ok, note] of checks) {
       console.log(`${ok ? C.green('ok  ') : C.yellow('warn')} ${name.padEnd(26)} ${C.dim(note)}`)
     }
   },
 
+  async watch(args) {
+    for (const flag of ['no-notify', 'open', 'quiet']) if (args[flag] !== undefined && args[flag] !== true) usageError(`--${flag} takes no value`)
+    await watchApprovals({ socketPath: SOCKET, json: JSON_OUT, notify: args['no-notify'] !== true, open: args.open === true, quiet: args.quiet === true })
+  },
+
   help() { printHelp() },
 }
 
+Object.assign(COMMANDS, controlCommands({ control, controlWithPresence, readSecret, out, fail, C, loadState, stateDir, gatewayPortOf, ask, isJson: () => JSON_OUT }))
+
 // -------------------------------------------------------------------- parsing
+
+/**
+ * Flags that may be given more than once. Each always parses to an array,
+ * even when given once, so no reader has to ask which shape it got. Every
+ * other flag keeps the last value given.
+ */
+const REPEATABLE = new Set(['map', 'route', 'header', 'add'])
 
 function parseArgs(argv) {
   const args = { _: [] }
   let passthrough = false
+  const set = (key, value) => {
+    if (REPEATABLE.has(key)) (args[key] ||= []).push(value)
+    else args[key] = value
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (passthrough) { args._.push(a); continue }
@@ -1289,10 +1496,10 @@ function parseArgs(argv) {
     if (a === '--json') { JSON_OUT = true; continue }
     if (a.startsWith('--')) {
       const eq = a.indexOf('=')
-      if (eq !== -1) { args[a.slice(2, eq)] = a.slice(eq + 1); continue }
+      if (eq !== -1) { set(a.slice(2, eq), a.slice(eq + 1)); continue }
       const next = argv[i + 1]
-      if (next && !next.startsWith('-')) { args[a.slice(2)] = next; i++ }
-      else args[a.slice(2)] = true
+      if (next && !next.startsWith('-')) { set(a.slice(2), next); i++ }
+      else set(a.slice(2), true)
       continue
     }
     args._.push(a)
@@ -1310,19 +1517,26 @@ function parseArgs(argv) {
 async function decide(args, granted) {
   const id = args._[0]
   if (!id) return fail('name the id to answer', EXIT.USAGE, { next: 'agent-vault approvals' })
+  // Read before anything is asked of the daemon: a narrowing that cannot be
+  // read is a usage error, never an approval as the agent proposed it.
+  const overrides = granted ? approvalOverrides(args, parseOverrides) : null
   const pending = await fetchPending((path) => control('GET', path))
   const item = pending.find((p) => p.id === id)
   if (!item) {
     return fail(`nothing waiting with id ${id}`, EXIT.NOT_FOUND, { next: 'agent-vault approvals' })
   }
-  const overrides = granted ? parseOverrides(args) : null
+  const settable = [...item.narrowable, ...(item.owner_settable || [])]
   for (const field of Object.keys(overrides || {})) {
-    if (!item.narrowable.includes(field)) {
+    if (!settable.includes(field)) {
       return fail(`--${field} does not apply to a ${item.kind}`, EXIT.USAGE, {
-        next: item.narrowable.length ? `narrowable: ${item.narrowable.join(', ')}` : 'this decision is yes or no',
+        next: `agent-vault approvals   (${settable.length ? `you can set: ${settable.join(', ')}` : 'this decision is yes or no'})`,
       })
     }
   }
+  if (overrides?.approval !== undefined && !APPROVAL_MODES.includes(overrides.approval)) {
+    return fail(`--approval is one of: ${APPROVAL_MODES.join(', ')}`, EXIT.USAGE)
+  }
+  if (granted && args.infinite !== undefined && args.infinite !== true) return fail('--infinite takes no value', EXIT.USAGE)
   const { path, body } = decision(item, { granted, overrides })
   const answered = await controlWithPresence('POST', path, body)
   if (!granted) return answered
@@ -1331,15 +1545,297 @@ async function decide(args, granted) {
   // state file belongs to you. The MCP bridge re-reads that file per request,
   // so a session recorded now reaches a RUNNING agent on its next call — no
   // restart, nothing pasted by hand.
-  const collected = await collectApproved(item, {
-    get: (p) => control('GET', p),
+  const collected = collectApproved(item, {
+    answered,
     remember: (s) => rememberSession(s, STATE),
   })
-  return collected ? { ...answered, collected } : answered
+  const { session, ...rest } = answered
+  return collected ? { ...rest, collected } : rest
+}
+
+/** The original `env`: shell exports for the state file's session. */
+function legacyEnv() {
+  const st = loadState()
+  if (!st.token) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
+  // Every value single-quoted. This output is meant for `eval`, and the state
+  // file it reads is writable by anything running as the human — an agent
+  // included — so an unquoted `token` of `x; <command> #` ran that command
+  // in the human's shell every time they evaluated it. loadState also
+  // refuses values that are not shaped like a token or a placeholder.
+  const vars = [
+    ['AGENT_VAULT', '1'],
+    ['AGENT_VAULT_URL', `http://127.0.0.1:${gatewayPortOf(st)}`],
+    ['AGENT_VAULT_SESSION', st.token],
+    // Absent rather than the word "undefined".
+    ...(st.placeholder ? [['AGENT_VAULT_PLACEHOLDER', st.placeholder]] : []),
+    ['AGENT_VAULT_HINT', 'Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>'],
+  ]
+  const lines = vars.map(([k, v]) => `export ${k}=${shellQuote(v)}`)
+  // Evaluated into a shell that may already hold one from an earlier
+  // session, which would then ride along with this session's token.
+  if (!st.placeholder) lines.push('unset AGENT_VAULT_PLACEHOLDER')
+  out(lines.join('\n'), { env: lines })
+}
+
+/** Whether `env` or `exec` was asked to map names to placeholders. */
+function wantsMapping(args) {
+  return args.map !== undefined || args['map-file'] !== undefined || booleanFlag(args, 'profile-vars')
+}
+
+const MAX_MAPPINGS = 64
+
+/**
+ * Read every NAME=SPEC from --map and --map-file. No network. An error names
+ * the flag or line and the NAME, never the right-hand side: someone may have
+ * pasted a real token there by mistake.
+ *
+ * SPEC is `<slug>`, `<slug>.<field>`, `<slug>:base_url` or `:gateway`.
+ */
+function parseMappings(args) {
+  const out = []
+  const names = new Set()
+  const add = (raw, where) => {
+    const text = typeof raw === 'string' ? raw : ''
+    const eq = text.indexOf('=')
+    const name = eq > 0 ? text.slice(0, eq) : ''
+    if (!ENV_NAME.test(name)) return fail(`${where}: not a NAME=SPEC mapping`, EXIT.USAGE)
+    const spec = parseSpec(text.slice(eq + 1))
+    if (!spec) return fail(`${where} (${name}): expected <slug>, <slug>.<field>, <slug>:base_url or :gateway`, EXIT.USAGE)
+    if (names.has(name)) return fail(`${name} is mapped twice`, EXIT.USAGE)
+    names.add(name)
+    out.push({ name, ...spec })
+  }
+  for (const raw of args.map || []) add(raw, '--map')
+  if (args['map-file'] !== undefined) {
+    if (args['map-file'] === true) return fail('--map-file needs a file name', EXIT.USAGE)
+    let text
+    try { text = readFileSync(String(args['map-file']), 'utf8') } catch (e) {
+      return fail(`cannot read --map-file: ${e.code || e.message}`, EXIT.USAGE)
+    }
+    text.split('\n').forEach((line, i) => {
+      const trimmed = line.trim().replace(/^export\s+/, '')
+      if (!trimmed || trimmed.startsWith('#')) return
+      add(trimmed, `--map-file line ${i + 1}`)
+    })
+  }
+  if (out.length > MAX_MAPPINGS) return fail(`at most ${MAX_MAPPINGS} names can be mapped`, EXIT.USAGE)
+  return out
+}
+
+function parseSpec(spec) {
+  if (spec === ':gateway') return { kind: 'url', cred: null }
+  const base = /^([^:.]+):base_url$/.exec(spec)
+  if (base) return ph.isValidSlug(base[1]) ? { kind: 'url', cred: base[1] } : null
+  const [slug, field, ...rest] = spec.split('.')
+  if (rest.length || !ph.isValidSlug(slug) || (field !== undefined && !ph.isValidField(field))) return null
+  return { kind: 'placeholder', cred: slug, field }
+}
+
+/**
+ * Turn mappings into values: confirm every credential is in the session, mint
+ * the placeholders in ONE gated call, and check every value before anything
+ * uses it. Shared by `env` and `exec`, so neither can be the laxer one.
+ */
+async function resolveMappings(args, mappings, purpose) {
+  if (args.session === true) return fail('--session needs a session id', EXIT.USAGE)
+  const sid = args.session || loadState().session_id
+  if (!sid) return fail('no session yet', EXIT.SESSION, { next: 'agent-vault session create --cred <slug>' })
+  let uses
+  // `--uses` with no value is `true`, and Number(true) is 1: it minted a
+  // one-use placeholder and exited 0. A valueless number is refused.
+  if (args.uses !== undefined) {
+    if (typeof args.uses !== 'string' || !Number.isInteger(Number(args.uses)) || Number(args.uses) < 1) return fail('--uses must be a whole number, 1 or more', EXIT.USAGE)
+    uses = Number(args.uses)
+  }
+  const sessions = await control('GET', '/v1/sessions')
+  const session = sessions.find((x) => x.id === sid)
+  if (!session) return fail(`no session ${sid}`, EXIT.NOT_FOUND, { next: 'agent-vault session list' })
+  const slugs = (session.creds || []).map((c) => c.slug).filter(Boolean)
+
+  if (booleanFlag(args, 'profile-vars')) {
+    // Each credential whose profile names the variables its SDK reads, as
+    // long as the name is not already taken by an explicit mapping.
+    const kinds = new Map((await control('GET', '/v1/credentials')).map((c) => [c.slug, c.kind]))
+    const taken = new Set(mappings.map((m) => m.name))
+    for (const slug of slugs) {
+      const env = getProfile(kinds.get(slug) || 'http')?.env
+      if (!env) continue
+      for (const [name, spec] of [[env.key, { kind: 'placeholder', cred: slug }], [env.base, { kind: 'url', cred: slug }]]) {
+        if (taken.has(name)) continue
+        taken.add(name)
+        mappings.push({ name, ...spec })
+      }
+    }
+    if (mappings.length > MAX_MAPPINGS) return fail(`at most ${MAX_MAPPINGS} names can be mapped`, EXIT.USAGE)
+  }
+  if (!mappings.length) return fail('nothing to map: pass --map NAME=<slug>, --map-file F or --profile-vars', EXIT.USAGE)
+  for (const m of mappings) {
+    if (m.cred && !slugs.includes(m.cred)) {
+      return fail(`${m.cred} is not in session ${sid}`, EXIT.NOT_FOUND, { next: 'agent-vault session list' })
+    }
+  }
+
+  const key = (cred, field) => `${cred}\u0000${field ?? ''}`
+  const wanted = new Map()
+  for (const m of mappings) {
+    if (m.kind === 'placeholder' && !wanted.has(key(m.cred, m.field))) {
+      wanted.set(key(m.cred, m.field), { cred: m.cred, ...(m.field ? { field: m.field } : {}), ...(uses ? { uses } : {}) })
+    }
+  }
+  const status = await control('GET', '/v1/status')
+  const port = Number(status.gateway_port)
+  const issued = new Map()
+  if (wanted.size) {
+    const items = [...wanted.values()]
+    const batch = await controlWithPresence('POST', '/v1/placeholders/batch', { sid, items, purpose })
+    items.forEach((item, i) => issued.set(key(item.cred, item.field), batch.items?.[i]))
+  }
+  const entries = mappings.map((m) => {
+    if (m.kind === 'url') {
+      return { name: m.name, kind: 'url', cred: m.cred, value: m.cred ? `http://127.0.0.1:${port}/p/${m.cred}` : `http://127.0.0.1:${port}` }
+    }
+    const got = issued.get(key(m.cred, m.field))
+    return { name: m.name, kind: 'placeholder', cred: m.cred, field: got?.field ?? m.field, value: got?.placeholder }
+  })
+  // The second line of defence, right before anything is written or run:
+  // whatever the daemon sent back, nothing but a placeholder for this
+  // session and credential, or a loopback gateway URL, gets through.
+  try {
+    assertPlaceholderOnly(entries, { sid, port, slugs })
+  } catch (e) {
+    if (e.code === 'NOT_PLACEHOLDER') return fail(e.message, EXIT.INTERNAL)
+    throw e
+  }
+  return { sid, port, entries }
+}
+
+/**
+ * What is at `path` now: 'none', 'file' (a regular file this user owns), or
+ * 'foreign' (a symlink, a directory, someone else's file). Never followed.
+ */
+function inspectTarget(path) {
+  try {
+    const st = nodeFs.lstatSync(path)
+    return st.isFile() && st.uid === process.getuid() ? 'file' : 'foreign'
+  } catch (e) {
+    if (e.code === 'ENOENT') return 'none'
+    throw e
+  }
+}
+
+/** True only when git says the file is in a work tree and not ignored. */
+async function gitWouldCommit(path) {
+  const { execFile } = await import('node:child_process')
+  const { dirname } = await import('node:path')
+  return new Promise((resolve) => {
+    execFile('git', ['check-ignore', '-q', '--', path], { cwd: dirname(path), timeout: 2000 }, (err) => {
+      // 1 means "not ignored" and only happens inside a work tree. Anything
+      // else, git missing included, says nothing.
+      resolve(err?.code === 1)
+    })
+  })
+}
+
+/**
+ * The gateway port for printed and exported URLs. `gateway_port` is written
+ * only by the dev daemon; a system install's service never records it, so
+ * the session's own base_url — which has the right port — comes next, and the
+ * default only after that.
+ */
+function gatewayPortOf(st) {
+  if (st.gateway_port) return st.gateway_port
+  const m = /^http:\/\/127\.0\.0\.1:(\d+)\//.exec(st.base_url || '')
+  return m ? Number(m[1]) : 7411
+}
+
+/**
+ * What to resend once a dead session has been replaced: only the requests
+ * whose answers are refusals for want of a session, found by id in the
+ * parsed answers — never by searching the text, which a successful result
+ * can contain. Returns null when there is nothing to resend, or
+ * `{ line, merge }`, where merge(text) puts the new answers in place of the
+ * refusals and keeps every other answer as it came.
+ */
+export function sessionRetry(line, text) {
+  let request
+  let answers
+  try {
+    request = JSON.parse(line)
+    answers = JSON.parse(text)
+  } catch { return null }
+  const refused = (a) => {
+    if (!a || typeof a !== 'object' || a.result?.isError !== true) return false
+    try { return JSON.parse(a.result.content?.[0]?.text).error === NEEDS_SESSION } catch { return false }
+  }
+  if (!Array.isArray(request)) {
+    return !Array.isArray(answers) && refused(answers) ? { line, merge: (again) => again } : null
+  }
+  if (!Array.isArray(answers)) return null
+  const key = (id) => JSON.stringify(id)
+  const ids = new Set(answers.filter((a) => refused(a) && a.id !== undefined && a.id !== null).map((a) => key(a.id)))
+  const redo = request.filter((m) => m && m.id !== undefined && m.id !== null && ids.has(key(m.id)))
+  if (!redo.length) return null
+  return {
+    line: JSON.stringify(redo),
+    merge(again) {
+      let fresh
+      try { fresh = JSON.parse(again) } catch { return text }
+      if (!Array.isArray(fresh)) return text
+      const byId = new Map(fresh.filter((a) => a && a.id !== undefined).map((a) => [key(a.id), a]))
+      return JSON.stringify(answers.map((a) => (refused(a) && byId.has(key(a.id)) ? byId.get(key(a.id)) : a)))
+    },
+  }
+}
+
+/** The tool error the daemon gives for a call that needs a live session. */
+const NEEDS_SESSION = 'this tool needs a live session'
+
+/** A value as one single-quoted shell word. */
+function shellQuote(v) {
+  return `'${String(v).replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Whether an environment variable carries a credential the vault should
+ * stand in for. Name-based (case-insensitive), plus any URL with a password
+ * in it, whatever it is called.
+ */
+function looksLikeCredential(name, value) {
+  // The vault's own configuration, by name. The whole AGENT_VAULT prefix used
+  // to be exempt, so AGENT_VAULT_SECRET or AGENT_VAULT_PASSWORD reached the
+  // child untouched. The variables exec generates are not here: they are
+  // rebuilt from the state file, never inherited (see VAULT_GENERATED).
+  if (VAULT_CONFIG.has(name)) return false
+  if (/(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET_?KEY|CLIENT_?SECRET|CREDENTIALS?)(_|$)/i.test(name)) return true
+  if (/(^|_)(KEY|DSN)$/i.test(name)) return true
+  return urlHasPassword(String(value))
+}
+
+/** The four approval modes a session may name. */
+const APPROVAL_MODES = ['each', 'on-write', 'first-use', 'auto']
+
+/** The vault settings a child may inherit as they are. */
+const VAULT_CONFIG = new Set(['AGENT_VAULT_DIR', 'AGENT_VAULT_PORT', 'AGENT_VAULT_ALLOW_ROOT'])
+
+/**
+ * What `env` and `exec` write. Never inherited: a value left over from an
+ * earlier session would sit beside this one's token — an old placeholder
+ * from another session or credential, used by whatever reads the carrier.
+ */
+const VAULT_GENERATED = ['AGENT_VAULT', 'AGENT_VAULT_URL', 'AGENT_VAULT_SESSION', 'AGENT_VAULT_PLACEHOLDER', 'AGENT_VAULT_HINT']
+
+/**
+ * Whether a value carries a URL with a password in it, anywhere. The user
+ * part may be empty: `redis://:hunter2@cache:6379` is the usual Redis form,
+ * and requiring a username let every one of them through.
+ */
+function urlHasPassword(value) {
+  if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(value)) return true
+  try { return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) && new URL(value).password !== '' } catch { return false }
 }
 
 function printHelp() {
-  console.log(`${C.bold('agent-vault')} - a local credential proxy for agents
+  const help = `${C.bold('agent-vault')} - a local credential proxy for agents
 
 ${C.bold('setup')}
   setup [--dev] [--print-only]         install properly (--dev skips the uid boundary)
@@ -1353,25 +1849,61 @@ ${C.bold('guided')}                               ${C.dim('(run these with no ar
   session create                       walks you through scoping a session
 
 ${C.bold('credentials')}                          ${C.dim('(the value is read from the terminal, never argv)')}
-  cred add <slug> --kind <kind> [--host H]
+  cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
   cred list | cred rm <slug>
+  cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
+                                       replace the value; sessions keep working
+  cred test [<slug> | --all]           run the connector's read-only probe
+  cred expiry <slug> <YYYY-MM-DD|none> record when the token expires
+  cred scrub <slug> [--add PATTERN [--sample TEXT] | --rm ID]
+                                       extra token shapes to redact from responses
+  cred pin <slug> --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
+                                       refuse any TLS key you did not pin
+  cred quarantine <slug> [--reason T]  stop all use at once; cred release <slug> undoes it
 
 ${C.bold('sessions and placeholders')}
-  session create --cred <slug> [--methods GET,POST] [--paths "/repos/**"] [--budget N] [--uses N]
+  session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths "/repos/**"]
+                 [--budget N] [--uses N] [--approval each|on-write|first-use|auto]
+                 [--ttl HOURS | --infinite] [--label TEXT] [--grants-file F]
+                 [--template NAME] [--rate 60/min] [--concurrency N] [--quota 1000/day]
+                 [--route GET:/repos/**]... [--payload-file F] [--graphql query]
+                 [--redirects N] [--spend-tokens N] [--spend-usd X] [--grant-ttl MIN]
+                                       --approval auto or first-use with writes,
+                                       and --infinite, ask for your passphrase
+                                       every time
   session list | session revoke [<sid>]
+  session narrow [<sid>] [--cred S] [any limit above] [--ttl MIN]
+                                       tighten a live session; it can never widen
+  session show [<sid>] [--markdown]    what it may do, and what it did
+  template save <name> --cred <slug> [session flags] | template list
+  template show <name> | template rm <name>
   ph next <cred> [--uses N]            issue a placeholder
   ph check <placeholder> | ph pattern  validate one, or print the scanner regex
-  env | exec -- <command>              hand a scrubbed environment to an agent
+  env [--out F [--force]] [--map NAME=<slug>[:base_url]]... [--map-file F] [--profile-vars]
+                                       placeholders for your tools; the file is 0600 and
+                                       never replaced unless you say so
+  exec [--map NAME=<slug>]... -- <command>
+                                       run a command with a scrubbed environment
+  preflight --cred S --method M --path P [--body-file F]
+                                       would this request pass? nothing is sent
 
 ${C.bold('approvals, audit, listeners')}
-  approvals | approve <id> | deny <id>
+  approvals [--show <id>] | approve <id> | deny <id>
+  watch [--no-notify] [--open]         tell you the moment something is waiting
+  notify set | notify show | notify off | notify test
+                                       an optional webhook for the same signal
+  panic [--lock] [--reason T]          revoke every session, deny everything waiting
+  tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
-  audit tail [--limit N] | audit verify
+  audit tail [--limit N] | audit verify [--witness F]
+  audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
+  report [--since 7d] [--markdown]     access review across every session
+  backup export --out F | backup inspect F | backup restore F [--on-conflict skip|rename|fail]
   listen add <id> --address <iface:port> [--surfaces gateway,mcp]
                  [--tls managed | --tls-cert F --tls-key F]
   listen list | listen rm <id>
-  tls setup [--port 7449]              certificate for the loopback MCP listener
+  tls setup [--port 7443]              certificate for the loopback MCP listener
   tls status                           fingerprint and expiry
 
 ${C.bold('ui')}
@@ -1388,9 +1920,10 @@ ${C.bold('mcp')}
 ${C.bold('docs')}
   docs [section]                       open the docs, written against this install
                                        how | start | connect | models | locking
-                                       | refused | commands
+                                       | safety | refused | commands
 
-${C.dim('--json on any command prints a machine-readable envelope.')}`)
+${C.dim('--json on any command prints a machine-readable envelope.')}`
+  out(help, { help })
 }
 
 // --------------------------------------------------------------------- entry
@@ -1424,10 +1957,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const args = parseArgs(argv)
   const [first, second] = args._
+  if (args.help && first === 'cred' && second === 'scrub') { out(SCRUB_HELP, { help: SCRUB_HELP }); return }
   if (!first || first === 'help' || args.help) { printHelp(); return }
 
   // Two-word commands (cred add) resolve to "cred:add"; one-word commands stay.
-  const GROUPS = ['cred', 'session', 'ph', 'audit', 'listen', 'mcp', 'passphrase', 'tls']
+  const GROUPS = ['cred', 'session', 'ph', 'audit', 'listen', 'mcp', 'passphrase', 'tls', 'template', 'backup', 'tripwire', 'notify']
   let name = first
   if (GROUPS.includes(first) && second && COMMANDS[`${first}:${second}`]) {
     name = `${first}:${second}`
@@ -1438,10 +1972,11 @@ export async function main(argv = process.argv.slice(2)) {
 
   const command = COMMANDS[name]
   if (!command) {
-    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: `one of: ${COMMAND_NAMES.join(', ')}` })
+    return fail(`unknown command "${args._[0] || first}"`, EXIT.USAGE, { next: 'agent-vault help' })
   }
 
   try {
+    if (['value', 'webhook-url', 'webhook_url', 'recovery-passphrase', 'recovery_passphrase'].some((key) => Object.hasOwn(args, key))) usageError('secrets are read from the terminal or stdin, never command-line flags')
     await command(args)
   } catch (e) {
     const problem = e.problem || {}

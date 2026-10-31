@@ -18,7 +18,7 @@
 // (Node has no Argon2 without a native dependency). Both are called out in the
 // README as items the Rust port fixes.
 
-import { createCipheriv, createDecipheriv, randomBytes, hkdfSync, scryptSync, createHmac, timingSafeEqual } from 'node:crypto'
+import { createCipheriv, createDecipheriv, randomBytes, hkdfSync, scrypt, scryptSync, createHmac, timingSafeEqual } from 'node:crypto'
 
 const ALG = 'chacha20-poly1305'
 const NONCE_LEN = 12
@@ -42,15 +42,31 @@ export function passphraseFactor(passphrase, salt) {
   return scryptSync(passphrase, salt, SCRYPT_PARAMS.keylen, SCRYPT_PARAMS)
 }
 
+/**
+ * The same scrypt, without blocking the event loop: for a work factor the
+ * daemon pays while it is also serving the gateway (a backup's 2^17). The
+ * construction is unchanged; only the call is asynchronous.
+ */
+export function scryptAsync(passphrase, salt, { N, r, p, keylen = 32, maxmem }) {
+  return new Promise((resolve, reject) => {
+    scrypt(passphrase, salt, keylen, { N, r, p, maxmem }, (err, key) => (err ? reject(err) : resolve(key)))
+  })
+}
+
+/**
+ * `plaintext` may be a Buffer, which is sealed as it is and not copied, so a
+ * caller holding secrets in one can wipe it afterwards.
+ */
 export function seal(key, plaintext, aad = '') {
   const nonce = randomBytes(NONCE_LEN)
   const cipher = createCipheriv(ALG, key, nonce, { authTagLength: TAG_LEN })
   if (aad) cipher.setAAD(Buffer.from(aad, 'utf8'))
-  const body = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()])
+  const body = Buffer.concat([cipher.update(Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(plaintext, 'utf8')), cipher.final()])
   return { ct: Buffer.concat([body, cipher.getAuthTag()]).toString('base64'), nonce: nonce.toString('base64') }
 }
 
-export function open(key, sealed, aad = '') {
+/** open(), as the Buffer it decrypts to, for a caller that wipes it after use. */
+export function openBytes(key, sealed, aad = '') {
   const raw = Buffer.from(sealed.ct, 'base64')
   const nonce = Buffer.from(sealed.nonce, 'base64')
   const body = raw.subarray(0, raw.length - TAG_LEN)
@@ -58,7 +74,12 @@ export function open(key, sealed, aad = '') {
   const decipher = createDecipheriv(ALG, key, nonce, { authTagLength: TAG_LEN })
   if (aad) decipher.setAAD(Buffer.from(aad, 'utf8'))
   decipher.setAuthTag(tag)
-  return Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8')
+  return Buffer.concat([decipher.update(body), decipher.final()])
+}
+
+export function open(key, sealed, aad = '') {
+  const bytes = openBytes(key, sealed, aad)
+  try { return bytes.toString('utf8') } finally { wipe(bytes) }
 }
 
 /** Per-credential data-encryption key. */

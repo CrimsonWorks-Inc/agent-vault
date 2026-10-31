@@ -10,15 +10,230 @@
 
 import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, chmodSync, openSync, closeSync, fsyncSync, fchmodSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import * as crypt from './crypto.js'
 import { id } from './ids.js'
 import { AuditLog } from './audit.js'
 import * as ph from '../core/placeholder.js'
+import * as policyMod from '../core/policy.js'
 import { deny } from '../core/errors.js'
 import { PROFILES } from '../connectors/profiles.js'
+import { PIN_RE, pinListState, urlHostOf } from '../connectors/pinning.js'
+import { compileScrubPattern, untrustedText } from '../core/scrub.js'
+import { canonicalOperation } from '../ui/webauthn.js'
 
 export const SCHEMA_VERSION = 1
+
+/**
+ * When something stamped with `iso` stops being valid, as epoch ms. Absent is
+ * "no limit" (Infinity); anything that does not parse counts as already past
+ * (-Infinity), so a corrupted date can only end access early, never extend it.
+ * `Date.parse` alone is NaN for garbage, and `NaN <= now` is false: that is how
+ * an unparseable `expires_at` used to be live forever.
+ */
+export function expiryMs(iso) {
+  if (iso === null || iso === undefined) return Infinity
+  if (typeof iso !== 'string') return -Infinity
+  const ms = Date.parse(iso)
+  return Number.isNaN(ms) ? -Infinity : ms
+}
+
+/**
+ * When a session ends. Only a session that says it is infinite with exactly
+ * `infinite === true` and `expires_at === null` never ends. A missing date on
+ * any other session — a legacy row, a truthy-but-not-true flag, a flag with the
+ * date dropped — is expired, never eternal.
+ */
+export function sessionExpiryMs(s) {
+  if (s.expires_at === null || s.expires_at === undefined) {
+    return s.infinite === true && s.expires_at === null ? Infinity : -Infinity
+  }
+  return expiryMs(s.expires_at)
+}
+
+/** The furthest a session could live, idle extension included. */
+function sessionCeilingMs(s) {
+  const ends = sessionExpiryMs(s)
+  if (ends === Infinity || !(ends > -Infinity)) return ends
+  return s.max_expires_at == null ? ends : Math.max(ends, expiryMs(s.max_expires_at))
+}
+
+/** A ledger row's end. Exactly null never expires; anything else unreadable already has. */
+function rowExpiryMs(row) {
+  return row.expires_at === null ? Infinity : (typeof row.expires_at === 'string' ? expiryMs(row.expires_at) : -Infinity)
+}
+
+/** `min(a, b)` as an ISO date, or `now` when it is already behind us. */
+/**
+ * A session's or grant's end as its creation record keeps it. One made from
+ * an agent's session request (C25) records only whether it has one: its end
+ * is the approval time plus a lifetime the agent proposed, so the timestamp
+ * is that number written down. The live session and grant keep the real end.
+ */
+function expiryForAudit(expiresAt, requested) {
+  return requested ? { expires_at: null, has_expiry: expiresAt != null } : { expires_at: expiresAt }
+}
+
+function shortenedIso(current, now, ttlMs) {
+  const at = Math.min(current, now + ttlMs)
+  return new Date(at > now ? at : now).toISOString()
+}
+
+// How close an expiry has to be before a credential is flagged (F10).
+export const EXPIRY_WARN_DAYS = 7
+
+/** 'expired', 'soon' or null. The sooner of the human's date and the observed one wins. */
+export function expiryWarning(cred, now = Date.now()) {
+  const dates = [cred.expires_at, cred.health?.observed_expires_at].filter((d) => d != null)
+  if (!dates.length) return null
+  const ends = Math.min(...dates.map(expiryMs))
+  if (!(ends > now)) return 'expired'
+  return ends < now + EXPIRY_WARN_DAYS * 86_400_000 ? 'soon' : null
+}
+
+/** An ISO date, normalised, or undefined when `v` is not one. */
+function isoOrUndefined(v) {
+  if (typeof v !== 'string') return undefined
+  const ms = Date.parse(v)
+  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString()
+}
+
+/**
+ * A bundle's quarantine record, checked by the rules setQuarantine keeps, or
+ * the whole restore refused: one that cannot be read is never dropped, since
+ * dropping it would release the credential.
+ */
+function restoredQuarantine(q, format) {
+  const ok = q && typeof q === 'object' && !Array.isArray(q) &&
+    Object.keys(q).every((k) => ['since', 'by', 'rule_id', 'reason_untrusted'].includes(k)) &&
+    isoOrUndefined(q.since) !== undefined && (q.by === 'control' || q.by === 'tripwire') &&
+    (q.rule_id == null || (typeof q.rule_id === 'string' && /^[a-z0-9_-]{1,32}$/.test(q.rule_id))) &&
+    (q.reason_untrusted == null || (typeof q.reason_untrusted === 'string' && q.reason_untrusted.length <= 200))
+  if (!ok) throw format('a quarantine record is malformed')
+  return { since: q.since, by: q.by, rule_id: q.rule_id ?? null, reason_untrusted: q.reason_untrusted ?? null }
+}
+
+/** `a` is `b`, or a restored copy of it (`-restored`, `-restored-2`, … as F8 renames), or `b` is one of `a`. */
+function sameCredential(a, b) {
+  const copyOf = (slug, base) => {
+    const m = /-restored(?:-\d+)?$/.exec(slug)
+    return !!m && slug.slice(0, m.index) === base.slice(0, 24 - m[0].length)
+  }
+  return a === b || copyOf(a, b) || copyOf(b, a)
+}
+
+const DAY_MS = 86_400_000
+
+// Binds the sealed webhook URL to what it is, so no other blob opens as one.
+const NOTIFY_AAD = 'av/notify/webhook'
+
+// F4's bounds on scrub patterns. The grammar is the gateway's (C5).
+const MAX_SCRUB_SOURCE = 256
+const MAX_SCRUB_PER_CRED = 16
+const MAX_SCRUB_TOTAL = 64
+
+// F17's bounds on templates.
+const TEMPLATE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
+const MAX_TEMPLATE_BYTES = 16 * 1024
+const MAX_TEMPLATES = 64
+
+// What elevated a session (C3). Recorded, not decided, here: the daemon decides
+// with elevationOf(), and the store refuses anything it does not recognise.
+const ELEVATIONS = new Set(['approval_auto_writes', 'infinite'])
+
+// F10's health record. Only these keys, each only with a value of its type.
+const HEALTH_STATUS = new Set(['ok', 'unauthorized', 'forbidden', 'unreachable', 'error', 'unknown'])
+const HEALTH_SOURCE = new Set(['probe', 'response'])
+
+// F16's tripwire rules. The shape is checked here, where it is stored, so no
+// reader of `settings.tripwires` has to wonder what it might hold.
+const RULE_KEYS = new Set(['id', 'codes', 'rule_prefix', 'threshold', 'window_s', 'action'])
+const RULE_ACTIONS = new Set(['revoke_session', 'quarantine_credential', 'panic'])
+const MAX_TRIPWIRE_RULES = 32
+
+function tripwireProblem(tw) {
+  if (!tw || typeof tw !== 'object' || Array.isArray(tw)) return 'tripwires must be an object'
+  for (const k of Object.keys(tw)) if (k !== 'enabled' && k !== 'rules') return `tripwires has an unknown key ${JSON.stringify(k)}`
+  if (typeof tw.enabled !== 'boolean') return 'tripwires.enabled must be true or false'
+  if (!Array.isArray(tw.rules)) return 'tripwires.rules must be a list'
+  if (tw.rules.length > MAX_TRIPWIRE_RULES) return `at most ${MAX_TRIPWIRE_RULES} tripwire rules`
+  const ids = new Set()
+  for (const r of tw.rules) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return 'a tripwire rule must be an object'
+    for (const k of Object.keys(r)) if (!RULE_KEYS.has(k)) return `a tripwire rule has an unknown key ${JSON.stringify(k)}`
+    if (typeof r.id !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(r.id)) return 'a tripwire rule id must match [a-z0-9_-]{1,32}'
+    if (ids.has(r.id)) return `tripwire rule ${r.id} appears twice`
+    ids.add(r.id)
+    if (r.codes !== undefined && (!Array.isArray(r.codes) || !r.codes.length || r.codes.length > 16 ||
+      !r.codes.every((c) => typeof c === 'string' && /^AV_[A-Z0-9_]{1,40}$/.test(c)))) {
+      return `tripwire rule ${r.id}: codes must be a non-empty list of AV_* codes`
+    }
+    // An empty prefix matches every rule name there is.
+    if (r.rule_prefix !== undefined && (typeof r.rule_prefix !== 'string' || !/^[a-z0-9_:.-]{1,64}$/.test(r.rule_prefix))) {
+      return `tripwire rule ${r.id}: rule_prefix must be 1-64 characters of [a-z0-9_:.-]`
+    }
+    if (r.codes === undefined && r.rule_prefix === undefined) return `tripwire rule ${r.id} matches nothing: give codes or rule_prefix`
+    if (!Number.isInteger(r.threshold) || r.threshold < 1 || r.threshold > 1000) return `tripwire rule ${r.id}: threshold must be an integer 1-1000`
+    if (!Number.isInteger(r.window_s) || r.window_s < 10 || r.window_s > 86_400) return `tripwire rule ${r.id}: window_s must be an integer 10-86400`
+    if (!RULE_ACTIONS.has(r.action)) return `tripwire rule ${r.id}: action must be revoke_session, quarantine_credential or panic`
+  }
+  return null
+}
+
+/** The refusal for a quarantined credential (F16), the same wherever it is met. */
+function quarantined(cred) {
+  return deny('AV_QUARANTINED', `${cred.slug} is quarantined`, {
+    rule: 'quarantine', hint: `A human can release it: agent-vault cred release ${cred.slug}`,
+  })
+}
+
+
+/** The refusal for a grant whose budget is spent, or cannot be read: the gateway's rule. */
+function budgetSpent(limit) {
+  return deny('AV_POLICY_DENIED', limit === null
+    ? 'this grant has a budget that cannot be read, so no request can be counted against it'
+    : `grant budget of ${limit} requests is spent`, { rule: 'budget', hint: 'A human must widen the grant or start a new session.' })
+}
+
+const MAX_PIN_HOSTS = 4
+
+/** F11: 1 to 4 pins of the one format, each kept once, or refused. */
+function pinList(pins) {
+  if (pinListState(pins) !== 'pinned') {
+    throw deny('AV_POLICY_DENIED', 'pins are 1 to 4 values of the form sha256/<base64 of 32 bytes>', { rule: 'pin_format' })
+  }
+  return [...new Set(pins)]
+}
+
+/** A stored pin table as an object, or {} when it is not one. */
+function plainTable(pins) {
+  return pins && typeof pins === 'object' && !Array.isArray(pins) ? pins : {}
+}
+
+/** A copy of a pin table without any key that names `key`'s host. */
+function pinTableOf(pins, key) {
+  return Object.fromEntries(Object.entries(plainTable(pins)).filter(([k]) => urlHostOf(k) !== key))
+}
+
+/** Pin counts per host for a public view (F11): never the pins. */
+function pinCounts(pins) {
+  return Object.fromEntries(Object.entries(plainTable(pins)).map(([k, v]) => [k, Array.isArray(v) ? v.length : 0]))
+}
+
+function scrubRefusal(why) {
+  return deny('AV_POLICY_DENIED', `scrub pattern refused: ${why}`, { rule: 'scrub_pattern' })
+}
+
+/**
+ * A grant's own request budget, for a placeholder's issue and use and a
+ * redirect hop's charge: the gateway's reader (C4, policy.budgetLimit), so the
+ * two cannot disagree. Infinity when the layer states no limit (the gateway
+ * then takes it from the session's layer), the number, or null when it cannot
+ * be read, which refuses. A policy with no budget key states none.
+ */
+function budgetLimit(policy) {
+  return policyMod.budgetLimit(policy?.budget)
+}
 
 // How many placeholder rows the ledger keeps. Active ones are capped per grant
 // by `max_active`; this bounds the dead ones, which nothing used to remove.
@@ -35,6 +250,124 @@ const EMPTY = {
   approvals: {},
   clients: {},
   listeners: {},
+}
+
+// The unlock factors a vault can be created with. A Touch ID (PRF) wrap is
+// not one of them on its own: it needs the passphrase beside it, so it is
+// added afterwards, by addWebauthnUnlock, and the factor invariant holds it
+// to that.
+const FACTOR_CLASSES = new Set(['none', 'passphrase', 'webauthn-prf'])
+
+/**
+ * A presence authenticator as the vault stores it, or a refusal.
+ *
+ * Whatever is stored here becomes the key every presence gate checks against,
+ * and the gate counts it as a human factor for as long as it is there. A record
+ * that cannot verify an assertion therefore still closes the gate — to
+ * everyone, the owner included. So nothing is stored that the daemon could not
+ * verify a signature against: a credential id the authenticator could have
+ * produced, an ES256 public key (the only algorithm verifyAssertion accepts)
+ * that actually parses as one, and a counter the authenticator could report.
+ * Only those fields are kept; nothing else the caller sent is.
+ */
+export function presenceKeyRecord(input) {
+  const refuse = (why) => deny('AV_POLICY_DENIED', `not a usable presence authenticator: ${why}`, {
+    rule: 'presence_key',
+    hint: 'Nothing was changed, and the authenticator already enrolled (if any) still works. Enrol the new one from the web UI: agent-vault ui',
+    next: 'agent-vault ui',
+  })
+  if (!input || typeof input !== 'object') throw refuse('no credential was given')
+  const { credentialId, publicKeySpki, signCount = 0 } = input
+  if (typeof credentialId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(credentialId)) {
+    throw refuse('credentialId must be a base64url string')
+  }
+  const rawId = Buffer.from(credentialId, 'base64url')
+  // WebAuthn credential ids are 16 to 1023 bytes. The round trip refuses an
+  // id that only decodes by being read leniently.
+  if (rawId.length < 16 || rawId.length > 1023 || rawId.toString('base64url') !== credentialId) {
+    throw refuse('credentialId is not a WebAuthn credential id')
+  }
+  if (typeof publicKeySpki !== 'string' || !publicKeySpki) throw refuse('publicKeySpki is missing')
+  const der = Buffer.from(publicKeySpki, 'base64')
+  if (der.toString('base64') !== publicKeySpki) throw refuse('publicKeySpki is not base64')
+  let key
+  try {
+    key = createPublicKey({ key: der, format: 'der', type: 'spki' })
+  } catch {
+    throw refuse('publicKeySpki is not a public key')
+  }
+  if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+    throw refuse('only ES256 (P-256) authenticators can be verified')
+  }
+  if (!Number.isSafeInteger(signCount) || signCount < 0 || signCount > 0xffffffff) {
+    throw refuse('signCount must be a 32-bit counter')
+  }
+  return { credentialId, publicKeySpki, signCount, enrolledAt: new Date().toISOString() }
+}
+
+function usablePresenceKey(record) {
+  try { presenceKeyRecord(record); return true } catch { return false }
+}
+
+/** The human factors a factor state holds: what the presence gates can check. */
+function humanFactors({ vmk_wraps: wraps, webauthn }) {
+  const factors = []
+  if (wraps.some((w) => w.class === 'passphrase')) factors.push('passphrase')
+  if (webauthn && usablePresenceKey(webauthn)) factors.push('authenticator')
+  return factors
+}
+
+function recoveryRefusal() {
+  return deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost', {
+    rule: 'factor_order',
+    hint: 'Touch ID unlock needs a passphrase to fall back on if the authenticator is lost. Set one, then enable Touch ID unlock again: agent-vault passphrase set',
+    next: 'agent-vault passphrase set',
+  })
+}
+
+/**
+ * The factor invariant, owner-decided, and the one place it is enforced:
+ *
+ *   1. A vault that has a usable human factor is never left without one. With
+ *      neither a passphrase nor an authenticator the control socket is open
+ *      to whoever reaches it, which is the fresh-install state, and nothing
+ *      may put a vault back into it.
+ *   2. A Touch ID (PRF) unlock wrap never exists without the passphrase
+ *      wrap. The passphrase is its recovery: without it, losing the
+ *      authenticator loses every credential in the vault.
+ *   3. A presence authenticator is only ever replaced by one the daemon can
+ *      verify signatures from (presenceKeyRecord).
+ *
+ * `prev` and `next` are factor states: `{ vmk_wraps, webauthn }`. Every
+ * construction and every factor change calls this on the state it is about to
+ * commit, before anything is written, so a refusal leaves memory and disk as
+ * they were. A vault that never had a human factor (a fresh one, on the
+ * 'none' wrap) is allowed to stay that way; it just cannot be returned there.
+ */
+export function assertFactorInvariant(prev, next) {
+  // Not a policy, a precondition: with no wrap at all nothing opens the vault.
+  if (!next.vmk_wraps.length) throw new Error('a factor change must leave at least one way to open the vault')
+  if (next.webauthn && next.webauthn !== prev.webauthn) presenceKeyRecord(next.webauthn)
+  const hasPassphrase = (s) => s.vmk_wraps.some((w) => w.class === 'passphrase')
+  if (next.vmk_wraps.some((w) => w.class === 'webauthn-prf') && !hasPassphrase(next)) {
+    if (!hasPassphrase(prev)) throw recoveryRefusal()
+    throw deny('AV_POLICY_DENIED', 'remove Touch ID unlock first; the passphrase is its recovery factor', {
+      rule: 'last_factor',
+      hint: 'Touch ID unlock needs the passphrase to recover the vault if the authenticator is lost. Turn off Touch ID unlock in the web UI first (agent-vault ui), then remove the passphrase.',
+      next: 'agent-vault ui',
+    })
+  }
+  const had = humanFactors(prev)
+  if (had.length && !humanFactors(next).length) {
+    const losing = had.join(' and ')
+    throw deny('AV_POLICY_DENIED', `the ${losing} is this vault's last human factor; enrol another before removing it`, {
+      rule: 'last_factor',
+      hint: had.includes('passphrase')
+        ? 'Without a passphrase or an authenticator, anyone who reaches the control socket could widen access. Enrol a presence authenticator in the web UI first (agent-vault ui), then remove the passphrase.'
+        : 'Without an authenticator or a passphrase, anyone who reaches the control socket could widen access. Set a passphrase first: agent-vault passphrase set',
+      next: had.includes('passphrase') ? 'agent-vault ui' : 'agent-vault passphrase set',
+    })
+  }
 }
 
 export class Vault {
@@ -54,13 +387,24 @@ export class Vault {
 
   /** Create the vault directory and its root key material. */
   static create(dir, { factor = 'none', passphrase = null } = {}) {
+    if (!FACTOR_CLASSES.has(factor)) throw new Error(`unknown unlock factor ${JSON.stringify(factor)}`)
+    // Checked before anything touches the disk. The only class this can refuse
+    // is a Touch ID wrap, which on its own would be a vault with no recovery.
+    assertFactorInvariant({ vmk_wraps: [], webauthn: null }, { vmk_wraps: [{ class: factor }], webauthn: null })
     mkdirSync(dir, { recursive: true, mode: 0o700 })
     chmodSync(dir, 0o700)
     const v = new Vault(dir)
     if (existsSync(v.dbPath)) throw new Error(`a vault already exists at ${dir}`)
 
     const deviceKey = crypt.randomKey()
-    writeFileSync(v.deviceKeyPath, deviceKey, { mode: 0o600 })
+    // Flushed before vault.json, which #persist flushes: every wrap in it is
+    // sealed under a key derived from this one, so vault.json surviving a
+    // power cut that this did not would leave a vault nothing can open.
+    const keyFd = openSync(v.deviceKeyPath, 'w', 0o600)
+    try {
+      writeFileSync(keyFd, deviceKey)
+      fsyncSync(keyFd)
+    } finally { closeSync(keyFd) }
 
     const vmk = crypt.randomKey()
     const db = structuredClone(EMPTY)
@@ -85,13 +429,27 @@ export class Vault {
    * deleting the anchor as well.
    */
   #anchorStamp() {
+    const vaultDb = () => this.db
     return {
-      anchored: !!this.db?.kv?.audit_anchored,
+      // Read live, not captured: a log opened before the stamp was set must
+      // still see it when the log goes missing later in the same run.
+      get anchored() { return !!vaultDb()?.kv?.audit_anchored },
       markAnchored: () => {
         if (this.db?.kv && !this.db.kv.audit_anchored) {
           this.db.kv.audit_anchored = true
           this.#persist()
         }
+      },
+      // What a witness checkpoint names (F9): stable for the vault's life,
+      // created on first use and written durably, since a witness file
+      // outlives any one run.
+      vaultId: () => {
+        if (!this.db?.kv) return null
+        if (!this.db.kv.vault_id) {
+          this.db.kv.vault_id = id.vault()
+          this.#persist()
+        }
+        return this.db.kv.vault_id
       },
     }
   }
@@ -141,7 +499,15 @@ export class Vault {
   }
 
   /** Unlock with whatever material a caller has: {passphrase} or {prfSecret}. */
-  unlockWith(material = {}) {
+  unlockWith(material = {}) { return this.#openWith(material, { unlock: true }) }
+
+  /**
+   * Open the master key with whatever material was supplied. With `unlock`,
+   * the vault is left unlocked and that is recorded; without it, the key is
+   * held only long enough for the caller to write to the audit log, and
+   * nothing about the lock changes — on disk or in the log.
+   */
+  #openWith(material, { unlock }) {
     const deviceKey = readFileSync(this.deviceKeyPath)
     for (const wrap of this.db.kv.vmk_wraps) {
       try {
@@ -159,8 +525,10 @@ export class Vault {
         const audit = new AuditLog(this.auditPath, crypt.kAudit(vmk), this.#anchorStamp())
         this.vmk = vmk
         this.audit = audit
-        if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
-        this.audit.write('vault.unlock', { factor: wrap.class })
+        if (unlock) {
+          if (this.db.kv.locked) { this.db.kv.locked = false; this.#persist() }
+          this.audit.write('vault.unlock', { factor: wrap.class })
+        }
         crypt.wipe(deviceKey)
         return wrap.class
       } catch {
@@ -205,10 +573,9 @@ export class Vault {
     const wrap = this.#wrapVmk(deviceKey, this.vmk, 'passphrase', newPassphrase)
     // Additive: keep any Touch-ID (webauthn-prf) wrap so both factors work.
     // Drop the 'none' fallback so the lock has teeth.
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase' && w.class !== 'none')
-    this.db.kv.vmk_wraps.push(wrap)
-    this.#syncFactors()
-    this.#persist()
+    this.#commitFactors({
+      vmk_wraps: [...this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase' && w.class !== 'none'), wrap],
+    })
     this.audit.write('presence.factor_added', { class: 'passphrase', replaced: hasPassphrase })
     crypt.wipe(deviceKey)
   }
@@ -222,30 +589,61 @@ export class Vault {
   }
 
   /**
+   * Commit a change to the factors: the wraps, the presence authenticator, or
+   * both. The factor invariant is checked on the whole new state first, and
+   * the change lands in memory only as part of a write that succeeded, so a
+   * refusal or a failed write leaves the old factors in place.
+   */
+  #commitFactors({ vmk_wraps = this.db.kv.vmk_wraps, webauthn = this.db.kv.webauthn ?? null }) {
+    const kv = this.db.kv
+    assertFactorInvariant({ vmk_wraps: kv.vmk_wraps, webauthn: kv.webauthn ?? null }, { vmk_wraps, webauthn })
+    const before = { vmk_wraps: kv.vmk_wraps, presence_factors: kv.presence_factors, webauthn: kv.webauthn }
+    kv.vmk_wraps = vmk_wraps
+    if (webauthn !== (kv.webauthn ?? null)) kv.webauthn = webauthn
+    this.#syncFactors()
+    try {
+      this.#persist()
+    } catch (e) {
+      Object.assign(kv, before)
+      if (before.webauthn === undefined) delete kv.webauthn
+      throw e
+    }
+  }
+
+  /**
+   * Refuse, unless a passphrase is set, anything that would make Touch ID an
+   * unlock factor. The passphrase is the recovery factor: without it, losing
+   * the authenticator would lose every credential in the vault. The daemon
+   * calls this before asking for a tap, so the owner is told what to do
+   * instead of tapping for a refusal. The store's own enforcement is the factor
+   * invariant, which gives the same answer from addWebauthnUnlock.
+   */
+  requireRecoveryFactor() {
+    if (this.hasPassphrase) return
+    throw recoveryRefusal()
+  }
+
+  /**
    * Add Touch ID (or any WebAuthn PRF authenticator) as an unlock factor. A
    * passphrase must already be set, so losing the authenticator can never lock
    * you out: the passphrase is always the recovery path.
    */
   addWebauthnUnlock(credentialId, prfSecret) {
     this.#requireUnlocked()
-    if (!this.hasPassphrase) {
-      throw deny('AV_POLICY_DENIED', 'set a passphrase first; it is the recovery factor if the authenticator is lost')
-    }
     const deviceKey = readFileSync(this.deviceKeyPath)
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf' && w.class !== 'none')
-    const wrap = this.#wrapVmk(deviceKey, this.vmk, 'webauthn-prf', prfSecret)
+    let wrap
+    try { wrap = this.#wrapVmk(deviceKey, this.vmk, 'webauthn-prf', prfSecret) } finally { crypt.wipe(deviceKey) }
     wrap.credential_id = credentialId
-    this.db.kv.vmk_wraps.push(wrap)
-    this.#syncFactors()
-    this.#persist()
+    this.#commitFactors({
+      vmk_wraps: [...this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf' && w.class !== 'none'), wrap],
+    })
     this.audit.write('presence.factor_added', { class: 'webauthn-prf', credential_id: credentialId })
-    crypt.wipe(deviceKey)
   }
 
   removeWebauthnUnlock() {
     this.#requireUnlocked()
     const had = this.hasWebauthnUnlock
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf')
+    let wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'webauthn-prf')
     // Every wrap is a way back to the master key. Remove the last one and the
     // vault is not locked, it is destroyed: no factor opens it, and no factor
     // can be added, because adding one needs the key that is now unreachable.
@@ -254,16 +652,18 @@ export class Vault {
     // being wrong here is every credential in the vault, permanently.
     // removePassphrase has had this guard since the beginning; this is the
     // same guard, for the same reason.
-    if (!this.db.kv.vmk_wraps.length) {
+    const downgraded = !wraps.length
+    if (downgraded) {
       const deviceKey = readFileSync(this.deviceKeyPath)
-      this.db.kv.vmk_wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
+      wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
       crypt.wipe(deviceKey)
+    }
+    this.#commitFactors({ vmk_wraps: wraps })
+    if (downgraded) {
       this.audit.write('presence.factor_downgraded', {
         class: 'none', reason: 'removing the last wrap would have made the vault unopenable',
       })
     }
-    this.#syncFactors()
-    this.#persist()
     if (had) this.audit.write('presence.factor_removed', { class: 'webauthn-prf' })
     return had
   }
@@ -271,6 +671,24 @@ export class Vault {
   get hasWebauthnUnlock() { return (this.db?.kv?.vmk_wraps || []).some((w) => w.class === 'webauthn-prf') }
   get webauthnUnlockCredentialId() {
     return (this.db?.kv?.vmk_wraps || []).find((w) => w.class === 'webauthn-prf')?.credential_id || null
+  }
+
+  /**
+   * Enrol or replace the presence authenticator: the key every presence gate
+   * verifies signatures from. Who may do this is the daemon's to decide (a
+   * first enrolment needs a passphrase, a replacement a fresh proof); what may
+   * be stored is decided here. The candidate is validated completely before
+   * the old key is touched, and on any refusal the old key stays.
+   */
+  setPresenceKey(input) {
+    this.#requireUnlocked()
+    const record = presenceKeyRecord(input)
+    const replaced = !!this.db.kv.webauthn
+    this.#commitFactors({ webauthn: record })
+    this.audit.write('presence.factor_added', {
+      class: 'webauthn-platform', credential_id: record.credentialId, replaced_existing: replaced,
+    })
+    return { replaced }
   }
 
   /** The stable salt the PRF is evaluated against; created on first enroll. */
@@ -282,9 +700,6 @@ export class Vault {
   /** Drop the passphrase, back to the UID-boundary-only 'none' factor. */
   removePassphrase(currentPassphrase) {
     this.#requireUnlocked()
-    if (this.hasWebauthnUnlock) {
-      throw deny('AV_POLICY_DENIED', 'remove Touch ID unlock first; the passphrase is its recovery factor')
-    }
     const wrap = this.db.kv.vmk_wraps.find((w) => w.class === 'passphrase')
     if (!wrap) return false
     try {
@@ -295,13 +710,18 @@ export class Vault {
     } catch {
       throw deny('AV_LOCKED', 'the current passphrase is required to remove it')
     }
-    const deviceKey = readFileSync(this.deviceKeyPath)
-    this.db.kv.vmk_wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase')
-    if (!this.db.kv.vmk_wraps.length) this.db.kv.vmk_wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
-    this.#syncFactors()
-    this.#persist()
+    // The invariant refuses this while Touch ID unlock depends on the
+    // passphrase for recovery, and when the passphrase is the last human
+    // factor: with no authenticator to take over, removing it would reopen
+    // the control socket to whoever reaches it.
+    let wraps = this.db.kv.vmk_wraps.filter((w) => w.class !== 'passphrase')
+    if (!wraps.length) {
+      const deviceKey = readFileSync(this.deviceKeyPath)
+      wraps = [this.#wrapVmk(deviceKey, this.vmk, 'none', null)]
+      crypt.wipe(deviceKey)
+    }
+    this.#commitFactors({ vmk_wraps: wraps })
     this.audit.write('presence.factor_removed', { class: 'passphrase' })
-    crypt.wipe(deviceKey)
     return true
   }
 
@@ -350,20 +770,32 @@ export class Vault {
     // A vault whose only factors need a secret (passphrase, Touch ID) cannot
     // be auto-unlocked at boot: the secret is not on disk. Come up locked in
     // that case rather than crashing, and let the human unlock.
-    let unlocked = false
+    //
+    // A vault recorded as locked is opened WITHOUT unlocking it. It used to go
+    // through the full unlock, which cleared the flag on disk (a crash right
+    // there brought it up unlocked: a lock the restart forgot) and wrote a
+    // `vault.unlock` that nobody performed into the log on every boot.
+    let opened = false
     try {
-      this.unlockWith({ passphrase })
-      unlocked = true
-    } catch { unlocked = false }
+      this.#openWith({ passphrase }, { unlock: !wasLocked })
+      opened = true
+    } catch { opened = false }
 
-    if (!unlocked || wasLocked) {
+    if (!opened || wasLocked) {
       if (this.vmk) crypt.wipe(this.vmk)
       this.vmk = null
       // The audit log needs a key. Without one (a passphrase/Touch-ID vault we
       // could not open) it stays silent until the human unlocks; that is the
       // honest consequence of a cryptographic lock.
       if (this.db.kv.locked !== true) { this.db.kv.locked = true; this.#persist() }
-      if (this.audit) this.audit.write('vault.started_locked', {})
+      if (this.audit) {
+        this.audit.write('vault.started_locked', {})
+        // And then let go of the key, as lock() does. Keeping it meant a vault
+        // locked before a reboot answered audit reads that one locked
+        // explicitly refuses.
+        crypt.wipe(this.audit.key)
+        this.audit = null
+      }
       return false
     }
     return true
@@ -430,9 +862,17 @@ export class Vault {
    */
   addCredential({ slug, kind, connector = {}, fields = {}, sites = {} }) {
     this.#requireUnlocked()
-    if (!ph.isValidSlug(slug)) throw deny('AV_NOT_FOUND', `invalid slug "${slug}": use [a-z0-9-], 1-24 characters`)
     if (this.findCredential(slug)) throw deny('AV_NOT_FOUND', `credential ${slug} already exists`)
+    const cred = this.#sealCredential({ slug, kind, connector, fields, sites })
+    this.db.credentials[cred.id] = cred
+    this.#persist()
+    this.audit.write('cred.added', { credential_slug: slug, connector: kind, fields: cred.fields.map((f) => f.name) })
+    return this.publicCredential(cred)
+  }
 
+  /** A new credential record, every value sealed, checked and not yet stored. Writes nothing. */
+  #sealCredential({ slug, kind, connector = {}, fields = {}, sites = {} }) {
+    if (!ph.isValidSlug(slug)) throw deny('AV_NOT_FOUND', `invalid slug "${slug}": use [a-z0-9-], 1-24 characters`)
     const credId = id.credential()
     const key = crypt.dek(this.vmk, credId)
     const stored = []
@@ -446,14 +886,10 @@ export class Vault {
         length: value.length,
       })
     }
-    const cred = {
+    return {
       id: credId, slug, connector_kind: kind, connector, fields: stored,
       created_at: new Date().toISOString(),
     }
-    this.db.credentials[credId] = cred
-    this.#persist()
-    this.audit.write('cred.added', { credential_slug: slug, connector: kind, fields: stored.map((f) => f.name) })
-    return this.publicCredential(cred)
   }
 
   findCredential(slug) {
@@ -464,10 +900,20 @@ export class Vault {
   publicCredential(cred) {
     return {
       id: cred.id, slug: cred.slug, kind: cred.connector_kind, connector: cred.connector,
+      expires_at: cred.expires_at ?? null,
+      health: cred.health ? structuredClone(cred.health) : null,
+      expiry_warning: expiryWarning(cred),
+      quarantine: cred.quarantine ? structuredClone(cred.quarantine) : null,
+      scrub_patterns: (cred.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
+      // F11: how many pins each host has, never the pins themselves.
+      pins: pinCounts(cred.pins),
       // No exact length: it narrows an offline guess and, with the fingerprint,
       // is metadata a credential value should not leak. A coarse bucket is
       // enough for the UI to say something useful.
-      fields: cred.fields.map((f) => ({ name: f.name, sites: f.sites, fp8: f.fp8, size: sizeBucket(f.length) })),
+      fields: cred.fields.map((f) => ({
+        name: f.name, sites: f.sites, fp8: f.fp8, size: sizeBucket(f.length),
+        version: f.key_version ?? 1, rotated_at: f.rotated_at ?? null,
+      })),
       // The profile's own read-only probe. Not sensitive — it is a constant of
       // the connector kind — and it lets a caller show an example request that
       // actually works instead of a made-up path.
@@ -478,27 +924,657 @@ export class Vault {
 
   listCredentials() { return Object.values(this.db.credentials).map((c) => this.publicCredential(c)) }
 
-  /** Decrypt one field. The only path to a plaintext value, used by the pipeline. */
+  /**
+   * Decrypt one field for a request: the pipeline's only path to a plaintext
+   * value. A quarantined credential is refused here (F16), not just where the
+   * gateway looks, so a placeholder issued before the quarantine reaches
+   * nothing either.
+   */
   revealField(credId, fieldName) {
     this.#requireUnlocked()
     const cred = this.db.credentials[credId]
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${credId}`)
-    const field = cred.fields.find((f) => f.name === fieldName)
-    if (!field) throw deny('AV_NOT_FOUND', `credential ${cred.slug} has no field ${fieldName}`)
-    const key = crypt.dek(this.vmk, credId)
-    return crypt.open(key, field, `${credId}|${fieldName}|${field.key_version}`)
+    if (cred.quarantine) throw quarantined(cred)
+    return this.#unseal(cred, fieldName)
   }
 
-  /** Every unsealed credential value, for the scrubber's match set. */
+  /**
+   * A field's plaintext, quarantined or not. For the vault's own readers —
+   * the scrubber's match set, rotation, a backup — and never for a request:
+   * a quarantined value still has to be scrubbed, rotated and kept.
+   */
+  #unseal(cred, fieldName) {
+    const field = cred.fields.find((f) => f.name === fieldName)
+    if (!field) throw deny('AV_NOT_FOUND', `credential ${cred.slug} has no field ${fieldName}`)
+    const key = crypt.dek(this.vmk, cred.id)
+    return crypt.open(key, field, `${cred.id}|${fieldName}|${field.key_version}`)
+  }
+
+  /**
+   * Every unsealed credential value, for the scrubber's match set. That
+   * includes a rotated-out value until its retire_until (F7), so an upstream
+   * that echoes the old token for a while is still scrubbed. Read-only: an
+   * expired retired value is skipped here and dropped at the next rotation.
+   */
+  /** `untrustedText` over this vault's stored secrets; while locked, placeholders and the bound only. */
+  untrustedText(text, max = 200) {
+    return untrustedText(text, this.locked ? [] : this.allSecrets(), max)
+  }
+
   allSecrets() {
     this.#requireUnlocked()
     const out = []
+    const now = Date.now()
     for (const cred of Object.values(this.db.credentials)) {
+      const key = crypt.dek(this.vmk, cred.id)
       for (const f of cred.fields) {
-        try { out.push({ secret: this.revealField(cred.id, f.name), label: cred.slug, field: f.name }) } catch { /* skip */ }
+        try { out.push({ secret: this.#unseal(cred, f.name), label: cred.slug, field: f.name }) } catch { /* skip */ }
+        for (const r of f.retired || []) {
+          if (!(expiryMs(r.retire_until) > now)) continue
+          try {
+            out.push({ secret: crypt.open(key, r, `${cred.id}|${f.name}|${r.key_version}`), label: cred.slug, field: f.name, retired: true })
+          } catch { /* skip */ }
+        }
       }
     }
     return out
+  }
+
+  /**
+   * The human's own note of when a credential stops working (F10). Metadata,
+   * not enforcement: the upstream refuses an expired credential anyway, and
+   * refusing it here would hand an agent a way to deny service. Stored as one
+   * normalised ISO string, so every reader parses the same thing.
+   */
+  setCredentialExpiry(slug, isoOrNull) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const expires = isoOrNull === null ? null : isoOrUndefined(isoOrNull)
+    if (expires === undefined) {
+      throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null to clear it', { rule: 'expires_at' })
+    }
+    cred.expires_at = expires
+    this.#persist()
+    this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: expires })
+    return this.publicCredential(cred)
+  }
+
+  /**
+   * Merge what was observed about a credential (F10): from a probe, or from
+   * the headers of a response it was used for. Called on the hot path, so the
+   * write skips the fsync and the log only hears about a change of status or
+   * of the observed expiry: a busy credential must not flood the log.
+   *
+   * Only the record's own keys are taken, each only with a value of its type.
+   * A value that is not one is dropped rather than stored, because it would
+   * reach the audit record (where a float throws) and every reader after it.
+   * A locked vault cannot record, so it changes nothing and returns null.
+   */
+  recordHealth(credIdOrSlug, patch) {
+    if (this.locked) return null
+    const cred = (Object.hasOwn(this.db.credentials, credIdOrSlug) && this.db.credentials[credIdOrSlug]) || this.findCredential(credIdOrSlug)
+    if (!cred || !patch || typeof patch !== 'object') return null
+    const clean = {}
+    if (HEALTH_STATUS.has(patch.status)) clean.status = patch.status
+    if (patch.http_status === null || (Number.isInteger(patch.http_status) && patch.http_status >= 100 && patch.http_status <= 599)) clean.http_status = patch.http_status
+    if (isoOrUndefined(patch.checked_at)) clean.checked_at = isoOrUndefined(patch.checked_at)
+    if (HEALTH_SOURCE.has(patch.source)) clean.source = patch.source
+    if (patch.observed_expires_at === null) clean.observed_expires_at = null
+    else if (isoOrUndefined(patch.observed_expires_at)) clean.observed_expires_at = isoOrUndefined(patch.observed_expires_at)
+    if (patch.scopes === null || (Array.isArray(patch.scopes) && patch.scopes.length <= 64 &&
+      patch.scopes.every((s) => typeof s === 'string' && s.length <= 128))) clean.scopes = patch.scopes && [...patch.scopes]
+    const before = cred.health || {}
+    const health = {
+      status: 'unknown', http_status: null, checked_at: new Date().toISOString(), source: 'response',
+      observed_expires_at: null, scopes: null, ...before, ...clean,
+    }
+    cred.health = health
+    this.#persist({ durable: false })
+    if (health.status !== before.status || health.observed_expires_at !== (before.observed_expires_at ?? null)) {
+      this.audit.write('cred.health_recorded', {
+        credential_slug: cred.slug, status: health.status, http_status: health.http_status,
+        source: health.source, observed_expires_at: health.observed_expires_at,
+      })
+    }
+    return structuredClone(health)
+  }
+
+  /**
+   * Stop a credential being used at all (F16), until a human releases it. Open
+   * by design: it only narrows, and it has to work in an emergency. A second
+   * quarantine keeps the first record, so who stopped it first, and when, is
+   * not overwritten by whoever repeats it.
+   */
+  setQuarantine(slug, { by = 'control', rule_id = null, reason = null } = {}) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (by !== 'control' && by !== 'tripwire') throw deny('AV_POLICY_DENIED', 'a quarantine is set by control or tripwire', { rule: 'quarantine' })
+    if (rule_id !== null && (typeof rule_id !== 'string' || !/^[a-z0-9_-]{1,32}$/.test(rule_id))) {
+      throw deny('AV_POLICY_DENIED', 'a tripwire rule id must match [a-z0-9_-]{1,32}', { rule: 'quarantine' })
+    }
+    if (cred.quarantine) return structuredClone(cred.quarantine)
+    // Written by whoever called the open route, an agent included.
+    const reasonUntrusted = typeof reason === 'string' && reason ? reason.slice(0, 200) : null
+    cred.quarantine = { since: new Date().toISOString(), by, rule_id, reason_untrusted: reasonUntrusted }
+    this.#persist()
+    this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted: reasonUntrusted })
+    return structuredClone(cred.quarantine)
+  }
+
+  /** Release a quarantine. Grants were paused, not revoked, so live ones work again. */
+  clearQuarantine(slug) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (!cred.quarantine) return false
+    cred.quarantine = null
+    this.#persist()
+    this.audit.write('cred.released', { credential_slug: cred.slug })
+    return true
+  }
+
+  /** A deep copy: nothing a caller does to it reaches the vault. Not secret, so open while locked. */
+  getSettings() {
+    return structuredClone(this.db.kv.settings || {})
+  }
+
+  /** Shallow merge per top-level key (F16). Tripwire rules are checked whole before anything is kept. */
+  updateSettings(patch) {
+    this.#requireUnlocked()
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw deny('AV_POLICY_DENIED', 'settings must be an object', { rule: 'policy_invalid' })
+    }
+    const keys = Object.keys(patch)
+    for (const k of keys) {
+      // `__proto__` as an own key of parsed JSON would replace the prototype.
+      if (!/^[a-z][a-z0-9_]{0,31}$/.test(k)) throw deny('AV_POLICY_DENIED', 'a setting name must match [a-z][a-z0-9_]{0,31}', { rule: 'policy_invalid' })
+    }
+    if (Object.hasOwn(patch, 'tripwires')) {
+      const problem = tripwireProblem(patch.tripwires)
+      if (problem) throw deny('AV_POLICY_DENIED', problem, { rule: 'tripwire_rule' })
+    }
+    const next = { ...(this.db.kv.settings || {}) }
+    for (const k of keys) next[k] = structuredClone(patch[k])
+    this.db.kv.settings = next
+    this.#persist()
+    this.audit.write('settings.changed', { keys })
+    return this.getSettings()
+  }
+
+  // ---------------------------------------------------- F4: scrub patterns
+
+  /**
+   * Add a scrub pattern to a credential (F4): a raw store write. The route
+   * compiles the pattern first (the gateway's compileScrubPattern decides the
+   * grammar); this checks the bounds, and that the source carries no secret.
+   * A pattern is stored in clear and shown to whoever lists credentials, so a
+   * source that contains a stored credential value, or a placeholder, would
+   * publish it. The log keeps only its digest and length.
+   */
+  addScrubPattern(slug, source) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const refuse = scrubRefusal
+    this.#checkScrubSource(source, this.allSecrets().map((s) => s.secret))
+    const mine = cred.scrub_patterns || []
+    if (mine.length >= MAX_SCRUB_PER_CRED) throw refuse(`at most ${MAX_SCRUB_PER_CRED} patterns per credential`)
+    const total = Object.values(this.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
+    if (total >= MAX_SCRUB_TOTAL) throw refuse(`at most ${MAX_SCRUB_TOTAL} patterns in the vault`)
+    const pattern = { id: id.scrubPattern(), source, added_at: new Date().toISOString() }
+    cred.scrub_patterns = [...mine, pattern]
+    this.#persist()
+    this.#auditScrubPattern(cred, pattern)
+    return { ...pattern }
+  }
+
+  /** The source rules, shared with a restore so both refuse the same patterns. Writes nothing. */
+  #checkScrubSource(source, secrets) {
+    const refuse = scrubRefusal
+    // 3 characters (F4) up to 256 (C5, which revised F4's 200).
+    if (typeof source !== 'string' || source.length < 3 || source.length > MAX_SCRUB_SOURCE) {
+      throw refuse(`a pattern is 3 to ${MAX_SCRUB_SOURCE} characters`)
+    }
+    if (ph.findAll(source).length) throw refuse('it contains a placeholder')
+    for (const secret of secrets) {
+      if (secret && source.includes(secret)) throw refuse('it contains a stored credential value')
+    }
+    // The gateway's own grammar (C5), so a pattern stored here is one the
+    // scrubber can apply. One it could not compile would withhold every
+    // response from every credential (scrub_pattern_invalid).
+    compileScrubPattern(source)
+  }
+
+  #auditScrubPattern(cred, pattern) {
+    this.audit.write('cred.scrub_pattern_added', {
+      credential_slug: cred.slug, pattern_id: pattern.id,
+      pattern_sha256: createHash('sha256').update(pattern.source).digest('hex'), length: pattern.source.length,
+    })
+  }
+
+  /** Remove one scrub pattern. False, and nothing recorded, when there was none. */
+  removeScrubPattern(slug, patternId) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const mine = cred.scrub_patterns || []
+    if (!mine.some((p) => p.id === patternId)) return false
+    cred.scrub_patterns = mine.filter((p) => p.id !== patternId)
+    this.#persist()
+    this.audit.write('cred.scrub_pattern_removed', { credential_slug: cred.slug, pattern_id: patternId })
+    return true
+  }
+
+  // ------------------------------------------------------- F11: SPKI pins
+
+  /**
+   * Pin a host of a credential to these SPKI digests (F11), replacing that
+   * host's list. The host is stored the way the connectors read a pin key
+   * (urlHostOf), so the gateway and the probe find it under the URL host
+   * they connect to, and two spellings of one host are one entry. It must be
+   * a host this credential can reach. Pins are 1 to 4 values of the one
+   * format (pinListState), each kept once; at most 4 hosts.
+   */
+  setPins(slug, host, pins) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const key = this.#pinHost(cred, host)
+    const list = pinList(pins)
+    const table = { ...pinTableOf(cred.pins, key), [key]: list }
+    if (Object.keys(table).length > MAX_PIN_HOSTS) {
+      throw deny('AV_POLICY_DENIED', `at most ${MAX_PIN_HOSTS} hosts can be pinned`, { rule: 'pin_host' })
+    }
+    cred.pins = table
+    this.#persist()
+    this.audit.write('cred.pins_set', { credential_slug: cred.slug, host: key, pins: list.length })
+    return { slug: cred.slug, host: key, pins: list.length }
+  }
+
+  /**
+   * Remove one pin from a host, or every pin of it (`spki` null). Returns how
+   * many stay for that host. Nothing is written or recorded when nothing was
+   * removed.
+   */
+  clearPins(slug, host, spki = null) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    if (spki !== null && (typeof spki !== 'string' || !PIN_RE.test(spki))) {
+      throw deny('AV_POLICY_DENIED', 'a pin is sha256/<base64 of 32 bytes>', { rule: 'pin_format' })
+    }
+    const key = typeof host === 'string' ? urlHostOf(host) : null
+    if (!key) throw deny('AV_POLICY_DENIED', `${String(host)} is not a host name`, { rule: 'pin_host' })
+    const current = Object.entries(plainTable(cred.pins))
+      .filter(([k, v]) => urlHostOf(k) === key && Array.isArray(v))
+      .flatMap(([, v]) => v)
+    const remaining = spki === null ? [] : [...new Set(current.filter((p) => p !== spki))]
+    const removed = new Set(current).size - remaining.length
+    if (removed === 0) return remaining.length
+    const table = pinTableOf(cred.pins, key)
+    if (remaining.length) table[key] = remaining
+    cred.pins = table
+    this.#persist()
+    this.audit.write('cred.pins_removed', { credential_slug: cred.slug, host: key, pins: removed })
+    return remaining.length
+  }
+
+  /** The canonical pin key for `host`, refused unless this credential can reach it. Writes nothing. */
+  #pinHost(cred, host) {
+    const key = typeof host === 'string' ? urlHostOf(host) : null
+    const ceiling = policyMod.credentialHostCeiling(cred, PROFILES[cred.connector_kind]?.hosts || [])
+    if (!key || !ceiling.some((h) => urlHostOf(h) === key || policyMod.matchHost(h, key))) {
+      throw deny('AV_POLICY_DENIED', `${String(host)} is not a host this credential reaches`, { rule: 'pin_host' })
+    }
+    return key
+  }
+
+  // ------------------------------------------------------- F7: rotation
+
+  /**
+   * Replace a field's value (F7). The current sealed value moves into
+   * `retired`, where it stays only so an upstream that echoes the old token
+   * is still scrubbed until `retire_until`; it is never substituted again.
+   * The new value is sealed under the same per-credential key with the next
+   * key_version in the AAD, as every field is.
+   *
+   * Everything is checked before anything changes, and `mode: 'revoke'`
+   * revokes the credential's grants. The route then denies the credential's
+   * held approvals (pipeline.denyApprovals): a human approved those against
+   * the old key, and the new one may reach further.
+   */
+  rotateCredential(slug, { field = null, value, mode = 'keep', retireMs = DAY_MS, expiresAt = undefined } = {}) {
+    this.#requireUnlocked()
+    const cred = this.findCredential(slug)
+    if (!cred) throw deny('AV_NOT_FOUND', `no credential ${slug}`)
+    const f = field === null ? cred.fields[0] : cred.fields.find((x) => x.name === field)
+    if (!f) throw deny('AV_NOT_FOUND', `credential ${slug} has no field ${field}`)
+    if (typeof value !== 'string' || value.length === 0) {
+      throw deny('AV_POLICY_DENIED', 'the new value must be a non-empty string', { rule: 'value_empty' })
+    }
+    if (mode !== 'keep' && mode !== 'revoke') throw deny('AV_POLICY_DENIED', 'mode must be keep or revoke', { rule: 'rotate_mode' })
+    if (!Number.isSafeInteger(retireMs) || retireMs < 0 || retireMs > 7 * DAY_MS) {
+      throw deny('AV_POLICY_DENIED', 'the retire window is a whole number of milliseconds, at most 7 days', { rule: 'retire_window' })
+    }
+    // Undefined clears it: the old expiry described the old token.
+    const expires = expiresAt === undefined || expiresAt === null ? null : isoOrUndefined(expiresAt)
+    if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null', { rule: 'expires_at' })
+    const current = this.#unseal(cred, f.name)
+    if (crypt.constantTimeEqual(current, value)) {
+      throw deny('AV_POLICY_DENIED', 'that is the value already stored', { rule: 'rotate_same_value' })
+    }
+
+    const now = Date.now()
+    const version = (Number.isSafeInteger(f.key_version) ? f.key_version : 1) + 1
+    const sealed = crypt.seal(crypt.dek(this.vmk, cred.id), value, `${cred.id}|${f.name}|${version}`)
+    const retireUntil = new Date(now + retireMs).toISOString()
+    // A zero window keeps nothing: an old value nobody will scrub for is
+    // only ciphertext of a secret, lying around.
+    const kept = (f.retired || []).filter((r) => expiryMs(r.retire_until) > now)
+    const retired = retireMs > 0
+      ? [...kept, { ct: f.ct, nonce: f.nonce, key_version: f.key_version ?? 1, retired_at: new Date(now).toISOString(), retire_until: retireUntil }]
+      : kept
+    const previousFp8 = f.fp8
+    Object.assign(f, {
+      ct: sealed.ct, nonce: sealed.nonce, key_version: version, retired,
+      fp8: crypt.fingerprint8(this.kFingerprint, value), length: value.length,
+      rotated_at: new Date(now).toISOString(),
+    })
+    cred.expires_at = expires
+    let revokedGrants = 0
+    if (mode === 'revoke') {
+      for (const g of Object.values(this.db.grants)) {
+        if (g.credential_id === cred.id && g.state === 'active') { this.revokeGrant(g.id, 'credential_rotated'); revokedGrants++ }
+      }
+    }
+    this.#persist()
+    const rotated = {
+      field: f.name, version, previous_fp8: previousFp8, fp8: f.fp8, mode, revoked_grants: revokedGrants, retire_until: retireUntil,
+    }
+    this.audit.write('cred.rotated', { credential_slug: cred.slug, ...rotated })
+    return { credential: this.publicCredential(cred), rotated }
+  }
+
+  // ------------------------------------------------- F14: notify webhook
+
+  /**
+   * The owner's approval-notification webhook (F14). Its URL is a bearer
+   * credential (a Slack webhook URL is one), so it is sealed at rest under its
+   * own key and only its host is ever shown or audited. HTTPS only, or plain
+   * HTTP to this machine; never userinfo.
+   */
+  setNotifyWebhook({ url, detail = 'minimal' } = {}) {
+    this.#requireUnlocked()
+    const refuse = (why) => deny('AV_POLICY_DENIED', `webhook refused: ${why}`, { rule: 'webhook_url' })
+    if (typeof url !== 'string' || !url || url.length > 2048) throw refuse('give an https URL of at most 2048 characters')
+    let parsed
+    try { parsed = new URL(url) } catch { throw refuse('not a URL') }
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+    if (!(parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback))) throw refuse('it must be https (or http to this machine)')
+    if (parsed.username || parsed.password) throw refuse('it must not carry a user name or password')
+    if (detail !== 'minimal' && detail !== 'headline') {
+      throw deny('AV_POLICY_DENIED', 'detail must be minimal or headline', { rule: 'policy_invalid' })
+    }
+    const sealed = crypt.seal(crypt.dek(this.vmk, 'notify'), url, NOTIFY_AAD)
+    this.db.kv.notify = { sealed, host: parsed.host, detail, configured_at: new Date().toISOString() }
+    this.#persist()
+    this.audit.write('notify.configured', { host: parsed.host, detail })
+    return this.notifyConfig()
+  }
+
+  /** The URL itself. Daemon-internal: nothing it returns may reach a response. */
+  getNotifyWebhook() {
+    this.#requireUnlocked()
+    const n = this.db.kv.notify
+    if (!n) return null
+    return { url: crypt.open(crypt.dek(this.vmk, 'notify'), n.sealed, NOTIFY_AAD), host: n.host, detail: n.detail }
+  }
+
+  /** What anyone may see: the host, never the path or query. */
+  notifyConfig() {
+    const n = this.db.kv.notify
+    return n ? { host: n.host, detail: n.detail, configured_at: n.configured_at } : null
+  }
+
+  clearNotifyWebhook() {
+    this.#requireUnlocked()
+    if (!this.db.kv.notify) return false
+    delete this.db.kv.notify
+    this.#persist()
+    this.audit.write('notify.removed', {})
+    return true
+  }
+
+  // ------------------------------------------------------ F17: templates
+
+  /**
+   * Save a named session shape (F17): configuration, not standing approval.
+   * Creating a session from one still passes the normal gate. The hash is
+   * over the canonical operation form, which accepts the floats a spec may
+   * carry (spend_usd) where canon.canonicalize would not, and it is what a
+   * human's signature binds, so an edit after they looked is refused.
+   */
+  saveTemplate(name, spec) {
+    this.#requireUnlocked()
+    const text = this.#checkTemplate(name, spec)
+    const templates = this.db.templates || {}
+    const old = Object.hasOwn(templates, name) ? templates[name] : null
+    if (!old && Object.keys(templates).length >= MAX_TEMPLATES) {
+      throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
+    }
+    const template = this.#templateRecord(name, text, old)
+    this.db.templates = { ...templates, [name]: template }
+    this.#persist()
+    this.audit.write('template.saved', { name, version: template.version, template_hash: template.hash })
+    return structuredClone(template)
+  }
+
+  /** A template's name and spec, checked; returns the spec's JSON. Shared with a restore. Writes nothing. */
+  #checkTemplate(name, spec) {
+    if (typeof name !== 'string' || !TEMPLATE_NAME.test(name)) {
+      throw deny('AV_POLICY_DENIED', 'a template name is 1-32 characters of [a-z0-9-], starting with a letter or digit', { rule: 'template_name' })
+    }
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+      throw deny('AV_POLICY_DENIED', 'a template spec is a session-create object', { rule: 'session_shape' })
+    }
+    for (const k of ['template', 'template_hash', 'presence']) {
+      if (Object.hasOwn(spec, k)) throw deny('AV_POLICY_DENIED', `a template spec cannot carry ${k}`, { rule: 'session_shape' })
+    }
+    let text
+    try { text = JSON.stringify(spec) } catch { throw deny('AV_POLICY_DENIED', 'a template spec must be plain JSON', { rule: 'session_shape' }) }
+    if (Buffer.byteLength(text) > MAX_TEMPLATE_BYTES) {
+      throw deny('AV_POLICY_DENIED', `a template spec is at most ${MAX_TEMPLATE_BYTES} bytes of JSON`, { rule: 'template_size' })
+    }
+    return text
+  }
+
+  #templateRecord(name, text, old) {
+    // Stored as the JSON it will be read back as, so the hash describes
+    // exactly what a later read returns.
+    const stored = JSON.parse(text)
+    const now = new Date().toISOString()
+    return {
+      name, version: old ? old.version + 1 : 1, spec: stored,
+      hash: createHash('sha256').update(canonicalOperation(stored)).digest('hex'),
+      created_at: old?.created_at ?? now, updated_at: now,
+    }
+  }
+
+  getTemplate(name) {
+    const t = this.db.templates
+    return t && typeof name === 'string' && Object.hasOwn(t, name) ? structuredClone(t[name]) : null
+  }
+
+  listTemplates() {
+    return Object.values(this.db.templates || {}).sort((a, b) => a.name.localeCompare(b.name)).map((t) => structuredClone(t))
+  }
+
+  /** Remove a template. It grants nothing, so removing it narrows only. */
+  deleteTemplate(name) {
+    this.#requireUnlocked()
+    const t = this.db.templates
+    if (!t || typeof name !== 'string' || !Object.hasOwn(t, name)) return false
+    const { version } = t[name]
+    const { [name]: _gone, ...rest } = t
+    this.db.templates = rest
+    this.#persist()
+    this.audit.write('template.deleted', { name, version })
+    return true
+  }
+
+  // ------------------------------------------------------- F8: backup
+
+  /**
+   * Every credential as a backup carries it (F8): current values, sites,
+   * scrub patterns, pins, expiry and quarantine. Quarantined ones too, because
+   * a backup that left them out would lose them, and with their quarantine as
+   * stored, because a restore must not release them. Only the export reads
+   * this, behind a fresh proof of presence.
+   */
+  backupCredentials() {
+    this.#requireUnlocked()
+    return Object.values(this.db.credentials).map((c) => ({
+      slug: c.slug, kind: c.connector_kind, connector: c.connector ?? null, created_at: c.created_at,
+      fields: c.fields.map((f) => ({ name: f.name, value: this.#unseal(c, f.name), sites: f.sites || [] })),
+      scrub_patterns: (c.scrub_patterns || []).map(({ id: pid, source, added_at }) => ({ id: pid, source, added_at })),
+      pins: c.pins ?? {},
+      expires_at: c.expires_at ?? null,
+      quarantine: c.quarantine ? structuredClone(c.quarantine) : null,
+    }))
+  }
+
+  /**
+   * Put a backup's credentials and templates back (F8), all or nothing. Every
+   * rule addCredential, setCredentialExpiry, addScrubPattern and saveTemplate
+   * apply is checked over the whole set first, writing nothing, and then all
+   * of it is stored in one write. A restore that stored its first credential
+   * and then threw on that credential's scrub pattern was a refusal that had
+   * changed the vault; now a refusal anywhere, or a write that fails, leaves
+   * the vault as it was.
+   *
+   * A restore never releases a quarantine. A credential quarantined in the
+   * bundle comes back quarantined, with the record as it was stored. One this
+   * vault holds quarantined under the bundle's slug (`from`, the slug before a
+   * rename) or under a renamed copy of it keeps the restored copy quarantined,
+   * whatever the bundle says, so restoring an older bundle under `rename`
+   * cannot hand out a released copy. Releasing stays clearQuarantine, a
+   * human's explicit act.
+   *
+   * `credentials` are in bundle form with conflicts already resolved: a slug
+   * that is taken is refused. A template whose name is taken is skipped, the
+   * way the restore has always treated one. Pins are refused until this vault
+   * can store them (F11): dropping them would restore a credential with less
+   * protection than the human gave it.
+   */
+  restoreEntries({ credentials = [], templates = [] } = {}) {
+    this.#requireUnlocked()
+    const format = (why) => deny('AV_POLICY_DENIED', `not a usable backup: ${why}`, { rule: 'backup_format' })
+    if (!Array.isArray(credentials) || !Array.isArray(templates)) throw format('credentials and templates are lists')
+    const now = new Date().toISOString()
+    const taken = new Set(Object.values(this.db.credentials).map((c) => c.slug))
+    // A pattern may carry no value this vault will hold: the ones it has, and every one being restored.
+    const secrets = [
+      ...this.allSecrets().map((s) => s.secret),
+      ...credentials.flatMap((c) => (Array.isArray(c?.fields) ? c.fields.map((f) => f?.value) : [])),
+    ]
+    let patternTotal = Object.values(this.db.credentials).reduce((n, c) => n + (c.scrub_patterns?.length || 0), 0)
+    const staged = []
+    for (const c of credentials) {
+      if (!c || typeof c !== 'object' || !Array.isArray(c.fields) || !c.fields.length) throw format('a credential entry is malformed')
+      if (taken.has(c.slug)) throw deny('AV_NOT_FOUND', `credential ${c.slug} already exists`)
+      taken.add(c.slug)
+      if (c.fields.some((f) => typeof f?.value !== 'string' || !f.value) || new Set(c.fields.map((f) => f.name)).size !== c.fields.length) {
+        throw format(`the fields of ${c.slug} are malformed`)
+      }
+      const cred = this.#sealCredential({
+        slug: c.slug, kind: c.kind, connector: c.connector ?? {},
+        fields: Object.fromEntries(c.fields.map((f) => [f.name, f.value])),
+        sites: Object.fromEntries(c.fields.map((f) => [f.name, f.sites ?? []])),
+      })
+      // Pins come back as setPins would store them, or the restore is refused:
+      // dropping them would restore a credential with less protection than
+      // the human gave it.
+      const pins = c.pins ?? {}
+      if (!pins || typeof pins !== 'object' || Array.isArray(pins)) throw format(`the pins of ${c.slug} are malformed`)
+      for (const [host, list] of Object.entries(pins)) {
+        if (Array.isArray(list) && list.length === 0) continue
+        const key = this.#pinHost(cred, host)
+        cred.pins = { ...pinTableOf(cred.pins, key), [key]: pinList(list) }
+      }
+      if (Object.keys(cred.pins ?? {}).length > MAX_PIN_HOSTS) {
+        throw deny('AV_POLICY_DENIED', `at most ${MAX_PIN_HOSTS} hosts can be pinned`, { rule: 'pin_host' })
+      }
+      if (c.expires_at != null) {
+        const expires = isoOrUndefined(c.expires_at)
+        if (expires === undefined) throw deny('AV_POLICY_DENIED', 'expires_at must be an ISO date, or null to clear it', { rule: 'expires_at' })
+        cred.expires_at = expires
+      }
+      const patterns = c.scrub_patterns ?? []
+      if (!Array.isArray(patterns)) throw format(`the scrub patterns of ${c.slug} are malformed`)
+      if (patterns.length > MAX_SCRUB_PER_CRED) throw scrubRefusal(`at most ${MAX_SCRUB_PER_CRED} patterns per credential`)
+      patternTotal += patterns.length
+      if (patternTotal > MAX_SCRUB_TOTAL) throw scrubRefusal(`at most ${MAX_SCRUB_TOTAL} patterns in the vault`)
+      for (const p of patterns) this.#checkScrubSource(p?.source, secrets)
+      if (patterns.length) cred.scrub_patterns = patterns.map((p) => ({ id: id.scrubPattern(), source: p.source, added_at: now }))
+      if (c.quarantine != null) cred.quarantine = restoredQuarantine(c.quarantine, format)
+      else {
+        // The earliest, as setQuarantine keeps the first record.
+        const names = [c.from ?? c.slug, c.slug]
+        const held = Object.values(this.db.credentials)
+          .filter((h) => h.quarantine && names.some((n) => sameCredential(h.slug, n)))
+          .map((h) => h.quarantine)
+          .sort((a, b) => Date.parse(a.since) - Date.parse(b.since))[0]
+        if (held) cred.quarantine = structuredClone(held)
+      }
+      staged.push(cred)
+    }
+    const before = this.db.templates
+    const nextTemplates = { ...(before || {}) }
+    const restoredTemplates = []
+    const skippedTemplates = []
+    for (const t of templates) {
+      const text = this.#checkTemplate(t?.name, t?.spec)
+      if (Object.hasOwn(nextTemplates, t.name)) { skippedTemplates.push(t.name); continue }
+      if (Object.keys(nextTemplates).length >= MAX_TEMPLATES) {
+        throw deny('AV_POLICY_DENIED', `at most ${MAX_TEMPLATES} templates`, { rule: 'template_size' })
+      }
+      nextTemplates[t.name] = this.#templateRecord(t.name, text, null)
+      restoredTemplates.push(t.name)
+    }
+    // Nothing above can reach a factor. Said, on the state about to be stored.
+    const factors = { vmk_wraps: this.db.kv.vmk_wraps, webauthn: this.db.kv.webauthn ?? null }
+    assertFactorInvariant(factors, factors)
+
+    // One write. Undone in memory if it fails, so the vault is what it was.
+    for (const cred of staged) this.db.credentials[cred.id] = cred
+    if (restoredTemplates.length) this.db.templates = nextTemplates
+    try {
+      this.#persist()
+    } catch {
+      for (const cred of staged) delete this.db.credentials[cred.id]
+      if (before === undefined) delete this.db.templates
+      else this.db.templates = before
+      throw deny('AV_INTERNAL', 'the restore could not be written, so nothing was restored', { rule: 'backup_persist' })
+    }
+    for (const cred of staged) {
+      this.audit.write('cred.added', { credential_slug: cred.slug, connector: cred.connector_kind, fields: cred.fields.map((f) => f.name) })
+      if (cred.expires_at !== undefined) this.audit.write('cred.expiry_set', { credential_slug: cred.slug, expires_at: cred.expires_at })
+      for (const p of cred.scrub_patterns ?? []) this.#auditScrubPattern(cred, p)
+      for (const [host, list] of Object.entries(cred.pins ?? {})) this.audit.write('cred.pins_set', { credential_slug: cred.slug, host, pins: list.length })
+      if (cred.quarantine) {
+        const { since, by, rule_id, reason_untrusted } = cred.quarantine
+        // From a bundle, which anyone could have written: cleaned like any
+        // other agent text before it is recorded (C28).
+        this.audit.write('cred.quarantined', { credential_slug: cred.slug, by, rule_id, reason_untrusted: this.untrustedText(reason_untrusted), since, restored: true })
+      }
+    }
+    for (const name of restoredTemplates) {
+      const t = this.db.templates[name]
+      this.audit.write('template.saved', { name, version: t.version, template_hash: t.hash })
+    }
+    return { restored: staged.map((c) => c.slug), templates: { restored: restoredTemplates, skipped: skippedTemplates } }
   }
 
   deleteCredential(slug) {
@@ -557,9 +1633,33 @@ export class Vault {
    * `expires_at`, so asking for 48 hours produced a session that outlived the
    * 24-hour cap by a day. It is now both: what is asked for is clamped down to
    * the cap, and what was asked for caps the idle extension.
+   *
+   * `infinite` (R3) is a session with no lifetime at all: it ends by being
+   * revoked, shortened or panicked, and never from the network. `elevated`
+   * (C3) is what made the daemon ask for a fresh proof, recorded with the
+   * creation. Every argument is checked before anything is written, and a
+   * value that is not exactly what it should be is refused, never coerced:
+   * `infinite: 'false'` is truthy, and `ttlMs: NaN` was a session that
+   * `new Date(NaN)` threw on halfway through.
    */
-  createSession({ workspaceId, label, ttlMs = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null }) {
+  createSession({ workspaceId, label, ttlMs = null, infinite = false, elevated = [], template = null, templateVersion = null, policy = {}, peerUid = process.getuid?.(), remote = false, clientName = null, requested = false }) {
     this.#requireUnlocked()
+    if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
+      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
+    }
+    if (typeof infinite !== 'boolean') throw deny('AV_POLICY_DENIED', 'infinite must be true or false', { rule: 'ttl' })
+    if (infinite && ttlMs !== null) throw deny('AV_POLICY_DENIED', 'an infinite session has no lifetime to set', { rule: 'ttl' })
+    if (infinite && remote) {
+      throw deny('AV_REMOTE_FORBIDDEN', 'an infinite session can never be reached from the network', { rule: 'infinite_remote' })
+    }
+    if (!Array.isArray(elevated) || elevated.length > ELEVATIONS.size || !elevated.every((e) => ELEVATIONS.has(e))) {
+      throw deny('AV_POLICY_DENIED', 'elevated must list only approval_auto_writes and infinite', { rule: 'elevation_invalid' })
+    }
+    // F17: which template, at which version, a session came from. Both or neither.
+    if (template === null ? templateVersion !== null
+      : (typeof template !== 'string' || !TEMPLATE_NAME.test(template) || !Number.isSafeInteger(templateVersion) || templateVersion < 1)) {
+      throw deny('AV_POLICY_DENIED', 'a session names its template and version together, or neither', { rule: 'template_name' })
+    }
     const sid = ph.newSid()
     const secret = randomBytes(33).toString('base64url')
     const token = `avs1.${sid}.${secret}`
@@ -576,14 +1676,24 @@ export class Vault {
       policy, owner_uid: peerUid ?? null, remote, client_name: clientName,
       state: 'active',
       created_at: new Date(now).toISOString(),
-      expires_at: new Date(now + life).toISOString(),
-      max_expires_at: new Date(now + ceiling).toISOString(),
-      idle_timeout_ms: (remote ? 1 : 2) * 3600_000,
+      expires_at: infinite ? null : new Date(now + life).toISOString(),
+      max_expires_at: infinite ? null : new Date(now + ceiling).toISOString(),
+      idle_timeout_ms: infinite ? null : ((remote ? 1 : 2) * 3600_000),
+      infinite,
+      // What it was created with, for the detail view (F19). Metadata only:
+      // nothing reads these to decide anything.
+      elevated: [...new Set(elevated)], template, template_version: templateVersion,
       last_seen_at: new Date(now).toISOString(),
     }
     this.db.sessions[sid] = session
     this.#persist()
-    this.audit.write('session.created', { session_id: sid, workspace_id: workspaceId, label, remote })
+    this.audit.write('session.created', {
+      // Whether it has a label, not the label: free text from whoever
+      // created it (C28). The session itself keeps it, and readers use that.
+      session_id: sid, workspace_id: workspaceId, has_label: !!label, remote,
+      infinite, ...expiryForAudit(session.expires_at, requested), elevated: session.elevated,
+      template, template_version: templateVersion,
+    })
     return { session, token }
   }
 
@@ -600,19 +1710,113 @@ export class Vault {
       next: { cli: ['agent-vault session create --cred <slug>'], mcp: { tool: 'vault_request_session' } },
     })
     if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
-    if (Date.parse(session.expires_at) <= Date.now()) {
-      if (session.state !== 'expired') { session.state = 'expired'; this.#persist() }
+    // Ended is final: nothing moves a session back to active, so a date that
+    // was later pushed out does not bring one back.
+    if (session.state !== 'active') throw deny('AV_SESSION_EXPIRED', `session ${session.id} has ended`)
+    if (!(sessionExpiryMs(session) > Date.now())) {
+      if (session.state !== 'expired') {
+        session.state = 'expired'
+        // Its placeholders die with it, as they do on revocation. Left
+        // active, they were exempt from the ledger bound forever and counted
+        // as live in every status report.
+        for (const p of Object.values(this.db.placeholders)) {
+          if (p.sid === session.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'session_ended' }
+        }
+        this.#persist()
+      }
       throw deny('AV_SESSION_EXPIRED', `session ${session.id} expired at ${session.expires_at}`)
     }
     return session
   }
 
-  /** Idle extension. Never widens capability, so it needs no presence. */
+  /**
+   * Whether a session may be used on the listener a request arrived on. Every
+   * surface that turns a token into a session asks this, and nothing else:
+   * the gateway, discovery, the MCP endpoint and its tools. Only /p/ used to
+   * apply C12, inside the pipeline, so the same infinite token was refused
+   * there and spent its grants over /mcp and /v1 on the same listener.
+   *
+   * C12 first: a session that never expires is never usable from a network
+   * listener, and that is refused before the session is touched. Then
+   * liveness. `listener` is the network listener, or null for the machine
+   * itself (the built-in gateway, stdio, the control socket). `peek` answers
+   * without side effects, for preflight and for the MCP handshake: nothing is
+   * marked expired and no placeholder dies. A C12 refusal is recorded here,
+   * as `remote.denied`, unless the caller records its own denials (`record:
+   * false`: the pipeline, whose every denial is a record already) or peeks.
+   */
+  assertSessionUsable(session, listener = null, { peek = false, record = true } = {}) {
+    if (session && session.infinite === true && listener?.remote) {
+      const e = deny('AV_REMOTE_FORBIDDEN', 'a session without expiry cannot be used from a network listener', {
+        rule: 'infinite_remote',
+        hint: 'Use it on this machine, or start a session with an expiry for remote use.',
+      })
+      if (record && !peek) {
+        this.audit?.write(e.auditKind, {
+          decision: 'deny', reason_code: e.code, rule: e.rule, session_id: session.id,
+          peer: { kind: listener.kind || 'remote', listener_id: listener.id || null },
+        })
+      }
+      throw e
+    }
+    if (!peek || !session) return this.assertSessionLive(session)
+    if (session.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${session.id} was revoked`)
+    if (session.state !== 'active' || !(sessionExpiryMs(session) > Date.now())) {
+      throw deny('AV_SESSION_EXPIRED', `session ${session.id} has expired`)
+    }
+    return session
+  }
+
+  /**
+   * Idle extension. Never widens capability, so it needs no presence. Only a
+   * live session is extended: one that is revoked, marked ended, or past its
+   * date though nothing has noticed yet stays ended, whoever calls this and
+   * in whatever order. The pipeline asserts liveness first; this does not
+   * rely on it. Never earlier than it was, never past its ceiling. False
+   * when nothing was touched.
+   */
   touchSession(session) {
     const now = Date.now()
-    const extended = Math.min(now + session.idle_timeout_ms, Date.parse(session.max_expires_at))
-    if (extended > Date.parse(session.expires_at)) session.expires_at = new Date(extended).toISOString()
+    if (!session || session.state !== 'active' || !(sessionExpiryMs(session) > now)) return false
+    // An infinite session has nothing to extend; only its last-seen moves.
+    if (session.infinite !== true) {
+      const extended = Math.min(now + session.idle_timeout_ms, sessionCeilingMs(session))
+      if (extended > sessionExpiryMs(session)) session.expires_at = new Date(extended).toISOString()
+    }
     session.last_seen_at = new Date(now).toISOString()
+    return true
+  }
+
+  /**
+   * Bring a session's end closer (R3, F15): never later than it already was,
+   * and an infinite session becomes finite. The ceiling idle activity may
+   * extend to comes down with it, and so do its live placeholders, so neither
+   * an agent that keeps working nor a placeholder minted earlier outlives it.
+   */
+  shortenSession(sid, ttlMs) {
+    this.#requireUnlocked()
+    const s = Object.hasOwn(this.db.sessions, sid) ? this.db.sessions[sid] : null
+    if (!s) throw deny('AV_NOT_FOUND', `no session ${sid}`)
+    if (s.state === 'revoked') throw deny('AV_SESSION_REVOKED', `session ${s.id} was revoked`)
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw deny('AV_POLICY_DENIED', 'a session lifetime must be a positive number', { rule: 'ttl' })
+    }
+    const now = Date.now()
+    const wasInfinite = s.infinite === true && s.expires_at === null
+    const ceiling = sessionCeilingMs(s)
+    const expiresAt = shortenedIso(sessionExpiryMs(s), now, ttlMs)
+    const maxExpiresAt = shortenedIso(ceiling, now, ttlMs)
+    s.expires_at = expiresAt
+    s.max_expires_at = maxExpiresAt
+    s.infinite = false
+    s.idle_timeout_ms = (s.remote ? 1 : 2) * 3600_000
+    const bound = Date.parse(maxExpiresAt)
+    for (const p of Object.values(this.db.placeholders)) {
+      if (p.sid === s.id && p.state === 'active' && !(rowExpiryMs(p) <= bound)) p.expires_at = maxExpiresAt
+    }
+    this.#persist()
+    this.audit.write('session.shortened', { session_id: s.id, expires_at: expiresAt, was_infinite: wasInfinite })
+    return s
   }
 
   revokeSession(sid, reason = 'revoked') {
@@ -638,11 +1842,13 @@ export class Vault {
     // nothing while locked rather than persisting unrecorded.
     this.#requireUnlocked()
     const parent = this.assertSessionLive(this.db.sessions[parentSid])
-    const parentTtl = Date.parse(parent.expires_at) - Date.now()
+    // Never infinite: a fork of an infinite parent takes the default lifetime.
+    const parentEnds = sessionExpiryMs(parent)
+    const parentTtl = parentEnds === Infinity ? null : parentEnds - Date.now()
     const { session, token } = this.createSession({
       workspaceId: parent.workspace_id,
       label: label || `${parent.label} (fork)`,
-      ttlMs: Math.min(ttlMs ?? parentTtl, parentTtl),
+      ttlMs: parentTtl === null ? (ttlMs ?? null) : Math.min(ttlMs ?? parentTtl, parentTtl),
       policy: parent.policy,
       peerUid: parent.owner_uid,
       remote: parent.remote,
@@ -651,7 +1857,13 @@ export class Vault {
     session.parent_sid = parentSid
     for (const g of Object.values(this.db.grants)) {
       if (g.session_id !== parentSid || g.state !== 'active') continue
-      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow })
+      // The child's grant ends no later than the one it copies (F18). Null is
+      // "as long as the session", which the child's own session bounds; a
+      // parent grant that has ended, or whose end cannot be read, is not copied.
+      const ends = expiryMs(g.expires_at)
+      if (!(ends > Date.now())) continue
+      const ttlMs = ends === Infinity ? null : ends - Date.now()
+      this.createGrant({ sessionId: session.id, credentialId: g.credential_id, fields: g.fields, policy: g.policy, narrow, ttlMs })
     }
     this.#persist()
     this.audit.write('session.forked', { session_id: session.id, parent_session_id: parentSid })
@@ -660,31 +1872,111 @@ export class Vault {
 
   // ----------------------------------------------------------------- grants
 
-  createGrant({ sessionId, credentialId, fields, policy, narrow = null }) {
+  /**
+   * `ttlMs` (F18) gives the grant a lifetime of its own, never longer than the
+   * session's: a grant of an infinite session still ends. Absent, the grant
+   * lives as long as its session, as before.
+   */
+  createGrant({ sessionId, credentialId, fields, policy, narrow = null, ttlMs = null, requested = false }) {
     // A change that cannot be written to the audit log must not happen.
     // Locking drops the audit key with the master key, so these mutate
     // nothing while locked rather than persisting unrecorded.
     this.#requireUnlocked()
-    const session = this.db.sessions[sessionId]
+    const session = Object.hasOwn(this.db.sessions, sessionId) ? this.db.sessions[sessionId] : null
     if (!session) throw deny('AV_NOT_FOUND', `no session ${sessionId}`)
-    const cred = this.db.credentials[credentialId]
+    const cred = Object.hasOwn(this.db.credentials, credentialId) ? this.db.credentials[credentialId] : null
     if (!cred) throw deny('AV_NOT_FOUND', `no credential ${credentialId}`)
+    if (ttlMs !== null && (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0)) {
+      throw deny('AV_POLICY_DENIED', 'a grant lifetime must be a positive number', { rule: 'grant_ttl' })
+    }
+    // Capability is never added to a session that has ended, or for a
+    // credential a human has stopped.
+    this.assertSessionLive(session)
+    if (cred.quarantine) throw quarantined(cred)
+    const expires_at = ttlMs === null ? null : new Date(Math.min(Date.now() + ttlMs, sessionExpiryMs(session))).toISOString()
     const grantId = id.grant()
     const grant = {
       id: grantId, session_id: sessionId, credential_id: credentialId,
       fields: fields || cred.fields.map((f) => f.name),
-      policy: narrow && Object.keys(narrow).length ? { ...policy, ...narrow } : policy,
+      // Intersected, never spread. `{ ...policy, ...narrow }` let a
+      // "narrowing" replace any dimension outright — methods: ['DELETE'],
+      // approval: 'auto' — so a fork could widen the grant it came from.
+      policy: narrow && Object.keys(narrow).length ? policyMod.intersect([policy, narrow]) : policy,
       budget_used: 0, counters: { requests: 0, denials: 0 }, state: 'active',
       created_at: new Date().toISOString(),
+      expires_at,
     }
     this.db.grants[grantId] = grant
     this.#persist()
-    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug })
+    this.audit.write('grant.created', { grant_id: grantId, session_id: sessionId, credential_slug: cred.slug, ...expiryForAudit(expires_at, requested) })
+    return grant
+  }
+
+  /**
+   * The newest grant for a session and credential, in any state (F18), so a
+   * caller that finds no active one can say it expired rather than that it
+   * never existed. Ties on the timestamp go to the later id (ids are ULIDs).
+   */
+  findGrant(sid, credId) {
+    let newest = null
+    for (const g of Object.values(this.db.grants)) {
+      if (g.session_id !== sid || g.credential_id !== credId) continue
+      if (!newest || String(g.created_at).localeCompare(String(newest.created_at)) > 0 ||
+        (g.created_at === newest.created_at && String(g.id) > String(newest.id))) newest = g
+    }
+    return newest
+  }
+
+  /**
+   * The one place a grant's lifetime is decided (F18). Every path that uses a
+   * grant — issuing, consuming, the gateway's route — asks this, so no two
+   * readers can disagree about whether it is over. Noticing the end is a
+   * change (the grant and its placeholders die), and a change that cannot be
+   * audited must not happen: a locked vault refuses without recording.
+   */
+  assertGrantLive(grant) {
+    if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grant?.id ?? ''}`.trim())
+    if (!(expiryMs(grant.expires_at) > Date.now())) {
+      const expired = deny('AV_GRANT_EXPIRED', `grant ${grant.id} expired at ${grant.expires_at}`, {
+        next: { mcp: { tool: 'vault_request_session' } },
+      })
+      if (this.locked) throw expired
+      grant.state = 'expired'
+      for (const p of Object.values(this.db.placeholders)) {
+        if (p.grant_id === grant.id && p.state === 'active') { p.state = 'dead'; p.dead_reason = 'expired' }
+      }
+      this.#persist()
+      this.audit.write('grant.expired', { grant_id: grant.id, session_id: grant.session_id })
+      throw expired
+    }
     return grant
   }
 
   grantsForSession(sid) {
     return Object.values(this.db.grants).filter((g) => g.session_id === sid && g.state === 'active')
+  }
+
+  /**
+   * Charge a grant for a request that spends no placeholder use (F6: each
+   * redirect hop). False, and nothing charged, when it would exceed the
+   * budget — or when the budget, the count or the grant cannot be read, since
+   * `used + NaN > limit` is false forever and that is no budget at all.
+   * Ledger churn like a placeholder use, so the write skips the fsync.
+   */
+  chargeGrant(grantId, n = 1) {
+    if (this.locked) return false
+    const grant = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
+    if (!grant || grant.state !== 'active' || !(expiryMs(grant.expires_at) > Date.now())) return false
+    if (!Number.isSafeInteger(n) || n < 1) return false
+    const used = grant.budget_used
+    if (!Number.isSafeInteger(used) || used < 0) return false
+    const limit = budgetLimit(grant.policy)
+    if (limit === null || used + n > limit) return false
+    grant.budget_used = used + n
+    grant.counters = grant.counters || { requests: 0, denials: 0 }
+    grant.counters.requests = (Number.isSafeInteger(grant.counters.requests) ? grant.counters.requests : 0) + n
+    this.#persist({ durable: false })
+    return true
   }
 
   revokeGrant(grantId, reason = 'revoked') {
@@ -702,6 +1994,29 @@ export class Vault {
     this.audit.write('grant.revoked', { grant_id: grantId, reason })
   }
 
+  /**
+   * Bring a grant's end closer (F15): `min(current, now + ttlMs)`, never later.
+   * Its live placeholders come down with it, so none outlives it.
+   */
+  shortenGrant(grantId, ttlMs) {
+    this.#requireUnlocked()
+    const g = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
+    if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
+    if (g.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grantId}`)
+    if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs) || ttlMs <= 0) {
+      throw deny('AV_POLICY_DENIED', 'a grant lifetime must be a positive number', { rule: 'grant_ttl' })
+    }
+    const expiresAt = shortenedIso(expiryMs(g.expires_at), Date.now(), ttlMs)
+    const bound = Date.parse(expiresAt)
+    g.expires_at = expiresAt
+    for (const p of Object.values(this.db.placeholders)) {
+      if (p.grant_id === g.id && p.state === 'active' && !(rowExpiryMs(p) <= bound)) p.expires_at = expiresAt
+    }
+    this.#persist()
+    this.audit.write('grant.shortened', { grant_id: g.id, expires_at: expiresAt })
+    return g
+  }
+
   /** Narrow an existing grant. Reducing capability never needs presence. */
   narrowGrant(grantId, narrow) {
     // A change that cannot be written to the audit log must not happen.
@@ -710,9 +2025,23 @@ export class Vault {
     this.#requireUnlocked()
     const g = this.db.grants[grantId]
     if (!g) throw deny('AV_NOT_FOUND', `no grant ${grantId}`)
-    g.policy = { ...g.policy, ...narrow }
+    if (!narrow || typeof narrow !== 'object' || Array.isArray(narrow)) {
+      throw deny('AV_POLICY_DENIED', 'a narrowing must be a policy layer', { rule: 'policy_invalid' })
+    }
+    // `redirects` is the one field whose absence means "off" (0.6). A grant
+    // that never stated it follows none, and intersecting it with a narrow
+    // that states 5 would follow five. So a narrow may only say 0.
+    if (Object.hasOwn(narrow, 'redirects') && narrow.redirects?.max !== 0) {
+      throw deny('AV_POLICY_DENIED', 'a narrowing can only turn redirect following off', { rule: 'narrow_widens' })
+    }
+    // The same intersection every request is checked against, so this can
+    // only ever remove capability. It was an object spread, which replaced
+    // whatever `narrow` named: a "narrowing" to DELETE on /admin/** with
+    // approval: 'auto' widened every one of them.
+    g.policy = policyMod.intersect([g.policy, narrow])
     this.#persist()
-    this.audit.write('grant.narrowed', { grant_id: grantId, narrow })
+    // The names, not the values: a narrow can carry floats and long lists.
+    this.audit.write('grant.narrowed', { grant_id: grantId, session_id: g.session_id, fields: Object.keys(narrow) })
     return g
   }
 
@@ -726,34 +2055,51 @@ export class Vault {
    */
   issuePlaceholder({ grantId, field, uses = null, ttlMs = null }) {
     this.#requireUnlocked()
-    const grant = this.db.grants[grantId]
+    const grant = Object.hasOwn(this.db.grants, grantId) ? this.db.grants[grantId] : null
     if (!grant || grant.state !== 'active') throw deny('AV_NO_GRANT', `no active grant ${grantId}`)
+    this.assertGrantLive(grant)
     const session = this.assertSessionLive(this.db.sessions[grant.session_id])
     const cred = this.db.credentials[grant.credential_id]
     const fieldName = field || grant.fields[0]
     if (!grant.fields.includes(fieldName)) throw deny('AV_NO_GRANT', `grant does not cover field ${fieldName}`)
+    if (cred.quarantine) throw quarantined(cred)
 
     // `?? 1000` does not catch NaN, only null and undefined, so a malformed
     // budget propagated straight into the placeholder's use ceiling — and
     // `Math.min(asked, NaN)` is NaN, which no `uses >= max_uses` ever stops.
-    const stated = Number(grant.policy?.budget?.limit)
-    const budgetLimit = Number.isFinite(stated) && stated > 0 ? stated : 1000
+    // A budget of 0 is no uses, not a thousand: it issues nothing. One that
+    // cannot be read is refused when it is used, here and at the gateway.
+    const limit = budgetLimit(grant.policy)
+    if (limit === 0) throw budgetSpent(limit)
+    const useLimit = limit === null || limit === Infinity ? 1000 : limit
     const phPolicy = grant.policy?.placeholder_policy || {}
-    const maxActive = phPolicy.max_active ?? 8
+    // Validated, not `?? 8`: a string or NaN made `length >= max_active`
+    // false for good, which is no bound at all.
+    const maxActive = Number.isSafeInteger(phPolicy.max_active) && phPolicy.max_active >= 1 ? phPolicy.max_active : 8
     const active = Object.values(this.db.placeholders)
       .filter((p) => p.grant_id === grantId && p.field === fieldName && p.state === 'active')
-    if (active.length >= maxActive) {
-      // Evict the oldest unused rather than refusing: an agent that asks twice
-      // should get a working placeholder, not an error it cannot act on.
-      const oldest = active.filter((p) => p.uses === 0).sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
-      if (oldest) { oldest.state = 'dead'; oldest.dead_reason = 'rotated' }
+    // Rotate rather than refuse: an agent that asks twice should get a working
+    // placeholder, not an error it cannot act on. Unused ones go first, oldest
+    // first; then the least recently used. Only unused ones used to be
+    // eligible, so once every live row had been used once the bound stopped
+    // applying — ask, use, ask again, and the live rows grew without limit.
+    // A rotated placeholder answers AV_PH_STALE, which says to ask again.
+    const order = (p) => [p.uses === 0 ? 0 : 1, p.last_used_at || p.created_at]
+    active.sort((a, b) => {
+      const [ua, ta] = order(a)
+      const [ub, tb] = order(b)
+      return ua - ub || String(ta).localeCompare(String(tb))
+    })
+    for (const p of active.slice(0, Math.max(0, active.length - maxActive + 1))) {
+      p.state = 'dead'
+      p.dead_reason = 'rotated'
     }
 
     // The grant's placeholder_policy is a ceiling, not a default. It used to
     // sit on the right of a `??`, so a caller asking for a million uses got a
     // million even where the human had configured one-time placeholders.
     // Enforced here so no call site can forget it.
-    const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : budgetLimit
+    const ceiling = Number.isFinite(phPolicy.max_uses) ? phPolicy.max_uses : useLimit
     // Floored to an integer. A fractional `uses` reached the audit record as a
     // float, and canonicalize refuses floats — so write() threw AFTER the
     // ledger had already been persisted, leaving a placeholder that existed
@@ -762,11 +2108,19 @@ export class Vault {
     const maxUses = uses == null || !Number.isFinite(asked) || asked < 1
       ? ceiling
       : Math.min(asked, ceiling)
-    const ttl = ttlMs ?? (phPolicy.ttl ? phPolicy.ttl * 1000 : null)
-    const expires = Math.min(
-      ttl ? Date.now() + ttl : Infinity,
-      Date.parse(session.expires_at),
-    )
+    // The grant's ttl is a ceiling too. An explicit ttlMs replaced it, so a
+    // caller asking for an hour got an hour on a grant that said one second.
+    // Either one that is not a positive number is no limit, not a zero.
+    const positive = (n) => (Number.isFinite(n) && n > 0 ? n : Infinity)
+    const ttl = Math.min(positive(Number(ttlMs ?? NaN)), positive(Number(phPolicy.ttl) * 1000))
+    // Bounded by how long the session can possibly last, not by when it would
+    // expire today. Idle activity moves `expires_at` out towards
+    // `max_expires_at`, and a placeholder pinned to the first value died hours
+    // before the session it belongs to — the one `session create` hands out
+    // included. The session's own liveness is checked on every use anyway
+    // (#authenticate asserts it for token and carrier alike). An infinite
+    // session sets no bound, and a grant with a lifetime of its own (F18) does.
+    const expires = Math.min(Date.now() + ttl, sessionCeilingMs(session), expiryMs(grant.expires_at))
     this.#collectDeadPlaceholders()
     const minted = ph.mint({ kPh: this.kPh, sid: session.id, slug: cred.slug, field: fieldName })
     const row = {
@@ -774,16 +2128,18 @@ export class Vault {
       sid: session.id, nonce_hash: minted.nonceHash,
       uses: 0, max_uses: maxUses, state: 'active', dead_reason: null, replaces_id: null,
       created_at: new Date().toISOString(),
-      expires_at: new Date(expires).toISOString(),
+      expires_at: Number.isFinite(expires) ? new Date(expires).toISOString() : null,
       last_used_at: null,
     }
     this.db.placeholders[row.id] = row
     // Ledger churn, not key material: the rename is atomic either way, so the
     // worst a power cut costs is one placeholder the agent asks for again.
     this.#persist({ durable: false })
+    // No max_uses (C25): it can be the budget an agent proposed, and a
+    // stored PIN proposed as a budget was written here during the approval.
     this.audit.write('placeholder.issued', {
       placeholder_id: row.id, grant_id: grantId, session_id: session.id,
-      credential_slug: cred.slug, field: fieldName, max_uses: maxUses,
+      credential_slug: cred.slug, field: fieldName,
     })
     return { placeholder: minted.text, row }
   }
@@ -818,7 +2174,20 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
-    if (Date.parse(row.expires_at) <= Date.now()) {
+    // The session at the moment of use. A placeholder is bounded by how long
+    // its session COULD live (idle extension included), so a session that
+    // went idle and expired early still has placeholders whose own date has
+    // not passed: they must die with it here, whoever called.
+    this.assertSessionLive(this.db.sessions[row.sid])
+    // The grant's own lifetime (F18), asked of the one function that decides
+    // it, so a placeholder minted before the grant ended dies with it.
+    const grant = this.assertGrantLive(this.db.grants[row.grant_id])
+    // A quarantine stops a placeholder issued before it, too (F16). Paused,
+    // not killed: the row works again when a human releases the credential.
+    const cred = this.db.credentials[row.credential_id]
+    if (!cred) throw deny('AV_NO_GRANT', `no credential ${row.credential_id}`)
+    if (cred.quarantine) throw quarantined(cred)
+    if (!(rowExpiryMs(row) > Date.now())) {
       row.state = 'dead'; row.dead_reason = 'expired'; this.#persist({ durable: false })
       throw deny('AV_PH_STALE', 'placeholder expired', {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
@@ -830,11 +2199,23 @@ export class Vault {
         next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
       })
     }
+    // The grant as it is now, not as it was at issue: a narrowed placeholder
+    // ceiling, and the budget other placeholders and redirect hops spent.
+    const phMax = grant.policy?.placeholder_policy?.max_uses
+    if (Number.isFinite(phMax) && row.uses >= phMax) {
+      row.state = 'dead'; row.dead_reason = 'exhausted'; this.#persist({ durable: false })
+      throw deny('AV_PH_EXHAUSTED', `placeholder used ${row.uses}/${phMax} times`, {
+        next: { cli: ['agent-vault ph next <cred>'], mcp: { tool: 'vault_get_placeholder' } },
+      })
+    }
+    const limit = budgetLimit(grant.policy)
+    if (limit === null || !Number.isSafeInteger(grant.budget_used) || grant.budget_used + 1 > limit) throw budgetSpent(limit)
     row.uses += 1
     row.last_used_at = new Date().toISOString()
     if (row.uses >= row.max_uses) { row.state = 'dead'; row.dead_reason = 'exhausted' }
-    const grant = this.db.grants[row.grant_id]
-    if (grant) { grant.budget_used += 1; grant.counters.requests += 1 }
+    grant.budget_used += 1
+    grant.counters = grant.counters || { requests: 0, denials: 0 }
+    grant.counters.requests = (Number.isSafeInteger(grant.counters.requests) ? grant.counters.requests : 0) + 1
     this.#persist()
     return row
   }
@@ -877,7 +2258,7 @@ export class Vault {
     this.#persist({ durable: false })
     // Recorded, so the ledger and the log agree about how many uses happened.
     this.audit?.write('placeholder.refunded', {
-      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses, max_uses: row.max_uses,
+      placeholder_id: rowId, grant_id: row.grant_id, uses: row.uses,
     })
   }
 
@@ -931,8 +2312,12 @@ export class Vault {
   #collectDeadPlaceholders() {
     const rows = Object.entries(this.db.placeholders)
     if (rows.length <= MAX_PLACEHOLDER_ROWS) return
+    // A row whose time has passed is dead whatever its state says. Rows of a
+    // session nobody touched again stay 'active' — expiry is noticed lazily —
+    // and they were exempt from this bound, so it bounded nothing.
+    const now = Date.now()
     const dead = rows
-      .filter(([, p]) => p.state !== 'active')
+      .filter(([, p]) => p.state !== 'active' || !(rowExpiryMs(p) > now))
       .sort((a, b) => String(a[1].created_at).localeCompare(String(b[1].created_at)))
     const overBy = rows.length - MAX_PLACEHOLDER_ROWS
     for (const [id] of dead.slice(0, overBy)) delete this.db.placeholders[id]
@@ -998,7 +2383,8 @@ export class Vault {
     return {
       credentials: Object.keys(this.db.credentials).length,
       workspaces: Object.keys(this.db.workspaces).length,
-      sessions_active: live(this.db.sessions, (s) => s.state === 'active' && Date.parse(s.expires_at) > Date.now()),
+      credentials_expiring: Object.values(this.db.credentials).filter((c) => expiryWarning(c) !== null).length,
+      sessions_active: live(this.db.sessions, (s) => s.state === 'active' && sessionExpiryMs(s) > Date.now()),
       grants_active: live(this.db.grants, (g) => g.state === 'active'),
       placeholders_live: live(this.db.placeholders, (p) => p.state === 'active'),
       listeners: Object.keys(this.db.listeners).length,

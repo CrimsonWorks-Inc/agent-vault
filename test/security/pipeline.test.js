@@ -3,7 +3,7 @@
 // A fake upstream records exactly what reached the wire, so "the secret never
 // left" is checked rather than assumed.
 
-import { test, beforeEach, afterEach } from 'node:test'
+import { test as nodeTest, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,12 @@ import { Readable } from 'node:stream'
 import { Pipeline } from '../../src/daemon/pipeline.js'
 
 const SECRET = 'ghp_REALSECRET0000111122223333444455556666'
+
+// Every test here is bounded: one that stalls under a broken pipeline fails
+// in 30 s instead of holding the file open. The mutation check once waited
+// over an hour on this file; a loop that never yields is beyond any timer in
+// here, and the checker's own timeout kills that run from outside.
+const test = (name, fn) => nodeTest(name, { timeout: 30_000 }, fn)
 
 let dir, vault, pipeline, sent, session, token, placeholder, grant
 
@@ -225,13 +231,18 @@ test('the places a naive scan does not look are not hiding places', async () => 
   }
 })
 
-test('a second header of the same name gets the secret, not the placeholder', async () => {
+test('a second Authorization header is refused, so no placeholder goes upstream', async () => {
   // The site is header:authorization:Bearer, so this placeholder IS at a
   // declared site and must be substituted. apply() looked the header up by
   // name and always found the first, so it rewrote a header that did not
   // contain the placeholder and left the one that did — and the request went
   // upstream carrying a live placeholder, past a location check that had just
   // approved it.
+  //
+  // Authorization is now carried once (round 2): two different copies are
+  // refused before substitution, so neither the placeholder nor the secret
+  // goes anywhere. A list header is still substituted where it stands; the
+  // gateway-w2-pipeline suite covers that.
   setup()
   const res = await pipeline.handle(req({
     headers: [
@@ -240,11 +251,9 @@ test('a second header of the same name gets the secret, not the placeholder', as
       ['authorization', `Bearer ${placeholder}`],
     ],
   }))
-  assert.equal(res.status, 200)
-  assert.equal(sent.length, 1)
-  const wire = JSON.stringify(sent[0].headers)
-  assert.ok(!wire.includes(placeholder), 'a placeholder reached the upstream')
-  assert.ok(wire.includes(SECRET), 'the secret was never substituted')
+  assert.equal(res.status, 403)
+  assert.equal(JSON.parse(res.body).rule, 'header_duplicate')
+  assert.equal(sent.length, 0, 'a request with two Authorization headers reached the upstream')
 })
 
 test('a malformed percent-escape in a query key does not blind the scan', async () => {
@@ -507,8 +516,10 @@ test('an approval does not carry over to a request with different headers', asyn
   // `X-HTTP-Method-Override: DELETE` is the sharp version: plenty of
   // frameworks honour it, so the approved write reaches the upstream as a
   // delete. The human is shown a method, a host and a path, and a header can
-  // change what all three mean.
-  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' } })
+  // change what all three mean. (An override naming a method the grant does
+  // not allow is refused outright; DELETE is allowed here so the header is
+  // what differs.)
+  setup({ policy: { hosts: ['api.github.com'], methods: ['GET', 'POST', 'DELETE'], paths: ['/**'], budget: { unit: 'requests', limit: 20 }, approval: 'each' } })
   const base = {
     method: 'POST', path: '/p/gh-frozencrow/repos/frozencrow/x/issues',
     headers: [['host', '127.0.0.1'], ['av-session', token], ['authorization', `Bearer ${placeholder}`]],

@@ -85,7 +85,7 @@ test('an agent cannot answer its own request', async () => {
   assert.equal(decided.body.code, 'AV_PRESENCE_REQUIRED')
 
   // And nothing was created on the way to refusing.
-  const collect = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
+  const collect = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}&secret=${asked.body.collect_secret}`)
   assert.equal(collect.body.state, 'pending')
 })
 
@@ -98,19 +98,18 @@ test('a human approving gets a working session, collected exactly once', async (
   await present()
   const decided = await ctl('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true })
   assert.equal(decided.status, 200, JSON.stringify(decided.body))
-  // Even the approval response carries no token: the agent collects it.
-  assert.equal(JSON.stringify(decided.body).includes('avs1.'), false, 'the token leaked into the decision')
+  // The approving human's client gets the session from the decision it proved
+  // presence for, so it can record it where local clients look. That is the
+  // one collection.
+  const got = decided.body.session
+  assert.match(got.token, /^avs1\./)
+  assert.match(got.placeholder, /^av1\./)
+  assert.ok(vault.sessionByToken(got.token), 'the collected token must name a real session')
 
+  // Once. The agent's own poll must not hand out another live copy.
   absent()
-  const got = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
-  assert.equal(got.body.state, 'approved')
-  assert.match(got.body.token, /^avs1\./)
-  assert.match(got.body.placeholder, /^av1\./)
-  assert.ok(vault.sessionByToken(got.body.token), 'the collected token must name a real session')
-
-  // Once. A second collection must not hand out another live copy.
-  const again = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
-  assert.notEqual(again.body.token, got.body.token)
+  const again = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}&secret=${asked.body.collect_secret}`)
+  assert.equal(again.body.token, undefined)
   assert.equal(again.body.state, 'collected')
 })
 
@@ -123,15 +122,14 @@ test('what the human edits is what gets created', async () => {
   })
 
   await present()
-  await ctl('POST', '/v1/session-requests/decide', {
+  const decided = await ctl('POST', '/v1/session-requests/decide', {
     id: asked.body.id,
     granted: true,
     overrides: { methods: ['GET'], paths: ['/user'], budget: 3 },
   })
   absent()
-  const got = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
 
-  const session = vault.sessionByToken(got.body.token)
+  const session = vault.sessionByToken(decided.body.session.token)
   const grant = vault.grantsForSession(session.id)[0]
   assert.deepEqual(grant.policy.methods, ['GET'], 'the agent got the methods it asked for, not the ones allowed')
   assert.deepEqual(grant.policy.paths, ['/user'])
@@ -146,12 +144,17 @@ test('approval supplies a human, never permission', async () => {
     cred: 'gh', methods: ['GET'], paths: ['/**'],
   })
   await present()
-  await ctl('POST', '/v1/session-requests/decide', {
+  // A host list is not a narrowing a decision applies. It used to be dropped
+  // and the approval went through; it is refused, naming the key (D1).
+  const widened = await ctl('POST', '/v1/session-requests/decide', {
     id: asked.body.id, granted: true, overrides: { hosts: ['evil.test'] },
   })
+  assert.equal(widened.status, 403, JSON.stringify(widened.body))
+  assert.match(JSON.stringify(widened.body), /hosts/)
+  assert.ok(!JSON.stringify(vault.db.grants).includes('evil.test'), 'a grant names the host')
+  const decided = await ctl('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true })
   absent()
-  const got = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
-  const session = vault.sessionByToken(got.body.token)
+  const session = vault.sessionByToken(decided.body.session.token)
   const grant = vault.grantsForSession(session.id)[0]
   assert.ok(!grant.policy.hosts.includes('evil.test'),
     'a host outside the credential survived a human approval')
@@ -172,7 +175,7 @@ test('a denial creates nothing and cannot be reversed by asking again', async ()
   const flipped = await ctl('POST', '/v1/session-requests/decide', { id: asked.body.id, granted: true })
   assert.equal(flipped.status, 403)
   absent()
-  const collect = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}`)
+  const collect = await ctl('GET', `/v1/session-requests/collect?id=${asked.body.id}&secret=${asked.body.collect_secret}`)
   assert.equal(collect.body.state, 'denied')
   assert.equal(collect.body.token, undefined)
 })
@@ -193,9 +196,11 @@ test('every request and answer is in the audit log', async () => {
   for (const kind of ['session_request.opened', 'session_request.approved', 'session_request.denied', 'session_request.collected']) {
     assert.ok(kinds.includes(kind), `${kind} was never recorded`)
   }
-  // The agent's stated reason is recorded as a claim, and no token is.
+  // C25: a request's records carry its shape, not the agent's words; no token either.
+  const requests = vault.audit.read({ limit: 400 }).filter((r) => r.kind.startsWith('session_request.'))
+  assert.ok(requests.every((r) => !('agent_reason_untrusted' in r) && !('summary' in r)), JSON.stringify(requests))
+  assert.ok(requests.some((r) => r.kind === 'session_request.opened' && Array.isArray(r.proposed) && r.proposed.includes('paths')))
   const raw = JSON.stringify(vault.audit.read({ limit: 400 }))
-  assert.ok(raw.includes('agent_reason_untrusted'))
   assert.ok(!raw.includes('avs1.'), 'a session token reached the audit log')
 })
 
@@ -316,12 +321,12 @@ test('approving records the session where a running agent will find it', async (
     // Nothing recorded yet: asking is not getting, and it is not recording either.
     assert.equal(existsSync(statePath), false, 'asking wrote state')
 
-    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
+    const answered = await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
 
     // The approving client's half, through the same shared step both the CLI
     // and the UI use.
-    const collected = await collectApproved({ id: asked.id, kind: 'session' }, {
-      get: (p) => call('GET', p),
+    const collected = collectApproved({ id: asked.id, kind: 'session' }, {
+      answered,
       remember: (row) => rememberSession(row, statePath),
     })
     assert.ok(collected?.token, 'the approving client should have collected a token')
@@ -334,7 +339,7 @@ test('approving records the session where a running agent will find it', async (
 
     // The token is handed out once, so a later poll has nothing to give — and
     // must say something true rather than sounding like a failure.
-    const again = await call('GET', `/v1/session-requests/collect?id=${asked.id}`)
+    const again = await call('GET', `/v1/session-requests/collect?id=${asked.id}&secret=${asked.collect_secret}`)
     assert.equal(again.token, undefined, 'the token was handed out twice')
     assert.equal(again.state, 'collected')
   } finally {
@@ -367,10 +372,10 @@ test('a denial records nothing', async () => {
     })
 
     const asked = await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths: ['/user'] })
-    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: false })
+    const answered = await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: false })
 
-    const collected = await collectApproved({ id: asked.id, kind: 'session' }, {
-      get: (p) => call('GET', p),
+    const collected = collectApproved({ id: asked.id, kind: 'session' }, {
+      answered,
       remember: () => assert.fail('a denied request must not be recorded'),
     })
     assert.equal(collected, null)
@@ -472,7 +477,12 @@ test('an approved token is never written to disk', async () => {
 
     first = await new Daemon(v, { port: 0, socketPath: s2 }).start()
     const asked = await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths: ['/user'] })
-    await call('POST', '/v1/session-requests/decide', { id: asked.id, granted: true })
+    const other = await call('POST', '/v1/session-requests', { cred: 'gh', methods: ['GET'], paths: ['/other'] })
+    // Two at once, so the approving client collects neither: each asker
+    // collects its own.
+    await call('POST', '/v1/pending/decide-many', {
+      decisions: [{ id: asked.id, kind: 'session', granted: true }, { id: other.id, kind: 'session', granted: true }],
+    })
 
     // Approved and NOT collected. The token exists in memory right now.
     const onDisk = readFileSync(join(d, 'vault.json'), 'utf8')
@@ -495,7 +505,7 @@ test('an approved token is never written to disk', async () => {
       req.on('error', () => resolve({}))
       req.end()
     })
-    const collect = await call2('GET', `/v1/session-requests/collect?id=${asked.id}`)
+    const collect = await call2('GET', `/v1/session-requests/collect?id=${asked.id}&secret=${asked.collect_secret}`)
     assert.equal(collect.token, undefined, 'a token survived a restart on disk')
   } finally {
     if (first) await first.stop()
@@ -701,8 +711,8 @@ test('an agent cannot settle a batch any more than it can settle one', async () 
     assert.equal(res.status, 401, `an agent approved a batch: ${JSON.stringify(res.body)}`)
     assert.equal(res.body.code, 'AV_PRESENCE_REQUIRED')
 
-    const still = await call('GET', `/v1/session-requests/collect?id=${id}`)
-    assert.equal(still.body.state, 'pending', 'a refused batch settled something anyway')
+    const still = await call('GET', '/v1/session-requests')
+    assert.ok(still.body.some((r) => r.id === id && r.state === 'pending'), 'a refused batch settled something anyway')
   })
 })
 
@@ -726,8 +736,8 @@ test('a batch refuses the shapes that would hide an approval', async () => {
       assert.equal(res.status, 403, `accepted ${JSON.stringify(decisions).slice(0, 60)}`)
       assert.match(res.body.detail, new RegExp(expected), res.body.detail)
     }
-    const still = await call('GET', `/v1/session-requests/collect?id=${id}`)
-    assert.equal(still.body.state, 'pending')
+    const still = await call('GET', '/v1/session-requests')
+    assert.ok(still.body.some((r) => r.id === id && r.state === 'pending'))
   })
 })
 

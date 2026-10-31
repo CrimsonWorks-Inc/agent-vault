@@ -15,6 +15,7 @@ import * as ph from '../../src/core/placeholder.js'
 import { detectAll } from '../../src/core/detect.js'
 import { locate } from '../../src/core/substitute.js'
 import { intersect, evaluateHttp, normalizePath, matchPath } from '../../src/core/policy.js'
+import { growth, LINEAR_BOUND } from './linear.js'
 
 function rng(seed) {
   let s = seed
@@ -105,15 +106,13 @@ test('the detector stays linear on a large body', () => {
   // on a single-threaded daemon, on input an agent chooses. Linear is the
   // requirement; the ReDoS in the policy globs was the same shape and cost 37
   // seconds of the daemon per request.
-  const timeFor = (mb) => {
-    const body = Buffer.alloc(mb << 20, 7).toString('base64').replace(/(.{76})/g, '$1\n')
-    const started = Date.now()
-    detectAll(body)
-    return Date.now() - started
-  }
-  const one = Math.max(timeFor(1), 1)
-  const four = timeFor(4)
-  assert.ok(four < one * 12, `4 MiB took ${four}ms against ${one}ms for 1 MiB; that is not linear`)
+  // Judged by the ratio of the fastest of three alternating runs at each size
+  // (see linear.js): one run of each failed under load in three reviews.
+  // Eight times the body is eight times the work when linear and sixty-four
+  // times when quadratic; the bound sits between.
+  const body = (bytes) => Buffer.alloc(bytes, 7).toString('base64').replace(/(.{76})/g, '$1\n')
+  const { small, large, ratio } = growth(detectAll, body(1 << 19), body(1 << 22))
+  assert.ok(ratio < LINEAR_BOUND, `4 MiB took ${large.toFixed(1)}ms against ${small.toFixed(1)}ms for 512 KiB (${ratio.toFixed(1)}x); that is not linear`)
 })
 
 test('the detector is a superset of the substituter, structurally', () => {

@@ -6,11 +6,16 @@
 // makes `session fork` safe to hand to an agent without a presence prompt.
 
 import { deny } from './errors.js'
+import { validatePayload } from './payload.js'
+import { METERED_KINDS } from './model-usage.js'
 
 export const APPROVAL_ORDER = ['auto', 'first-use', 'on-write', 'each']
 export const SQL_ORDER = ['read-only', 'read-write', 'raw']
 export const SSH_MODE_ORDER = ['run', 'agent']
 
+export const PER_MS = Object.freeze({ second: 1_000, minute: 60_000, hour: 3_600_000 })
+export const WINDOW_MS = Object.freeze({ hour: 3_600_000, day: 86_400_000 })
+const METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /** Suffixes where a wildcard host would span unrelated tenants. */
@@ -37,6 +42,8 @@ function minNum(a, b) {
 function stricter(a, b, order) {
   if (a == null) return b
   if (b == null) return a
+  if (!order.includes(a)) return a
+  if (!order.includes(b)) return b
   return order.indexOf(a) >= order.indexOf(b) ? a : b
 }
 
@@ -52,8 +59,21 @@ function narrower(a, b, order) {
  */
 export function intersect(layers) {
   let out = {}
-  for (const layer of layers) {
-    if (!layer) continue
+  const invalid = new Map()
+  for (const original of layers) {
+    if (original == null) continue
+    const layer = { ...original }
+    for (const problem of validate(original)) {
+      const field = problem.field
+      if (field === 'redirects') { layer.redirects = { max: 0 }; continue }
+      if (field === 'policy') { invalid.set('methods', false); continue }
+      if (field === 'budget' || field === 'spend') { invalid.set(field, { invalid: true }); delete layer[field]; continue }
+      if (field === 'routes' || field === 'payload') {
+        const effective = field === 'routes' ? 'route_sets' : 'payload_sets'
+        invalid.set(effective, [null]); delete layer[field]; delete layer[effective]; continue
+      }
+      invalid.set(field, original[field]); delete layer[field]
+    }
     out = {
       kind: out.kind || layer.kind,
       hosts: intersectHosts(out.hosts, layer.hosts),
@@ -66,7 +86,12 @@ export function intersect(layers) {
       rate: intersectRate(out.rate, layer.rate),
       budget: intersectBudget(out.budget, layer.budget),
       placeholder_policy: intersectPh(out.placeholder_policy, layer.placeholder_policy),
-      max_concurrent: minNum(out.max_concurrent, layer.max_concurrent),
+      max_concurrent: intersectLimit(out.max_concurrent, layer.max_concurrent),
+      quota: intersectWindow(out.quota, layer.quota, WINDOW_MS, 'window', 100_000_000),
+      spend: intersectSpend(out.spend, layer.spend),
+      redirects: intersectRedirects(out.redirects, layer.redirects),
+      route_sets: [...(out.route_sets ?? []), ...(layer.route_sets ?? []), ...(layer.routes ? [layer.routes] : [])],
+      payload_sets: [...(out.payload_sets ?? []), ...(layer.payload_sets ?? []), ...(layer.payload ? [layer.payload] : [])],
       databases: intersectList(out.databases ?? null, layer.databases ?? null),
       rcpt: intersectList(out.rcpt ?? null, layer.rcpt ?? null),
       // A child overriding these is the same widening the paths above used to
@@ -83,6 +108,7 @@ export function intersect(layers) {
       stream_bodies: (out.stream_bodies ?? false) && (layer.stream_bodies ?? false),
     }
   }
+  for (const [field, value] of invalid) out[field] = value
   return out
 }
 
@@ -159,30 +185,74 @@ function hostAllows(outer, inner) {
   return false
 }
 
+/** Select the stricter sustained rate, retaining its original capacity/window. */
 function intersectRate(a, b) {
-  if (!a) return b
-  if (!b) return a
-  return { count: Math.min(a.count, b.count), per: a.per }
+  return intersectWindow(a, b, PER_MS, 'per', 1_000_000)
 }
 
+const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+const integer = (v, min = 0, max = Number.MAX_SAFE_INTEGER) => Number.isInteger(v) && v >= min && v <= max
+const keys = (v, allowed) => object(v) && Object.keys(v).every((k) => allowed.includes(k))
+function validWindow(v, units, key, max) {
+  return keys(v, ['count', key]) && integer(v.count, 1, max) && Object.hasOwn(units, v[key])
+}
+function intersectWindow(a, b, units, key, max) {
+  if (a != null && !validWindow(a, units, key, max)) return a
+  if (b != null && !validWindow(b, units, key, max)) return b
+  if (a == null) return b
+  if (b == null) return a
+  const ar = a.count / units[a[key]], br = b.count / units[b[key]]
+  return ar < br || (ar === br && a.count <= b.count) ? a : b
+}
+function intersectLimit(a, b) {
+  if (a != null && !integer(a, 1, 1024)) return a
+  if (b != null && !integer(b, 1, 1024)) return b
+  return minNum(a, b)
+}
+export function budgetInteger(value) {
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) value = Number(value)
+  return integer(value) ? value : null
+}
+function validBudget(v) {
+  // Legacy layers may state only the unit; they add no numerical limit.
+  return keys(v, ['unit', 'limit']) && (v.unit === undefined || v.unit === 'requests') && (v.limit === undefined || budgetInteger(v.limit) !== null)
+}
+/**
+ * C4: one budget layer's request limit, read the one way the gateway and the
+ * store both use, which is the way validate() reads a layer. Infinity when the
+ * layer states none (no budget, or a legacy layer that names only the unit),
+ * the whole number it states (a canonical decimal string such as "50"
+ * included), or null when it cannot be read: a null budget or limit, '',
+ * '5.5', '-1', '1e3', ' 5', a non-request unit, an unknown key, a value past
+ * the safe integers, or anything that is not a layer. An unreadable budget
+ * refuses; it never means no limit.
+ */
+export function budgetLimit(budget) {
+  if (budget === undefined) return Infinity
+  if (!validBudget(budget)) return null
+  return budget.limit === undefined ? Infinity : budgetInteger(budget.limit)
+}
 function intersectBudget(a, b) {
-  if (!a) return b
-  if (!b) return a
-  // A layer that names a unit but no limit constrains nothing, and Math.min
-  // with an absent limit is NaN. Every budget check is `used >= limit`, and
-  // `anything >= NaN` is false — so one layer written `{unit:'requests'}`
-  // turned a counted grant into an uncounted one, silently, in the counter
-  // itself. Take the tightest limit anyone actually stated, or none.
-  // Coerced, because a limit can arrive as "50" from a config file, an MCP
-  // tool or a hand-written policy, and refusing that would be fail-closed on
-  // something that plainly means fifty. Number('') is 0, so the empty string
-  // is excluded explicitly rather than read as a budget of nothing.
-  const unit = b.unit || a.unit
-  const limits = [a.limit, b.limit]
-    .filter((n) => n !== null && n !== undefined && n !== '')
-    .map(Number)
-    .filter((n) => Number.isFinite(n))
-  return limits.length ? { unit, limit: Math.min(...limits) } : { unit }
+  for (const v of [a, b]) if (v != null && !validBudget(v)) return { unit: v.unit, invalid: true }
+  const limits = [a?.limit, b?.limit].filter((value) => value !== undefined).map(budgetInteger)
+  if (a == null && b == null) return undefined
+  return limits.length ? { unit: 'requests', limit: Math.min(...limits) } : { unit: 'requests' }
+}
+function validSpend(v) {
+  return keys(v, ['tokens', 'usd_micros']) && Object.values(v).every((n) => integer(n))
+}
+function intersectSpend(a, b) {
+  if ([a, b].some((v) => v != null && !validSpend(v))) return { invalid: true }
+  if (a == null) return b
+  if (b == null) return a
+  return Object.fromEntries(['tokens', 'usd_micros'].filter((k) => a[k] != null || b[k] != null).map((k) => [k, minNum(a[k], b[k])]))
+}
+function validRedirects(v) { return keys(v, ['max']) && integer(v.max, 0, 5) }
+function intersectRedirects(a, b) {
+  if ([a, b].some((v) => v != null && !validRedirects(v))) return { max: 0 }
+  if (a == null) return b
+  if (b == null) return a
+  return { max: Math.min(a.max, b.max) }
 }
 
 function intersectPh(a, b) {
@@ -252,53 +322,69 @@ export function encodePathForWire(path) {
   return String(path).split('/').map(encodePathSegment).join('/')
 }
 
+/**
+ * The path a request names, decoded once — which is what goes on the wire,
+ * re-encoded — or a refusal.
+ *
+ * A path is decoded exactly once, and refused if decoding it again would
+ * change it. This used to decode to a fixed point and check two readings,
+ * once and fully decoded, but an upstream may decode any number of times in
+ * between: `/a/b%252520c` was allowed on both readings and an upstream that
+ * decodes twice served `/a/b%20c`, which neither reading was. No count of
+ * readings closes that, so an escape that is itself encoded is refused.
+ */
 export function normalizePath(path) {
-  let p = String(path || '/')
+  const raw = String(path || '/')
 
-  // Decode to a fixed point, not a fixed number of rounds. Two rounds left a
-  // live escape in the output at three levels of encoding, and the forwarded
-  // path was the un-normalized original, so the upstream resolved something
-  // the policy never saw.
-  let decoded = p
-  for (let i = 0; i < MAX_DECODE_ROUNDS; i++) {
-    let next
-    try { next = decodeURIComponent(decoded) } catch {
-      throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
-    }
-    if (next === decoded) break
-    decoded = next
-    if (i === MAX_DECODE_ROUNDS - 1) {
-      throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times to resolve')
-    }
+  // The request itself must be well-formed.
+  let p
+  try { p = decodeURIComponent(raw) } catch {
+    throw deny('AV_POLICY_DENIED', 'path contains an invalid percent-escape')
   }
 
   // Everything below decides what resource this names. A URL parser answers
   // the same question differently, and where the two disagree the request
   // goes somewhere the policy did not authorise.
   //
-  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
-  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
-  //   "/user/keys".
-  const cut = decoded.search(/[?#]/)
-  if (cut !== -1) decoded = decoded.slice(0, cut)
-
   //   An encoded slash is genuinely ambiguous: to this function it is a
   //   separator, to some upstreams a literal character in one segment. Two
   //   readings means two different resources, so it is refused rather than
   //   guessed. The same goes for a backslash, which several servers fold to
   //   a separator.
-  if (/%2f|%5c|\\/i.test(String(path || ''))) {
+  //
+  //   Both are looked for in the decoded path as well, so a backslash encoded
+  //   twice (`%255c`) is named for what it is rather than only as the double
+  //   encoding below.
+  if (/%2f|%5c|\\/i.test(raw) || /%2f|%5c|\\/i.test(p)) {
     throw deny('AV_POLICY_DENIED', 'path contains an encoded slash or a backslash', {
       rule: 'path_ambiguous_separator',
       hint: 'Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.',
     })
   }
 
+  //   Decoded once, nothing may still decode. `%25` followed by hex is an
+  //   escape that was itself encoded, and an upstream that decodes again
+  //   serves another path. A `%` that starts no escape is a literal percent
+  //   sign, as in `/files/100%25`, and is sent as one. `%u` and four hex
+  //   digits counts as an escape too: IIS decodes it.
+  if (/%(?:[0-9a-f]{2}|u[0-9a-f]{4})/i.test(p)) {
+    throw deny('AV_POLICY_DENIED', 'path is percent-encoded too many times: decoding it again would change it', {
+      rule: 'path_ambiguous_encoding',
+      hint: 'An upstream that decodes the path twice would serve a different path from the one checked here. Encode the path once.',
+    })
+  }
+
+  //   `?` and `#` end the path. They survived decoding, so `/user/keys%23`
+  //   was matched as "/user/keys#" (no deny glob hits) and then sent as
+  //   "/user/keys".
+  const cut = p.search(/[?#]/)
+  if (cut !== -1) p = p.slice(0, cut)
+
   //   TAB, LF and CR are deleted outright by the WHATWG URL parser, so
   //   "/repos/o/r/hooks\t" matched no deny glob and arrived as
   //   "/repos/o/r/hooks". Every C0 control and DEL is refused: none of them
   //   belongs in a path, and each is a chance for two parsers to disagree.
-  const control = /[\u0000-\u001f\u007f]/.exec(decoded)
+  const control = /[\u0000-\u001f\u007f]/.exec(p)
   if (control) {
     const code = control[0].charCodeAt(0).toString(16).padStart(2, '0')
     throw deny('AV_POLICY_DENIED', `path contains a control character (0x${code})`, {
@@ -308,7 +394,7 @@ export function normalizePath(path) {
   }
 
   const segments = []
-  for (const seg of decoded.split('/')) {
+  for (const seg of p.split('/')) {
     if (seg === '' || seg === '.') continue
     if (seg === '..') {
       if (segments.length === 0) throw deny('AV_POLICY_DENIED', 'path traverses above its root')
@@ -319,9 +405,6 @@ export function normalizePath(path) {
   }
   return `/${segments.join('/')}`
 }
-
-// Enough for any legitimate double-encoding, far short of a decode bomb.
-const MAX_DECODE_ROUNDS = 5
 
 /**
  * Glob matching, done segment by segment rather than by compiling to a regex.
@@ -461,9 +544,14 @@ export function isMultiTenantWildcard(pattern) {
 
 /**
  * Evaluate an HTTP request against an effective policy.
- * Throws a VaultError on denial; returns the matched rule name on success.
+ * Throws a VaultError on denial. On success it returns which path rule and
+ * which route allowed the request, by index, never by their text.
  */
 export function evaluateHttp(policy, { method, host, path }) {
+  for (const problem of validate(policy)) {
+    if (problem.field === 'redirects') continue
+    throw deny('AV_POLICY_DENIED', problem.field === 'budget' ? 'budget limit is not a number in the accepted integer format' : `invalid policy field ${problem.field}`, { rule: `${problem.field}_invalid` })
+  }
   const m = String(method || 'GET').toUpperCase()
   const h = normalizeHost(host)
   const p = normalizePath(path)
@@ -482,56 +570,71 @@ export function evaluateHttp(policy, { method, host, path }) {
       hint: `Allowed methods: ${(policy.methods || []).join(', ') || 'none'}.`,
     })
   }
-  for (const dp of policy.deny_paths || []) {
+  // The deny rule is named by its index too (C27): the denial is filed, and a
+  // narrowing, which anyone on the socket may send, can add a deny pattern.
+  for (const [i, dp] of (policy.deny_paths || []).entries()) {
     if (matchPath(dp, p)) {
       throw deny('AV_POLICY_DENIED', `path ${p} is on a deny list`, {
-        rule: `deny_paths:${dp}`,
+        rule: `deny_paths:${i}`,
         hint: 'This path is denied by the connector profile and cannot be granted.',
       })
     }
   }
-  // Which pattern let it through, not merely that something did. The audit
-  // log records this as `path_glob_matched`, and it was the literal string
-  // "allow" on every record ever written — a field named for the glob that
-  // never once held a glob.
-  let matched = null
+  // Which rule let it through, not merely that something did, named by its
+  // place in the effective policy (C27). The audit log used to file the glob
+  // text itself, and a glob can be one an agent proposed — which means it can
+  // be a secret the agent put there. An index says which rule without saying
+  // what it was; the grant itself still holds the text for a human to read.
+  let path_rule = null
   if (policy.paths) {
-    matched = policy.paths.find((pat) => matchPath(pat, p)) ?? null
-    if (matched === null) {
+    path_rule = policy.paths.findIndex((pat) => matchPath(pat, p))
+    if (path_rule === -1) {
       throw deny('AV_POLICY_DENIED', `path ${p} is outside the grant`, {
         rule: 'paths',
         hint: `Allowed paths: ${(policy.paths || []).join(', ') || 'none'}.`,
       })
     }
   }
-  return { host: h, path: p, method: m, rule: matched ?? 'allow', matched }
+  // Every route set must allow the request. The last is the innermost layer
+  // (the grant's own routes, or a narrowing of them), so its route is the one
+  // recorded.
+  let route_rule = null
+  for (const set of policy.route_sets ?? (policy.routes ? [policy.routes] : [])) {
+    const i = set.findIndex((pair) => pair.methods.includes(m) && pair.paths.some((glob) => matchPath(glob, p)))
+    if (i === -1) throw deny('AV_POLICY_DENIED', 'request is outside the allowed routes', {
+      rule: 'routes', hint: `Allowed here: ${set.flatMap((pair) => pair.methods.flatMap((method) => pair.paths.map((glob) => `${method} ${glob}`))).join(' | ')}`,
+    })
+    route_rule = i
+  }
+  return { host: h, path: p, method: m, path_rule, route_rule }
 }
 
 /** Does this request need a human approval under the effective policy? */
 export function needsApproval(policy, { method, firstUse }) {
-  const mode = policy.approval || 'auto'
+  const mode = policy.approval === undefined ? 'auto' : policy.approval
   const m = String(method || 'GET').toUpperCase()
   switch (mode) {
     case 'auto': return false
     case 'first-use': return !!firstUse
     case 'on-write': return !SAFE_METHODS.has(m)
     case 'each': return true
-    default: return false
+    default: return true
   }
 }
 
 /** Static checks that run before a policy is stored, surfaced by `policy lint`. */
 export function lint(policy, { kind } = {}) {
+  if (!object(policy)) return validate(policy).map((p) => ({ level: 'error', rule: p.field, message: p.message }))
   const problems = []
   if (!policy.budget || policy.budget.limit == null) {
     problems.push({ level: 'error', rule: 'budget', message: 'every grant must set a budget; add budget: { requests: N }' })
   }
-  for (const host of policy.hosts || []) {
-    if (isMultiTenantWildcard(host)) {
+  for (const host of Array.isArray(policy.hosts) ? policy.hosts : []) {
+    if (typeof host === 'string' && isMultiTenantWildcard(host)) {
       problems.push({ level: 'error', rule: 'hosts', message: `${host} spans a shared multi-tenant suffix; name exact hosts` })
     }
   }
-  for (const p of policy.paths || []) {
+  for (const p of Array.isArray(policy.paths) ? policy.paths : []) {
     if (p === '/**' || p === '**') {
       problems.push({ level: 'warn', rule: 'paths', message: 'a root ** grant allows every path this connector permits' })
     }
@@ -543,8 +646,113 @@ export function lint(policy, { kind } = {}) {
       message: 'a low max_uses breaks SDK pagination and retries; session-lifetime is the default for a reason',
     })
   }
-  if ((policy.methods || []).some((m) => !SAFE_METHODS.has(m)) && (policy.approval || 'auto') === 'auto') {
+  if ((Array.isArray(policy.methods) ? policy.methods : []).some((m) => !SAFE_METHODS.has(m)) && (policy.approval || 'auto') === 'auto') {
     problems.push({ level: 'warn', rule: 'approval', message: 'write methods with approval: auto; on-write is the default for a reason' })
   }
+  for (const problem of validate(policy, { kind })) problems.push({ level: 'error', rule: problem.field, message: problem.message })
+  for (const set of Array.isArray(policy.route_sets) ? policy.route_sets : (Array.isArray(policy.routes) ? [policy.routes] : [])) {
+    if (Array.isArray(set) && set.some((pair) => Array.isArray(pair.methods) && pair.methods.some((m) => !SAFE_METHODS.has(m)) && pair.paths?.some((p) => p === '/**' || p === '**'))) {
+      problems.push({ level: 'warn', rule: 'routes', message: 'write route permits every path' })
+    }
+  }
   return problems
+}
+
+function stringList(v, predicate = () => true) {
+  return Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length > 0 && predicate(s))
+}
+function validRoutes(v) {
+  return Array.isArray(v) && v.length <= 64 && v.every((pair) => keys(pair, ['methods', 'paths']) &&
+    stringList(pair.methods, (m) => METHODS.includes(m)) && pair.methods.length >= 1 && pair.methods.length <= 7 &&
+    stringList(pair.paths) && pair.paths.length >= 1 && pair.paths.length <= 64)
+}
+function validPayload(v) { return validatePayload(v).length === 0 }
+
+/** Pure validation of both writable layers and stored effective policies. */
+export function validate(layer, { kind } = {}) {
+  if (!object(layer)) return [{ field: 'policy', message: 'policy must be an object' }]
+  const problems = []
+  const check = (field, ok) => { if (!ok) problems.push({ field, message: `invalid ${field}` }) }
+  for (const [field, value] of Object.entries(layer)) {
+    // Undefined fields are emitted by intersection for unconstrained values.
+    if (value === undefined) continue
+    if (['hosts', 'methods', 'paths', 'databases', 'rcpt', 'commands'].includes(field) && value === null) continue
+    switch (field) {
+      case 'kind': check(field, typeof value === 'string' && value.length > 0); break
+      case 'hosts': case 'paths': case 'deny_paths': case 'databases': case 'rcpt': case 'commands': check(field, stringList(value)); break
+      case 'methods': check(field, stringList(value, (m) => METHODS.includes(m))); break
+      case 'approval': check(field, APPROVAL_ORDER.includes(value)); break
+      case 'sql_profile': check(field, SQL_ORDER.includes(value)); break
+      case 'mode': check(field, SSH_MODE_ORDER.includes(value)); break
+      case 'budget': check(field, validBudget(value)); break
+      case 'spend': check(field, validSpend(value)); break
+      case 'rate': check(field, validWindow(value, PER_MS, 'per', 1_000_000)); break
+      case 'quota': check(field, validWindow(value, WINDOW_MS, 'window', 100_000_000)); break
+      case 'max_concurrent': check(field, integer(value, 1, 1024)); break
+      case 'redirects': check(field, validRedirects(value)); break
+      case 'routes': check(field, validRoutes(value)); break
+      case 'route_sets': check('routes', Array.isArray(value) && value.every(validRoutes)); break
+      case 'payload': check(field, validPayload(value)); break
+      case 'payload_sets': check('payload', Array.isArray(value) && value.every(validPayload)); break
+      case 'stream_bodies': check(field, typeof value === 'boolean'); break
+      case 'graphql': check(field, object(value)); break
+      case 'placeholder_policy': check(field, keys(value, ['max_uses', 'ttl', 'max_active']) && Object.values(value).every((n) => n === undefined || integer(n, 1))); break
+      default: check(field, false)
+    }
+  }
+  if (layer.spend !== undefined && kind !== undefined && !METERED_KINDS.includes(kind)) problems.push({ field: 'spend', message: 'spend applies only to anthropic, openai and google-genai' })
+  return problems
+}
+
+/** Convert the public grant input to a policy layer without mutating input. */
+export function grantPolicyFromInput(spec, { profile = {}, ceiling = [], defaults = true } = {}) {
+  const out = {}
+  const has = (k) => Object.hasOwn(spec, k)
+  const hostCeiling = Array.isArray(ceiling) ? ceiling : (ceiling.hosts ?? profile.policyCeiling?.hosts ?? [])
+  if (defaults || has('hosts')) out.hosts = confineHosts(spec.hosts, hostCeiling)
+  for (const [k, fallback] of [['methods', ['GET', 'HEAD']], ['paths', ['/**']], ['approval', 'on-write']]) {
+    if (defaults || has(k)) out[k] = has(k) ? structuredClone(spec[k]) : fallback
+  }
+  if (defaults || has('budget')) out.budget = { unit: profile.defaultBudget?.unit ?? 'requests', limit: has('budget') ? (budgetInteger(spec.budget) ?? spec.budget) : (profile.defaultBudget?.limit ?? 500) }
+  for (const k of ['deny_paths', 'max_concurrent', 'routes', 'payload', 'sql_profile', 'mode', 'databases', 'rcpt', 'commands', 'graphql', 'stream_bodies', 'placeholder_policy']) {
+    if (has(k)) out[k] = structuredClone(spec[k])
+  }
+  const aliases = { s: 'second', sec: 'second', second: 'second', m: 'minute', min: 'minute', minute: 'minute', h: 'hour', hour: 'hour', d: 'day', day: 'day' }
+  for (const [k, key, allowed] of [['rate', 'per', PER_MS], ['quota', 'window', WINDOW_MS]]) {
+    if (!has(k)) continue
+    let v = structuredClone(spec[k])
+    if (typeof v === 'string') {
+      const match = /^(\d+)\/(s|sec|second|m|min|minute|h|hour|d|day)$/.exec(v)
+      if (match && Object.hasOwn(allowed, aliases[match[2]])) v = { count: Number(match[1]), [key]: aliases[match[2]] }
+    }
+    out[k] = v
+  }
+  if (defaults || has('redirects')) out.redirects = { max: has('redirects') ? spec.redirects : 0 }
+  if (has('spend_tokens') || has('spend_usd')) {
+    out.spend = {}
+    if (has('spend_tokens')) out.spend.tokens = spec.spend_tokens
+    if (has('spend_usd')) {
+      const usd = spec.spend_usd
+      if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0 || Math.abs(usd * 1e6 - Math.round(usd * 1e6)) > 1e-7) {
+        throw deny('AV_POLICY_DENIED', 'invalid spend_usd', { rule: 'policy_invalid' })
+      }
+      out.spend.usd_micros = Math.round(usd * 1e6)
+    }
+  }
+  const problems = validate(out, { kind: profile.kind })
+  if (problems.length) throw deny('AV_POLICY_DENIED', `invalid policy field ${problems[0].field}`, { rule: 'policy_invalid' })
+  return out
+}
+
+/** A detached, public description containing no runtime counters or secrets. */
+export function describeEffective(effective) {
+  const out = {}
+  for (const k of ['hosts', 'methods', 'paths', 'deny_paths', 'approval', 'spend', 'rate', 'max_concurrent', 'quota']) out[k] = effective[k] ?? null
+  out.routes = effective.route_sets ?? (effective.routes ? [effective.routes] : [])
+  out.payload = effective.payload_sets ?? (effective.payload ? [effective.payload] : [])
+  // A limit that is not a canonical integer is described as one, not as an
+  // unlimited budget: the gateway refuses every request on it.
+  out.budget = effective.budget ? (effective.budget.invalid ? { limit: null, invalid: true } : { limit: effective.budget.limit ?? null }) : null
+  out.redirects = validRedirects(effective.redirects) ? effective.redirects : { max: 0 }
+  return structuredClone(out)
 }

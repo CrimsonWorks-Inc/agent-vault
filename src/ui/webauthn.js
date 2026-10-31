@@ -21,6 +21,7 @@
 // RS256 is rejected rather than half-supported.
 
 import { createHash, createPublicKey, createVerify, randomBytes, timingSafeEqual } from 'node:crypto'
+import { deny } from '../core/errors.js'
 
 export const ES256 = -7
 
@@ -144,17 +145,36 @@ export function b64url(buf) {
   return Buffer.from(buf).toString('base64url')
 }
 
-function parseClientData(clientDataJSON, { expectedType, expectedChallenge, expectedOrigins }) {
-  const data = JSON.parse(Buffer.from(clientDataJSON, 'base64url').toString('utf8'))
-  if (data.type !== expectedType) throw new Error(`client data type is ${data.type}, expected ${expectedType}`)
+/**
+ * Why a ceremony failed, as one of a closed set. The message says it in words
+ * for whoever sent the assertion, and it quotes what they sent: the type and
+ * origin from their clientDataJSON, a JSON.parse snippet. The code is what may
+ * be recorded (C28), because it says the same thing and quotes nothing.
+ */
+export const FAILURES = Object.freeze(['client_data_type', 'origin', 'challenge', 'signature', 'credential', 'malformed', 'size', 'other'])
+const fail = (code, message) => Object.assign(new Error(message), { failure: code })
 
+/** The code of a failure thrown here, or `other`. Never the message. */
+export function failureOf(e) {
+  return FAILURES.includes(e?.failure) ? e.failure : 'other'
+}
+
+function parseClientData(clientDataJSON, { expectedType, expectedChallenge, expectedOrigins }) {
+  let data
+  try { data = JSON.parse(Buffer.from(clientDataJSON, 'base64url').toString('utf8')) } catch (e) {
+    throw fail('malformed', `clientDataJSON is not JSON: ${e.message}`)
+  }
+  if (!data || typeof data !== 'object') throw fail('malformed', 'clientDataJSON is not an object')
+  if (data.type !== expectedType) throw fail('client_data_type', `client data type is ${data.type}, expected ${expectedType}`)
+
+  if (typeof data.challenge !== 'string') throw fail('malformed', 'clientDataJSON has no challenge')
   const got = Buffer.from(data.challenge, 'base64url')
   const want = Buffer.from(expectedChallenge)
   if (got.length !== want.length || !timingSafeEqual(got, want)) {
-    throw new Error('challenge does not match; this assertion was made for a different operation')
+    throw fail('challenge', 'challenge does not match; this assertion was made for a different operation')
   }
   if (!expectedOrigins.includes(data.origin)) {
-    throw new Error(`origin ${data.origin} is not this server`)
+    throw fail('origin', `origin ${data.origin} is not this server`)
   }
   return data
 }
@@ -197,7 +217,7 @@ export function verifyAssertion({
   expectedChallenge, expectedOrigins, rpId, enrolled,
 }) {
   if (credentialId !== enrolled.credentialId) {
-    throw new Error('this assertion is from a credential that was never enrolled')
+    throw fail('credential', 'this assertion is from a credential that was never enrolled')
   }
   // Sizes first, before anything parses anything.
   //
@@ -210,15 +230,16 @@ export function verifyAssertion({
   // a caller who has proved nothing should be work that fits in a breath.
   const LIMITS = { authenticatorData: 8 * 1024, clientDataJSON: 8 * 1024, signature: 2 * 1024 }
   for (const [field, value] of Object.entries({ authenticatorData, clientDataJSON, signature })) {
-    if (typeof value !== 'string') throw new Error(`${field} must be a base64url string`)
+    if (typeof value !== 'string') throw fail('malformed', `${field} must be a base64url string`)
     if (value.length > LIMITS[field]) {
-      throw new Error(`${field} is ${value.length} characters; a real assertion is under ${LIMITS[field]}`)
+      throw fail('size', `${field} is ${value.length} characters; a real assertion is under ${LIMITS[field]}`)
     }
   }
   parseClientData(clientDataJSON, { expectedType: 'webauthn.get', expectedChallenge, expectedOrigins })
 
   const authData = Buffer.from(authenticatorData, 'base64url')
-  const parsed = parseAuthData(authData)
+  let parsed
+  try { parsed = parseAuthData(authData) } catch (e) { throw fail('malformed', e.message) }
 
   const expectedRpIdHash = createHash('sha256').update(rpId).digest()
   if (!timingSafeEqual(parsed.rpIdHash, expectedRpIdHash)) throw new Error('relying party id does not match')
@@ -234,14 +255,16 @@ export function verifyAssertion({
   const verifier = createVerify('SHA256')
   verifier.update(signedBytes)
   verifier.end()
-  if (!verifier.verify(publicKey, Buffer.from(signature, 'base64url'))) {
-    throw new Error('signature does not verify')
-  }
+  // A signature that is not even DER makes verify throw; it is the same
+  // failure as one that does not verify.
+  let verified = false
+  try { verified = verifier.verify(publicKey, Buffer.from(signature, 'base64url')) } catch { /* not a signature */ }
+  if (!verified) throw fail('signature', 'signature does not verify')
 
   // A counter that goes backwards means the credential was cloned. Platform
   // authenticators commonly report zero, which is not a regression.
   if (parsed.signCount > 0 && enrolled.signCount > 0 && parsed.signCount <= enrolled.signCount) {
-    throw new Error('signature counter did not advance; the credential may have been cloned')
+    throw fail('signature', 'signature counter did not advance; the credential may have been cloned')
   }
   return { signCount: parsed.signCount, userVerified: true }
 }
@@ -261,20 +284,56 @@ export function verifyAssertion({
  * its digest: the signature must cover which secret is being stored, but the
  * secret itself has no business in a structure that gets canonicalised,
  * compared and logged.
+ *
+ * The names this function writes itself are refused as request fields. They
+ * used to be copied in like any other, after `op` and after the digest, so a
+ * body carrying `op: 'session.create'` turned a placeholder request into the
+ * operation a human had signed for a narrow session, and one carrying
+ * `prf_secret_sha256` swapped the digest of the human's secret for the
+ * agent's. What is signed has to be what this function computed, so nothing
+ * the caller sends may overwrite it.
  */
 export function operationFor(op, params = {}) {
-  const out = { op }
+  const out = {}
   for (const key of Object.keys(params).sort()) {
     if (key === 'presence') continue          // the proof is not part of what it proves
     const v = params[key]
     if (v === undefined) continue
-    if (key === 'value' || key === 'prf_secret') {
-      out[`${key}_sha256`] = createHash('sha256').update(String(v)).digest('hex')
+    // A body that repeats the route's own op says nothing new; one naming a
+    // different op is the swap.
+    if (key === 'op' && v === op) continue
+    if (key === 'op' || key.endsWith('_sha256')) {
+      throw deny('AV_POLICY_DENIED', `a request cannot carry a field named ${JSON.stringify(key)}`, {
+        rule: 'reserved_operation_field',
+      })
+    }
+    if (DIGESTED.has(key)) {
+      out[`${key}_sha256`] = digestOf(v)
       continue
     }
     out[key] = v
   }
+  out.op = op
   return out
+}
+
+/**
+ * Request fields that carry a secret, bound by digest rather than in clear: a
+ * credential value, an unlock secret, a backup's recovery passphrase, the
+ * backup bundle itself (every secret, sealed), and a webhook URL, which is a
+ * bearer credential for whoever holds it.
+ */
+export const DIGESTED = new Set(['value', 'prf_secret', 'recovery_passphrase', 'bundle', 'webhook_url'])
+
+/**
+ * A string is digested as its own bytes, as it always was. Anything else is
+ * digested as its canonical form (null is "null" either way): `String()` of a
+ * backup bundle is "[object Object]" for every bundle there is, so a signature
+ * over that digest would bind no bundle at all. Contract C19.
+ */
+function digestOf(v) {
+  const text = typeof v === 'string' ? v : canonicalOperation(v)
+  return createHash('sha256').update(text).digest('hex')
 }
 
 /**
