@@ -14,7 +14,7 @@ npm test               # everything, the UI included
 
 | Path | What it holds |
 |---|---|
-| `src/lib/` | Plain JS, no JSX, tested with `node --test`: `api.js` (the only fetch), `presence.js` (WebAuthn, byte-identical to app.html), `paging.js`, `text.js`, `format.js`, `router.js`, `theme.js`, `notify.js`, `cache.js` |
+| `src/lib/` | Plain JS, no JSX, tested with `node --test`: `api.js` (the only fetch), `presence.js` (WebAuthn, byte-identical to the old page), `paging.js`, `text.js`, `format.js`, `router.js`, `theme.js`, `notify.js`, `cache.js` |
 | `src/hooks/` | `useApi`/`useApiQuery`, `usePaged`, `usePresence`, `usePolling`, `useAction`, `usePrompt`, `useToast`, `useVault` |
 | `src/components/ui/` | The primitives. Pages use these, never raw Headless UI or long class strings |
 | `src/components/<feature>/` | Pieces composed for one page (`overview/`) |
@@ -33,7 +33,7 @@ npm run build:ui
 node web/scripts/dev-vault.mjs --enrolled          # prints {"page": "http://127.0.0.1:5180/", ...}
 ```
 
-It creates a temp vault with fake credentials, 64 sessions, over 200 audit records and 3 waiting session requests. It starts a daemon and the real UI server (`src/ui/server.js`), claims the session itself, and serves `src/ui/dist` under the strict CSP with `/api` proxied. It reads the dist on every request, so rebuild and reload. Flags: `--locked`, `--pending N`, `--port N`.
+It creates a temp vault with fake credentials, 64 sessions, over 200 audit records and 3 waiting session requests. It starts a daemon and the real UI server (`src/ui/server.js`), claims the session itself, and forwards the page, its assets and `/api` to it with the session cookie added. The real UI server serves the built page, read once at its start, so after `npm run build:ui` restart this. Flags: `--locked`, `--enrolled`, `--pending N`, `--sessions N`, `--creds N`, `--templates N`, `--port N`.
 
 **Screenshots** (headless Chrome over DevTools; it fails on any CSP violation and reports horizontal overflow):
 

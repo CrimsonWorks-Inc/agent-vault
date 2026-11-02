@@ -24,6 +24,25 @@ reproduced first and has a test that fails without its fix.
   panic. It needs a fresh passphrase or fingerprint, cannot be remote, and its
   token is refused on every non-loopback listener.
 
+### The web UI, rebuilt
+
+- **A React page in the ioLite Labs look**, light and dark, with a page each for
+  Overview, Credentials, Sessions, Approvals, Audit, Templates, Containment,
+  Notifications, Settings and Docs. Everything the old page did is still there,
+  signed the same way.
+- **Every list pages and searches**: credentials, sessions, approvals,
+  templates, tripwire rules, the access review, a session's grants, and the
+  whole audit log (the daemon now pages it, filtered by kind before the limit).
+  `paged=1` opts a UI route into `{items, next_cursor, prev_cursor, total}`;
+  without it every route answers as before. Cursors are sealed, and a search
+  runs only over what the page is already shown.
+- **A prebuilt bundle, still zero runtime dependencies.** The page is built from
+  `web/` into `src/ui/dist` and shipped prebuilt; React, Vite and Tailwind are
+  devDependencies. The UI server serves it from memory under a strict policy
+  with no inline script or style, and refuses to start without it.
+- **Contributors:** `npm ci`, edit `web/`, then `npm run build:ui` and commit
+  `src/ui/dist` with the change. `npm test` fails if the two disagree.
+
 ### New
 
 - Per-grant rate, concurrency and rolling quotas (`--rate 60/min`,
