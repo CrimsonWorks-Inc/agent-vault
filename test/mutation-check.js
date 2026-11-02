@@ -4448,8 +4448,8 @@ const MUTATIONS = [
   {
     what: 'U2: an asset path is matched after normalising instead of as it arrived',
     file: 'src/ui/server.js',
-    from: "    const asIs = String(req.url).split('?')[0] === url.pathname",
-    to: "    const asIs = true",
+    from: "  if (raw !== pathname || !raw.startsWith('/')) return false",
+    to: "  if (!raw.startsWith('/')) return false",
     tests: ['test/security/ui-dist-serving.test.js'],
   },
   {

@@ -160,9 +160,8 @@ export class UiServer {
   /**
    * One file of the built page. Only a name that was in dist/assets when this
    * server started, held in memory since then, and only for the holder of the
-   * session, as the page itself is. The path is compared as it arrived as
-   * well as parsed, so a dot segment, an encoded slash or a backslash cannot
-   * turn into a different name on the way: any of them is a 404.
+   * session, as the page itself is. The name is the path as it arrived:
+   * literalPath has already refused one the parser would have changed.
    */
   #serveAsset(req, res, url) {
     const cookie = this.#cookieFrom(req)
@@ -170,8 +169,7 @@ export class UiServer {
       return this.#send(res, 401, { error: 'not authenticated' })
     }
     const name = url.pathname.slice('/assets/'.length)
-    const asIs = String(req.url).split('?')[0] === url.pathname
-    const asset = req.method === 'GET' && asIs && ASSET_NAME.test(name) ? this.dist.assets.get(name) : undefined
+    const asset = req.method === 'GET' && ASSET_NAME.test(name) ? this.dist.assets.get(name) : undefined
     if (!asset) return this.#send(res, 404, { error: 'not found' })
     this.#touch(res)
     res.writeHead(200, {
