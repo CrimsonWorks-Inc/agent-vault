@@ -133,8 +133,8 @@ Waves of independent review, each asked for reproductions, found these:
 
 ### Testing
 
-1823 tests (1629 under `node --test`, 194 page tests under vitest).
-`npm run test:mutation` now breaks 613 protections in turn and expects the
+1836 tests (1634 under `node --test`, 202 page tests under vitest).
+`npm run test:mutation` now breaks 623 protections in turn and expects the
 suite to fail each time. The new end-to-end tests drive the real
 CLI, control API, MCP and gateway against a throwaway daemon and a local
 upstream.
