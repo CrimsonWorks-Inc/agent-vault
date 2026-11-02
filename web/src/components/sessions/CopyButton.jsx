@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/16/solid'
 import { useToast } from '../../hooks/useToast.js'
 import { Button } from '../ui/Button.jsx'
+import { copyable } from '../ui/CodeBlock.jsx'
 
 /**
  * Copy a longer text that is not on screen as a block (the Markdown summary):
@@ -12,7 +13,7 @@ export function CopyButton({ text, children = 'Copy', ...rest }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
-      await globalThis.navigator.clipboard.writeText(String(typeof text === 'function' ? text() : text))
+      await globalThis.navigator.clipboard.writeText(copyable(typeof text === 'function' ? text() : text))
       setCopied(true)
       setTimeout(() => setCopied(false), 1400)
     } catch {

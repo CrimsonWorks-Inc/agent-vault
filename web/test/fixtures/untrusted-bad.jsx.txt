@@ -1,0 +1,12 @@
+// Failing fixture for untrusted-scan: each of these renders an agent-written
+// field some other way, and each must be reported.
+export function Bad({ r, q }) {
+  return (
+    <div>
+      <p>{r.reason_untrusted}</p>
+      <span title={q.reason_untrusted}>x</span>
+      <CodeBlock text={r.agent_reason_untrusted} />
+      <p>Reason: {`"${r.reason_untrusted}"`}</p>
+    </div>
+  )
+}

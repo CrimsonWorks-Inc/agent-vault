@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
 import { operationFor } from '../lib/presence.js'
-import { SESSIONS, callsTo, challengeOf, envelope, pagesRoutes, Enrolled } from './fixtures.pages-a.jsx'
+import { DETAIL, SESSIONS, callsTo, challengeOf, envelope, pagesRoutes, Enrolled } from './fixtures.pages-a.jsx'
 import { Sessions } from './Sessions.jsx'
 
 // Whole pages over a fake server: generous when the machine is busy.
@@ -270,5 +270,84 @@ describe('Sessions: detail and access review', () => {
     for (const c of asks) expect(c.query).toMatchObject({ since: '7d', paged: '1', limit: '25' })
     expect(screen.getAllByText('HEAD').length).toBeGreaterThan(0)
     expect(screen.getAllByText('quarantined').length).toBeGreaterThan(0)
+  })
+})
+
+describe('Sessions: copy and code never carry bidi marks (fix round 1)', () => {
+  const BIDI = /[\u202a-\u202e\u2066-\u2069]/
+  const withClipboard = () => {
+    const written = []
+    Object.defineProperty(globalThis.navigator, 'clipboard', { value: { writeText: async (t) => { written.push(t) } }, configurable: true })
+    return written
+  }
+  const MARKED = {
+    ...CREATED,
+    token: 'avs_fix\u202elive',
+    grants: [{ ...CREATED.grants[0], base_url: 'http://127.0.0.1:7411/gh\u2066-work', placeholder: 'AVPH_\u202aph' }, CREATED.grants[1]],
+  }
+
+  it('the hand-off card shows and copies the token and base URL without them, and keeps & < > " \'', async () => {
+    const written = withClipboard()
+    try {
+      const server = fakeServer(pagesRoutes({ 'POST sessions': { ...MARKED, grants: [{ ...MARKED.grants[0], usage: ['a & <b> "q" \'s'] }, MARKED.grants[1]] } }))
+      renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
+      await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
+      await click(screen.getByRole('button', { name: /Create session/ }))
+      const handoff = (await screen.findByRole('heading', { name: 'Hand this to the agent' })).closest('[data-handoff]')
+      for (const pre of handoff.querySelectorAll('pre, code')) expect(pre.textContent).not.toMatch(BIDI)
+      expect(handoff.textContent).toContain('avs_fixlive')
+      expect(handoff.textContent).toContain('http://127.0.0.1:7411/gh-work')
+      expect(handoff.textContent).toContain('a & <b> "q" \'s')
+      await click(within(handoff).getByRole('button', { name: 'Copy the session token' }))
+      await click(within(handoff).getByRole('button', { name: 'Copy the base URL for gh-work' }))
+      await click(within(handoff).getByRole('button', { name: 'Copy the placeholder for gh-work' }))
+      await click(within(handoff).getByRole('button', { name: 'Copy the example request' }))
+      await waitFor(() => expect(written).toHaveLength(4))
+      expect(written.slice(0, 3)).toEqual(['avs_fixlive', 'http://127.0.0.1:7411/gh-work', 'AVPH_ph'])
+      expect(written[3]).toContain('-H "AV-Session: avs_fixlive"')
+      for (const w of written) expect(w).not.toMatch(BIDI)
+    } finally {
+      delete globalThis.navigator.clipboard
+    }
+  })
+
+  it('"Copy as Markdown" strips the marks from a session label and keeps the rest byte for byte', async () => {
+    const written = withClipboard()
+    try {
+      const label = 'bot\u202e<label title="x"> & \'y\''
+      const server = fakeServer(pagesRoutes({
+        'GET sessions/detail': ({ query }) => {
+          const d = { ...DETAIL, session: { ...DETAIL.session, label } }
+          return { ...envelope(d.grants)({ query }), session: d.session, activity: d.activity }
+        },
+      }))
+      renderWith(<Enrolled><Sessions rest="detail:s_live" /></Enrolled>, { server })
+      await screen.findByText(/History is incomplete/)
+      await click(screen.getByRole('button', { name: 'Copy as Markdown' }))
+      await waitFor(() => expect(written).toHaveLength(1))
+      expect(written[0]).not.toMatch(BIDI)
+      expect(written[0].split('\n')[0]).toBe('## Session `s_live` (bot<label title="x"> & \'y\')')
+      expect(document.body.textContent).not.toMatch(/\u202e/)
+    } finally {
+      delete globalThis.navigator.clipboard
+    }
+  })
+
+  it('an env name the CLI would refuse is named, with why, and no command is shown', async () => {
+    const server = fakeServer(pagesRoutes({ 'POST sessions': CREATED }))
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
+    await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
+    await click(screen.getByRole('button', { name: /Create session/ }))
+    const handoff = (await screen.findByRole('heading', { name: 'Hand this to the agent' })).closest('[data-handoff]')
+    type(within(handoff).getByLabelText('Variable name 1'), 'MY-KEY')
+    type(within(handoff).getByLabelText('Variable name 2'), 'MY-KEY')
+    type(within(handoff).getByLabelText('Variable name 2'), 'GH_WORK_TOKEN')
+    type(within(handoff).getByLabelText('Variable name 1'), 'GH_WORK_TOKEN')
+    expect(within(handoff).getByText('No command: env would refuse it.')).toBeTruthy()
+    const listed = handoff.querySelector('[data-env-rejected]').textContent
+    expect(listed).toContain('“GH_WORK_TOKEN”: GH_WORK_TOKEN is mapped twice.')
+    type(within(handoff).getByLabelText('Variable name 1'), 'MY-KEY')
+    expect(handoff.querySelector('[data-env-rejected]').textContent).toBe('“MY-KEY”: Letters, digits and _ only, not starting with a digit.')
+    expect(handoff.textContent).not.toContain('agent-vault env --session')
   })
 })

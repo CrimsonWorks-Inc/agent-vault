@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { listFiles } from '../scripts/compare-trees.mjs'
+import { findUntrustedRendering } from './untrusted-scan.mjs'
 
 const WEB = fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(WEB, 'src')
@@ -69,13 +70,25 @@ test('nothing the page stores in the browser can hold a token or a placeholder',
   assert.match(paging, /storage\?\.setItem\(key, String\(clampLimit\(n\)\)\)/, 'the page size is the only value stored under a caller key')
 })
 
-test('every agent-written field the Overview shows goes through UntrustedText', () => {
+test('every agent-written field in web/src is rendered only through UntrustedText\'s text prop', () => {
+  const hits = []
   for (const { f, text } of sources()) {
-    if (/\.test\.jsx?$/.test(f)) continue
-    for (const m of text.matchAll(/\{[^{}]*_untrusted[^{}]*\}/g)) {
-      assert.match(m[0], /UntrustedText|text=/, `${f} shows ${m[0]} outside UntrustedText`)
-    }
+    if (/\.test\.jsx?$/.test(f) || !f.endsWith('.jsx')) continue
+    for (const h of findUntrustedRendering(text)) hits.push(`${f}:${h.line} ${h.why}: ${h.expr}`)
   }
+  assert.deepEqual(hits, [])
+})
+
+test('the untrusted scan passes UntrustedText text= and fails every other rendering (fixtures)', () => {
+  const fixture = (name) => read(join(WEB, 'test/fixtures', name))
+  assert.deepEqual(findUntrustedRendering(fixture('untrusted-ok.jsx.txt')), [])
+  const bad = findUntrustedRendering(fixture('untrusted-bad.jsx.txt'))
+  assert.deepEqual(bad.map((h) => [h.line, h.why]), [
+    [6, 'rendered as a child'],
+    [7, 'span title='],
+    [8, 'CodeBlock text='],
+    [9, 'rendered as a child'],
+  ])
 })
 
 // ---- the built page ---------------------------------------------------------

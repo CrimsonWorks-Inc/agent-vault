@@ -50,7 +50,7 @@ describe('usePaged', () => {
     const before = server.calls.length
     await act(async () => { latest.setQ('g'); latest.setQ('gh') })
     expect(server.calls.length).toBe(before)
-    await screen.findByText('match-gh', {}, { timeout: 2000 })
+    await screen.findByText('match-gh')
     expect(server.calls.length).toBe(before + 1)
     expect(server.calls.at(-1).query).toEqual({ paged: '1', limit: '25', q: 'gh' })
   })

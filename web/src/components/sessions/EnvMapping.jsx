@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { PlusIcon, XMarkIcon } from '@heroicons/react/16/solid'
+import { cleanLine } from '../../lib/text.js'
 import { Button } from '../ui/Button.jsx'
 import { CodeBlock } from '../ui/CodeBlock.jsx'
 import { IconButton } from '../ui/IconButton.jsx'
@@ -72,7 +73,16 @@ export function EnvMapping({ cli, sessionId, grants }) {
       {ok ? (
         <CodeBlock code={envCommand({ cli, sessionId, mappings: rows })} label="Copy the env command" wrap />
       ) : (
-        <Notice tone="warn">{rows.length ? 'Fix the names above to get the command.' : 'Map at least one name to get the command.'}</Notice>
+        <Notice tone="warn" title={rows.length ? 'No command: env would refuse it.' : 'Map at least one name to get the command.'}>
+          {rows.length > 0 && (
+            <ul className="space-y-0.5" data-env-rejected="">
+              {rows.map((r, i) => (problems[i] ? (
+                <li key={i}><span className="font-mono">{r.name ? `“${cleanLine(r.name)}”` : 'An empty name'}</span>: {problems[i]}.</li>
+              ) : null))}
+            </ul>
+          )}
+          {rows.length > 0 && <p className="mt-1">Fix the names above to get the command.</p>}
+        </Notice>
       )}
       <p className="text-xs text-muted">
         Each name becomes one line of the file. A credential’s placeholder works only where its usage says; its base URL is the loopback address to send it to.

@@ -30,7 +30,7 @@ function useRoute() {
   return route
 }
 
-export function App({ fetch: doFetch } = {}) {
+export function App({ fetch: doFetch, pages = PAGE_COMPONENTS } = {}) {
   const [fatal, setFatal] = useState(null)
   const api = useMemo(() => createApi(doFetch ? { fetch: doFetch } : {}), [doFetch])
   const slow = useMemo(() => createCache(), [])
@@ -41,18 +41,22 @@ export function App({ fetch: doFetch } = {}) {
     <ApiContext.Provider value={apiCtx}>
       <ToastProvider>
         <PromptProvider>
-          <Shell fatal={fatal} setFatal={setFatal} />
+          <Shell fatal={fatal} setFatal={setFatal} pages={pages} />
         </PromptProvider>
       </ToastProvider>
     </ApiContext.Provider>
   )
 }
 
-function Shell({ fatal, setFatal }) {
+function Shell({ fatal, setFatal, pages }) {
   const { api } = useApiCtx()
   const prompt = usePrompt()
   const askSecret = useCallback((label) => prompt.secret({ title: label }), [prompt])
   const presence = usePresenceController({ api, askSecret })
+  // The enrolment, once, for every page: a deep link to a page with a gated
+  // button must not start from "not enrolled" (pages-b report, item 1).
+  const refreshPresence = presence.refresh
+  useEffect(() => { refreshPresence().catch(() => {}) }, [refreshPresence])
   const vault = useVaultController(api, !fatal)
   const route = useRoute()
 
@@ -66,7 +70,7 @@ function Shell({ fatal, setFatal }) {
   if (fatal?.kind === 'session') return <NoSession cli={vault.context.cli} />
   if (fatal) return <Unreachable error={fatal} onRetry={retry} cli={vault.context.cli} />
 
-  const Page = PAGE_COMPONENTS[route.page] || PAGE_COMPONENTS.overview
+  const Page = pages[route.page] || pages.overview
   return (
     <PresenceContext.Provider value={presence}>
       <VaultContext.Provider value={vault}>

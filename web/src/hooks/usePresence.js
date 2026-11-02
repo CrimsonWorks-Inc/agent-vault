@@ -6,7 +6,7 @@
 // BEFORE the platform dialog opens, because that dialog says who is asking
 // and never what for.
 
-import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { createPresence, describeOperation, operationFor } from '../lib/presence.js'
 
@@ -28,11 +28,23 @@ export function usePresenceController({ api, askSecret, platform = NO_OVERRIDES 
   const [state, setState] = useState({ enrolled: false, known: false })
   const [signing, setSigning] = useState(null)
 
+  // Whether the server has been asked yet. The App shell asks on mount, so
+  // every page, a deep link included, sees the real enrolment; a gated call
+  // that races ahead of that first answer asks for itself rather than
+  // reporting "No authenticator enrolled" for a key that is there.
+  const known = useRef(false)
+
   const refresh = useCallback(async () => {
     const s = await presence.refresh()
+    known.current = true
     setState({ ...s, known: true })
     return s
   }, [presence])
+
+  /** Run a change to the authenticators, then re-read the enrolment, whatever happened. */
+  const changing = useCallback(async (fn) => {
+    try { return await fn() } finally { await refresh() }
+  }, [refresh])
 
   /**
    * Show what is being signed for as long as `fn` runs. Committed
@@ -44,8 +56,10 @@ export function usePresenceController({ api, askSecret, platform = NO_OVERRIDES 
     try { return await fn() } finally { setSigning(null) }
   }, [])
 
-  const gated = useCallback((operation, send, { label } = {}) =>
-    showing(label || describeOperation(operation), () => presence.gated(operation, send)), [presence, showing])
+  const gated = useCallback(async (operation, send, { label } = {}) => {
+    if (!known.current) await refresh()
+    return showing(label || describeOperation(operation), () => presence.gated(operation, send))
+  }, [presence, showing, refresh])
 
   const value = useMemo(() => ({
     enrolled: state.enrolled === true,
@@ -56,13 +70,13 @@ export function usePresenceController({ api, askSecret, platform = NO_OVERRIDES 
     gated,
     operationFor,
     describe: describeOperation,
-    enroll: () => showing('enrol this device to confirm changes', () => presence.enroll({ askPassphrase: askSecret })).then((s) => { setState({ ...s, known: true }); return s }),
-    replaceKey: () => showing('replace the confirmation authenticator', () => presence.replaceKey()).then((s) => { setState({ ...s, known: true }); return s }),
-    enableTouchId: () => showing('turn on Touch ID unlock', () => presence.enableTouchId()),
-    disableTouchId: () => showing('turn off Touch ID unlock', () => presence.disableTouchId()),
+    enroll: () => changing(() => showing('enrol this device to confirm changes', () => presence.enroll({ askPassphrase: askSecret }))),
+    replaceKey: () => changing(() => showing('replace the confirmation authenticator', () => presence.replaceKey())),
+    enableTouchId: () => changing(() => showing('turn on Touch ID unlock', () => presence.enableTouchId())),
+    disableTouchId: () => changing(() => showing('turn off Touch ID unlock', () => presence.disableTouchId())),
     touchIdUnlock: () => showing('unlock the vault', () => presence.touchIdUnlock()),
     lock: () => showing('lock the vault', () => presence.lock()),
-  }), [state, signing, refresh, gated, showing, presence, askSecret])
+  }), [state, signing, refresh, gated, showing, changing, presence, askSecret])
 
   return value
 }
