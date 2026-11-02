@@ -1,14 +1,26 @@
-import { cleanLine } from '../../lib/text.js'
 import { Disclosure } from '../ui/Disclosure.jsx'
 import { Field } from '../ui/Field.jsx'
 import { Input } from '../ui/Input.jsx'
 import { Select } from '../ui/Select.jsx'
+import { UntrustedText } from '../ui/UntrustedText.jsx'
 import { OWNER_APPROVALS } from './decide.js'
 
-/** A proposal value as a placeholder: what the agent asked for, or "unchanged". */
-export function proposed(v) {
-  if (v === undefined || v === null) return 'unchanged'
-  return cleanLine(typeof v === 'object' && !Array.isArray(v) ? JSON.stringify(v) : String(v))
+/** Every narrowing input says this, whatever the agent proposed. */
+export const NARROW_PLACEHOLDER = 'unchanged'
+
+/** The attribution beside a proposed value. A constant: nothing the agent wrote is in it. */
+export const PROPOSED_BY = 'Proposed by the agent, not verified'
+
+/**
+ * What the agent proposed for one field, as text for UntrustedText, or null
+ * when it proposed nothing. Structured values (routes, payload) as JSON.
+ * Never put into an attribute: it is the agent's words, so it is shown as
+ * text beside the input, marked as theirs (U7).
+ */
+export function proposedText(v) {
+  if (v === undefined || v === null) return null
+  if (Array.isArray(v)) return v.map((x) => (typeof x === 'object' && x !== null ? JSON.stringify(x) : String(x))).join(', ')
+  return typeof v === 'object' ? JSON.stringify(v) : String(v)
 }
 
 /**
@@ -36,19 +48,28 @@ export function NarrowingFields({ item, draft, onChange }) {
           <fieldset>
             <legend className="mb-2 text-sm text-muted">Narrow it before approving, if it asks for more than it needs:</legend>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {fields.map((f) => (
-                <Field key={f} label={<span className="font-mono">{f}</span>}>
-                  <Input
-                    mono
-                    data-field={f}
-                    value={d.fields?.[f] ?? ''}
-                    placeholder={proposed(item.proposal?.[f])}
-                    autoComplete="off"
-                    spellCheck={false}
-                    onChange={(e) => set({ fields: { ...(d.fields || {}), [f]: e.target.value } })}
-                  />
-                </Field>
-              ))}
+              {fields.map((f) => {
+                const asked = proposedText(item.proposal?.[f])
+                return (
+                  <Field key={f} label={<span className="font-mono">{f}</span>}>
+                    <Input
+                      mono
+                      data-field={f}
+                      value={d.fields?.[f] ?? ''}
+                      placeholder={NARROW_PLACEHOLDER}
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(e) => set({ fields: { ...(d.fields || {}), [f]: e.target.value } })}
+                    />
+                    {asked !== null && (
+                      <p className="mt-1 flex min-w-0 items-baseline gap-1.5 text-xs text-muted">
+                        <span className="shrink-0">asked:</span>
+                        <UntrustedText text={asked} label={PROPOSED_BY} />
+                      </p>
+                    )}
+                  </Field>
+                )
+              })}
             </div>
           </fieldset>
         </Disclosure>

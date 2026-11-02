@@ -5,12 +5,24 @@ import { Containment } from './Containment.jsx'
 
 const CHALLENGE = { challengeId: 'ch1', challenge: 'AAEC', allowCredentials: [{ id: 'Y3JlZDE' }], rpId: 'localhost' }
 const AN_HOUR_AGO = new Date(Date.now() - 3600e3).toISOString()
+const RULES = [
+  { id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' },
+  { id: 'bad_location', codes: ['AV_BAD_LOCATION'], threshold: 3, window_s: 600, action: 'revoke_session' },
+  { id: 'cross_session', codes: ['AV_PH_CROSS_SESSION'], threshold: 3, window_s: 600, action: 'revoke_session' },
+  { id: 'deny_paths', rule_prefix: 'deny_paths:', threshold: 5, window_s: 600, action: 'revoke_session' },
+]
 
 function routes(over = {}) {
   return {
     'GET presence/state': { enrolled: true, rpId: 'localhost' },
     'POST presence/challenge': CHALLENGE,
-    'GET tripwires': { enabled: true, rules_saved: true, rules: [{ id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' }], defaults: [] },
+    // The U3 envelope: the rules are the items, over three cursor pages, with
+    // enabled / rules_saved / defaults beside each page.
+    'GET tripwires': ({ query }) => {
+      const pages = { undefined: [RULES[0], RULES[1]], t2: [RULES[2]], t3: [RULES[3]] }
+      const next = { undefined: 't2', t2: 't3', t3: null }
+      return { items: pages[query.cursor], next_cursor: next[query.cursor], prev_cursor: null, total: RULES.length, enabled: true, rules_saved: true, defaults: [] }
+    },
     'GET audit': () => ({ items: [{ seq: 90, kind: 'tripwire.fired', rule_id: 'replay', session_id: 's_9', credential_slug: 'gh-work', count: 1, window_s: 600, action: 'revoke_session', ts: AN_HOUR_AGO }], next_cursor: 'f2', prev_cursor: null, total: null }),
     'GET credentials': {
       items: [
@@ -40,6 +52,19 @@ describe('Containment', () => {
     expect(screen.getByText(/Fired recently/)).toBeTruthy()
     const recent = server.calls.find((c) => c.path === 'audit' && c.query.limit === '5')
     expect(recent.query).toMatchObject({ paged: '1', kind: 'tripwire.fired' })
+  })
+
+  it('reads the tripwires paged, walking every cursor page, and keeps every rule in the shape the card reads', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Containment />, { server })
+    expect(await screen.findByText('deny_paths')).toBeTruthy()
+    for (const id of ['replay', 'bad_location', 'cross_session', 'deny_paths']) expect(screen.getAllByText(id).length).toBeGreaterThan(0)
+    const reads = server.calls.filter((c) => c.method === 'GET' && c.path === 'tripwires')
+    expect(reads.map((c) => c.query.cursor)).toEqual([undefined, 't2', 't3'])
+    for (const c of reads) expect(c.query).toMatchObject({ paged: '1' })
+    fireEvent.click(screen.getByRole('button', { name: /Edit rules/ }))
+    const editor = await screen.findByRole('textbox', { name: /Rules \(JSON\)/ })
+    expect(JSON.parse(editor.value).map((r) => r.id)).toEqual(RULES.map((r) => r.id))
   })
 
   it('Panic is confirmed in a page-drawn dialog and sent unsigned', async () => {

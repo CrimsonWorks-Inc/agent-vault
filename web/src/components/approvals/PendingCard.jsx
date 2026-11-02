@@ -54,8 +54,8 @@ export function PendingCard({ item, draft, onDraft, selected, onSelect, onDecide
       <p className="mt-2 break-words font-mono text-[0.9375rem] font-semibold text-ink">{cleanLine(item.headline)}</p>
 
       {item.proposal?.template && (
-        <p className="mt-1 text-sm text-muted">
-          template <span className="font-mono text-ink">{cleanLine(item.proposal.template)}</span> v{cleanLine(item.proposal.template_version ?? '?')}
+        <p className="mt-1 flex flex-wrap items-baseline gap-1.5 text-sm text-muted">
+          template <UntrustedText text={item.proposal.template} label="Named by the agent, not verified" /> v{cleanLine(item.proposal.template_version ?? '?')}
         </p>
       )}
 

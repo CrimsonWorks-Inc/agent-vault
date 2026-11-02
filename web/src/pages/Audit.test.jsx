@@ -102,6 +102,25 @@ describe('Audit (parity with app.html, paged through the whole log)', () => {
     expect(checked).toBeGreaterThan(0)
   })
 
+  it('a failed head read is said, with Try again; it never reads as an empty log', async () => {
+    let failHead = true
+    const base = routes()['GET audit']
+    const server = fakeServer(routes({
+      'GET audit': (call) => (call.query.limit === '1' && failHead ? { __status: 500, body: { error: 'head read failed' } } : base(call)),
+    }))
+    renderWith(<Audit />, { server })
+    expect(await screen.findByText('Could not read the head of the log.')).toBeTruthy()
+    expect(screen.getByText('head read failed')).toBeTruthy()
+    expect(screen.getByText('head: unknown')).toBeTruthy()
+    expect(await within(table()).findByText('request.denied')).toBeTruthy()
+    expect(screen.queryByText('head: no records yet')).toBeNull()
+
+    failHead = false
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText(/head: record 214, h214abcdef012345…/)).toBeTruthy()
+    expect(screen.queryByText('Could not read the head of the log.')).toBeNull()
+  })
+
   it('an empty log says so', async () => {
     const server = fakeServer(routes({ 'GET audit': { items: [], next_cursor: null, prev_cursor: null, total: null } }))
     renderWith(<Audit />, { server })

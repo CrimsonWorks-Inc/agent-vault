@@ -91,8 +91,8 @@ describe('Approvals (parity with app.html)', () => {
     await loaded()
     const card = within(table()).getByRole('article', { name: 'Session requested sr_1' })
     fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
-    fireEvent.change(within(card).getByPlaceholderText('GET'), { target: { value: 'get' } })
-    fireEvent.change(within(card).getByPlaceholderText('/repos/acme/app/**'), { target: { value: '/repos/acme/app/pulls/**' } })
+    fireEvent.change(card.querySelector('[data-field="methods"]'), { target: { value: 'get' } })
+    fireEvent.change(card.querySelector('[data-field="paths"]'), { target: { value: '/repos/acme/app/pulls/**' } })
     expect(within(card).getByRole('button', { name: /Narrow it before approving \(2 narrowed\)/ })).toBeTruthy()
     fireEvent.click(within(card).getByRole('button', { name: /Approve session/ }))
     await waitFor(() => expect(server.calls.some((c) => c.path === 'session-requests/decide')).toBe(true))
@@ -149,7 +149,7 @@ describe('Approvals (parity with app.html)', () => {
     await loaded()
     const card = within(table()).getByRole('article', { name: 'Session requested sr_1' })
     fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
-    fireEvent.change(within(card).getAllByRole('textbox')[2], { target: { value: 'lots' } }) // budget
+    fireEvent.change(card.querySelector('[data-field="budget"]'), { target: { value: 'lots' } })
     fireEvent.click(within(card).getByRole('button', { name: /Approve session/ }))
     expect(await screen.findByText(/That narrowing does not parse, so nothing was sent/)).toBeTruthy()
     expect(challenges(server)).toHaveLength(0)
@@ -180,6 +180,53 @@ describe('Approvals (parity with app.html)', () => {
     fireEvent.click(within(table()).getAllByRole('checkbox', { name: 'Select sr_1' })[0])
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
     expect(screen.queryByRole('region', { name: 'Decide the selected' })).toBeNull()
+  })
+
+  it('no agent-proposed value ever reaches an attribute: proposals are text beside the input, marked as the agent\'s', async () => {
+    const HOSTILE = {
+      ...SESSION_ITEM,
+      id: 'sr_9',
+      narrowable: ['methods', 'paths', 'routes', 'payload', 'budget'],
+      proposal: {
+        methods: ['GET', '" onfocus="alert(1)'],
+        paths: ['/repos/"><img src=x onerror=alert(1)>', '/a\u202e/evil-bidi'],
+        routes: [{ methods: ['POST'], paths: ['/x" autofocus onfocus="alert(2)'] }],
+        payload: { rules: [{ field: 'title', equals: '<script>alert(3)</script>\u2066' }] },
+        budget: 5,
+        template: 'tpl"><b>owned</b>\u202e',
+      },
+    }
+    const server = fakeServer(routes({ 'GET pending': { items: [HOSTILE], next_cursor: null, prev_cursor: null, total: 1 } }))
+    const { container } = renderWith(<Approvals />, { server })
+    await waitFor(() => expect(container.querySelectorAll('[data-item="sr_9"]').length).toBeGreaterThan(0))
+    for (const card of within(table()).getAllByRole('article')) {
+      fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
+    }
+    await waitFor(() => expect(container.querySelectorAll('[data-field="paths"]').length).toBeGreaterThan(0))
+
+    // Every attribute of every element on the page: none carries any part of a proposal.
+    const SINKS = ['onfocus', 'onerror', 'img src', 'autofocus', '<script', 'evil-bidi', '/repos/"', 'owned', '\u202e', '\u2066', 'alert(']
+    const hits = []
+    for (const el of container.querySelectorAll('*')) {
+      for (const { name, value } of el.attributes) {
+        for (const s of SINKS) if (value.includes(s)) hits.push(`${el.tagName.toLowerCase()}[${name}]=${JSON.stringify(value)}`)
+      }
+    }
+    expect(hits).toEqual([])
+    for (const input of container.querySelectorAll('[data-field]')) {
+      expect(input.getAttribute('placeholder')).toBe('unchanged')
+      expect(input.value).toBe('')
+    }
+
+    // The proposals are on the page as text, cleaned, inside UntrustedText, attributed as the agent's.
+    const asked = [...container.querySelectorAll('[data-untrusted]')].map((n) => n.textContent)
+    expect(asked.some((t) => t.includes('/repos/"><img src=x onerror=alert(1)>, /a/evil-bidi'))).toBe(true)
+    expect(asked.some((t) => t.includes('{"rules":[{"field":"title","equals":"<script>alert(3)</script>"}]}'))).toBe(true)
+    expect(asked.some((t) => t.includes('"paths":["/x\\" autofocus onfocus=\\"alert(2)"]'))).toBe(true)
+    expect(asked.some((t) => t.includes('tpl"><b>owned</b>'))).toBe(true)
+    expect(asked.join('')).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/)
+    expect(screen.getAllByText(/Proposed by the agent, not verified/).length).toBeGreaterThan(0)
+    expect(container.querySelector('img, script, b')).toBeNull()
   })
 
   it('pages with the server\'s cursor and searches with q', async () => {

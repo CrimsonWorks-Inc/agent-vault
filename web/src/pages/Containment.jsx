@@ -12,7 +12,6 @@ import { useCallback, useEffect } from 'react'
 import { useApiQuery, useSlowCache } from '../hooks/useApi.js'
 import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
-import { itemsOf, pageQuery } from '../lib/paging.js'
 import { Button } from '../components/ui/Button.jsx'
 import { Notice } from '../components/ui/Notice.jsx'
 import { PageHeader } from '../components/ui/PageHeader.jsx'
@@ -20,13 +19,19 @@ import { ContainmentCard } from '../components/overview/ContainmentCard.jsx'
 import { FiredTable } from '../components/containment/FiredTable.jsx'
 import { QuarantineTable } from '../components/containment/QuarantineTable.jsx'
 import { LockedAudit } from './Audit.jsx'
+import { readFired, readTripwires } from './Overview.jsx'
 
-/** The tripwire settings and the last few that fired, as the Overview reads them. */
+/**
+ * The tripwire settings and the last few that fired, through the Overview's
+ * own readers and under the same cache keys, so the two pages share one
+ * shape: tripwires walks every cursor page (paged=1) and puts the rules back
+ * beside `enabled`, `rules_saved` and `defaults`.
+ */
 export async function loadContainment(api, slow, locked) {
   const quiet = (p) => p.catch(() => null)
   const [tripwires, fired] = await Promise.all([
-    slow.get('tripwires', () => api.get('tripwires')),
-    locked ? null : quiet(slow.get('fired', () => api.get('audit', pageQuery({ limit: 5, filters: { kind: 'tripwire.fired' } })).then(itemsOf))),
+    slow.get('tripwires', () => readTripwires(api.get)),
+    locked ? null : quiet(slow.get('fired', () => readFired(api.get))),
   ])
   return { tripwires, fired }
 }
