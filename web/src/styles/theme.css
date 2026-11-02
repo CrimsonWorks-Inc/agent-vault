@@ -1,0 +1,235 @@
+/*
+ * The only place colours, fonts, radii, shadows and spacing are defined
+ * (contract U1, web/BRAND.md). Components use the Tailwind utilities these
+ * tokens generate (bg-surface, text-muted, border-line, rounded-card...) and
+ * never a literal colour.
+ *
+ * Tailwind is told exactly what to scan. Left to detect sources itself it
+ * would read src/ui/app.html and the committed bundle in src/ui/dist, so the
+ * CSS would depend on the previous build and the drift check could never be
+ * stable.
+ */
+@import "tailwindcss" source(none);
+@source "../";
+
+/* Light and dark: the system's choice unless the human picked one (lib/theme.js
+   sets data-theme only then). Every colour utility reads these variables, so
+   no component needs a dark: variant for colour. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* Self-hosted, Latin and Latin Extended only: anything else falls back to the
+   system font rather than fetching from anywhere. OFL-1.1. */
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-ext-wght-normal.woff2") format("woff2-variations");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ---- palette: light (default) ------------------------------------------ */
+:root {
+  color-scheme: light;
+  --av-bg: #f6f5fc;          /* ioLite base, light */
+  --av-surface: #ffffff;
+  --av-sunken: #efebfa;      /* ioLite panel2, light */
+  --av-nav: #ffffff;
+  --av-ink: #0d1255;         /* ioLite ink: the navy of the logo */
+  --av-muted: #4e5378;
+  --av-line: #dddaef;
+  --av-line-strong: #8e8ab5; /* input borders: 3:1 against surface */
+  --av-accent: #3b33b0;      /* between ioLite #383598 and the mark's #3b2fb8 */
+  --av-accent-hover: #2e2794;
+  --av-on-accent: #ffffff;
+  --av-accent-soft: #eceafb;
+  --av-brand: #383598;       /* ioLite Labs, in the lockup */
+  --av-ok: #17704a;
+  --av-ok-soft: #e3f4eb;
+  --av-warn: #8a5300;
+  --av-warn-soft: #fbf0dc;
+  --av-crit: #b42318;
+  --av-crit-hover: #941c13;
+  --av-on-crit: #ffffff;
+  --av-crit-soft: #fce8e6;
+  --av-focus: #5468ff;       /* the mark's middle stop */
+  --av-scrim: rgb(13 18 85 / 0.45);
+  --av-shadow: 0 1px 2px rgb(13 18 85 / 0.06), 0 1px 1px rgb(13 18 85 / 0.04);
+  --av-shadow-raised: 0 12px 32px -8px rgb(13 18 85 / 0.22), 0 2px 6px rgb(13 18 85 / 0.08);
+}
+
+/* ---- palette: dark ------------------------------------------------------ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --av-bg: #070713;        /* ioLite base, dark */
+    --av-surface: #0c0c20;   /* ioLite panel */
+    --av-sunken: #0f1030;    /* ioLite panel2 */
+    --av-nav: #080814;       /* ioLite nav */
+    --av-ink: #e6e8f5;
+    --av-muted: #a3a8cc;
+    --av-line: #23244d;
+    --av-line-strong: #5a5d9a;
+    --av-accent: #8f9bff;    /* the agent-vault page's periwinkle */
+    --av-accent-hover: #a9b2ff;
+    --av-on-accent: #0d1255;
+    --av-accent-soft: #1a1b52;
+    --av-brand: #c2a5f3;     /* ioLite lilac */
+    --av-ok: #7be3a6;
+    --av-ok-soft: #0f2a20;
+    --av-warn: #f2c46b;
+    --av-warn-soft: #2b220c;
+    --av-crit: #ff8a7a;
+    --av-crit-hover: #ffa597;
+    --av-on-crit: #2a0a08;
+    --av-crit-soft: #2e1216;
+    --av-focus: #c2a5f3;
+    --av-scrim: rgb(0 0 0 / 0.6);
+    --av-shadow: 0 1px 2px rgb(0 0 0 / 0.5);
+    --av-shadow-raised: 0 16px 40px -8px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(143 155 255 / 0.08);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --av-bg: #070713;
+  --av-surface: #0c0c20;
+  --av-sunken: #0f1030;
+  --av-nav: #080814;
+  --av-ink: #e6e8f5;
+  --av-muted: #a3a8cc;
+  --av-line: #23244d;
+  --av-line-strong: #5a5d9a;
+  --av-accent: #8f9bff;
+  --av-accent-hover: #a9b2ff;
+  --av-on-accent: #0d1255;
+  --av-accent-soft: #1a1b52;
+  --av-brand: #c2a5f3;
+  --av-ok: #7be3a6;
+  --av-ok-soft: #0f2a20;
+  --av-warn: #f2c46b;
+  --av-warn-soft: #2b220c;
+  --av-crit: #ff8a7a;
+  --av-crit-hover: #ffa597;
+  --av-on-crit: #2a0a08;
+  --av-crit-soft: #2e1216;
+  --av-focus: #c2a5f3;
+  --av-scrim: rgb(0 0 0 / 0.6);
+  --av-shadow: 0 1px 2px rgb(0 0 0 / 0.5);
+  --av-shadow-raised: 0 16px 40px -8px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(143 155 255 / 0.08);
+}
+
+/* ---- tokens Tailwind turns into utilities -------------------------------- */
+@theme {
+  /* Only these colours exist: the defaults are cleared so a stray bg-blue-500
+     cannot sneak a colour past the theme. */
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-bg: var(--av-bg);
+  --color-surface: var(--av-surface);
+  --color-sunken: var(--av-sunken);
+  --color-nav: var(--av-nav);
+  --color-ink: var(--av-ink);
+  --color-muted: var(--av-muted);
+  --color-line: var(--av-line);
+  --color-line-strong: var(--av-line-strong);
+  --color-accent: var(--av-accent);
+  --color-accent-hover: var(--av-accent-hover);
+  --color-on-accent: var(--av-on-accent);
+  --color-accent-soft: var(--av-accent-soft);
+  --color-brand: var(--av-brand);
+  --color-ok: var(--av-ok);
+  --color-ok-soft: var(--av-ok-soft);
+  --color-warn: var(--av-warn);
+  --color-warn-soft: var(--av-warn-soft);
+  --color-crit: var(--av-crit);
+  --color-crit-hover: var(--av-crit-hover);
+  --color-on-crit: var(--av-on-crit);
+  --color-crit-soft: var(--av-crit-soft);
+  --color-focus: var(--av-focus);
+  --color-scrim: var(--av-scrim);
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Type scale: 13px body for a dense tool, 11px mono eyebrows (ioLite's
+     uppercase, widely tracked labels). */
+  --text-eyebrow: 0.6875rem;
+  --text-eyebrow--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-stat: 1.75rem;
+  --text-stat--line-height: 2.125rem;
+
+  /* Spacing: Tailwind's 4px grid. */
+  --spacing: 0.25rem;
+
+  --radius-control: 0.5rem;
+  --radius-card: 0.875rem;
+  --radius-pill: 999px;
+
+  --shadow-card: var(--av-shadow);
+  --shadow-raised: var(--av-shadow-raised);
+
+  --animate-shimmer: av-shimmer 1.4s ease-in-out infinite;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+}
+
+@keyframes av-shimmer {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@layer base {
+  html {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 100%;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "cv11", "ss01";
+  }
+  body { min-height: 100dvh; font-size: var(--text-base); line-height: var(--text-base--line-height); }
+  code, kbd, samp, pre { font-family: var(--font-mono); }
+  ::selection { background: var(--color-accent-soft); color: var(--color-ink); }
+  :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+}
