@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 Three things users asked for, twenty features, and the security work they
 needed. As in 0.1.0, the findings come with what was actually wrong. Each one was
@@ -23,6 +23,27 @@ reproduced first and has a test that fails without its fix.
   expiry. It lasts until revoked, narrowed to a finite lifetime, or ended by
   panic. It needs a fresh passphrase or fingerprint, cannot be remote, and its
   token is refused on every non-loopback listener.
+
+### The web UI, rebuilt
+
+- **A React page in the ioLite Labs look**, light and dark, with a page each for
+  Overview, Credentials, Sessions, Approvals, Audit, Templates, Containment,
+  Notifications, Settings and Docs. Everything the old page did is still there,
+  signed the same way.
+- **Every list pages and searches**: credentials, sessions, approvals,
+  templates, tripwire rules, the access review, a session's grants, and the
+  whole audit log (the daemon now pages it, filtered by kind before the limit).
+  `paged=1` opts a UI route into `{items, next_cursor, prev_cursor, total}`;
+  without it every route answers as before. Cursors are sealed, and a search
+  runs only over what the page is already shown. What reads a whole list (the
+  overview's counts, the pickers, the waiting badge) follows every page to the
+  end, with no cap, and says so if a list never ends rather than count part of it.
+- **A prebuilt bundle, still zero runtime dependencies.** The page is built from
+  `web/` into `src/ui/dist` and shipped prebuilt; React, Vite and Tailwind are
+  devDependencies. The UI server serves it from memory under a strict policy
+  with no inline script or style, and refuses to start without it.
+- **Contributors:** `npm ci`, edit `web/`, then `npm run build:ui` and commit
+  `src/ui/dist` with the change. `npm test` fails if the two disagree.
 
 ### New
 
@@ -112,8 +133,9 @@ Waves of independent review, each asked for reproductions, found these:
 
 ### Testing
 
-1512 tests. `npm run test:mutation` now breaks 569 protections in turn and
-expects the suite to fail each time. The new end-to-end tests drive the real
+1836 tests (1634 under `node --test`, 202 page tests under vitest).
+`npm run test:mutation` now breaks 623 protections in turn and expects the
+suite to fail each time. The new end-to-end tests drive the real
 CLI, control API, MCP and gateway against a throwaway daemon and a local
 upstream.
 

@@ -5,8 +5,8 @@
 // request and compares; for the routes in DAEMON_VERIFIED the daemon rebuilds
 // it again from what reaches it and verifies the same signature. Three
 // builders, one operation. The wave-3 branches each tested their side against
-// a stand-in, so here every gated UI route runs end to end: the served page's
-// own operationFor, the real UI server, the real daemon.
+// a stand-in, so here every gated UI route runs end to end: the page's own
+// operationFor (web/src/lib/presence.js), the real UI server, the real daemon.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,9 +14,9 @@ import http from 'node:http'
 import { operationFor, canonicalOperation, DIGESTED } from '../../src/ui/webauthn.js'
 import { UiServer } from '../../src/ui/server.js'
 import { signed, PASSPHRASE } from './fix-control-helpers.js'
-import { servedPageSigning, startSigned } from './integrate3-helpers.js'
+import { pageSigning, startSigned } from './integrate3-helpers.js'
 
-const page = servedPageSigning()
+const page = pageSigning()
 
 /**
  * A control call with an explicit length. The shared helper lets Node chunk
@@ -75,7 +75,7 @@ async function upstream() {
 
 /**
  * One gated change through the UI, as the page makes it: build the operation
- * with the served page's builder over what is sent (the body, or the query of
+ * with the page's own builder over what is sent (the body, or the query of
  * a DELETE), sign it through the UI, send it.
  */
 async function change(t, { method, path, op, bind, body = {} }) {

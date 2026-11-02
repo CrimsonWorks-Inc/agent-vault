@@ -35,9 +35,10 @@ import { rememberSession } from '../client-state.js'
 import { fetchPending, parseOverrides, collectApproved } from '../pending.js'
 import { overridesOf } from '../daemon/session-requests.js'
 import { findAll as findPlaceholders } from '../core/placeholder.js'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, lstatSync, statSync, openSync, fstatSync, closeSync, realpathSync, constants as fsConstants } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, extname, sep } from 'node:path'
+import { Cursors, PagingError, pagingOf, pageAnswer, matches, LISTS, AUDIT_FIELDS } from './list-paging.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const IDLE_EXIT_MS = 30 * 60_000
@@ -47,7 +48,7 @@ export class UiServer {
    * @param {string} socketPath the daemon's control socket
    * @param {{port?: number, idleMs?: number}} opts
    */
-  constructor(socketPath, { port = 0, idleMs = IDLE_EXIT_MS, cli = 'agent-vault', statePath = null } = {}) {
+  constructor(socketPath, { port = 0, idleMs = IDLE_EXIT_MS, cli = 'agent-vault', statePath = null, distDir = DIST_DIR } = {}) {
     // Told, not derived. Deriving it from the environment means writing state
     // for whichever vault the environment names rather than the one this
     // server is actually serving, which is how a UI pointed at a scratch vault
@@ -64,7 +65,15 @@ export class UiServer {
     this.sessionCookie = null // set when the launch token is claimed
     this.claimedAt = null
     this.lastSeen = Date.now()
-    this.html = servedPage()
+    // The built page (UI contract U2): index.html and an allowlist of assets,
+    // read once here and served from memory, so no request ever names a file
+    // on disk.
+    // There is no other page: a missing bundle stops the server here, with
+    // the command that builds it, rather than serving something else.
+    this.dist = loadDist(distDir)
+    if (!this.dist) throw new Error(`the built UI is missing (no index.html in ${distDir}); run npm run build:ui`)
+    // Cursors for paged lists (U3) are sealed with a key that lives only here.
+    this.cursors = new Cursors()
     // Outstanding presence challenges, each bound to one operation and good
     // for one use within a minute.
     this.challenges = new Map()
@@ -115,7 +124,10 @@ export class UiServer {
     // Not marked as activity here. Counting every request kept the server up
     // on the strength of the page's own refused polls once its cookie had
     // expired; only a caller holding the session counts (see #touch).
-    const url = new URL(req.url, this.origin)
+    // A target the parser refuses (`//`, `//host:x`) is answered, not thrown:
+    // a throw here is a rejection nothing catches, which ends the process.
+    let url
+    try { url = new URL(req.url, this.origin) } catch { return this.#send(res, 404, { error: 'not found' }) }
 
     // Arriving by IP would put the page on an origin whose domain cannot be a
     // relying party id, so the authenticator would refuse to enrol. Redirect to
@@ -135,9 +147,41 @@ export class UiServer {
     const origin = req.headers.origin
     if (origin && origin !== this.origin) return this.#send(res, 403, { error: 'cross-origin request refused' })
 
+    // The path is routed only as it arrived. A dot segment, an encoded
+    // separator or a backslash would let the parser turn it into a different
+    // path (/assets/../ into /), so any of them is a 404 before routing.
+    if (!literalPath(String(req.url), url.pathname)) return this.#send(res, 404, { error: 'not found' })
     if (url.pathname === '/') return this.#servePage(req, res, url)
     if (url.pathname.startsWith('/api/')) return this.#serveApi(req, res, url)
+    if (url.pathname.startsWith('/assets/')) return this.#serveAsset(req, res, url)
     return this.#send(res, 404, { error: 'not found' })
+  }
+
+  /**
+   * One file of the built page. Only a name that was in dist/assets when this
+   * server started, held in memory since then, and only for the holder of the
+   * session, as the page itself is. The name is the path as it arrived:
+   * literalPath has already refused one the parser would have changed.
+   */
+  #serveAsset(req, res, url) {
+    const cookie = this.#cookieFrom(req)
+    if (!this.sessionCookie || !cookie || !safeEqual(cookie, this.sessionCookie)) {
+      return this.#send(res, 401, { error: 'not authenticated' })
+    }
+    const name = url.pathname.slice('/assets/'.length)
+    const asset = req.method === 'GET' && ASSET_NAME.test(name) ? this.dist.assets.get(name) : undefined
+    if (!asset) return this.#send(res, 404, { error: 'not found' })
+    this.#touch(res)
+    res.writeHead(200, {
+      'content-type': asset.type,
+      'content-length': asset.body.length,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'cross-origin-resource-policy': 'same-origin',
+      'content-security-policy': STRICT_CSP,
+    })
+    res.end(asset.body)
   }
 
   /**
@@ -150,7 +194,7 @@ export class UiServer {
 
     if (cookie && this.sessionCookie && safeEqual(cookie, this.sessionCookie)) {
       this.#touch(res)
-      return this.#sendHtml(res, this.html)
+      return this.#sendHtml(res, this.dist.index)
     }
 
     if (offered && !this.sessionCookie && safeEqual(offered, this.launchToken)) {
@@ -467,16 +511,21 @@ export class UiServer {
 
       switch (key) {
         case 'GET status': return send(200, await this.#control('GET', '/v1/status'))
-        case 'GET credentials': return send(200, await this.#control('GET', '/v1/credentials'))
-        case 'GET sessions': return send(200, await this.#control('GET', '/v1/sessions'))
+        // The list routes answer as they always have, or with one page of the
+        // list when the caller sends paged=1 (U3; see #listed).
+        case 'GET credentials':
+          return send(200, await this.#listed(url, LISTS.credentials, () => this.#control('GET', '/v1/credentials')))
+        case 'GET sessions':
+          return send(200, await this.#listed(url, LISTS.sessions, () => this.#control('GET', '/v1/sessions')))
         // Everything waiting for a human, normalised by src/pending.js — the
         // same module the CLI renders from. The page paints whatever this
         // returns and decides nothing, so a new kind of decision appears in
         // both interfaces at once instead of in whichever one someone
         // remembered.
         case 'GET pending':
-          return send(200, await fetchPending((path) => this.#control('GET', path)))
-        case 'GET listeners': return send(200, await this.#control('GET', '/v1/listeners'))
+          return send(200, await this.#listed(url, LISTS.pending, () => fetchPending((path) => this.#control('GET', path))))
+        case 'GET listeners':
+          return send(200, await this.#listed(url, LISTS.listeners, () => this.#control('GET', '/v1/listeners')))
         case 'GET audit': {
           // `kind` narrows the rows to one record kind (the tripwires card
           // reads tripwire.fired). Filtered here too, so a daemon that ignores
@@ -485,22 +534,47 @@ export class UiServer {
           if (kind !== null && !/^[a-z_]+(\.[a-z_]+)*$/.test(kind)) {
             throw Object.assign(new Error('kind is a record kind, like tripwire.fired'), { status: 400 })
           }
+          const paging = pagingOf(url.searchParams)
+          if (paging) return send(200, await this.#auditPage(kind, paging))
           const limit = Number(url.searchParams.get('limit') || 40)
-          const path = kind === null ? `/v1/audit?limit=${limit}` : `/v1/audit?limit=${Math.max(limit, 500)}&kind=${encodeURIComponent(kind)}`
+          // The daemon filters kind before its limit, so its most (500) of that kind
+          // is enough for any page, and a limit it would refuse is never sent.
+          const path = kind === null ? `/v1/audit?limit=${limit}` : `/v1/audit?limit=${AUDIT_BATCH}&kind=${encodeURIComponent(kind)}`
           const rows = await this.#control('GET', path)
           return send(200, kind === null ? rows : (Array.isArray(rows) ? rows.filter((r) => r?.kind === kind).slice(-limit) : []))
         }
         case 'GET audit/checkpoint': return send(200, await this.#control('GET', '/v1/audit/checkpoint'))
 
         // Reads (F19, F16, F17, F14). Open in the daemon as well.
-        case 'GET sessions/detail':
-          return send(200, await this.#control('GET', `/v1/sessions/detail?sid=${encodeURIComponent(url.searchParams.get('sid') ?? '')}`))
-        case 'GET report/access':
-          return send(200, await this.#control('GET', `/v1/report/access?since=${encodeURIComponent(url.searchParams.get('since') || '7d')}`))
-        case 'GET tripwires': return send(200, await this.#control('GET', '/v1/tripwires'))
+        case 'GET sessions/detail': {
+          const sid = url.searchParams.get('sid') ?? ''
+          // Paged, it is a page of the session's grants, with the session and
+          // its activity summary beside it.
+          return send(200, await this.#listed(url, LISTS.detailGrants,
+            () => this.#control('GET', `/v1/sessions/detail?sid=${encodeURIComponent(sid)}`),
+            { within: 'grants', filters: { sid } }))
+        }
+        case 'GET report/access': {
+          const since = url.searchParams.get('since') || '7d'
+          // Paged, it is a page of one of the report's two lists, `list=sessions`
+          // (the default) or `list=credentials`, with the report's header beside it.
+          const which = url.searchParams.get('list') ?? 'sessions'
+          if (which !== 'sessions' && which !== 'credentials') {
+            throw Object.assign(new Error('list is sessions or credentials'), { status: 400 })
+          }
+          return send(200, await this.#listed(url, which === 'sessions' ? LISTS.reportSessions : LISTS.reportCredentials,
+            () => this.#control('GET', `/v1/report/access?since=${encodeURIComponent(since)}`),
+            { within: which, drop: ['sessions', 'credentials'], filters: { since } }))
+        }
+        case 'GET tripwires':
+          // Paged, it is a page of the rules in force, in their saved order,
+          // with the switch and the defaults beside it.
+          return send(200, await this.#listed(url, LISTS.tripwireRules, () => this.#control('GET', '/v1/tripwires'), { within: 'rules' }))
         case 'GET templates': {
           const name = url.searchParams.get('name')
-          return send(200, await this.#control('GET', name === null ? '/v1/templates' : `/v1/templates?name=${encodeURIComponent(name)}`))
+          // One template by name is one template, never a page.
+          if (name !== null) return send(200, await this.#control('GET', `/v1/templates?name=${encodeURIComponent(name)}`))
+          return send(200, await this.#listed(url, LISTS.templates, () => this.#control('GET', '/v1/templates')))
         }
         case 'GET notify': return send(200, await this.#control('GET', '/v1/notify'))
 
@@ -676,7 +750,106 @@ export class UiServer {
     } catch (e) {
       // A VaultError (a reserved operation field, say) carries its status as
       // `http`; reading only `status` made a refusal look like a crash.
-      return send(e.status || e.http || 500, { error: e.message, detail: e.problem ?? e.toProblem?.() })
+      // `code` at the top as well, so a client reads one place for it.
+      const code = typeof e.code === 'string' && e.code.startsWith('AV_') ? e.code : (e.problem?.code ?? null)
+      return send(e.status || e.http || 500, { error: e.message, code, detail: e.problem ?? e.toProblem?.() })
+    }
+  }
+
+  /**
+   * A list route's answer: exactly what it always was, or, with paged=1, one
+   * page of it (U3). The answer goes through towardPage BEFORE the search and
+   * the paging, so `q` only ever sees what the page would be shown anyway.
+   * `within` names the list inside an object answer; the rest of that object
+   * rides beside the page, minus `drop`.
+   */
+  async #listed(url, spec, load, { within = null, drop = [], filters = {} } = {}) {
+    const paging = pagingOf(url.searchParams)
+    const answer = await load()
+    if (!paging) return answer
+    const shown = towardPage(answer)
+    return pageAnswer(shown, spec, paging, { within, drop, filters }, this.cursors)
+  }
+
+  /**
+   * One page of the audit log, newest first, walked through the daemon's own
+   * paging (`before` / `after`) so the whole log is reachable, with `kind`
+   * filtered in the daemon before its limit. Rows go through towardPage before
+   * `q` sees them. `total` is null: counting would mean reading the whole log.
+   */
+  async #auditPage(kind, paging) {
+    const filters = { kind, q: paging.q }
+    const cursor = paging.cursor === null ? null : this.cursors.open(paging.cursor, 'audit', filters)
+    if (cursor && !Number.isSafeInteger(cursor.key[0])) throw new PagingError('AV_BAD_CURSOR', 'that cursor is not one this server made; start the list again from the first page')
+    const seal = (dir, seq) => this.cursors.seal('audit', filters, dir, [seq])
+    const want = paging.limit + 1
+    const batch = paging.q ? AUDIT_BATCH : want
+    const ofKind = kind === null ? '' : `&kind=${encodeURIComponent(kind)}`
+    const fetchRows = async (where) => {
+      const rows = await this.#control('GET', `/v1/audit?limit=${batch}${ofKind}${where}`)
+      return Array.isArray(rows) ? rows : []
+    }
+    const shownIfMatch = (row) => {
+      const shown = towardPage(row)
+      return matches(shown, AUDIT_FIELDS, paging.q) ? shown : null
+    }
+
+    if (cursor?.dir === 'prev') {
+      // Newer than the cursor, closest first, until a page and one more.
+      const found = []
+      let at = cursor.key[0]
+      for (;;) {
+        const rows = await fetchRows(`&after=${at}`)
+        for (const r of rows) {
+          if (!Number.isSafeInteger(r?.seq) || r.seq <= at) continue
+          const shown = shownIfMatch(r)
+          if (shown) found.push(shown)
+          if (found.length >= want) break
+        }
+        const last = rows.at(-1)?.seq
+        if (found.length >= want || rows.length < batch || !Number.isSafeInteger(last) || last <= at) break
+        at = last
+      }
+      // The page is the rows just newer than the cursor and nothing else, even
+      // when there are fewer than a page of them. Starting again from the
+      // current newest would repeat rows the reader has already seen once the
+      // log has grown since the first page. Fewer than a page and one more
+      // means there is nothing newer, so there is no Prev.
+      const items = found.slice(0, paging.limit).reverse()
+      const more = found.length > paging.limit
+      // Next from here is the rows older than the oldest shown; with nothing
+      // shown, the rows from the cursor's own row down.
+      const oldest = items.length ? items.at(-1).seq : cursor.key[0] + 1
+      return {
+        items,
+        next_cursor: Number.isSafeInteger(oldest) ? seal('next', oldest) : null,
+        prev_cursor: more ? seal('prev', items[0].seq) : null,
+        total: null,
+      }
+    }
+
+    // Older than the cursor (or from the newest), closest first.
+    const found = []
+    let at = cursor ? cursor.key[0] : null
+    for (;;) {
+      const rows = await fetchRows(at === null ? '' : `&before=${at}`)
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const r = rows[i]
+        if (!Number.isSafeInteger(r?.seq) || (at !== null && r.seq >= at)) continue
+        const shown = shownIfMatch(r)
+        if (shown) found.push(shown)
+        if (found.length >= want) break
+      }
+      const first = rows[0]?.seq
+      if (found.length >= want || rows.length < batch || !Number.isSafeInteger(first) || (at !== null && first >= at)) break
+      at = first
+    }
+    const items = found.slice(0, paging.limit)
+    return {
+      items,
+      next_cursor: found.length > paging.limit ? seal('next', items.at(-1).seq) : null,
+      prev_cursor: cursor && items.length ? seal('prev', items[0].seq) : null,
+      total: null,
     }
   }
 
@@ -857,9 +1030,7 @@ export class UiServer {
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      // Everything is inline and same-origin; nothing may be loaded or sent
-      // anywhere else, so a scripted page cannot beacon what it reads.
-      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+      'content-security-policy': STRICT_CSP,
     })
     res.end(html)
   }
@@ -867,26 +1038,114 @@ export class UiServer {
 
 const canonical = webauthn.canonicalOperation
 
-/** Where app.html takes the one parser of typed narrowing (contract C21). */
-export const PARSER_MARKER = '/* parseOverrides: injected by src/ui/server.js from src/pending.js */'
+const DIST_DIR = join(HERE, 'dist')
+
+// How many rows each step of an audit search reads from the daemon (its most).
+const AUDIT_BATCH = 500
 
 /**
- * The page as served: app.html with parseOverrides put in at the marker, so
- * the page reads a narrowing with the same function this server rebinds the
- * signed operation with. A page without the marker is a build error, not a
- * page that cannot approve anything.
+ * The page's policy (U2). Script, style, fonts and requests come from this
+ * origin and nowhere else, and nothing is inline: no 'unsafe-inline' and no
+ * 'unsafe-eval', so text that reached the DOM as markup still cannot run, and
+ * a scripted page cannot beacon what it reads anywhere but here.
  */
-export function servedPage(parser = parseOverrides) {
-  const html = readFileSync(join(HERE, 'app.html'), 'utf8')
-  if (html.split(PARSER_MARKER).length !== 2) throw new Error('app.html must carry the parseOverrides marker exactly once')
-  // The source goes into an inline <script> as it is. Text that would end the
-  // script, open an HTML comment, or put the marker back would change what
-  // the page runs, so it stops the server from starting instead.
-  const source = parser.toString()
-  if (/<\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {
-    throw new Error('parseOverrides cannot be put in the page: its source holds </script, <!-- or the marker')
+export const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+
+
+// What may be served from dist/assets: a plain name with no leading dot and
+// no empty segment (so no '..'), of a type the build produces. Anything else
+// in the directory is not served, whatever it is.
+const ASSET_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+$/
+const ASSET_TYPES = new Map([
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.css', 'text/css; charset=utf-8'],
+  ['.woff2', 'font/woff2'],
+  ['.woff', 'font/woff'],
+  ['.svg', 'image/svg+xml'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+  ['.ico', 'image/x-icon'],
+])
+const ASSET_BYTES_MAX = 32 * 1024 * 1024
+
+/**
+ * Whether a request path can be routed as it arrived (U2): the same path the
+ * URL parser made of it, with no dot segment, no empty segment, no backslash
+ * and no encoded dot, slash or backslash. Anything else would be routed as a
+ * path other than the one that was asked for.
+ */
+export function literalPath(rawUrl, pathname) {
+  const raw = rawUrl.split('?')[0]
+  if (raw !== pathname || !raw.startsWith('/')) return false
+  if (raw.includes('\\') || /%(2e|2f|5c)/i.test(raw)) return false
+  return !raw.slice(1).split('/').some((part, i, all) => part === '.' || part === '..' || (part === '' && i < all.length - 1))
+}
+
+/**
+ * The built page, read once: index.html and every regular file directly in
+ * dist/assets whose name and type are allowed. Null when there is no
+ * dist/index.html; the server then refuses to start (U2).
+ *
+ * Nothing outside dist is read. The dist directory, its assets directory and
+ * index.html must not be symlinks, a symlinked asset is skipped, and each file
+ * is opened without following a link and read only if its canonical path is
+ * inside dist's and is the file that was opened.
+ */
+export function loadDist(distDir) {
+  const kindOf = (path) => {
+    try { return lstatSync(path) } catch (e) { if (e.code === 'ENOENT') return null; throw e }
   }
-  return html.replace(PARSER_MARKER, () => source)
+  const refuse = (what) => new Error(`the built UI in ${distDir} is not usable: ${what}; rebuild it with npm run build:ui`)
+  const top = kindOf(distDir)
+  if (top === null) return null
+  if (top.isSymbolicLink()) throw refuse('the dist directory is a symlink')
+  if (!top.isDirectory()) throw refuse('dist is not a directory')
+  const root = realpathSync(distDir)
+  const indexPath = join(distDir, 'index.html')
+  const indexKind = kindOf(indexPath)
+  if (indexKind === null) return null
+  if (indexKind.isSymbolicLink()) throw refuse('index.html is a symlink')
+  if (!indexKind.isFile()) throw refuse('index.html is not a regular file')
+  const index = readInside(root, indexPath, refuse)
+  const assetsDir = join(distDir, 'assets')
+  const assetsKind = kindOf(assetsDir)
+  if (assetsKind?.isSymbolicLink()) throw refuse('the assets directory is a symlink')
+  if (assetsKind && !assetsKind.isDirectory()) throw refuse('assets is not a directory')
+  const entries = assetsKind ? readdirSync(assetsDir, { withFileTypes: true }) : []
+  const assets = new Map()
+  let total = index.length
+  for (const entry of entries) {
+    if (!entry.isFile() || !ASSET_NAME.test(entry.name)) continue
+    const type = ASSET_TYPES.get(extname(entry.name).toLowerCase())
+    if (!type) continue
+    const body = readInside(root, join(assetsDir, entry.name), refuse)
+    total += body.length
+    if (total > ASSET_BYTES_MAX) throw new Error(`the built UI in ${distDir} is over ${ASSET_BYTES_MAX} bytes; rebuild it with npm run build:ui`)
+    assets.set(entry.name, { body, type })
+  }
+  return { index, assets }
+}
+
+/** One regular file under root, opened without following a link at its end, and checked to be inside root. */
+function readInside(root, path, refuse) {
+  let fd
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+  } catch (e) {
+    if (e.code === 'ELOOP') throw refuse(`${path} is a symlink`)
+    throw e
+  }
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile()) throw refuse(`${path} is not a regular file`)
+    const real = realpathSync(path)
+    if (!real.startsWith(root + sep)) throw refuse(`${path} is outside dist`)
+    const named = statSync(real)
+    if (named.dev !== opened.dev || named.ino !== opened.ino) throw refuse(`${path} changed while it was read`)
+    return readFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /** The request minus its proof, for a daemon route that does not check one. */
@@ -1005,19 +1264,10 @@ function readBody(req) {
   })
 }
 
+// Served under the strict policy like everything else, so it carries no
+// inline style: plain markup that reads well in the browser's own light or
+// dark rendering.
 function errorPage(title, detail) {
-  return `<!doctype html><meta charset="utf-8"><title>agent-vault</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-         display: grid; place-items: center; min-height: 100vh; margin: 0; padding: 24px;
-         background: Canvas; color: CanvasText; }
-  .card { max-width: 30rem; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-          border-radius: 12px; padding: 24px 28px; }
-  h1 { font-size: 1.15rem; margin: 0 0 8px; }
-  p { margin: 0; color: color-mix(in srgb, CanvasText 72%, transparent); }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em;
-         background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: 4px; }
-</style>
-<div class="card"><h1>${title}</h1><p>${detail}</p></div>`
+  return `<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>agent-vault</title>
+<main><h1>${title}</h1><p>${detail}</p></main>`
 }

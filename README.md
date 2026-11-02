@@ -474,7 +474,9 @@ On a single-user dev install it is mode 0600. On a system install the daemon run
 agent-vault ui        # prints a single-use link and opens it
 ```
 
-Its views cover Overview, Credentials, Sessions, Approvals and Audit, plus the Docs page that `agent-vault docs` opens directly.
+Its pages are Overview, Credentials, Sessions, Approvals, Audit, Templates, Containment (panic, tripwires, quarantine), Notifications and Settings (Touch ID, the lock), plus the Docs page that `agent-vault docs` opens directly. Every list pages through the whole set and has a search box, so 300 sessions or the full audit log are a few clicks away rather than cut off at the newest few.
+
+The page is a React app in the ioLite Labs look, light and dark, built from `web/` into `src/ui/dist` and committed. The npm package ships that prebuilt bundle and still has no runtime dependencies; React, Vite and Tailwind are development tools only. The UI server serves the bundle from memory under a strict content security policy (no inline script or style, nothing from another origin), and a search matches only what the page is already allowed to see.
 
 The link uses `localhost`, not `127.0.0.1`, and arriving by IP redirects. That is
 not cosmetic: WebAuthn requires the relying party to be a registrable domain, and
@@ -555,7 +557,8 @@ src/core/         placeholder grammar, detector, substitution, scrubber, policy,
 src/store/        encrypted vault, key hierarchy, hash-chained audit log
 src/daemon/       request pipeline, HTTP gateway, control API, MCP (stdio + Streamable HTTP)
 src/connectors/   built-in profiles (github, slack, anthropic, openai, google-genai, http, postgres)
-src/ui/           the web UI server, its page, and WebAuthn verification
+src/ui/           the web UI server, WebAuthn verification, and the prebuilt page (src/ui/dist)
+web/              the page's React source (not in the npm package): npm run build:ui writes src/ui/dist
 src/cli/          the command-line app
 bin/              the CLI, the service entry point, and the privileged installer
 test/core/        unit and property tests for the pure core
@@ -564,6 +567,8 @@ demo/             an end-to-end run against a real upstream
 ```
 
 `src/core` has no I/O and no platform code. It is the part worth reading first and the part worth fuzzing.
+
+Changing the page: edit `web/`, run `npm ci` once, then `npm run build:ui` and commit `src/ui/dist` with the source. `npm test` fails when the committed bundle is not exactly what the source builds. `web/README.md` covers running it against a throwaway vault.
 
 ## Threat model
 

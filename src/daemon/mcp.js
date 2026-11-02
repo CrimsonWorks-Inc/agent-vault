@@ -9,6 +9,7 @@
 // changes a policy.
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { getProfile } from '../connectors/profiles.js'
 import * as sitesMod from '../core/sites.js'
 import * as policyMod from '../core/policy.js'
@@ -19,7 +20,18 @@ import { SessionRequests, OWNER_FIELDS, templateCreds, templateSummary, grantSpe
 export const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26']
 export const LATEST_PROTOCOL = PROTOCOL_VERSIONS[0]
 
-const SERVER_INFO = { name: 'agent-vault', version: '0.1.0' }
+// The same version the daemon reports, read from package.json rather than
+// written here, so an MCP client is never told a version the code is not.
+const SERVER_INFO = {
+  name: 'agent-vault',
+  version: (() => {
+    try {
+      return JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+    } catch {
+      return '0.0.0-unknown'
+    }
+  })(),
+}
 
 // Transport sessions held at once. Each is a few bytes; the bound is what
 // matters, not the number.

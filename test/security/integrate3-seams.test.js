@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import https from 'node:https'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Vault } from '../../src/store/vault.js'
@@ -21,10 +21,22 @@ import { tlsPaths } from '../../src/daemon/tls.js'
 import { fetchPending } from '../../src/pending.js'
 import { startUi } from './fix-control-helpers.js'
 import { startApi, SECRET } from './control-api-helpers.js'
-import { servedSource, servedConst } from './integrate3-helpers.js'
 
 const README = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
-const PAGE = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
+
+/**
+ * The page's own text: every source file of the React UI (tests and fixtures
+ * left out), which is what the bundle is built from. The docs sections are
+ * where the tools are counted and named.
+ */
+function docsSource() {
+  const root = new URL('../../web/src/', import.meta.url)
+  const files = readdirSync(root, { recursive: true })
+    .filter((f) => /\.jsx?$/.test(f) && !/\.test\.|fixtures|\/test\//.test(f) && !f.startsWith('test/'))
+  return files.map((f) => readFileSync(new URL(f, root), 'utf8')).join('\n')
+}
+const PAGE_TEXT = docsSource()
+const DOCS = readFileSync(new URL('../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
 const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
 
 test('the README and the docs page say how many MCP tools there are, and it is how many mcp.js has', () => {
@@ -34,10 +46,14 @@ test('the README and the docs page say how many MCP tools there are, and it is h
   // Every sentence that counts the tools, in either document.
   const counts = (text) => [...text.matchAll(/\b(\w+) (?:MCP )?tools\b/gi)].map((m) => m[1].toLowerCase()).filter((w) => WORDS.includes(w))
   assert.deepEqual(counts(README), [word], 'the README counts the tools differently')
-  assert.deepEqual(counts(PAGE), [word], 'the docs page counts the tools differently')
+  assert.deepEqual(counts(PAGE_TEXT), [word], 'the docs page counts the tools differently')
+  // The docs list the tools in MCP_TOOLS, one [name, what it does] row each,
+  // rendered as <C>{name}</C>; the list is exactly the server's tools.
+  const listed = [...DOCS.slice(DOCS.indexOf('const MCP_TOOLS = ['), DOCS.indexOf('\n]\n', DOCS.indexOf('const MCP_TOOLS = ['))).matchAll(/^\s*\['(vault_\w+)',/gm)].map((m) => m[1])
+  assert.deepEqual([...listed].sort(), [...tools].sort(), 'the docs page lists different tools from mcp.js')
+  assert.match(DOCS, /MCP_TOOLS\.map\(\(\[name, what\]\) => \(\s*<li key=\{name\}>\s*<C>\{name\}<\/C>/, 'each tool is named as code')
   for (const name of tools) {
     assert.ok(README.includes(`\`${name}\``), `the README does not name ${name}`)
-    assert.ok(PAGE.includes(`<code>${name}</code>`), `the docs page does not name ${name}`)
   }
 })
 
@@ -83,12 +99,13 @@ test('F13: a held request carries its preview from the gateway through pending.j
     const viaUi = (await (await u.api('GET', 'pending')).json()).find((i) => i.kind === 'request')
     assert.deepEqual(viaUi.preview.body.text, item.preview.body.text)
 
-    // The served page's own renderer, with its own esc.
-    const render = new Function(`${servedConst('esc')}\n${servedConst('UNTRUSTED')}\n${servedSource('function previewBlock(')}\nreturn previewBlock`)()
-    const html = render(viaUi.preview, viaUi.id)
-    assert.ok(!/<img|<script/i.test(html), 'the page renders the agent\'s markup as markup')
-    assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/)
-    assert.match(html, /What it sends/)
+    // What reaches the page carries the agent's markup as data, whole: the
+    // page is what must keep it text. That render (RequestPreview through
+    // UntrustedText: no img or script element, the text shown, labelled as the
+    // agent's) is web/src/pages/Docs.ported.test.jsx "F13: a held request's
+    // preview is painted as text".
+    assert.equal(typeof viaUi.preview.body.text, 'string')
+    assert.ok(viaUi.preview.body.text.includes(hostile), 'the page is not given the body the agent sent')
   } finally { await u.stop(); await a.stop() }
 })
 

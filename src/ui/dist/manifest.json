@@ -1,0 +1,39 @@
+{
+  "../node_modules/@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2": {
+    "file": "assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2",
+    "src": "../node_modules/@fontsource-variable/inter/files/inter-latin-ext-wght-normal.woff2"
+  },
+  "../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2": {
+    "file": "assets/inter-latin-wght-normal-Dx4kXJAl.woff2",
+    "src": "../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"
+  },
+  "../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-ext-wght-normal.woff2": {
+    "file": "assets/jetbrains-mono-latin-ext-wght-normal-DBQx-q_a.woff2",
+    "src": "../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-ext-wght-normal.woff2"
+  },
+  "../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2": {
+    "file": "assets/jetbrains-mono-latin-wght-normal-B9CIFXIH.woff2",
+    "src": "../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2"
+  },
+  "index.html": {
+    "file": "assets/index-pBgQnzJw.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "assets": [
+      "assets/inter-latin-wght-normal-Dx4kXJAl.woff2",
+      "assets/inter-latin-ext-wght-normal-DO1Apj_S.woff2",
+      "assets/jetbrains-mono-latin-wght-normal-B9CIFXIH.woff2",
+      "assets/jetbrains-mono-latin-ext-wght-normal-DBQx-q_a.woff2",
+      "assets/favicon-DohTI5x5.svg"
+    ]
+  },
+  "src/assets/favicon.svg": {
+    "file": "assets/favicon-DohTI5x5.svg",
+    "src": "src/assets/favicon.svg"
+  },
+  "style.css": {
+    "file": "assets/style-DuZsvs4R.css",
+    "src": "style.css"
+  }
+}

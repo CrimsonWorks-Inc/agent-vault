@@ -1,0 +1,289 @@
+import { describe, expect, it } from 'vitest'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
+import { operationFor } from '../lib/presence.js'
+import { parseOverrides } from '../../../src/pending.js'
+import { Approvals } from './Approvals.jsx'
+
+const CHALLENGE = { challengeId: 'ch1', challenge: 'AAEC', allowCredentials: [{ id: 'Y3JlZDE' }], rpId: 'localhost' }
+const NOW = new Date().toISOString()
+
+const SESSION_ITEM = {
+  id: 'sr_1', kind: 'session', headline: 'gh-work GET /repos/acme/app/** for 60m', created_at: NOW,
+  claim: 'Need to open a PR\u202e and nothing else. <b>Approve</b>',
+  caution: 'This grants hours of access, not one call.',
+  narrowable: ['methods', 'paths', 'budget', 'uses', 'ttl_minutes'],
+  owner_settable: ['approval', 'infinite'],
+  proposal: { methods: ['GET'], paths: ['/repos/acme/app/**'], template: 'gh-read', template_version: 3 },
+}
+const REQUEST_ITEM = {
+  id: 'ap_2', kind: 'request', headline: 'POST api.github.com/repos/acme/app/issues', created_at: NOW,
+  narrowable: [], owner_settable: [], proposal: {},
+  preview: {
+    method: 'POST', host: 'api.github.com', path: '/repos/acme/app/issues', content_type: 'application/json',
+    body: { text: '{"title":"<img src=x onerror=alert(1)>\u202egnp.exe"}', bytes: 52 },
+    query: [['state', 'open']], headers: [['x-trace', 'abc']],
+    placeholders: [{ label: 'gh-work', location: 'header:authorization' }],
+  },
+}
+
+function routes(over = {}) {
+  return {
+    'GET presence/state': { enrolled: true, rpId: 'localhost' },
+    'POST presence/challenge': CHALLENGE,
+    'GET pending': [SESSION_ITEM, REQUEST_ITEM],
+    'POST session-requests/decide': { state: 'approved', recorded: null },
+    'POST approvals': { ok: true },
+    'POST pending/decide-many': { decided: [{ id: 'sr_1', outcome: 'decided' }, { id: 'ap_2', outcome: 'skipped' }] },
+    ...over,
+  }
+}
+
+const challenges = (server) => server.calls.filter((c) => c.path === 'presence/challenge')
+const table = () => screen.getByRole('table', { name: 'Waiting decisions' })
+const loaded = () => waitFor(() => expect(within(table()).getAllByText('gh-work GET /repos/acme/app/** for 60m').length).toBeGreaterThan(0))
+
+describe('Approvals (parity with the old page)', () => {
+  it('asks GET pending with paged=1 and shows the empty state when nothing waits', async () => {
+    const server = fakeServer(routes({ 'GET pending': [] }))
+    renderWith(<Approvals />, { server, vault: { pendingCount: 0 } })
+    expect(await screen.findByText('Nothing waiting.')).toBeTruthy()
+    expect(screen.getByText('Requests an agent cannot make without you.')).toBeTruthy()
+    const call = server.calls.find((c) => c.path === 'pending')
+    expect(call.query).toMatchObject({ paged: '1', limit: '25' })
+  })
+
+  it('shows a loading state, then each item with its kind, id, headline, template and caution', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server, vault: { pendingCount: 2 } })
+    expect(screen.getAllByText('Loading').length).toBeGreaterThan(0)
+    await loaded()
+    const t = within(table())
+    expect(screen.getByText('2 waiting')).toBeTruthy()
+    expect(t.getByText('session requested')).toBeTruthy()
+    expect(t.getByText('held request')).toBeTruthy()
+    expect(t.getByText('gh-read')).toBeTruthy()
+    expect(t.getByText('This grants hours of access, not one call.')).toBeTruthy()
+    expect(t.getByRole('button', { name: /Approve session/ })).toBeTruthy()
+    expect(t.getByRole('button', { name: /Approve once/ })).toBeTruthy()
+  })
+
+  it('shows the agent\'s claim and the request body as text, marked, with bidi stripped and never as HTML', async () => {
+    const server = fakeServer(routes())
+    const { container } = renderWith(<Approvals />, { server })
+    await loaded()
+    const claim = within(table()).getByText(/Need to open a PR/)
+    expect(claim.textContent).toBe('Need to open a PR and nothing else. <b>Approve</b>')
+    expect(claim.closest('[data-untrusted]')).toBeTruthy()
+    expect(container.querySelector('b')).toBeNull()
+    fireEvent.click(within(table()).getByRole('button', { name: /What it sends/ }))
+    const body = await within(table()).findByText(/onerror/)
+    expect(body.textContent).not.toMatch(/\u202e/)
+    expect(body.closest('[data-untrusted]')).toBeTruthy()
+    expect(container.querySelector('img')).toBeNull()
+    expect(within(table()).getByText(/gh-work @ header:authorization/)).toBeTruthy()
+  })
+
+  it('approves a session request with the narrowing typed, parsed by parseOverrides and signed as sent', async () => {
+    const auth = fakeAuthenticator()
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server, authenticator: auth })
+    await loaded()
+    const card = within(table()).getByRole('article', { name: 'Session requested sr_1' })
+    fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
+    fireEvent.change(card.querySelector('[data-field="methods"]'), { target: { value: 'get' } })
+    fireEvent.change(card.querySelector('[data-field="paths"]'), { target: { value: '/repos/acme/app/pulls/**' } })
+    expect(within(card).getByRole('button', { name: /Narrow it before approving \(2 narrowed\)/ })).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: /Approve session/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'session-requests/decide')).toBe(true))
+
+    const overrides = parseOverrides({ methods: 'get', paths: '/repos/acme/app/pulls/**', approval: '' })
+    expect(challenges(server)[0].body.operation).toEqual(await operationFor('session_request.decide', { id: 'sr_1', granted: true, ...overrides }))
+    const sent = server.calls.find((c) => c.path === 'session-requests/decide').body
+    expect(sent).toMatchObject({ id: 'sr_1', granted: true, overrides })
+    expect(sent.presence.challengeId).toBe('ch1')
+    expect(auth.asked).toHaveLength(1)
+    expect(await screen.findByText('Approved')).toBeTruthy()
+  })
+
+  it('names the decision on the page before the platform dialog opens', async () => {
+    let shown = null
+    const auth = fakeAuthenticator({ onGet: () => { shown = document.body.textContent } })
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server, authenticator: auth })
+    await loaded()
+    const card = within(table()).getByRole('article', { name: 'Held request ap_2' })
+    fireEvent.click(within(card).getByRole('button', { name: /Deny/ }))
+    await waitFor(() => expect(auth.asked).toHaveLength(1))
+    expect(shown).toContain('deny request ap_2')
+  })
+
+  it('denies a held request with exactly the old page\'s operation and body', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    const card = within(table()).getByRole('article', { name: 'Held request ap_2' })
+    fireEvent.click(within(card).getByRole('button', { name: /Deny/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'approvals')).toBe(true))
+    expect(challenges(server)[0].body.operation).toEqual({ op: 'approval.deny', granted: false, id: 'ap_2' })
+    const sent = server.calls.find((c) => c.path === 'approvals').body
+    expect(Object.keys(sent).sort()).toEqual(['granted', 'id', 'presence'])
+    expect(sent).toMatchObject({ id: 'ap_2', granted: false })
+  })
+
+  it('sends the owner options as chosen: approval and no expiry', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    const card = within(table()).getByRole('article', { name: 'Session requested sr_1' })
+    fireEvent.click(within(card).getByRole('checkbox', { name: 'No expiry' }))
+    fireEvent.click(within(card).getByRole('button', { name: /Approve session/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'session-requests/decide')).toBe(true))
+    expect(server.calls.find((c) => c.path === 'session-requests/decide').body.overrides).toEqual({ infinite: true })
+    expect(challenges(server)[0].body.operation).toEqual({ op: 'session_request.decide', granted: true, id: 'sr_1', infinite: true })
+  })
+
+  it('a narrowing that does not parse sends nothing and asks for no signature', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    const card = within(table()).getByRole('article', { name: 'Session requested sr_1' })
+    fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
+    fireEvent.change(card.querySelector('[data-field="budget"]'), { target: { value: 'lots' } })
+    fireEvent.click(within(card).getByRole('button', { name: /Approve session/ }))
+    expect(await screen.findByText(/That narrowing does not parse, so nothing was sent/)).toBeTruthy()
+    expect(challenges(server)).toHaveLength(0)
+    expect(server.calls.some((c) => c.path === 'session-requests/decide')).toBe(false)
+  })
+
+  it('decides the ticked items, and only those, under one signature', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    expect(screen.queryByRole('region', { name: 'Decide the selected' })).toBeNull()
+    fireEvent.click(within(table()).getAllByRole('checkbox', { name: 'Select sr_1' })[0])
+    fireEvent.click(within(table()).getAllByRole('checkbox', { name: 'Select ap_2' })[0])
+    const bar = screen.getByRole('region', { name: 'Decide the selected' })
+    expect(within(bar).getByTestId('bulk-count').textContent).toBe('2')
+    fireEvent.click(within(bar).getByRole('button', { name: /Approve selected/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'pending/decide-many')).toBe(true))
+    // In the order shown, which is the server's: created_at newest first, then kind (LISTS.pending).
+    const decisions = [{ id: 'ap_2', kind: 'request', granted: true }, { id: 'sr_1', kind: 'session', granted: true }]
+    expect(challenges(server)[0].body.operation).toEqual(await operationFor('pending.decide_many', { decisions }))
+    expect(server.calls.find((c) => c.path === 'pending/decide-many').body.decisions).toEqual(decisions)
+    expect(await screen.findByText('1 approved, 1 no longer pending')).toBeTruthy()
+  })
+
+  // Ported from test/security/requested-ui.test.js ("what the human typed on
+  // an approval survives the five-second re-render"): the list refreshes on a
+  // timer, and narrowings and owner options must not vanish mid-edit; a
+  // decided item's drafts are forgotten, so they cannot reappear.
+  it('what was typed survives the refresh; a decided item\'s draft is forgotten', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    const card = () => within(table()).getByRole('article', { name: 'Session requested sr_1' })
+    fireEvent.click(within(card()).getByRole('button', { name: /Narrow it before approving/ }))
+    fireEvent.change(card().querySelector('[data-field="budget"]'), { target: { value: '7' } })
+    const reads = () => server.calls.filter((c) => c.method === 'GET' && c.path === 'pending').length
+    const before = reads()
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(reads()).toBeGreaterThan(before))
+    await loaded()
+    expect(card().querySelector('[data-field="budget"]').value).toBe('7')
+
+    fireEvent.click(within(card()).getByRole('button', { name: /Approve session/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'session-requests/decide')).toBe(true))
+    expect(server.calls.find((c) => c.path === 'session-requests/decide').body.overrides.budget).toBe(7)
+    // The server still lists it (a stand-in that ignores the decision); the draft is gone.
+    await waitFor(() => expect(reads()).toBeGreaterThan(before + 1))
+    await loaded()
+    const input = card().querySelector('[data-field="budget"]')
+    expect(input ? input.value : '').toBe('')
+  })
+
+  it('Clear empties the selection and hides the bar', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals />, { server })
+    await loaded()
+    fireEvent.click(within(table()).getAllByRole('checkbox', { name: 'Select sr_1' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(screen.queryByRole('region', { name: 'Decide the selected' })).toBeNull()
+  })
+
+  it('no agent-proposed value ever reaches an attribute: proposals are text beside the input, marked as the agent\'s', async () => {
+    const HOSTILE = {
+      ...SESSION_ITEM,
+      id: 'sr_9',
+      narrowable: ['methods', 'paths', 'routes', 'payload', 'budget'],
+      proposal: {
+        methods: ['GET', '" onfocus="alert(1)'],
+        paths: ['/repos/"><img src=x onerror=alert(1)>', '/a\u202e/evil-bidi'],
+        routes: [{ methods: ['POST'], paths: ['/x" autofocus onfocus="alert(2)'] }],
+        payload: { rules: [{ field: 'title', equals: '<script>alert(3)</script>\u2066' }] },
+        budget: 5,
+        template: 'tpl"><b>owned</b>\u202e',
+      },
+    }
+    const server = fakeServer(routes({ 'GET pending': [HOSTILE] }))
+    const { container } = renderWith(<Approvals />, { server })
+    await waitFor(() => expect(container.querySelectorAll('[data-item="sr_9"]').length).toBeGreaterThan(0))
+    for (const card of within(table()).getAllByRole('article')) {
+      fireEvent.click(within(card).getByRole('button', { name: /Narrow it before approving/ }))
+    }
+    await waitFor(() => expect(container.querySelectorAll('[data-field="paths"]').length).toBeGreaterThan(0))
+
+    // Every attribute of every element on the page: none carries any part of a proposal.
+    const SINKS = ['onfocus', 'onerror', 'img src', 'autofocus', '<script', 'evil-bidi', '/repos/"', 'owned', '\u202e', '\u2066', 'alert(']
+    const hits = []
+    for (const el of container.querySelectorAll('*')) {
+      for (const { name, value } of el.attributes) {
+        for (const s of SINKS) if (value.includes(s)) hits.push(`${el.tagName.toLowerCase()}[${name}]=${JSON.stringify(value)}`)
+      }
+    }
+    expect(hits).toEqual([])
+    for (const input of container.querySelectorAll('[data-field]')) {
+      expect(input.getAttribute('placeholder')).toBe('unchanged')
+      expect(input.value).toBe('')
+    }
+
+    // The proposals are on the page as text, cleaned, inside UntrustedText, attributed as the agent's.
+    const asked = [...container.querySelectorAll('[data-untrusted]')].map((n) => n.textContent)
+    expect(asked.some((t) => t.includes('/repos/"><img src=x onerror=alert(1)>, /a/evil-bidi'))).toBe(true)
+    expect(asked.some((t) => t.includes('{"rules":[{"field":"title","equals":"<script>alert(3)</script>"}]}'))).toBe(true)
+    expect(asked.some((t) => t.includes('"paths":["/x\\" autofocus onfocus=\\"alert(2)"]'))).toBe(true)
+    expect(asked.some((t) => t.includes('tpl"><b>owned</b>'))).toBe(true)
+    expect(asked.join('')).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/)
+    expect(screen.getAllByText(/Proposed by the agent, not verified/).length).toBeGreaterThan(0)
+    expect(container.querySelector('img, script, b')).toBeNull()
+  })
+
+  it('pages with the server\'s cursor and searches with q', async () => {
+    const pages = {
+      undefined: { items: [SESSION_ITEM], next_cursor: 'c2', prev_cursor: null, total: 2 },
+      c2: { items: [REQUEST_ITEM], next_cursor: null, prev_cursor: 'c1', total: 2 },
+    }
+    const server = fakeServer(routes({ 'GET pending': ({ query }) => pages[query.cursor] }))
+    renderWith(<Approvals />, { server })
+    await loaded()
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'pending' && c.query.cursor === 'c2')).toBe(true))
+    expect(await within(table()).findByText('held request')).toBeTruthy()
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search waiting decisions' }), { target: { value: 'ap_2' } })
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'pending' && c.query.q === 'ap_2' && !c.query.cursor)).toBe(true))
+  })
+
+  it('opens on the deep-linked item by searching for its id', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Approvals rest="ap_2" />, { server })
+    expect(await screen.findByText('Showing ap_2')).toBeTruthy()
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'pending' && c.query.q === 'ap_2')).toBe(true))
+  })
+
+  it('says so when the list cannot be read', async () => {
+    const server = fakeServer(routes({ 'GET pending': { __status: 500, body: { error: 'control socket hiccup' } } }))
+    renderWith(<Approvals />, { server })
+    expect(await screen.findByText('Could not read what is waiting.')).toBeTruthy()
+    expect(screen.getByText('control socket hiccup')).toBeTruthy()
+  })
+})

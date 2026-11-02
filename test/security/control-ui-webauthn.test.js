@@ -6,14 +6,15 @@
 // String(value), which is "[object Object]" for every backup bundle there is:
 // a signature for restoring one bundle would have restored any other.
 //
-// The page builds the same operation in the browser, so its builder is run
-// here too and must agree with the server's on every field.
+// The page builds the same operation in the browser, so its builder
+// (web/src/lib/presence.js, the module the bundle is built from) is run here
+// too and must agree with the server's on every field.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, webcrypto } from 'node:crypto'
 import { operationFor, canonicalOperation, DIGESTED } from '../../src/ui/webauthn.js'
-import { pageFunctions, pageConst } from './control-ui-helpers.js'
+import { operationFor as pageOperationFor, DIGESTED as PAGE_DIGESTED } from '../../web/src/lib/presence.js'
 
 const sha = (s) => createHash('sha256').update(s).digest('hex')
 
@@ -58,9 +59,6 @@ test('the same bundle with its keys in another order is the same operation', () 
 
 test('the page builds the same operation as the servers, field for field', async () => {
   globalThis.crypto ??= webcrypto
-  const { operationFor: pageOperationFor } = pageFunctions(
-    [{ name: 'operationFor', async: true }, 'canonicalJson'], pageConst('DIGESTED'),
-  )
   const cases = [
     ['cred.rotate', { slug: 'demo', value: 'ghp_NEW', mode: 'keep', retire_hours: 24 }],
     ['backup.restore', { bundle: BUNDLE, recovery_passphrase: 'twelve chars plus', on_conflict: 'rename' }],
@@ -74,6 +72,5 @@ test('the page builds the same operation as the servers, field for field', async
 })
 
 test("the page's digested fields are the servers' digested fields", () => {
-  const page = [...pageConst('DIGESTED').matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort()
-  assert.deepEqual(page, [...DIGESTED].sort())
+  assert.deepEqual([...PAGE_DIGESTED].sort(), [...DIGESTED].sort())
 })

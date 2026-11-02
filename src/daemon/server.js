@@ -1672,6 +1672,8 @@ export class Daemon {
             const infinite = s.infinite === true
             return {
               id: s.id, label: s.label, state: s.state, expires_at: s.expires_at ?? null, remote: s.remote,
+              // What a newest-first list orders by (UI contract U3).
+              created_at: s.created_at ?? null,
               grants: grants.length,
               // Each grant's own values, so a client can list what a session
               // can map and how each one asks.
@@ -1845,7 +1847,7 @@ export class Daemon {
         // handle and reporting an internal error for an expected state.
         case 'GET /v1/audit':
           if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to read it')
-          return json(200, this.vault.audit.read({ limit: Number(url.searchParams.get('limit') || 30) }))
+          return json(200, auditRows(this.vault.audit, url.searchParams))
         case 'GET /v1/audit/verify':
           if (!this.vault.audit) throw deny('AV_LOCKED', 'the audit log is encrypted; unlock the vault to verify it')
           return json(200, this.vault.audit.verify())
@@ -2689,6 +2691,55 @@ function reportSince(raw) {
   if (rel) return new Date(Date.now() - Number(rel[1]) * (rel[2] === 'd' ? 86_400_000 : 3_600_000)).toISOString()
   if (/^\d{4}-\d{2}-\d{2}/.test(text) && !Number.isNaN(Date.parse(text))) return new Date(Date.parse(text)).toISOString()
   throw deny('AV_POLICY_DENIED', 'since is an ISO date, or a span like 7d or 24h', { rule: 'report_since' })
+}
+
+// One record kind (`tripwire.fired`) or a family of them (`session` is every
+// session.* kind). Checked before it is read, so a filter is a filter and
+// never anything else.
+const AUDIT_KIND = /^[a-z_]+(\.[a-z_]+)*$/
+const AUDIT_PAGE_MAX = 500
+
+/**
+ * `GET /v1/audit`, oldest first like every other read of the log.
+ *
+ * - With neither `before` nor `after` it is the tail it always was: the
+ *   newest `limit` rows (30 by default), with the old lenient reading of
+ *   `limit`, so `audit tail` is unchanged.
+ * - `kind` filters BEFORE the limit, so `kind=X&limit=25` is the newest 25
+ *   rows of kind X, not the X rows among the newest 25. A filtered read is
+ *   new, so it has no old leniency to keep: its `limit` is a whole number
+ *   from 1 to 500 (30 when absent), checked before anything is read.
+ * - `before=<seq>` is the newest `limit` rows older than that record, and
+ *   `after=<seq>` the oldest `limit` rows newer than it, so a reader can walk
+ *   the whole log a page at a time in either direction (UI contract U3). With
+ *   either, `limit` is a whole number from 1 to 500, and anything else is
+ *   refused rather than read as something else.
+ */
+function auditRows(audit, params) {
+  const kind = params.get('kind')
+  if (kind !== null && !AUDIT_KIND.test(kind)) {
+    throw deny('AV_POLICY_DENIED', 'kind is a record kind, like tripwire.fired', { rule: 'audit_range' })
+  }
+  const before = params.get('before')
+  const after = params.get('after')
+  const ofKind = (rows) => (kind === null ? rows : rows.filter((r) => typeof r.kind === 'string' && (r.kind === kind || r.kind.startsWith(`${kind}.`))))
+  // The unfiltered tail keeps its old reading of limit, so `audit tail` is
+  // unchanged. Nothing else reads it that way.
+  if (before === null && after === null && kind === null) return audit.read({ limit: Number(params.get('limit') || 30) })
+  if (before !== null && after !== null) {
+    throw deny('AV_POLICY_DENIED', 'give before or after, not both', { rule: 'audit_range' })
+  }
+  const limitRaw = params.get('limit')
+  if (limitRaw !== null && !(/^[1-9][0-9]{0,2}$/.test(limitRaw) && Number(limitRaw) <= AUDIT_PAGE_MAX)) {
+    throw deny('AV_POLICY_DENIED', `limit must be a whole number from 1 to ${AUDIT_PAGE_MAX}`, { rule: 'audit_range' })
+  }
+  if (before === null && after === null) return ofKind(audit.read({ limit: Infinity })).slice(-(limitRaw === null ? 30 : Number(limitRaw)))
+  const limit = limitRaw === null ? 100 : Number(limitRaw)
+  const at = wholeParam(before ?? after, 0, before !== null ? 'before' : 'after')
+  const rows = ofKind(audit.read({ limit: Infinity })).filter((r) => Number.isSafeInteger(r.seq))
+  return before !== null
+    ? rows.filter((r) => r.seq < at).slice(-limit)
+    : rows.filter((r) => r.seq > at).slice(0, limit)
 }
 
 /** A whole-number query parameter, or the default when absent. Anything else is refused, never coerced. */

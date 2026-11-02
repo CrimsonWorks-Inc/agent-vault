@@ -12,7 +12,8 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request as unixRequest } from 'node:http'
@@ -79,21 +80,37 @@ test('both interfaces read the same list from the same module', async () => {
   }
 })
 
-test('the page paints the list and decides nothing about it', async () => {
-  // The browser cannot import a module, so the UI server hands it the already
-  // normalised list. If the page went back to fetching the raw routes it would
-  // be free to disagree with the CLI again.
-  const page = readFileSync(join(ROOT, 'src/ui/app.html'), 'utf8')
-  assert.match(page, /api\('GET', 'pending'\)/, 'the page must read the normalised list')
-  assert.ok(!/api\('GET', 'session-requests'\)/.test(page),
-    'the page must not fetch a source directly')
-  assert.ok(!/api\('GET', 'approvals'\)/.test(page),
-    'the page must not fetch a source directly — the badge missing session requests is exactly this bug')
+/** Every source file of the page (web/src), tests left out, as [path, text]. */
+function pageSources() {
+  const out = []
+  const walk = (dir) => {
+    for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`
+      if (e.isDirectory()) { if (e.name !== 'test') walk(rel) } else if (/\.(js|jsx)$/.test(e.name) && !/\.test\.jsx?$|fixtures/.test(e.name)) out.push([rel, readFileSync(join(ROOT, rel), 'utf8')])
+    }
+  }
+  walk('web/src')
+  return out
+}
 
+test('the page paints the list and decides nothing about it', async () => {
+  // The UI server hands the page the list already normalised by pending.js.
+  // If the page went back to fetching the raw routes it would be free to
+  // disagree with the CLI again.
+  const sources = pageSources()
+  const all = sources.map(([, t]) => t).join('\n')
+  assert.match(all, /usePaged\('pending'/, 'the approvals page must read the normalised list')
+  assert.match(all, /fetchAll\(api\.get, 'pending'\)/, 'the shell must count the normalised list')
+  for (const [file, text] of sources) {
+    for (const source of ['session-requests', 'approvals']) {
+      const reads = new RegExp(`(\\.get\\(|usePaged\\(|fetch(?:All|Pages)\\([^,]+,)\\s*'${source}'`)
+      assert.ok(!reads.test(text), `${file} fetches ${source} itself — the badge missing session requests is exactly this bug`)
+    }
+  }
   // And the count a human sees covers every kind, because a decision that
   // raises no badge is one nobody knows to make.
-  const badge = /approvalCount[\s\S]{0,400}/.exec(page)?.[0] || ''
-  assert.ok(!badge.includes("'approvals'"), 'the badge must count everything waiting')
+  const shell = readFileSync(join(ROOT, 'web/src/App.jsx'), 'utf8')
+  assert.match(shell, /pendingCount: pending \? pending\.length : 0/, 'the badge must count everything waiting')
 })
 
 test('narrowing flags are parsed identically wherever they are typed', () => {
@@ -113,7 +130,7 @@ test('a new kind of decision reaches both interfaces by construction', () => {
   assert.match(pending, /export const SOURCES/)
   const cli = readFileSync(join(ROOT, 'src/cli/index.js'), 'utf8')
   const ui = readFileSync(join(ROOT, 'src/ui/server.js'), 'utf8')
-  const page = readFileSync(join(ROOT, 'src/ui/app.html'), 'utf8')
+  const page = pageSources().map(([, t]) => t).join('\n')
   for (const [name, src] of Object.entries({ cli, ui, page })) {
     assert.ok(!/kind === 'session'[\s\S]{0,80}kind === 'request'/.test(src),
       `${name} enumerates the kinds itself; that list belongs in pending.js`)
@@ -151,4 +168,36 @@ test('a lifetime can be narrowed, like every other dimension of a proposal', asy
     if (f === 'cred') continue // which credential is the request, not a dimension of it
     assert.ok(item.narrowable.includes(f), `a proposal can name ${f} but a human cannot narrow it`)
   }
+})
+
+// C21: one parser of typed narrowing, shared by the page and the server. The
+// page is a prebuilt bundle, so this is proven from the build itself: one
+// build of web/ (web/scripts/bundle-modules.mjs) that is byte for byte the
+// committed src/ui/dist, whose module graph shows where the bundle's
+// parseOverrides came from.
+test('C21: the shipped bundle\'s parseOverrides is src/pending.js\'s, and the server binds with the same function', { timeout: 300_000 }, () => {
+  const r = spawnSync(process.execPath, [join(ROOT, 'web/scripts/bundle-modules.mjs')], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  assert.equal(r.status, 0, r.stderr)
+  const { chunks, diffs } = JSON.parse(r.stdout)
+  // The build that was inspected is the page that ships.
+  assert.deepEqual(diffs, [], `src/ui/dist is not this build; run npm run build:ui:\n${diffs.join('\n')}`)
+  const entry = chunks.find((c) => c.isEntry)
+  assert.ok(entry, 'the build has an entry chunk')
+  const html = readFileSync(join(ROOT, 'src/ui/dist/index.html'), 'utf8')
+  assert.ok(html.includes(`src="/assets/${entry.file.replace(/^assets\//, '')}"`), 'the page loads that chunk')
+  // parseOverrides is rendered into the bundle from src/pending.js, and from
+  // nowhere else: no second reader exists in the page.
+  const owners = chunks.flatMap((c) => Object.entries(c.modules)).filter(([, m]) => m.exports.includes('parseOverrides')).map(([id]) => id)
+  assert.deepEqual(owners, ['src/pending.js'])
+  assert.ok(entry.modules['src/pending.js'].length > 0, 'src/pending.js was tree-shaken out of the page')
+  assert.ok(entry.modules['web/src/components/approvals/decide.js'], 'the approvals reader is in the page')
+  const decide = readFileSync(join(ROOT, 'web/src/components/approvals/decide.js'), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
+  for (const [file, text] of pageSources()) {
+    assert.ok(!/function parse(?:Overrides|Narrowing)\s*\(|parse(?:Overrides|Narrowing)\s*=\s*(?:\(|function)/.test(text), `${file} defines its own narrowing parser`)
+  }
+  // The server rebinds the signed operation with the same module's function.
+  const server = readFileSync(join(ROOT, 'src/ui/server.js'), 'utf8')
+  assert.match(server, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/pending\.js'/)
+  assert.ok(!/function parseOverrides\s*\(/.test(server), 'the server keeps its own parser')
 })

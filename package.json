@@ -1,6 +1,6 @@
 {
   "name": "agent-vault",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-trust local credential proxy for LLM agents: the agent sends placeholders, the daemon injects real secrets only at declared sites for granted destinations.",
   "homepage": "https://iolitelabs.com/agent-vault",
   "repository": {
@@ -38,14 +38,35 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test test/core/*.test.js test/security/*.test.js",
+    "test": "node --test test/core/*.test.js test/security/*.test.js web/test/*.test.js && vitest run --config web/vite.config.js",
     "test:core": "node --test test/core/*.test.js",
     "test:security": "node --test test/security/*.test.js",
+    "test:ui": "node --test web/test/*.test.js && vitest run --config web/vite.config.js",
+    "build:ui": "vite build --config web/vite.config.js",
+    "dev:ui": "vite --config web/vite.config.js",
+    "check:ui": "node web/scripts/check-dist.mjs",
+    "prepack": "node web/scripts/check-dist.mjs",
     "demo": "node demo/demo.js",
     "daemon": "node bin/agent-vault.js daemon",
     "ui": "node bin/agent-vault.js ui",
     "test:mutation": "node test/mutation-check.js"
   },
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@headlessui/react": "2.2.10",
+    "@heroicons/react": "2.2.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.8",
+    "@vitejs/plugin-react": "4.7.0",
+    "jsdom": "26.1.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwindcss": "4.3.3",
+    "vite": "6.4.5",
+    "vitest": "4.1.12"
+  }
 }

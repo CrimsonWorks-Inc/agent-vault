@@ -29,7 +29,9 @@ const TIMEOUT_MS = Number(process.env.MUTATION_TIMEOUT_MS) || 300_000
 
 /**
  * Each entry breaks one protection by a literal string swap, then names the
- * tests that must go red. `from` has to appear exactly once.
+ * tests that must go red. `from` has to appear exactly once. A test under
+ * web/src (a *.test.jsx component test) runs under vitest; any other under
+ * node --test.
  */
 const MUTATIONS = [
   {
@@ -583,11 +585,11 @@ const MUTATIONS = [
     tests: ['test/security/fix-control-cli.test.js'],
   },
   {
-    what: 'the page signs the raw narrowing text',
-    file: 'src/ui/app.html',
-    from: "const overrides = parseOverrides(typed)",
-    to: "const overrides = typed",
-    tests: ['test/security/fix-control-page.test.js'],
+    what: "the page signs the raw narrowing text",
+    file: "web/src/components/approvals/decide.js",
+    from: "    return { overrides: parseOverrides(typed) }",
+    to: "    return { overrides: typed }",
+    tests: ["test/security/fix-control-page.test.js", "test/security/control-ui-narrowing.test.js"],
   },
   {
     what: 'the UI login cookie never slides',
@@ -731,11 +733,11 @@ const MUTATIONS = [
     tests: ['test/security/fix-control-touchid.test.js'],
   },
   {
-    what: 'the page asks for a tap on a vault with no passphrase instead of saying what to do',
-    file: 'src/ui/app.html',
-    from: '    if (!params.has_passphrase) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
-    to: '    if (false) throw new Error(TOUCHID_NEEDS_PASSPHRASE)',
-    tests: ['test/security/fix-control-page.test.js'],
+    what: "the page asks for a tap on a vault with no passphrase instead of saying what to do",
+    file: "web/src/lib/presence.js",
+    from: "    if (!params.has_passphrase) throw new Error(TOUCHID_NEEDS_PASSPHRASE)",
+    to: "    if (false) throw new Error(TOUCHID_NEEDS_PASSPHRASE)",
+    tests: ["test/security/fix-control-page.test.js"],
   },
   {
     // Fix-control round 4: the factor invariant, checked in one place.
@@ -3451,46 +3453,48 @@ const MUTATIONS = [
     tests: ['test/security/control-ui-routes.test.js'],
   },
   {
-    what: 'the page is served without the one narrowing parser (C21)',
-    file: 'src/ui/server.js',
-    from: 'return html.replace(PARSER_MARKER, () => source)',
-    to: 'return html',
-    tests: ['test/security/control-ui-guard.test.js'],
+    // C21 survives as a build-time guarantee: the page's reader imports
+    // src/pending.js. A local copy is a second parser.
+    what: 'the page reads a narrowing with its own parser, not src/pending.js (C21)',
+    file: 'web/src/components/approvals/decide.js',
+    from: "import { checkDecisions, parseOverrides } from '../../../../src/pending.js'",
+    to: "import { checkDecisions } from '../../../../src/pending.js'\nconst parseOverrides = (typed) => ({ ...typed })",
+    tests: ['test/security/control-ui-guard.test.js', 'test/security/one-source-of-truth.test.js'],
   },
   {
-    what: 'an approval preview is painted as markup',
-    file: 'src/ui/app.html',
-    from: '? `<pre class="untrusted">${esc(body.text)}</pre>`',
-    to: '? `<pre class="untrusted">${body.text}</pre>`',
-    tests: ['test/security/control-ui-page.test.js'],
+    what: "an approval preview is painted as markup",
+    file: "web/src/components/approvals/RequestPreview.jsx",
+    from: "        ? <UntrustedText text={body.text} block className=\"mt-2\" />",
+    to: "        ? <pre className=\"mt-2\" dangerouslySetInnerHTML={{ __html: body.text }} />",
+    tests: ["web/src/components/approvals/RequestPreview.test.jsx", "web/test/page-invariants.test.js"],
   },
   {
     what: "a desktop notification carries the agent's claim",
-    file: 'src/ui/app.html',
-    from: "const text = `${lead}${String(item?.headline ?? '')}`",
-    to: "const text = `${lead}${String(item?.claim ?? item?.headline ?? '')}`",
-    tests: ['test/security/control-ui-page.test.js'],
+    file: "web/src/lib/notify.js",
+    from: "  return clip(`${lead}${String(item?.headline ?? '')}`, 120)",
+    to: "  return clip(`${lead}${String(item?.claim ?? item?.headline ?? '')}`, 120)",
+    tests: ["test/security/control-ui-page.test.js"],
   },
   {
-    what: 'a template override can lengthen the lifetime',
-    file: 'src/ui/app.html',
-    from: 'if (!limits.infinite && h > limits.ttlHours) return',
-    to: 'if (false) return',
-    tests: ['test/security/control-ui-page.test.js'],
+    what: "a template override can lengthen the lifetime",
+    file: "web/src/components/sessions/sessionLogic.js",
+    from: "      if (!limits.infinite && h > limits.ttlHours) return",
+    to: "      if (false) return",
+    tests: ["test/security/control-ui-page.test.js"],
   },
   {
-    what: 'a template override can relax the approval mode',
-    file: 'src/ui/app.html',
-    from: 'APPROVAL_ORDER.indexOf(chosen.approval) < limits.approvalFloor',
-    to: 'false',
-    tests: ['test/security/control-ui-page.test.js'],
+    what: "a template override can relax the approval mode",
+    file: "web/src/components/sessions/sessionLogic.js",
+    from: "APPROVAL_ORDER.indexOf(chosen.approval) < limits.approvalFloor",
+    to: "false",
+    tests: ["test/security/control-ui-page.test.js"],
   },
   {
-    what: 'the payload rules are signed without being parsed',
-    file: 'src/ui/app.html',
-    from: 'try { payload = JSON.parse(raw.payload) } catch (e) { return { error: `The payload rules are not JSON: ${e.message}` } }',
-    to: 'payload = raw.payload',
-    tests: ['test/security/control-ui-page.test.js'],
+    what: "the payload rules are signed without being parsed",
+    file: "web/src/components/sessions/sessionLogic.js",
+    from: "try { payload = JSON.parse(raw.payload) } catch (e) { return { error: `The payload rules are not JSON: ${e.message}` } }",
+    to: "payload = raw.payload",
+    tests: ["test/security/control-ui-page.test.js"],
   },
   {
     what: 'an error from POST sessions reaches the page as a hand-off, unfiltered',
@@ -3528,11 +3532,11 @@ const MUTATIONS = [
     tests: ['test/security/control-ui-handoff.test.js'],
   },
   {
-    what: 'a parser that can end its own script is served in the page',
-    file: 'src/ui/server.js',
-    from: "if (/<\\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {",
-    to: 'if (false) {',
-    tests: ['test/security/control-ui-handoff.test.js'],
+    what: "U2: a server with no built bundle starts anyway",
+    file: "src/ui/server.js",
+    from: "    if (!this.dist) throw new Error(`the built UI is missing",
+    to: "    if (false) throw new Error(`the built UI is missing",
+    tests: ["test/security/ui-dist-serving.test.js"],
   },
   {
     what: 'a VaultError refusal from the UI is reported as a crash',
@@ -3542,18 +3546,18 @@ const MUTATIONS = [
     tests: ['test/security/control-ui-handoff.test.js'],
   },
   {
-    what: 'a decision is sent when its narrowing does not parse (C23)',
-    file: 'src/ui/app.html',
-    from: 'if (narrowing.error) return toast(narrowing.error)',
-    to: 'if (false) return toast(narrowing.error)',
-    tests: ['test/security/control-ui-narrowing.test.js'],
+    what: "a decision is sent when its narrowing does not parse (C23)",
+    file: "web/src/components/approvals/decide.js",
+    from: "  if (narrowing.error) throw new Error(narrowing.error)",
+    to: "  if (false) throw new Error(narrowing.error)",
+    tests: ["test/security/control-ui-narrowing.test.js", "test/security/integrate3-narrowing.test.js"],
   },
   {
-    what: 'a narrowing that does not parse is read as no narrowing (C23)',
-    file: 'src/ui/app.html',
-    from: 'return { error: `That narrowing does not parse, so nothing was sent: ${e?.message ?? e}` }',
-    to: 'return { overrides: {} }',
-    tests: ['test/security/control-ui-narrowing.test.js'],
+    what: "a narrowing that does not parse is read as no narrowing (C23)",
+    file: "web/src/components/approvals/decide.js",
+    from: "    return { error: `That narrowing does not parse, so nothing was sent: ${e?.message ?? e}` }",
+    to: "    return { overrides: {} }",
+    tests: ["test/security/control-ui-narrowing.test.js"],
   },
   // ---- wave 3, control-cli: parsing, files and untrusted presentation ----
   {
@@ -4021,11 +4025,11 @@ const MUTATIONS = [
     tests: ['test/security/integrate3-r4.test.js'],
   },
   {
-    what: 'the page does not warn that first-use with writes is elevated (C26)',
-    file: 'src/ui/app.html',
-    from: "    (approval === 'auto' || approval === 'first-use') && (methods",
-    to: "    approval === 'auto' && (methods",
-    tests: ['test/security/requested-ui.test.js'],
+    what: "the page does not warn that first-use with writes is elevated (C26)",
+    file: "web/src/components/sessions/sessionLogic.js",
+    from: "  (approval === 'auto' || approval === 'first-use')\n  && (methods",
+    to: "  approval === 'auto'\n  && (methods",
+    tests: ["test/security/requested-ui.test.js"],
   },
   {
     // Coordinator item 5: `--force=false` is the string "false", which is truthy.
@@ -4217,17 +4221,17 @@ const MUTATIONS = [
   },
   {
     what: "r6 B1: the page labels the defaults in force as the owner's rules",
-    file: 'src/ui/app.html',
-    from: "const rules = tw?.rules_saved !== false && Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []",
-    to: "const rules = Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []",
-    tests: ['test/security/integrate3-r6.test.js'],
+    file: "web/src/components/overview/tripwires.js",
+    from: "  const rules = tw?.rules_saved !== false && Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []",
+    to: "  const rules = Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []",
+    tests: ["test/security/integrate3-r6.test.js"],
   },
   {
     what: "r6 B1: the page's turn-on reads the defaults in force as saved rules",
-    file: 'src/ui/app.html',
-    from: "const stored = tripwireState?.rules_saved !== false && (tripwireState?.rules || []).length",
-    to: "const stored = (tripwireState?.rules || []).length",
-    tests: ['test/security/integrate3-r6.test.js'],
+    file: "web/src/components/overview/tripwires.js",
+    from: "  const stored = tw?.rules_saved !== false && (tw?.rules || []).length > 0",
+    to: "  const stored = (tw?.rules || []).length > 0",
+    tests: ["test/security/integrate3-r6.test.js"],
   },
   {
     what: "r6 B2: the CLI's documented preflight sends no placeholder and is always refused",
@@ -4300,18 +4304,18 @@ const MUTATIONS = [
     tests: ['test/security/integrate3-r6.test.js'],
   },
   {
-    what: "r6 N4: the page's esc() keeps bidi controls",
-    file: 'src/ui/app.html',
-    from: "const esc = (s) => String(s ?? '').replace(/[\\u202a-\\u202e\\u2066-\\u2069]/g, '').replace(",
-    to: "const esc = (s) => String(s ?? '').replace(",
-    tests: ['test/security/integrate3-r6.test.js'],
+    what: "r6 N4: the page's copied and shown code keeps bidi controls",
+    file: "web/src/lib/clipboard.js",
+    from: "export const copyable = (text) => cleanText(text)",
+    to: "export const copyable = (text) => String(text ?? '')",
+    tests: ["test/security/integrate3-r6.test.js", "web/src/pages/Sessions.test.jsx"],
   },
   {
     what: "r6 N4: a desktop notification keeps bidi controls and line separators",
-    file: 'src/ui/app.html',
-    from: ".replace(/[\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]/g, ' ').replace(/[\\u202a-\\u202e\\u2066-\\u2069]/g, '')",
-    to: ".replace(/[\\u0000-\\u001f\\u007f-\\u009f]/g, ' ')",
-    tests: ['test/security/integrate3-r6.test.js'],
+    file: "web/src/lib/text.js",
+    from: "  return String(value ?? '').replace(LINE_CONTROLS, ' ').replace(BIDI, '')",
+    to: "  return String(value ?? '').replace(/[\\u0000-\\u001f\\u007f-\\u009f]/g, ' ')",
+    tests: ["test/security/integrate3-r6.test.js", "test/security/control-ui-page.test.js"],
   },
   {
     what: "r6 F1 (Grok): response.streamed records the upstream's own Content-Type",
@@ -4340,6 +4344,392 @@ const MUTATIONS = [
     from: "const said = session ? this.pipeline.explainDenial(args.request_id, session.id) : null",
     to: "const said = this.pipeline.explainDenial(args.request_id, session?.id)",
     tests: ['test/security/integrate3-r6.test.js'],
+  },
+  // UI rebrand, api piece (contract U2, U3): serving the built page, paged
+  // lists, and audit paging in the daemon.
+  {
+    what: "U3: a paged search matches the answer before towardPage, so q can test a withheld value",
+    file: "src/ui/server.js",
+    from: "    const shown = towardPage(answer)\n    return pageAnswer(",
+    to: "    const shown = answer\n    return pageAnswer(",
+    tests: ["test/security/ui-paging.test.js"],
+  },
+  {
+    what: 'U3: an audit search matches rows before towardPage',
+    file: 'src/ui/server.js',
+    from: "      const shown = towardPage(row)\n      return matches(shown, AUDIT_FIELDS, paging.q) ? shown : null",
+    to: "      const shown = row\n      return matches(shown, AUDIT_FIELDS, paging.q) ? shown : null",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U3: a cursor is opened without checking its seal',
+    file: 'src/ui/list-paging.js',
+    from: "    if (!timingSafeEqual(mac, this.#mac(body))) throw badCursor",
+    to: "    if (false) throw badCursor",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: a cursor made under one search or filter is accepted under another',
+    file: 'src/ui/list-paging.js',
+    from: "    if (c.f !== digestOf(filters)) throw badCursor",
+    to: "    if (false) throw badCursor",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: a cursor made for one list is accepted by another',
+    file: 'src/ui/list-paging.js',
+    from: "    if (c.l !== list) throw badCursor",
+    to: "    if (false) throw badCursor",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: a limit above 200 is accepted',
+    file: 'src/ui/list-paging.js',
+    from: "    if (limit > LIMIT_MAX) throw badLimit",
+    to: "    if (false) throw badLimit",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: limit is coerced instead of read as written',
+    file: 'src/ui/list-paging.js',
+    from: "    if (!/^[1-9][0-9]{0,2}$/.test(limits[0])) throw badLimit",
+    to: "    if (Number.isNaN(Number(limits[0]))) throw badLimit",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: a cursor without paged=1 is ignored instead of refused',
+    file: 'src/ui/list-paging.js',
+    from: "    if (params.has('cursor')) throw badCursor('was sent without paged=1')",
+    to: "    if (false) throw badCursor('was sent without paged=1')",
+    tests: ['test/security/ui-paging.test.js'],
+  },
+  {
+    what: 'U3: the audit page ignores where the last page ended and rereads the newest rows',
+    file: 'src/ui/server.js',
+    from: "      const rows = await fetchRows(at === null ? '' : `&before=${at}`)",
+    to: "      const rows = await fetchRows('')",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U3 daemon: kind is filtered after the limit, not before',
+    file: 'src/daemon/server.js',
+    from: "  if (before === null && after === null) return ofKind(audit.read({ limit: Infinity })).slice(-(limitRaw === null ? 30 : Number(limitRaw)))",
+    to: "  if (before === null && after === null) return ofKind(audit.read({ limit: limitRaw === null ? 30 : Number(limitRaw) }))",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U3 daemon: a paged read ignores kind',
+    file: 'src/daemon/server.js',
+    from: "  const rows = ofKind(audit.read({ limit: Infinity })).filter((r) => Number.isSafeInteger(r.seq))",
+    to: "  const rows = audit.read({ limit: Infinity }).filter((r) => Number.isSafeInteger(r.seq))",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U3 daemon: before= is ignored, so the log cannot be walked',
+    file: 'src/daemon/server.js',
+    from: "    ? rows.filter((r) => r.seq < at).slice(-limit)",
+    to: "    ? rows.slice(-limit)",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U3 daemon: a paged read takes more than 500 rows',
+    file: 'src/daemon/server.js',
+    from: " && Number(limitRaw) <= AUDIT_PAGE_MAX)) {",
+    to: ")) {",
+    tests: ['test/security/ui-audit-paging.test.js'],
+  },
+  {
+    what: 'U2: assets are served without the session cookie',
+    file: 'src/ui/server.js',
+    from: "    if (!this.sessionCookie || !cookie || !safeEqual(cookie, this.sessionCookie)) {\n      return this.#send(res, 401, { error: 'not authenticated' })\n    }\n    const name",
+    to: "    if (false) {\n      return this.#send(res, 401, { error: 'not authenticated' })\n    }\n    const name",
+    tests: ['test/security/ui-dist-serving.test.js'],
+  },
+  {
+    what: 'U2: an asset path is matched after normalising instead of as it arrived',
+    file: 'src/ui/server.js',
+    from: "  if (raw !== pathname || !raw.startsWith('/')) return false",
+    to: "  if (!raw.startsWith('/')) return false",
+    tests: ['test/security/ui-dist-serving.test.js'],
+  },
+  {
+    what: 'U2: a symlink in dist/assets is followed at startup and served',
+    file: 'src/ui/server.js',
+    from: "    if (!entry.isFile() || !ASSET_NAME.test(entry.name)) continue",
+    to: "    if (!ASSET_NAME.test(entry.name)) continue",
+    tests: ['test/security/ui-dist-serving.test.js'],
+  },
+  {
+    what: 'U2: a file of a type the build never makes (a source map, a text file) is served',
+    file: 'src/ui/server.js',
+    from: "    const type = ASSET_TYPES.get(extname(entry.name).toLowerCase())\n",
+    to: "    const type = ASSET_TYPES.get(extname(entry.name).toLowerCase()) ?? 'application/octet-stream'\n",
+    tests: ['test/security/ui-dist-serving.test.js'],
+  },
+  {
+    what: "U2: the built page is served under a policy that allows inline script",
+    file: "src/ui/server.js",
+    from: "      'content-security-policy': STRICT_CSP,\n    })\n    res.end(html)",
+    to: "      'content-security-policy': \"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\",\n    })\n    res.end(html)",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: 'U2: an asset answer carries no content security policy',
+    file: 'src/ui/server.js',
+    from: "      'cross-origin-resource-policy': 'same-origin',\n      'content-security-policy': STRICT_CSP,\n",
+    to: "      'cross-origin-resource-policy': 'same-origin',\n",
+    tests: ['test/security/ui-dist-serving.test.js'],
+  },
+  // UI rebrand, integration (contract U7, U3 end to end): the page's own
+  // protections, in the modules the bundle is built from. Component tests
+  // (web/src/**/*.test.jsx) run under vitest.
+  {
+    what: "U7: agent text is rendered as markup (dangerouslySetInnerHTML in the page)",
+    file: "web/src/components/ui/UntrustedText.jsx",
+    from: "<span className=\"min-w-0 break-words font-mono text-[0.8125rem] text-ink\">{cleanLine(text)}</span>",
+    to: "<span className=\"min-w-0 break-words font-mono text-[0.8125rem] text-ink\" dangerouslySetInnerHTML={{ __html: cleanLine(text) }} />",
+    tests: ["web/test/page-invariants.test.js", "web/src/components/ui/UntrustedText.test.jsx"],
+  },
+  {
+    what: "U7: UntrustedText shows agent text without stripping bidi and controls",
+    file: "web/src/components/ui/UntrustedText.jsx",
+    from: "{cleanText(text)}</pre>",
+    to: "{String(text ?? '')}</pre>",
+    tests: ["web/src/components/ui/UntrustedText.test.jsx"],
+  },
+  {
+    what: "U7: the hand-off token and placeholders stay in the page after Done",
+    file: "web/src/pages/Sessions.jsx",
+    from: "onDismiss={() => setHandoff(null)}",
+    to: "onDismiss={() => {}}",
+    tests: ["web/src/pages/Sessions.test.jsx"],
+  },
+  {
+    what: "U7: an agent-proposed narrowing value is put in an input's placeholder attribute",
+    file: "web/src/components/approvals/NarrowingFields.jsx",
+    from: "placeholder={NARROW_PLACEHOLDER}",
+    to: "placeholder={asked ?? NARROW_PLACEHOLDER}",
+    tests: ["web/src/pages/Approvals.test.jsx"],
+  },
+  {
+    what: "U7: a code block shows a token with its bidi controls",
+    file: "web/src/components/ui/CodeBlock.jsx",
+    from: "{copyable(code)}</pre>",
+    to: "{String(code ?? '')}</pre>",
+    tests: ["web/src/pages/Sessions.test.jsx"],
+  },
+  {
+    what: "U3: the page reads a list answer that is not a page as an empty page",
+    file: "web/src/lib/paging.js",
+    from: "  if (!Array.isArray(data?.items)) throw new EnvelopeError()",
+    to: "  if (!Array.isArray(data?.items)) return { items: [], next_cursor: null, prev_cursor: null, total: null }",
+    tests: ["web/test/lib-paging.test.js", "web/src/hooks/usePaged.test.jsx"],
+  },
+  {
+    what: "U3: the page asks for a list without paged=1",
+    file: "web/src/lib/paging.js",
+    from: "  const out = { ...filters, paged: 1, limit }",
+    to: "  const out = { ...filters, limit }",
+    tests: ["web/test/lib-paging.test.js", "web/src/hooks/usePaged.test.jsx"],
+  },
+  {
+    what: "U3: a whole-list read stops at the first page instead of following the server's cursor",
+    file: "web/src/lib/paging.js",
+    from: "    seen.add(page.next_cursor)\n    cursor = page.next_cursor",
+    to: "    return { items: out, beside }",
+    tests: ["web/test/lib-paging.test.js"],
+  },
+  // Fix round 1 (Grok security review, finding 1): a copy carries no terminal controls.
+  {
+    what: 'U7 fr1: a copy keeps C0 controls and ESC (only bidi removed)',
+    file: 'web/src/lib/clipboard.js',
+    from: 'export const copyable = (text) => cleanText(text)',
+    to: "export const copyable = (text) => String(text ?? '').replace(/[\\u202a-\\u202e\\u2066-\\u2069]/g, '')",
+    tests: ['test/security/control-ui-page.test.js'],
+  },
+  {
+    what: 'U7 fr1: the session Markdown carries an agent path with its controls',
+    file: 'web/src/components/sessions/sessionLogic.js',
+    from: '  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${cleanLine(p.method)} ${cleanLine(p.path)}`)}`)',
+    to: '  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${p.method} ${p.path}`)}`)',
+    tests: ['test/security/control-ui-page.test.js'],
+  },
+  // Fix round 1 (parity review): complete-list reads, the overview's errors,
+  // and the tripwire rule list.
+  {
+    what: 'U3 fr1: a whole-list read stops silently at 10,000 rows',
+    file: 'web/src/lib/paging.js',
+    from: '    if (!page.next_cursor) return { items: out, beside }',
+    to: '    if (!page.next_cursor || out.length >= 10_000) return { items: out, beside }',
+    tests: ['test/security/ui-complete-lists.test.js', 'web/test/lib-paging.test.js'],
+  },
+  {
+    what: 'U3 fr1: a whole-list read follows a cursor the server already gave, forever',
+    file: 'web/src/lib/paging.js',
+    from: '    if (seen.has(page.next_cursor) || !page.items.length) throw new IncompleteListError(path, out.length)',
+    to: '    if (!page.items.length) throw new IncompleteListError(path, out.length)',
+    tests: ['web/test/lib-paging.test.js'],
+  },
+  {
+    what: 'U3 fr1: a whole-list read keeps following empty pages that point onward',
+    file: 'web/src/lib/paging.js',
+    from: '    if (seen.has(page.next_cursor) || !page.items.length) throw new IncompleteListError(path, out.length)',
+    to: '    if (seen.has(page.next_cursor)) throw new IncompleteListError(path, out.length)',
+    tests: ['web/test/lib-paging.test.js'],
+  },
+  {
+    what: 'U5 fr1: a failed first overview read is an endless loading skeleton',
+    file: 'web/src/pages/Overview.jsx',
+    from: '  if (!data) return error && !loading ? <OverviewError error={error} onRetry={reload} /> : <OverviewSkeleton />',
+    to: '  if (!data) return <OverviewSkeleton />',
+    tests: ['web/src/pages/Overview.test.jsx'],
+  },
+  {
+    what: 'U5 fr1: a failed overview refresh leaves stale data looking current',
+    file: 'web/src/pages/Overview.jsx',
+    from: '        {error && <StaleNotice error={error} readAt={readAt} onRetry={reload} />}',
+    to: '        {false && <StaleNotice error={error} readAt={readAt} onRetry={reload} />}',
+    tests: ['web/src/pages/Overview.test.jsx'],
+  },
+  {
+    what: 'U4 fr1: the tripwire rule list has no search box',
+    file: 'web/src/components/overview/ContainmentCard.jsx',
+    from: '      <SearchInput value={list.q} onChange={list.setQ} label="Search tripwire rules" placeholder="Search rule, code, action…" />',
+    to: '',
+    tests: ['web/src/pages/Containment.test.jsx'],
+  },
+  {
+    what: 'U4 fr1: the tripwire rule list has no paging controls',
+    file: 'web/src/components/overview/ContainmentCard.jsx',
+    from: '      <Pagination {...list.pagination} label="Tripwire rule pages" />',
+    to: '',
+    tests: ['web/src/pages/Containment.test.jsx'],
+  },
+  {
+    what: 'U4 fr1: the rules editor and signed body hold only the displayed page of rules',
+    file: 'web/src/pages/Overview.jsx',
+    from: "  const r = await fetchPages(get, 'tripwires')",
+    to: "  const r = await fetchPages(get, 'tripwires'); r.items = r.items.slice(0, 25)",
+    tests: ['web/src/pages/Containment.test.jsx'],
+  },
+  {
+    what: "U3: the search box is not sent to the server",
+    file: "web/src/lib/paging.js",
+    from: "  if (term) out.q = term",
+    to: "  if (false) out.q = term",
+    tests: ["web/test/lib-paging.test.js", "web/src/hooks/usePaged.test.jsx"],
+  },
+  {
+    what: "U3: the paged tripwires answer loses its rules",
+    file: "web/src/pages/Overview.jsx",
+    from: "  return { ...r.beside, rules: r.items }",
+    to: "  return { ...r.beside }",
+    tests: ["web/src/pages/Containment.test.jsx"],
+  },
+  {
+    what: "U3: the access review drops the paged report's credentials",
+    file: "web/src/pages/Overview.jsx",
+    from: "    credentials: c.items,",
+    to: "    credentials: [],",
+    tests: ["web/src/pages/Overview.test.jsx"],
+  },
+  {
+    what: "U3: a cursor the server no longer opens is shown as an error instead of starting the list again",
+    file: "web/src/hooks/usePaged.js",
+    from: "      if (e?.code === 'AV_BAD_CURSOR' && view.cursor) {",
+    to: "      if (false) {",
+    tests: ["web/src/hooks/usePaged.test.jsx"],
+  },
+  {
+    what: "U3 fix1: Prev with less than a page above it starts again from the newest row",
+    file: "src/ui/server.js",
+    from: "      const items = found.slice(0, paging.limit).reverse()\n      const more = found.length > paging.limit",
+    to: "      if (found.length < want) return this.#auditPage(kind, { ...paging, cursor: null })\n      const items = found.slice(0, paging.limit).reverse()\n      const more = found.length > paging.limit",
+    tests: ["test/security/ui-audit-growth.test.js"],
+  },
+  {
+    what: "U3 fix1: a short Prev page still offers a Prev",
+    file: "src/ui/server.js",
+    from: "        prev_cursor: more ? seal('prev', items[0].seq) : null,",
+    to: "        prev_cursor: items.length ? seal('prev', items[0].seq) : null,",
+    tests: ["test/security/ui-audit-growth.test.js"],
+  },
+  {
+    what: "U2 fix2: the raw path is not checked before routing",
+    file: "src/ui/server.js",
+    from: "    if (!literalPath(String(req.url), url.pathname)) return this.#send(res, 404, { error: 'not found' })",
+    to: "    if (false) return this.#send(res, 404, { error: 'not found' })",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix2: a path the parser changed counts as literal",
+    file: "src/ui/server.js",
+    from: "  if (raw !== pathname || !raw.startsWith('/')) return false",
+    to: "  if (!raw.startsWith('/')) return false",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix2: encoded separators and backslashes count as literal",
+    file: "src/ui/server.js",
+    from: "  if (raw.includes('\\\\') || /%(2e|2f|5c)/i.test(raw)) return false",
+    to: "",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix2: dot and empty segments count as literal",
+    file: "src/ui/server.js",
+    from: "part === '.' || part === '..' || (part === '' && i < all.length - 1))",
+    to: "false)",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix2: a request target the URL parser refuses is thrown, not answered",
+    file: "src/ui/server.js",
+    from: "    try { url = new URL(req.url, this.origin) } catch { return this.#send(res, 404, { error: 'not found' }) }",
+    to: "    url = new URL(req.url, this.origin)",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix3: a dist directory that is a symlink is followed",
+    file: "src/ui/server.js",
+    from: "  if (top.isSymbolicLink()) throw refuse('the dist directory is a symlink')",
+    to: "",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix3: an index.html that is a symlink is followed",
+    file: "src/ui/server.js",
+    from: "  if (indexKind.isSymbolicLink()) throw refuse('index.html is a symlink')",
+    to: "",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U2 fix3: an assets directory that is a symlink is read through",
+    file: "src/ui/server.js",
+    from: "  if (assetsKind?.isSymbolicLink()) throw refuse('the assets directory is a symlink')",
+    to: "",
+    tests: ["test/security/ui-dist-serving.test.js"],
+  },
+  {
+    what: "U3 fix4: a kind-filtered tail takes any limit",
+    file: "src/daemon/server.js",
+    from: "  if (limitRaw !== null && !(/^[1-9][0-9]{0,2}$/.test(limitRaw) && Number(limitRaw) <= AUDIT_PAGE_MAX)) {",
+    to: "  if ((before !== null || after !== null) && limitRaw !== null && !(/^[1-9][0-9]{0,2}$/.test(limitRaw) && Number(limitRaw) <= AUDIT_PAGE_MAX)) {",
+    tests: ["test/security/ui-audit-paging.test.js"],
+  },
+  {
+    what: "U3 fix4: the unfiltered tail is held to the new bound",
+    file: "src/daemon/server.js",
+    from: "  if (before === null && after === null && kind === null) return audit.read(",
+    to: "  if (false) return audit.read(",
+    tests: ["test/security/ui-audit-paging.test.js"],
+  },
+  {
+    what: "U3 fix4: the page's old kind read passes its own limit to the daemon",
+    file: "src/ui/server.js",
+    from: "`/v1/audit?limit=${AUDIT_BATCH}&kind=${encodeURIComponent(kind)}`",
+    to: "`/v1/audit?limit=${limit}&kind=${encodeURIComponent(kind)}`",
+    tests: ["test/security/ui-audit-paging.test.js"],
   },
 ]
 
@@ -4375,16 +4765,12 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => { killChild(); restoreAll(); process.exit(130) })
 }
 
-/**
- * Run `files` under node --test, asynchronously: a synchronous spawn blocked
- * the event loop, so neither a timeout nor a signal handler could run until
- * the tests finished, which under a looping mutant was never.
- */
-function runTests(files) {
+/** One command, asynchronously, killed with its whole group at the timeout. */
+function runCommand(args) {
   return new Promise((resolve) => {
     let stdout = ''
     let timedOut = false
-    child = spawn(node, ['--test', ...files], { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawn(node, args, { cwd: ROOT, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (d) => { stdout += d })
     child.stderr.resume()
@@ -4395,10 +4781,48 @@ function runTests(files) {
       child?.stdout.destroy()
       child?.stderr.destroy()
     }, TIMEOUT_MS)
-    const done = () => { clearTimeout(timer); child = null; resolve({ stdout, timedOut }) }
-    child.on('close', done)
-    child.on('error', done)
+    const done = (code) => { clearTimeout(timer); child = null; resolve({ stdout, timedOut, code }) }
+    child.on('close', (code) => done(code))
+    child.on('error', () => done(1))
   })
+}
+
+// The page's component tests (web/src/**/*.test.jsx) run under vitest; every
+// other test file under node --test.
+const VITEST = join(ROOT, 'node_modules', 'vitest', 'vitest.mjs')
+const isVitest = (file) => /\/web\/src\/.*\.test\.jsx?$/.test(file)
+
+/**
+ * Run `files`, asynchronously: a synchronous spawn blocked the event loop, so
+ * neither a timeout nor a signal handler could run until the tests finished,
+ * which under a looping mutant was never. Returns the failures counted from
+ * node's summary and vitest's TAP, and whether either run was killed.
+ */
+async function runTests(files) {
+  const plain = files.filter((f) => !isVitest(f))
+  const ui = files.filter(isVitest)
+  let failed = 0
+  let notOk = 0
+  let stdout = ''
+  let timedOut = false
+  if (plain.length) {
+    const r = await runCommand(['--test', ...plain])
+    stdout += r.stdout
+    timedOut ||= r.timedOut
+    const m = /^[#ℹ] fail (\d+)/m.exec(r.stdout)
+    failed += m ? Number(m[1]) : 0
+  }
+  if (ui.length && !timedOut) {
+    const r = await runCommand([VITEST, 'run', '--config', join(ROOT, 'web', 'vite.config.js'), '--reporter=tap-flat', ...ui])
+    stdout += r.stdout
+    timedOut ||= r.timedOut
+    const bad = (r.stdout.match(/^not ok \d+(?![^\n]*# (?:TODO|SKIP))/gm) || []).length
+    // A suite that would not even load (the mutant broke an import) fails
+    // with no test line; that is the suite going red too.
+    failed += bad || (!r.timedOut && r.code !== 0 ? 1 : 0)
+  }
+  notOk = (stdout.match(/^\s*not ok \d+(?![^\n]*# (?:TODO|SKIP))/gm) || []).length
+  return { stdout, timedOut, failed, notOk }
 }
 
 console.log(`Checking ${MUTATIONS.length} protections against the suite.\n`)
@@ -4417,14 +4841,13 @@ for (const m of MUTATIONS) {
   writeFileSync(path, original.replace(m.from, m.to))
   try {
     const res = await runTests(m.tests.map((t) => join(ROOT, t)))
-    const failed = /^[#ℹ] fail (\d+)/m.exec(res.stdout)
-    const count = failed ? Number(failed[1]) : 0
+    const count = res.failed
     if (res.timedOut) {
       // A run that never finished proves nothing by itself: the tests may
       // have been about to pass. It counts as caught only when a test had
       // already failed before the kill; otherwise it is reported, and fails
       // the run, so a short timeout cannot hide a surviving protection.
-      const notOk = (res.stdout.match(/^\s*not ok \d+(?![^\n]*# (?:TODO|SKIP))/gm) || []).length
+      const notOk = res.notOk
       if (notOk > 0) {
         console.log(`ok ${m.what}\n   caught by ${notOk} failing test${notOk > 1 ? 's' : ''} before the run was killed at ${TIMEOUT_MS / 1000} s`)
       } else {
