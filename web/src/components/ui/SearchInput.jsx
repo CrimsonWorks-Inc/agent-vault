@@ -26,7 +26,7 @@ export function SearchInput({ value, onChange, label = 'Search', placeholder = '
           type="button"
           onClick={() => onChange('')}
           aria-label="Clear search"
-          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-ink"
+          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-ink focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
         >
           <XMarkIcon aria-hidden="true" className="size-4" />
         </button>

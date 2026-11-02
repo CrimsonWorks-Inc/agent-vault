@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
 import { operationFor } from '../lib/presence.js'
-import { SESSIONS, callsTo, challengeOf, envelope, pagesRoutes } from './fixtures.pages-a.js'
+import { SESSIONS, callsTo, challengeOf, envelope, pagesRoutes, Enrolled } from './fixtures.pages-a.jsx'
 import { Sessions } from './Sessions.jsx'
 
 // Whole pages over a fake server: generous when the machine is busy.
@@ -30,7 +30,7 @@ describe('Sessions: the list', () => {
     let release
     const gate = new Promise((r) => { release = r })
     const server = fakeServer(pagesRoutes({ 'GET sessions': async (c) => { await gate; return envelope(SESSIONS)(c) } }))
-    renderWith(<Sessions />, { server })
+    renderWith(<Enrolled><Sessions /></Enrolled>, { server })
     expect(await screen.findByRole('heading', { name: 'Sessions', level: 1 })).toBeTruthy()
     expect(screen.getAllByText('Loading').length).toBeGreaterThan(0)
     await act(async () => { release() })
@@ -48,17 +48,17 @@ describe('Sessions: the list', () => {
 
   it('empty and error states', async () => {
     const server = fakeServer(pagesRoutes({ 'GET sessions': envelope([]) }))
-    renderWith(<Sessions />, { server })
+    renderWith(<Enrolled><Sessions /></Enrolled>, { server })
     expect(await screen.findByText('No sessions yet.')).toBeTruthy()
     const broken = fakeServer(pagesRoutes({ 'GET sessions': { __status: 500, body: { error: 'nope' } } }))
-    renderWith(<Sessions />, { server: broken })
+    renderWith(<Enrolled><Sessions /></Enrolled>, { server: broken })
     expect(await screen.findByText('Could not read the sessions.')).toBeTruthy()
   })
 
   it('pages with paged=1 and the server cursor', async () => {
     const many = Array.from({ length: 64 }, (_, i) => ({ id: `s_${i}`, label: `bot ${i}`, state: 'active', grants: 1, creds: [], expires_at: null, infinite: true }))
     const server = fakeServer(pagesRoutes({ 'GET sessions': envelope(many) }))
-    renderWith(<Sessions />, { server })
+    renderWith(<Enrolled><Sessions /></Enrolled>, { server })
     await screen.findAllByText('bot 0')
     expect(callsTo(server, 'GET', 'sessions')[0].query).toEqual({ paged: '1', limit: '25' })
     await click(screen.getByRole('button', { name: 'Next page' }))
@@ -73,7 +73,7 @@ describe('Sessions: the list', () => {
 describe('Sessions: revoke and narrow are signed over exactly what is sent', () => {
   it('Revoke: session.revoke, DELETE sessions?sid with only the proof', async () => {
     const server = fakeServer(pagesRoutes({ 'DELETE sessions': { ok: true } }))
-    renderWith(<Sessions />, { server })
+    renderWith(<Enrolled><Sessions /></Enrolled>, { server })
     await screen.findAllByText('issue triage'); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'Revoke session s_live' })[0])
     expect(await challengeOf(server)).toEqual({ op: 'session.revoke', sid: 's_live' })
@@ -91,7 +91,7 @@ describe('Sessions: revoke and narrow are signed over exactly what is sent', () 
     it(`${label}: session.narrow over app.html's body, and the before/after card`, async () => {
       const result = { session_id: 's_live', expires_at: '2026-11-01T12:00:00Z', infinite: false, grants: [{ cred: 'gh-work', before: { methods: ['GET', 'POST'] }, after: { methods: ['GET', 'HEAD'] }, expires_at: null }] }
       const server = fakeServer(pagesRoutes({ 'POST sessions/narrow': result }))
-      renderWith(<Sessions />, { server })
+      renderWith(<Enrolled><Sessions /></Enrolled>, { server })
       await screen.findAllByText('issue triage'); await enrolled(server)
       await click(screen.getAllByRole('button', { name: 'Narrow session s_live' })[0])
       const dialog = await screen.findByRole('dialog')
@@ -113,7 +113,7 @@ describe('Sessions: revoke and narrow are signed over exactly what is sent', () 
 describe('Sessions: New session and the hand-off card', () => {
   it('creates an infinite, auto-approved session: warnings first, then session.create over the exact body', async () => {
     const server = fakeServer(pagesRoutes({ 'POST sessions': CREATED }))
-    renderWith(<Sessions rest="new" />, { server, vault: { context: { cli: 'agent-vault' } } })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server, vault: { context: { cli: 'agent-vault' } } })
     await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
     // gh-work is picked by default; add openai.
     await click(screen.getByRole('checkbox', { name: /openai/ }))
@@ -148,7 +148,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('the env-file mapping: rename, add a base URL, refuse a bad name', async () => {
     const server = fakeServer(pagesRoutes({ 'POST sessions': CREATED }))
-    renderWith(<Sessions rest="new" />, { server })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
     await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
     await click(screen.getByRole('button', { name: /Create session/ }))
     const handoff = (await screen.findByRole('heading', { name: 'Hand this to the agent' })).closest('[data-handoff]')
@@ -166,7 +166,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('Done drops the token and placeholders from the page, and nothing was stored', async () => {
     const server = fakeServer(pagesRoutes({ 'POST sessions': CREATED }))
-    renderWith(<Sessions rest="new" />, { server })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
     await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
     await click(screen.getByRole('button', { name: /Create session/ }))
     await screen.findByRole('heading', { name: 'Hand this to the agent' })
@@ -183,7 +183,7 @@ describe('Sessions: New session and the hand-off card', () => {
   it('a form mistake is said before signing and spends no tap', async () => {
     const authenticator = fakeAuthenticator()
     const server = fakeServer(pagesRoutes())
-    renderWith(<Sessions rest="new" />, { server, authenticator })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server, authenticator })
     await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
     await click(screen.getByRole('checkbox', { name: /gh-work/ })) // nothing picked now
     await click(screen.getByRole('button', { name: /Create session/ }))
@@ -199,7 +199,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('spend limits appear only for a model credential', async () => {
     const server = fakeServer(pagesRoutes())
-    renderWith(<Sessions rest="new" />, { server })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
     await screen.findByRole('group', { name: 'Credentials' })
     await click(screen.getByRole('button', { name: 'Advanced limits' }))
     expect(screen.queryByLabelText('Spend limit: tokens')).toBeNull()
@@ -209,7 +209,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('Save as template: template.save over {name, spec: the session body}', async () => {
     const server = fakeServer(pagesRoutes({ 'POST templates': { name: 'gh-read', version: 3, lint: [{ message: 'wide paths' }] } }))
-    renderWith(<Sessions rest="new" />, { server })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
     await screen.findByRole('group', { name: 'Credentials' }); await enrolled(server)
     await click(screen.getByRole('button', { name: 'Save as template' }))
     const dialog = await screen.findByRole('dialog')
@@ -223,7 +223,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('from a template: only narrower choices, and the hash of the template on screen', async () => {
     const server = fakeServer(pagesRoutes({ 'POST sessions': CREATED }))
-    renderWith(<Sessions rest="new:gh-read" />, { server })
+    renderWith(<Enrolled><Sessions rest="new:gh-read" /></Enrolled>, { server })
     expect(await screen.findByText(/These fields can only narrow it/)).toBeTruthy()
     await enrolled(server)
     expect(callsTo(server, 'GET', 'templates').some((c) => c.query.name === 'gh-read')).toBe(true)
@@ -237,7 +237,7 @@ describe('Sessions: New session and the hand-off card', () => {
 
   it('without a credential, says to add one first', async () => {
     const server = fakeServer(pagesRoutes({ 'GET credentials': envelope([]) }))
-    renderWith(<Sessions rest="new" />, { server })
+    renderWith(<Enrolled><Sessions rest="new" /></Enrolled>, { server })
     expect(await screen.findByText('Add a credential first')).toBeTruthy()
   })
 })
@@ -245,13 +245,13 @@ describe('Sessions: New session and the hand-off card', () => {
 describe('Sessions: detail and access review', () => {
   it('detail: the facts, the paged grants, agent payload rules as text, incomplete history', async () => {
     const server = fakeServer(pagesRoutes())
-    const { container } = renderWith(<Sessions rest="detail:s_live" />, { server })
+    const { container } = renderWith(<Enrolled><Sessions rest="detail:s_live" /></Enrolled>, { server })
     expect(await screen.findByText(/History is incomplete: the log was rotated/)).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Session s_live' })).toBeTruthy()
     await screen.findAllByText('ph_1')
-    const paged = callsTo(server, 'GET', 'sessions/detail').find((c) => c.query.paged === '1')
-    expect(paged.query).toEqual({ sid: 's_live', paged: '1', limit: '25' })
-    expect(callsTo(server, 'GET', 'sessions/detail').some((c) => c.query.sid === 's_live' && !c.query.paged)).toBe(true)
+    expect(callsTo(server, 'GET', 'sessions/detail').some((c) => c.query.limit === '25')).toBe(true)
+    // Every read of the list route is paged (U3); the whole record comes from walking its pages.
+    for (const c of callsTo(server, 'GET', 'sessions/detail')) expect(c.query).toMatchObject({ sid: 's_live', paged: '1' })
     const payload = container.querySelector('figure[data-untrusted]')
     expect(payload.textContent).toContain('"one_of"')
     expect(payload.textContent).not.toMatch(/[\u202a-\u202e]/)
@@ -262,9 +262,10 @@ describe('Sessions: detail and access review', () => {
 
   it('access review: both lists paged by the server, with what to tighten', async () => {
     const server = fakeServer(pagesRoutes())
-    renderWith(<Sessions rest="review" />, { server })
+    renderWith(<Enrolled><Sessions rest="review" /></Enrolled>, { server })
     await screen.findAllByText('granted but never used:')
-    const asks = callsTo(server, 'GET', 'report/access').filter((c) => c.query.paged === '1')
+    for (const c of callsTo(server, 'GET', 'report/access')) expect(c.query.paged).toBe('1')
+    const asks = callsTo(server, 'GET', 'report/access').filter((c) => c.query.limit === '25')
     expect(asks.map((c) => c.query.list).sort()).toEqual(['credentials', 'sessions'])
     for (const c of asks) expect(c.query).toMatchObject({ since: '7d', paged: '1', limit: '25' })
     expect(screen.getAllByText('HEAD').length).toBeGreaterThan(0)

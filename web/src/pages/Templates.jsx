@@ -3,10 +3,9 @@
 // a view of each spec, and a way to start a session from one. Templates are
 // saved from New session ("Save as template").
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { PlusIcon } from '@heroicons/react/16/solid'
 import { usePaged } from '../hooks/usePaged.js'
-import { usePresence } from '../hooks/usePresence.js'
 import { formatHash } from '../lib/router.js'
 import { Card } from '../components/ui/Card.jsx'
 import { PageHeader } from '../components/ui/PageHeader.jsx'
@@ -19,10 +18,8 @@ import { TemplateView } from '../components/templates/TemplateView.jsx'
 export const TEMPLATE_SEARCH_FIELDS = ['name', 'summary']
 
 export function Templates() {
-  const presence = usePresence()
   const list = usePaged('templates', { searchFields: TEMPLATE_SEARCH_FIELDS })
   const [viewing, setViewing] = useState(null)
-  useEffect(() => { if (!presence.known) presence.refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <>

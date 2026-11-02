@@ -5,6 +5,7 @@ import { usePresence } from '../../hooks/usePresence.js'
 import { usePrompt } from '../../hooks/usePrompt.js'
 import { useToast } from '../../hooks/useToast.js'
 import { useVault } from '../../hooks/useVault.js'
+import { queryBound } from '../../lib/presence.js'
 import { Button } from '../ui/Button.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
 import { Menu } from '../ui/Menu.jsx'
@@ -60,8 +61,8 @@ export function CredentialActions({ c, onTest, onManage, onRotate, onChanged }) 
     })
     if (!ok) return
     try {
-      const operation = await presence.operationFor('cred.remove', { slug })
-      await presence.gated(operation, (proof) => api.del('credentials', { slug }, { presence: proof }), { label: `remove credential ${slug}` })
+      const r = queryBound('DELETE credentials', { slug })
+      await presence.gated(r.operation, (proof) => api.del(r.path, r.query, { presence: proof }), { label: `remove credential ${slug}` })
       toast('Removed', { tone: 'ok' })
       slow.clear()
       onChanged?.()

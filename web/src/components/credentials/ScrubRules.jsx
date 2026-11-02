@@ -3,6 +3,7 @@ import { useApi, useSlowCache } from '../../hooks/useApi.js'
 import { usePresence } from '../../hooks/usePresence.js'
 import { useToast } from '../../hooks/useToast.js'
 import { ago } from '../../lib/format.js'
+import { queryBound } from '../../lib/presence.js'
 import { cleanLine } from '../../lib/text.js'
 import { CodeBlock } from '../ui/CodeBlock.jsx'
 import { Field } from '../ui/Field.jsx'
@@ -45,8 +46,8 @@ export function ScrubRules({ c, sample, onSample, onChanged }) {
                 size="sm"
                 variant="danger"
                 label={`remove scrub pattern ${p.id} from ${slug}`}
-                operation={() => presence.operationFor('cred.scrub_remove', { slug, id: p.id })}
-                send={(proof) => api.del('credentials/scrub', { slug, id: p.id }, { presence: proof })}
+                operation={queryBound('DELETE credentials/scrub', { slug, id: p.id }).operation}
+                send={(proof) => { const r = queryBound('DELETE credentials/scrub', { slug, id: p.id }); return api.del(r.path, r.query, { presence: proof }) }}
                 onDone={() => { toast(`Removed ${p.id}`, { tone: 'ok' }); slow.clear(); onChanged?.() }}
                 aria-label={`Remove pattern ${p.id}`}
               >

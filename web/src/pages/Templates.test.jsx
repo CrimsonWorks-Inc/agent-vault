@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeServer, renderWith } from '../test/harness.jsx'
-import { TEMPLATES, callsTo, challengeOf, envelope, pagesRoutes } from './fixtures.pages-a.js'
+import { TEMPLATES, callsTo, challengeOf, envelope, pagesRoutes, Enrolled } from './fixtures.pages-a.jsx'
 import { Templates } from './Templates.jsx'
 
 // Whole pages over a fake server: generous when the machine is busy.
@@ -14,7 +14,7 @@ const enrolled = (server) => waitFor(() => expect(callsTo(server, 'GET', 'presen
 describe('Templates', () => {
   it('lists the saved templates by name, with version, elevation and credentials', async () => {
     const server = fakeServer(pagesRoutes())
-    renderWith(<Templates />, { server })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server })
     expect(await screen.findByRole('heading', { name: 'Templates', level: 1 })).toBeTruthy()
     await screen.findAllByText('gh-read')
     expect(screen.getAllByText('v2').length).toBeGreaterThan(0)
@@ -25,11 +25,11 @@ describe('Templates', () => {
 
   it('empty: says how to make one; error: says what went wrong', async () => {
     const server = fakeServer(pagesRoutes({ 'GET templates': envelope([]) }))
-    renderWith(<Templates />, { server })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server })
     expect(await screen.findByText('No templates yet')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Open New session' }).getAttribute('href')).toBe('#sessions/new')
     const broken = fakeServer(pagesRoutes({ 'GET templates': { __status: 503, body: { error: 'x' } } }))
-    renderWith(<Templates />, { server: broken })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server: broken })
     // 503 is "cannot reach the daemon", which App swaps for its own screen; the page still says it failed.
     expect(await screen.findByText('Could not read the templates.')).toBeTruthy()
   })
@@ -37,7 +37,7 @@ describe('Templates', () => {
   it('pages and searches through the server (paged=1, cursor, q)', async () => {
     const many = Array.from({ length: 30 }, (_, i) => ({ name: `t-${String(i).padStart(2, '0')}`, version: 1, creds: [], elevated: [] }))
     const server = fakeServer(pagesRoutes({ 'GET templates': envelope(many) }))
-    renderWith(<Templates />, { server })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server })
     await screen.findAllByText('t-00')
     expect(callsTo(server, 'GET', 'templates')[0].query).toEqual({ paged: '1', limit: '25' })
     await click(screen.getByRole('button', { name: 'Next page' }))
@@ -49,7 +49,7 @@ describe('Templates', () => {
 
   it('Delete: template.delete, DELETE templates?name with only the proof', async () => {
     const server = fakeServer(pagesRoutes({ 'DELETE templates': { ok: true } }))
-    renderWith(<Templates />, { server })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server })
     await screen.findAllByText('gh-read'); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'Delete template gh-read' })[0])
     expect(await challengeOf(server)).toEqual({ op: 'template.delete', name: 'gh-read' })
@@ -61,7 +61,7 @@ describe('Templates', () => {
 
   it('View shows the stored spec; Use opens New session on it', async () => {
     const server = fakeServer(pagesRoutes())
-    renderWith(<Templates />, { server })
+    renderWith(<Enrolled><Templates /></Enrolled>, { server })
     await screen.findAllByText('gh-read')
     await click(screen.getAllByRole('button', { name: 'View template gh-read' })[0])
     const dialog = await screen.findByRole('dialog')

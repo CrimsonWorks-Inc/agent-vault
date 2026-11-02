@@ -4,10 +4,9 @@
 // Pins are shown, read-only; they are set from the command line, where the
 // live certificate chain can be checked (F11).
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useApi, useSlowCache } from '../hooks/useApi.js'
 import { usePaged } from '../hooks/usePaged.js'
-import { usePresence } from '../hooks/usePresence.js'
 import { Card } from '../components/ui/Card.jsx'
 import { PageHeader } from '../components/ui/PageHeader.jsx'
 import { Pagination } from '../components/ui/Pagination.jsx'
@@ -23,7 +22,6 @@ export const CREDENTIAL_SEARCH_FIELDS = ['slug', 'id', 'kind', 'label']
 export function Credentials() {
   const api = useApi()
   const slow = useSlowCache()
-  const presence = usePresence()
   const list = usePaged('credentials', { searchFields: CREDENTIAL_SEARCH_FIELDS })
   // The last probe and the last scrub sample, per credential, as app.html
   // kept them: they survive a re-read of the list, not a reload.
@@ -32,9 +30,6 @@ export function Credentials() {
   const [managing, setManaging] = useState(null)
   const [rotating, setRotating] = useState(null)
 
-  // Signing needs to know whether an authenticator is enrolled; the page may
-  // be the first one opened.
-  useEffect(() => { if (!presence.known) presence.refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const reload = list.reload
   const onTest = useCallback(async (slug) => {

@@ -1,9 +1,9 @@
 import { DocumentDuplicateIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
 import { EyeIcon, PlayIcon } from '@heroicons/react/16/solid'
 import { useApi } from '../../hooks/useApi.js'
-import { usePresence } from '../../hooks/usePresence.js'
 import { useToast } from '../../hooks/useToast.js'
 import { ago } from '../../lib/format.js'
+import { queryBound } from '../../lib/presence.js'
 import { formatHash } from '../../lib/router.js'
 import { cleanLine } from '../../lib/text.js'
 import { Badge } from '../ui/Badge.jsx'
@@ -17,7 +17,6 @@ import { GatedButton } from '../ui/GatedButton.jsx'
  */
 export function TemplatesTable({ list, onView, onChanged }) {
   const api = useApi()
-  const presence = usePresence()
   const toast = useToast()
   const searching = Boolean(list.q.trim())
   return (
@@ -65,8 +64,8 @@ export function TemplatesTable({ list, onView, onChanged }) {
                 size="sm"
                 variant="danger"
                 label={`delete template ${t.name}`}
-                operation={() => presence.operationFor('template.delete', { name: t.name })}
-                send={(proof) => api.del('templates', { name: t.name }, { presence: proof })}
+                operation={queryBound('DELETE templates', { name: t.name }).operation}
+                send={(proof) => { const r = queryBound('DELETE templates', { name: t.name }); return api.del(r.path, r.query, { presence: proof }) }}
                 onDone={() => { toast(`Deleted template ${t.name}`, { tone: 'ok' }); onChanged?.() }}
                 aria-label={`Delete template ${t.name}`}
               >

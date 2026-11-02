@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { act, configure, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
 import { operationFor } from '../lib/presence.js'
-import { CREDS, callsTo, challengeOf, envelope, pagesRoutes } from './fixtures.pages-a.js'
+import { CREDS, callsTo, challengeOf, envelope, pagesRoutes, Enrolled } from './fixtures.pages-a.jsx'
 import { Credentials } from './Credentials.jsx'
 
 const loaded = () => screen.findAllByText('gh-work')
@@ -19,7 +19,7 @@ describe('Credentials: states', () => {
     let release
     const gate = new Promise((r) => { release = r })
     const server = fakeServer(pagesRoutes({ 'GET credentials': async (c) => { await gate; return envelope(CREDS)(c) } }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     expect(await screen.findByRole('heading', { name: 'Credentials', level: 1 })).toBeTruthy()
     expect(screen.getAllByText('Loading').length).toBeGreaterThan(0)
     await act(async () => { release() })
@@ -34,7 +34,7 @@ describe('Credentials: states', () => {
 
   it('empty: says so and points at the form', async () => {
     const server = fakeServer(pagesRoutes({ 'GET credentials': envelope([]) }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     expect(await screen.findByText('No credentials yet')).toBeTruthy()
     expect(screen.getByText('Add one below.')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Add a credential' })).toBeTruthy()
@@ -43,7 +43,7 @@ describe('Credentials: states', () => {
   it('error: says what the server said, and asks again', async () => {
     let fail = true
     const server = fakeServer(pagesRoutes({ 'GET credentials': (c) => (fail ? { __status: 500, body: { error: 'daemon said no' } } : envelope(CREDS)(c)) }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     expect(await screen.findByText('Could not read the credentials.')).toBeTruthy()
     expect(screen.getByText('daemon said no')).toBeTruthy()
     fail = false
@@ -53,7 +53,7 @@ describe('Credentials: states', () => {
 
   it('the quarantine reason is agent text: stripped of bidi, never HTML', async () => {
     const server = fakeServer(pagesRoutes())
-    const { container } = renderWith(<Credentials />, { server })
+    const { container } = renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded()
     const reason = container.querySelector('[data-untrusted]')
     expect(reason.textContent).toContain('leaked evil <b>bold</b>')
@@ -68,7 +68,7 @@ describe('Credentials: paging (U3)', () => {
 
   it('asks with paged=1 and the page size, follows next_cursor, and resets on search', async () => {
     const server = fakeServer(pagesRoutes({ 'GET credentials': envelope(many) }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await screen.findAllByText('c-00')
     const first = callsTo(server, 'GET', 'credentials')[0]
     expect(first.query).toEqual({ paged: '1', limit: '25' })
@@ -85,7 +85,7 @@ describe('Credentials: paging (U3)', () => {
 describe('Credentials: every change is signed over exactly what is sent', () => {
   it('Store credential: cred.add with the value by digest, then the value is cleared', async () => {
     const server = fakeServer(pagesRoutes({ 'POST credentials': { slug: 'new-one' } }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded(); await enrolled(server)
     type(screen.getByPlaceholderText('gh-frozencrow'), 'new-one')
     const value = screen.getByPlaceholderText('paste the token; it is not echoed and never returned')
@@ -103,7 +103,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
   it('Store credential without a value asks for one and spends no tap', async () => {
     const authenticator = fakeAuthenticator()
     const server = fakeServer(pagesRoutes())
-    renderWith(<Credentials />, { server, authenticator })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server, authenticator })
     await loaded(); await enrolled(server)
     type(screen.getByPlaceholderText('gh-frozencrow'), 'x')
     await click(screen.getByRole('button', { name: /Store credential/ }))
@@ -113,7 +113,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
 
   it('Remove: a page-drawn confirm, then cred.remove and DELETE credentials?slug', async () => {
     const server = fakeServer(pagesRoutes({ 'DELETE credentials': { ok: true } }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded(); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'More actions for gh-work' })[0])
     await click(await screen.findByRole('menuitem', { name: 'Remove' }))
@@ -129,7 +129,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
 
   it('Release: cred.release, POST credentials/release {slug, presence}', async () => {
     const server = fakeServer(pagesRoutes({ 'POST credentials/release': { ok: true } }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded(); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'Release old-hook' })[0])
     expect(await challengeOf(server)).toEqual({ op: 'cred.release', slug: 'old-hook' })
@@ -140,7 +140,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
   it('Quarantine is open (F16): asks a reason, sends no signature', async () => {
     const authenticator = fakeAuthenticator()
     const server = fakeServer(pagesRoutes({ 'POST credentials/quarantine': { denied_approvals: 2 } }))
-    renderWith(<Credentials />, { server, authenticator })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server, authenticator })
     await loaded()
     await click(screen.getAllByRole('button', { name: 'More actions for gh-work' })[0])
     await click(await screen.findByRole('menuitem', { name: 'Quarantine' }))
@@ -155,7 +155,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
   it('Rotate: the value is typed, the exact operation is shown, and only "Sign it" signs', async () => {
     const authenticator = fakeAuthenticator()
     const server = fakeServer(pagesRoutes({ 'POST credentials/rotate': { rotated: { version: 3 }, invalidated_approvals: 1 } }))
-    renderWith(<Credentials />, { server, authenticator })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server, authenticator })
     await loaded(); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'Rotate gh-work' })[0])
     let dialog = await screen.findByRole('dialog')
@@ -163,8 +163,9 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
     expect(await screen.findByText('No value was typed. Nothing was changed.')).toBeTruthy()
     type(within(dialog).getByLabelText('New value for gh-work (not echoed)'), 'sk-test-new')
     await click(within(dialog).getByRole('button', { name: 'Next' }))
-    dialog = await screen.findByRole('dialog')
-    const shown = dialog.querySelector('[data-operation]').textContent
+    await waitFor(() => expect(document.querySelector('[data-operation]')).not.toBeNull())
+    dialog = document.querySelector('[data-operation]').closest('[role=dialog]')
+    const shown = document.querySelector('[data-operation]').textContent
     const expected = await operationFor('cred.rotate', { slug: 'gh-work', value: 'sk-test-new', mode: 'keep', retire_hours: 24 })
     expect(JSON.parse(shown)).toEqual(expected)
     expect(shown).not.toContain('sk-test-new')
@@ -180,7 +181,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
       'POST credentials/scrub': { id: 'sp_2', sample: { matches: 1, redacted: 'key=[redacted]' } },
       'DELETE credentials/scrub': { ok: true },
     }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded(); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'More actions for gh-work' })[0])
     await click(await screen.findByRole('menuitem', { name: 'Scrub patterns and expiry' }))
@@ -194,14 +195,15 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
     expect(await challengeOf(server)).toEqual({ op: 'cred.scrub_add', slug: 'gh-work', pattern: 'acme_[A-Za-z0-9]{20}', sample: 'key=acme_aaaaaaaaaaaaaaaaaaaa' })
     expect(await screen.findByText('Added sp_2 to gh-work')).toBeTruthy()
     expect(await within(dialog).findByText('key=[redacted]')).toBeTruthy()
-    await click(within(dialog).getByRole('button', { name: 'Remove pattern sp_1' }))
-    expect(await challengeOf(server, 1)).toEqual({ op: 'cred.scrub_remove', slug: 'gh-work', id: 'sp_1' })
-    await waitFor(() => expect(callsTo(server, 'DELETE', 'credentials/scrub')[0]?.query).toEqual({ slug: 'gh-work', id: 'sp_1' }))
+    // A numeric id is signed as the string the server reads from the query.
+    await click(within(dialog).getByRole('button', { name: 'Remove pattern 3' }))
+    expect(await challengeOf(server, 1)).toEqual({ op: 'cred.scrub_remove', slug: 'gh-work', id: '3' })
+    await waitFor(() => expect(callsTo(server, 'DELETE', 'credentials/scrub')[0]?.query).toEqual({ slug: 'gh-work', id: '3' }))
   })
 
   it('Expiry: set (midnight UTC) and clear, both cred.expiry_set', async () => {
     const server = fakeServer(pagesRoutes({ 'POST credentials/expiry': { ok: true } }))
-    renderWith(<Credentials />, { server })
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded(); await enrolled(server)
     await click(screen.getAllByRole('button', { name: 'More actions for openai' })[0])
     await click(await screen.findByRole('menuitem', { name: 'Scrub patterns and expiry' }))
@@ -217,7 +219,7 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
 
   it('Test probes the credential (open) and shows the result on its row', async () => {
     const server = fakeServer(pagesRoutes({ 'POST credentials/test': { status: 'ok', http_status: 200, latency_ms: 41, scopes: ['repo'] } }))
-    const { container } = renderWith(<Credentials />, { server })
+    const { container } = renderWith(<Enrolled><Credentials /></Enrolled>, { server })
     await loaded()
     await click(screen.getAllByRole('button', { name: 'Test gh-work' })[0])
     await waitFor(() => expect(container.querySelector('[data-test-line]')?.textContent).toBe('test: ok · 200 · 41ms · scopes: repo'))

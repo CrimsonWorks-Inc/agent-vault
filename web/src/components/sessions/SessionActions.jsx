@@ -3,6 +3,7 @@ import { AdjustmentsHorizontalIcon, DocumentMagnifyingGlassIcon } from '@heroico
 import { useApi } from '../../hooks/useApi.js'
 import { usePresence } from '../../hooks/usePresence.js'
 import { useToast } from '../../hooks/useToast.js'
+import { queryBound } from '../../lib/presence.js'
 import { cleanLine } from '../../lib/text.js'
 import { Button } from '../ui/Button.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
@@ -16,7 +17,6 @@ import { NARROWINGS } from './sessionLogic.js'
  */
 export function SessionActions({ s, onDetails, onNarrowed, onChanged }) {
   const api = useApi()
-  const presence = usePresence()
   const toast = useToast()
   const [narrowing, setNarrowing] = useState(false)
   const sid = s.id
@@ -32,8 +32,8 @@ export function SessionActions({ s, onDetails, onNarrowed, onChanged }) {
             size="sm"
             variant="danger"
             label={`revoke session ${sid}`}
-            operation={() => presence.operationFor('session.revoke', { sid })}
-            send={(proof) => api.del('sessions', { sid }, { presence: proof })}
+            operation={queryBound('DELETE sessions', { sid }).operation}
+            send={(proof) => { const r = queryBound('DELETE sessions', { sid }); return api.del(r.path, r.query, { presence: proof }) }}
             onDone={() => { toast('Revoked', { tone: 'ok' }); onChanged?.() }}
             aria-label={`Revoke session ${sid}`}
           >

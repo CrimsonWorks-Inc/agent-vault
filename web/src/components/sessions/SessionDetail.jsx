@@ -3,6 +3,7 @@ import { XMarkIcon } from '@heroicons/react/16/solid'
 import { useApiQuery } from '../../hooks/useApi.js'
 import { usePaged } from '../../hooks/usePaged.js'
 import { until } from '../../lib/format.js'
+import { fetchPages } from '../../lib/paging.js'
 import { cleanLine } from '../../lib/text.js'
 import { cx } from '../../lib/cx.js'
 import { Badge } from '../ui/Badge.jsx'
@@ -26,13 +27,24 @@ const WIDTH = ['w-0', 'w-[5%]', 'w-[10%]', 'w-[15%]', 'w-[20%]', 'w-[25%]', 'w-[
   'w-[55%]', 'w-[60%]', 'w-[65%]', 'w-[70%]', 'w-[75%]', 'w-[80%]', 'w-[85%]', 'w-[90%]', 'w-[95%]', 'w-full']
 
 /**
+ * The whole record for the header, the activity and the Markdown copy:
+ * every page of grants (paged=1, U3) with `session` and `activity` from
+ * beside them. A server from before U3 answers it whole.
+ */
+export async function readSessionDetail(get, sid) {
+  const r = await fetchPages(get, 'sessions/detail', { filters: { sid } })
+  if (r.items === null) return r.legacy
+  return { ...r.beside, grants: r.items }
+}
+
+/**
  * `session show`, as a card (F19): the session's facts, each grant's
  * effective policy and use, and what the audit log says it did. The grants
  * are paged (U3); the header, the activity and the Markdown copy come from
  * the whole record.
  */
 export function SessionDetail({ sid, onClose }) {
-  const { data: d, error, loading } = useApiQuery((api) => api.get('sessions/detail', { sid }), [sid])
+  const { data: d, error, loading } = useApiQuery((api) => readSessionDetail(api.get, sid), [sid])
   const grants = usePaged('sessions/detail', { filters: { sid }, searchFields: ['grant_id', 'cred', 'state'] })
 
   if (error && !d) {

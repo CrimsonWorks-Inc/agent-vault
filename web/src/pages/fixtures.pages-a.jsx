@@ -1,8 +1,10 @@
 // Answers for the Credentials, Sessions and Templates tests, shaped as the
 // UI server gives them with paged=1 (the U3 envelope), plus the helpers the
 // tests share. Test-only: nothing in the app imports this file.
+import { useEffect } from 'react'
 import { waitFor } from '@testing-library/react'
 import { expect } from 'vitest'
+import { usePresence } from '../hooks/usePresence.js'
 
 export const CHALLENGE = { challengeId: 'ch1', challenge: 'AAEC', allowCredentials: [{ id: 'Y3JlZDE' }], rpId: 'localhost' }
 export const SOON = new Date(Date.now() + 3 * 86400e3).toISOString()
@@ -33,7 +35,7 @@ export const CREDS = [
   {
     slug: 'gh-work', kind: 'github', connector: { host: 'api.github.com' },
     fields: [{ fp8: 'a1b2c3d4', sites: ['header:Authorization:Bearer'], version: 2, rotated_at: new Date(Date.now() - 3 * 86400e3).toISOString() }],
-    pins: { 'api.github.com': 2 }, health: { status: 'ok' }, scrub_patterns: [{ id: 'sp_1', source: 'ghx_[A-Za-z0-9]{20}', added_at: new Date().toISOString() }],
+    pins: { 'api.github.com': 2 }, health: { status: 'ok' }, scrub_patterns: [{ id: 3, source: 'ghx_[A-Za-z0-9]{20}', added_at: new Date().toISOString() }],
     probe_path: '/user',
   },
   {
@@ -113,3 +115,13 @@ export async function challengeOf(server, n = 0) {
 
 /** The calls to one route. */
 export const callsTo = (server, method, path) => server.calls.filter((c) => c.method === method && c.path === path)
+
+/**
+ * Reads presence/state once, as the App shell does for every page, so a
+ * gated button knows an authenticator is enrolled.
+ */
+export function Enrolled({ children }) {
+  const presence = usePresence()
+  useEffect(() => { presence.refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  return children
+}

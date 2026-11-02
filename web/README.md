@@ -46,6 +46,33 @@ It shoots light and dark at 1440 and 390 wide. Use `127.0.0.1`, not `localhost`:
 
 **With hot reload** (`npm run dev:ui`): run `agent-vault ui` on a throwaway vault, open the link it prints (that sets the `av_ui` cookie for `localhost`), then open Vite's `http://localhost:5173`. `/api` is proxied to `AV_UI_PROXY` (default `http://localhost:7412`). Touch ID cannot complete from Vite's origin, because the UI server checks the WebAuthn origin.
 
+## Signing a DELETE: use `queryBound`
+
+Five gated routes carry their parameters in the query string, and the server builds the signed operation from it with `url.searchParams.get(name)`:
+
+- `DELETE credentials`
+- `DELETE sessions`
+- `DELETE credentials/scrub`
+- `DELETE credentials/pins`
+- `DELETE templates`
+
+`get()` returns a string, or null when the parameter is absent. So "remove every pin for this host" is signed with `spki: null`, and a scrub id is signed as `"3"`, never `3`. An operation that leaves the key out, or uses a number, is a different operation, and the server refuses it with 409.
+
+Never build these operations by hand. `queryBound` builds the query and the operation from one object, so they cannot disagree:
+
+```jsx
+import { queryBound, describeOperation } from '../lib/presence.js'
+
+const r = queryBound('DELETE credentials/pins', { slug, host })      // spki omitted: every pin for the host
+<GatedButton
+  operation={r.operation}                                           // { op: 'cred.pins_remove', slug, host, spki: null }
+  label={describeOperation(r.operation)}
+  send={(proof) => api.del(r.path, r.query, { presence: proof })}
+>Remove pins</GatedButton>
+```
+
+`web/test/query-bound.test.js` checks every one of these against the real `src/ui/server.js`. Every other gated route binds the request body: sign `operationFor(op, body)` over exactly the body you send. Like the server, `operationFor` refuses a body that names a different `op` or carries a `*_sha256` field.
+
 ## The rules the tests hold
 
 - No `dangerouslySetInnerHTML`, `innerHTML`, `eval` or `new Function` in `src/`. Agent-written text goes through `<UntrustedText>`.

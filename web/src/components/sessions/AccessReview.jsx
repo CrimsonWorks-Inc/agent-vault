@@ -2,6 +2,7 @@ import { CheckBadgeIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline
 import { useApiQuery, useSlowCache } from '../../hooks/useApi.js'
 import { usePaged } from '../../hooks/usePaged.js'
 import { ago } from '../../lib/format.js'
+import { readAccessReport } from '../../pages/Overview.jsx'
 import { cleanLine } from '../../lib/text.js'
 import { Badge } from '../ui/Badge.jsx'
 import { Card } from '../ui/Card.jsx'
@@ -23,7 +24,8 @@ export const REVIEW_SINCE = '7d'
  */
 export function AccessReview() {
   const slow = useSlowCache()
-  const header = useApiQuery((api) => slow.get('report', () => api.get('report/access', { since: REVIEW_SINCE })), [])
+  // The Overview's own reader and cache key, so the two never disagree.
+  const header = useApiQuery((api) => slow.get('report', () => readAccessReport(api.get, REVIEW_SINCE)), [])
   const sessions = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'sessions' }, searchFields: ['id', 'label', 'state'], storageKey: 'agent-vault.page-size.report/access:sessions' })
   const creds = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'credentials' }, searchFields: ['slug'], storageKey: 'agent-vault.page-size.report/access:credentials' })
   const report = header.data

@@ -10,7 +10,6 @@ import { PlusIcon } from '@heroicons/react/16/solid'
 import { KeyIcon } from '@heroicons/react/24/outline'
 import { useApiQuery } from '../hooks/useApi.js'
 import { usePaged } from '../hooks/usePaged.js'
-import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
 import { fetchAll } from '../lib/paging.js'
 import { formatHash } from '../lib/router.js'
@@ -38,7 +37,6 @@ const go = (rest) => {
 }
 
 export function Sessions({ rest = '' }) {
-  const presence = usePresence()
   const vault = useVault()
   const route = sessionsRoute(rest)
   const [tab, setTab] = useState(route.tab)
@@ -55,7 +53,6 @@ export function Sessions({ rest = '' }) {
     setTab(r.tab)
     setDetail(r.detail ?? null)
   }, [rest])
-  useEffect(() => { if (!presence.known) presence.refresh() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const choose = (id) => { setTab(id); go(id === 'list' ? '' : id) }
   const openDetail = (sid) => { setDetail(sid); setTab('list'); go(`detail:${sid}`); globalThis.scrollTo?.({ top: 0 }) }

@@ -16,7 +16,7 @@
     "src": "../node_modules/@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2"
   },
   "index.html": {
-    "file": "assets/index-DrYWB2QM.js",
+    "file": "assets/index-Be5f6EEU.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -33,7 +33,7 @@
     "src": "src/assets/favicon.svg"
   },
   "style.css": {
-    "file": "assets/style-CgLNHHNn.css",
+    "file": "assets/style-B81b1VvR.css",
     "src": "style.css"
   }
 }
