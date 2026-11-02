@@ -25,6 +25,11 @@ export function Mark({ size = 28, compact, title, className }) {
       aria-label={title}
     >
       <defs>
+        {/* A mask paints in luminance, not colour: white keeps the door, black
+            cuts the dial and keyhole out of it. These two literals are
+            stencil values, so they cannot come from a theme token, and a token
+            that changed them would break the mark. The colour you see is
+            currentColor on the path below. brand.test.js allows exactly these. */}
         <mask id={`av-punch-${id}`}>
           <rect width="64" height="64" fill="#fff" />
           <circle cx="32" cy="32" r="15" fill="none" stroke="#000" strokeWidth={small ? 3.4 : 2.6} />

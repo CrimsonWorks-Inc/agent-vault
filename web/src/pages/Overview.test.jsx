@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
 import { overviewRoutes } from '../test/fixtures.js'
 import { Overview } from './Overview.jsx'
+import { LIST_ROUTES } from '../lib/paging.js'
 
 const settle = (server) => waitFor(() => expect(server.calls.some((c) => c.path === 'notify')).toBe(true))
 
@@ -21,15 +22,44 @@ describe('Overview (parity with app.html)', () => {
     expect(within(glance).getByText('214')).toBeTruthy()
   })
 
-  it('asks every list with paged=1 and the largest page, so it counts all of it', async () => {
+  it('sends paged=1 on every list request it makes (U3)', async () => {
     const server = fakeServer(overviewRoutes())
     renderWith(<Overview />, { server })
     await settle(server)
-    for (const path of ['credentials', 'sessions']) {
-      const call = server.calls.find((c) => c.path === path)
-      expect(call.query).toMatchObject({ paged: '1', limit: '200' })
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'report/access')).toBe(true))
+    const lists = server.calls.filter((c) => LIST_ROUTES.includes(c.path))
+    expect(new Set(lists.map((c) => c.path))).toEqual(new Set(['credentials', 'sessions', 'tripwires', 'audit', 'report/access']))
+    for (const call of lists) {
+      expect(call.query.paged, `${call.method} ${call.path}`).toBe('1')
       expect(call.headers['x-av-ui']).toBe('1')
     }
+    for (const path of ['credentials', 'sessions', 'tripwires', 'report/access']) {
+      expect(server.calls.find((c) => c.path === path).query.limit).toBe('200')
+    }
+    expect(server.calls.find((c) => c.path === 'audit').query).toEqual({ paged: '1', limit: '5', kind: 'tripwire.fired' })
+    expect(server.calls.find((c) => c.path === 'report/access').query).toMatchObject({ since: '7d', list: 'sessions' })
+  })
+
+  it('reads the U3 envelopes of tripwires, report/access and audit', async () => {
+    const env = (items, beside = {}, next = null) => ({ items, next_cursor: next, prev_cursor: null, total: null, ...beside })
+    const server = fakeServer(overviewRoutes({
+      'GET tripwires': env([{ id: 'mine', codes: ['AV_X'], threshold: 2, window_s: 60, action: 'panic' }], { enabled: true, rules_saved: true, defaults: [] }),
+      'GET report/access': ({ query }) => (query.list === 'credentials'
+        ? env([{ slug: 'old', quarantined: true }], { complete: true, since: '7d' })
+        : query.cursor === 'p2'
+          ? env([{ id: 's_9', label: 'second page', unused_methods: ['PUT'] }], { complete: false, since: '7d' })
+          : env([{ id: 's_1', label: 'first page', unused_methods: ['DELETE'] }], { complete: false, since: '7d' }, 'p2')),
+      'GET audit': env([{ kind: 'tripwire.fired', rule_id: 'mine', ts: new Date().toISOString(), action: 'panic' }]),
+    }))
+    renderWith(<Overview />, { server })
+    await settle(server)
+    expect(await screen.findByText('first page')).toBeTruthy()
+    expect(screen.getByText('second page')).toBeTruthy()
+    expect(screen.getByText('quarantined')).toBeTruthy()
+    expect(screen.getByText('The audit log does not cover the whole period, so this review is incomplete.')).toBeTruthy()
+    expect(screen.getAllByText('mine').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /Turn off/ })).toBeTruthy()
+    expect(server.calls.find((c) => c.path === 'report/access' && c.query.cursor === 'p2').query).toMatchObject({ paged: '1', list: 'sessions', since: '7d' })
   })
 
   it('reads the paged envelope too, walking every page', async () => {

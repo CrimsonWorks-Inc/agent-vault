@@ -106,6 +106,7 @@ describe('primitives', () => {
     expect(onChange).toHaveBeenCalledWith('')
     fireEvent.click(screen.getByRole('button', { name: 'Clear search' }))
     expect(onChange).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('button', { name: 'Clear search' }).className).toContain('focus-visible:outline-focus')
   })
 
   it('CodeBlock copies its text, and says when the browser refuses', async () => {

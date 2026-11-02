@@ -10,7 +10,7 @@ import { useCallback } from 'react'
 import { useApiQuery, useSlowCache } from '../hooks/useApi.js'
 import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
-import { fetchAll, itemsOf } from '../lib/paging.js'
+import { fetchAll, fetchPages, itemsOf, pageQuery } from '../lib/paging.js'
 import { prfSupported } from '../lib/presence.js'
 import { expiresIn, plural, soonestExpiry } from '../lib/format.js'
 import { formatHash } from '../lib/router.js'
@@ -26,6 +26,40 @@ import { ConfirmationCard, LockBanner, UnlockingCard } from '../components/overv
 
 export const OVERVIEW_POLL_MS = 5000
 
+/**
+ * Tripwires, paged (U3): the rules are the items, and `enabled`,
+ * `rules_saved` and `defaults` sit beside them. A server from before U3
+ * answers the whole object, which is used as it is.
+ */
+export async function readTripwires(get) {
+  const r = await fetchPages(get, 'tripwires')
+  if (r.items === null) return r.legacy
+  return { ...r.beside, rules: r.items }
+}
+
+/**
+ * The access report, paged (U3): one list per request (`list=sessions`, then
+ * `list=credentials`), with `complete` beside each page. Put back together in
+ * the shape the card reads. A server from before U3 answers it whole.
+ */
+export async function readAccessReport(get, since = '7d') {
+  const s = await fetchPages(get, 'report/access', { filters: { since, list: 'sessions' } })
+  if (s.items === null) return s.legacy
+  const c = await fetchPages(get, 'report/access', { filters: { since, list: 'credentials' } })
+  const incomplete = s.beside.complete === false || c.beside.complete === false
+  return {
+    ...s.beside,
+    sessions: s.items,
+    credentials: c.items ?? itemsOf(c.legacy?.credentials),
+    complete: incomplete ? false : (s.beside.complete ?? c.beside.complete),
+  }
+}
+
+/** The last few tripwire firings: one page of audit, filtered in the daemon. */
+export function readFired(get, limit = 5) {
+  return get('audit', pageQuery({ limit, filters: { kind: 'tripwire.fired' } })).then(itemsOf)
+}
+
 /** Everything the overview shows, in one load (app.html's views.overview). */
 export async function loadOverview(api, slow, presence) {
   const [status, creds, sessions] = await Promise.all([
@@ -33,9 +67,9 @@ export async function loadOverview(api, slow, presence) {
   ])
   const quiet = (p) => p.catch(() => null)
   const [report, tripwires, fired, notify, unlockState] = await Promise.all([
-    status.locked ? null : quiet(slow.get('report', () => api.get('report/access', { since: '7d' }))),
-    quiet(slow.get('tripwires', () => api.get('tripwires'))),
-    status.locked ? null : quiet(slow.get('fired', () => api.get('audit', { kind: 'tripwire.fired', limit: 5 }).then(itemsOf))),
+    status.locked ? null : quiet(slow.get('report', () => readAccessReport(api.get))),
+    quiet(slow.get('tripwires', () => readTripwires(api.get))),
+    status.locked ? null : quiet(slow.get('fired', () => readFired(api.get))),
     quiet(slow.get('notify', () => api.get('notify'))),
     quiet(api.get('unlock/state')),
     presence.refresh(),
