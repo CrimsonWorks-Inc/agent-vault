@@ -131,6 +131,29 @@ test('the daemon: paging parameters are whole numbers in range or refused', asyn
   assert.equal((await control('/v1/audit?before=10&limit=500')).status, 200)
 })
 
+test('the daemon: a kind-filtered tail is bounded at 500 even with no before or after', async () => {
+  // Refused before anything is read, like the range reads.
+  for (const limit of ['1000000000', '501', 'Infinity', '0', '-1', '1e3', '2.5', '', 'x', '0500']) {
+    const r = await control(`/v1/audit?kind=test.alpha&limit=${encodeURIComponent(limit)}`)
+    assert.equal(r.status, 403, limit)
+    assert.equal(r.body.code, 'AV_POLICY_DENIED', limit)
+    assert.equal(r.body.rule, 'audit_range', limit)
+  }
+  const most = await control('/v1/audit?kind=test.alpha&limit=500')
+  assert.equal(most.status, 200)
+  assert.deepEqual(most.body.map((x) => x.seq), ofKind('test.alpha').slice(-500).map((x) => x.seq))
+  // No limit is the old default of 30.
+  const plain = await control('/v1/audit?kind=test.alpha')
+  assert.deepEqual(plain.body.map((x) => x.seq), ofKind('test.alpha').slice(-30).map((x) => x.seq))
+})
+
+test('the daemon: the unfiltered tail keeps its old reading of limit', async () => {
+  const huge = await control('/v1/audit?limit=1000000000')
+  assert.equal(huge.status, 200)
+  assert.equal(huge.body.length, all().length)
+  assert.deepEqual((await control('/v1/audit?limit=x')).body, vault.audit.read({ limit: Number('x') }))
+})
+
 test('the CLI: audit tail reads the same tail as before', async () => {
   const r = await cli(dir, ['audit', 'tail', '--limit', '7', '--json'])
   assert.equal(r.code, 0, r.stderr)
@@ -223,4 +246,9 @@ test('the page: without paged=1 the audit route is unchanged', async () => {
   assert.deepEqual(r.body, towardPage(vault.audit.read({ limit: 5 })))
   const k = await page('audit?kind=test.beta&limit=4')
   assert.deepEqual(k.body.map((x) => x.seq), ofKind('test.beta').slice(-4).map((x) => x.seq))
+  // A limit the daemon would refuse is never sent to it: the page's old
+  // kind read asks for the daemon's most and answers from those.
+  const big = await page('audit?kind=test.alpha&limit=100000')
+  assert.equal(big.status, 200)
+  assert.deepEqual(big.body.map((x) => x.seq), ofKind('test.alpha').slice(-500).map((x) => x.seq))
 })
