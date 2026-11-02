@@ -35,9 +35,9 @@ import { rememberSession } from '../client-state.js'
 import { fetchPending, parseOverrides, collectApproved } from '../pending.js'
 import { overridesOf } from '../daemon/session-requests.js'
 import { findAll as findPlaceholders } from '../core/placeholder.js'
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, readdirSync, lstatSync, statSync, openSync, fstatSync, closeSync, realpathSync, constants as fsConstants } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join, extname } from 'node:path'
+import { dirname, join, extname, sep } from 'node:path'
 import { Cursors, PagingError, pagingOf, pageList, matches } from './list-paging.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -126,7 +126,10 @@ export class UiServer {
     // Not marked as activity here. Counting every request kept the server up
     // on the strength of the page's own refused polls once its cookie had
     // expired; only a caller holding the session counts (see #touch).
-    const url = new URL(req.url, this.origin)
+    // A target the parser refuses (`//`, `//host:x`) is answered, not thrown:
+    // a throw here is a rejection nothing catches, which ends the process.
+    let url
+    try { url = new URL(req.url, this.origin) } catch { return this.#send(res, 404, { error: 'not found' }) }
 
     // Arriving by IP would put the page on an origin whose domain cannot be a
     // relying party id, so the authenticator would refuse to enrol. Redirect to
@@ -146,6 +149,10 @@ export class UiServer {
     const origin = req.headers.origin
     if (origin && origin !== this.origin) return this.#send(res, 403, { error: 'cross-origin request refused' })
 
+    // The path is routed only as it arrived. A dot segment, an encoded
+    // separator or a backslash would let the parser turn it into a different
+    // path (/assets/../ into /), so any of them is a 404 before routing.
+    if (!literalPath(String(req.url), url.pathname)) return this.#send(res, 404, { error: 'not found' })
     if (url.pathname === '/') return this.#servePage(req, res, url)
     if (url.pathname.startsWith('/api/')) return this.#serveApi(req, res, url)
     if (url.pathname.startsWith('/assets/')) return this.#serveAsset(req, res, url)
@@ -537,7 +544,9 @@ export class UiServer {
           const paging = pagingOf(url.searchParams)
           if (paging) return send(200, await this.#auditPage(kind, paging))
           const limit = Number(url.searchParams.get('limit') || 40)
-          const path = kind === null ? `/v1/audit?limit=${limit}` : `/v1/audit?limit=${Math.max(limit, 500)}&kind=${encodeURIComponent(kind)}`
+          // The daemon filters kind before its limit, so its most (500) of that kind
+          // is enough for any page, and a limit it would refuse is never sent.
+          const path = kind === null ? `/v1/audit?limit=${limit}` : `/v1/audit?limit=${AUDIT_BATCH}&kind=${encodeURIComponent(kind)}`
           const rows = await this.#control('GET', path)
           return send(200, kind === null ? rows : (Array.isArray(rows) ? rows.filter((r) => r?.kind === kind).slice(-limit) : []))
         }
@@ -813,10 +822,22 @@ export class UiServer {
         if (found.length >= want || rows.length < batch || !Number.isSafeInteger(last) || last <= at) break
         at = last
       }
-      // Less than a full page is newer than this: that is the first page.
-      if (found.length < want) return this.#auditPage(kind, { ...paging, cursor: null })
+      // The page is the rows just newer than the cursor and nothing else, even
+      // when there are fewer than a page of them. Starting again from the
+      // current newest would repeat rows the reader has already seen once the
+      // log has grown since the first page. Fewer than a page and one more
+      // means there is nothing newer, so there is no Prev.
       const items = found.slice(0, paging.limit).reverse()
-      return { items, next_cursor: seal('next', items.at(-1).seq), prev_cursor: seal('prev', items[0].seq), total: null }
+      const more = found.length > paging.limit
+      // Next from here is the rows older than the oldest shown; with nothing
+      // shown, the rows from the cursor's own row down.
+      const oldest = items.length ? items.at(-1).seq : cursor.key[0] + 1
+      return {
+        items,
+        next_cursor: Number.isSafeInteger(oldest) ? seal('next', oldest) : null,
+        prev_cursor: more ? seal('prev', items[0].seq) : null,
+        total: null,
+      }
     }
 
     // Older than the cursor (or from the newest), closest first.
@@ -1095,28 +1116,83 @@ const ASSET_TYPES = new Map([
 const ASSET_BYTES_MAX = 32 * 1024 * 1024
 
 /**
+ * Whether a request path can be routed as it arrived (U2): the same path the
+ * URL parser made of it, with no dot segment, no empty segment, no backslash
+ * and no encoded dot, slash or backslash. Anything else would be routed as a
+ * path other than the one that was asked for.
+ */
+export function literalPath(rawUrl, pathname) {
+  const raw = rawUrl.split('?')[0]
+  if (raw !== pathname || !raw.startsWith('/')) return false
+  if (raw.includes('\\') || /%(2e|2f|5c)/i.test(raw)) return false
+  return !raw.slice(1).split('/').some((part, i, all) => part === '.' || part === '..' || (part === '' && i < all.length - 1))
+}
+
+/**
  * The built page, read once: index.html and every regular file directly in
- * dist/assets whose name and type are allowed. Symlinks and directories are
- * skipped. Null when there is no dist/index.html.
+ * dist/assets whose name and type are allowed. Null when there is no
+ * dist/index.html (the U2 wave-1 fallback).
+ *
+ * Nothing outside dist is read. The dist directory, its assets directory and
+ * index.html must not be symlinks, a symlinked asset is skipped, and each file
+ * is opened without following a link and read only if its canonical path is
+ * inside dist's and is the file that was opened.
  */
 export function loadDist(distDir) {
+  const kindOf = (path) => {
+    try { return lstatSync(path) } catch (e) { if (e.code === 'ENOENT') return null; throw e }
+  }
+  const refuse = (what) => new Error(`the built UI in ${distDir} is not usable: ${what}; rebuild it with npm run build:ui`)
+  const top = kindOf(distDir)
+  if (top === null) return null
+  if (top.isSymbolicLink()) throw refuse('the dist directory is a symlink')
+  if (!top.isDirectory()) throw refuse('dist is not a directory')
+  const root = realpathSync(distDir)
   const indexPath = join(distDir, 'index.html')
-  if (!existsSync(indexPath)) return null
-  const index = readFileSync(indexPath)
+  const indexKind = kindOf(indexPath)
+  if (indexKind === null) return null
+  if (indexKind.isSymbolicLink()) throw refuse('index.html is a symlink')
+  if (!indexKind.isFile()) throw refuse('index.html is not a regular file')
+  const index = readInside(root, indexPath, refuse)
+  const assetsDir = join(distDir, 'assets')
+  const assetsKind = kindOf(assetsDir)
+  if (assetsKind?.isSymbolicLink()) throw refuse('the assets directory is a symlink')
+  if (assetsKind && !assetsKind.isDirectory()) throw refuse('assets is not a directory')
+  const entries = assetsKind ? readdirSync(assetsDir, { withFileTypes: true }) : []
   const assets = new Map()
-  let entries = []
-  try { entries = readdirSync(join(distDir, 'assets'), { withFileTypes: true }) } catch { entries = [] }
   let total = index.length
   for (const entry of entries) {
     if (!entry.isFile() || !ASSET_NAME.test(entry.name)) continue
     const type = ASSET_TYPES.get(extname(entry.name).toLowerCase())
     if (!type) continue
-    const body = readFileSync(join(distDir, 'assets', entry.name))
+    const body = readInside(root, join(assetsDir, entry.name), refuse)
     total += body.length
     if (total > ASSET_BYTES_MAX) throw new Error(`the built UI in ${distDir} is over ${ASSET_BYTES_MAX} bytes; rebuild it with npm run build:ui`)
     assets.set(entry.name, { body, type })
   }
   return { index, assets }
+}
+
+/** One regular file under root, opened without following a link at its end, and checked to be inside root. */
+function readInside(root, path, refuse) {
+  let fd
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+  } catch (e) {
+    if (e.code === 'ELOOP') throw refuse(`${path} is a symlink`)
+    throw e
+  }
+  try {
+    const opened = fstatSync(fd)
+    if (!opened.isFile()) throw refuse(`${path} is not a regular file`)
+    const real = realpathSync(path)
+    if (!real.startsWith(root + sep)) throw refuse(`${path} is outside dist`)
+    const named = statSync(real)
+    if (named.dev !== opened.dev || named.ino !== opened.ino) throw refuse(`${path} changed while it was read`)
+    return readFileSync(fd)
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /** Where app.html takes the one parser of typed narrowing (contract C21). */

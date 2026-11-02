@@ -15,7 +15,7 @@ import http from 'node:http'
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { UiServer, STRICT_CSP, loadDist } from '../../src/ui/server.js'
+import { UiServer, STRICT_CSP, loadDist, literalPath } from '../../src/ui/server.js'
 import { startStub } from './control-ui-helpers.js'
 
 const EXACT_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
@@ -59,6 +59,8 @@ function raw(path, { method = 'GET', headers = {}, withCookie = true } = {}) {
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
     })
     req.on('error', reject)
+    // A server that never answers is a failure here, not a hang.
+    req.setTimeout(15_000, () => req.destroy(new Error(`no answer to ${method} ${path}`)))
     req.end()
   })
 }
@@ -139,16 +141,53 @@ test('traversal, encoded slashes, backslashes and dot segments are all 404', asy
     '/assets/./index-Ab12Cd.js', '/assets//index-Ab12Cd.js', '/assets/index-Ab12Cd.js/',
     '/assets/index-Ab12Cd.js%00', '/assets/index-Ab12Cd.js%20', '/assets/%69ndex-Ab12Cd.js',
     '/assets/', '/assets', '/index.html', '/manifest.json', '/app.html', '/assets/manifest.json',
+    // Paths the URL parser turns into / itself: still 404, never the page.
+    '/assets/../', '/assets/..', '/assets/%2e%2e/', '/assets/%2E%2E', '/assets/..\\', '/assets/../?anything=1',
+    '/./', '/.', '/%2e/', '/assets/./../', '/assets/nested/../../', '//', '/%2f', '/%5c',
+    // And into an API route or an asset.
+    '/assets/../api/credentials', '/x/../assets/index-Ab12Cd.js', '/assets/nested/../index-Ab12Cd.js',
   ]
   for (const path of tries) {
     const r = await raw(path)
-    // A path that normalises to / is the page itself and is fine; nothing
-    // else may answer 200.
-    if (r.status === 200) assert.equal(r.body.toString(), INDEX, `${path} served something other than the page`)
-    else assert.equal(r.status, 404, path)
+    assert.equal(r.status, 404, path)
     assert.ok(!r.body.toString().includes(OUTSIDE), `${path} leaked a file outside the allowlist`)
     assert.ok(!r.body.toString().includes('"file"'), `${path} served the manifest`)
   }
+})
+
+test('a path is routed only as it arrived: the literal / and literal asset names still work', async () => {
+  assert.equal((await raw('/')).status, 200)
+  assert.equal((await raw('/?x=1')).status, 200)
+  assert.equal((await raw('/assets/index-Ab12Cd.js')).status, 200)
+  assert.equal((await raw('/assets/index-Ab12Cd.js?v=2')).status, 200)
+  // An API path with a dot segment never reaches the API either.
+  const api = await raw('/api/../api/credentials', { headers: { 'x-av-ui': '1' } })
+  assert.equal(api.status, 404)
+  // A target the URL parser refuses outright is a 404 too, and the server is still up after it.
+  for (const bad of ['//', '//localhost:1/x', '//[']) assert.equal((await raw(bad)).status, 404, bad)
+  assert.equal((await raw('/')).status, 200)
+  const absolute = await raw(`http://localhost:${ui.boundPort}/`)
+  assert.equal(absolute.status, 404, 'an absolute-form target is not a literal path')
+})
+
+test('literalPath: only a path the parser leaves as it is, with no dot segment or encoded separator', () => {
+  const parsed = (r) => { try { return new URL(r, 'http://localhost:1').pathname } catch { return null } }
+  for (const ok of ['/', '/api/credentials', '/assets/index-Ab12Cd.js', '/assets/index-Ab12Cd.js?v=1', '/api/'] ) {
+    assert.equal(literalPath(ok, parsed(ok)), true, ok)
+  }
+  for (const bad of [
+    '/assets/..%2findex.html', '/assets/x%2Fy.js', '/api/%2fcredentials', '/api/a%5cb', '/assets/a%2E.js',
+    '/assets/a\\b.js', '/assets//x.js', '/api//credentials',
+    '/assets/../', '/./', '/assets/%2e%2e/', '*', 'http://localhost:1/',
+  ]) assert.equal(literalPath(bad, parsed(bad) ?? '/'), false, bad)
+  // The same path the parser made is not enough on its own.
+  assert.equal(literalPath('/api/x%2fy', '/api/x%2fy'), false)
+  assert.equal(literalPath('/api/./x', '/api/./x'), false)
+  assert.equal(literalPath('/api/a\\b', '/api/a\\b'), false)
+  assert.equal(literalPath('/api//x', '/api//x'), false)
+  // Nor is a path free of those marks that the parser still changed.
+  assert.equal(literalPath('/api/a{b', '/api/a%7Bb'), false)
+  assert.equal(literalPath('/api/x', '/api/y'), false)
 })
 
 test('dotfiles, unlisted types, nested files and symlinks are never served', async () => {
@@ -194,6 +233,78 @@ test('loadDist lists only regular, allowed files directly in assets', () => {
   ])
   assert.equal(loaded.index.toString(), INDEX)
   assert.equal(loadDist(join(root, 'nowhere')), null)
+})
+
+/** A throwaway dist beside an outside directory, for the symlink cases. */
+function symlinkCase(build) {
+  const at = mkdtempSync(join(tmpdir(), 'av-dist-link-'))
+  const d = join(at, 'dist')
+  const outside = join(at, 'outside')
+  mkdirSync(d)
+  mkdirSync(outside)
+  writeFileSync(join(outside, 'secret-Ab12.js'), OUTSIDE)
+  writeFileSync(join(outside, 'index.html'), OUTSIDE)
+  try { return build(d, outside, at) } finally { rmSync(at, { recursive: true, force: true }) }
+}
+const REFUSED = /npm run build:ui/
+
+test('loadDist refuses an assets directory that is a symlink, even to a directory beside dist', () => {
+  symlinkCase((d, outside) => {
+    writeFileSync(join(d, 'index.html'), INDEX)
+    symlinkSync(outside, join(d, 'assets'), 'dir')
+    assert.throws(() => loadDist(d), (e) => REFUSED.test(e.message) && /symlink/.test(e.message) && !e.message.includes(OUTSIDE))
+  })
+  // A symlink to a directory inside dist is refused too: the rule is no links.
+  symlinkCase((d) => {
+    writeFileSync(join(d, 'index.html'), INDEX)
+    mkdirSync(join(d, 'real'))
+    writeFileSync(join(d, 'real', 'app-Ab12.js'), JS)
+    symlinkSync(join(d, 'real'), join(d, 'assets'), 'dir')
+    assert.throws(() => loadDist(d), /symlink/)
+  })
+})
+
+test('loadDist refuses an index.html that is a symlink, inside or outside dist, and a dangling one', () => {
+  symlinkCase((d, outside) => {
+    symlinkSync(join(outside, 'index.html'), join(d, 'index.html'))
+    // Refused by the check on index.html itself, before the no-follow open.
+    assert.throws(() => loadDist(d), /usable: index\.html is a symlink/)
+  })
+  symlinkCase((d) => {
+    writeFileSync(join(d, 'real.html'), INDEX)
+    symlinkSync(join(d, 'real.html'), join(d, 'index.html'))
+    assert.throws(() => loadDist(d), /symlink/)
+  })
+  symlinkCase((d, outside) => {
+    symlinkSync(join(outside, 'gone.html'), join(d, 'index.html'))
+    assert.throws(() => loadDist(d), /symlink/, 'a dangling link is not "no bundle"')
+  })
+})
+
+test('loadDist refuses a dist directory that is a symlink, and a dist or assets that is not a directory', () => {
+  symlinkCase((d, outside, at) => {
+    writeFileSync(join(outside, 'index.html'), INDEX)
+    const linked = join(at, 'linked-dist')
+    symlinkSync(outside, linked, 'dir')
+    assert.throws(() => loadDist(linked), /dist directory is a symlink/)
+  })
+  symlinkCase((d) => {
+    writeFileSync(join(d, 'index.html'), INDEX)
+    writeFileSync(join(d, 'assets'), 'not a directory')
+    assert.throws(() => loadDist(d), /not a directory/)
+  })
+  symlinkCase((d, outside, at) => {
+    writeFileSync(join(at, 'flat'), INDEX)
+    assert.throws(() => loadDist(join(at, 'flat')), /not a directory/)
+  })
+})
+
+test('a server over a symlinked assets directory does not start, so nothing outside dist is ever served', async () => {
+  await symlinkCase(async (d, outside) => {
+    writeFileSync(join(d, 'index.html'), INDEX)
+    symlinkSync(outside, join(d, 'assets'), 'dir')
+    assert.throws(() => new UiServer(join(d, 'unused.sock'), { port: 0, distDir: d }), /symlink/)
+  })
 })
 
 test('the error pages carry the strict policy and nothing inline', async () => {

@@ -2706,7 +2706,9 @@ const AUDIT_PAGE_MAX = 500
  *   newest `limit` rows (30 by default), with the old lenient reading of
  *   `limit`, so `audit tail` is unchanged.
  * - `kind` filters BEFORE the limit, so `kind=X&limit=25` is the newest 25
- *   rows of kind X, not the X rows among the newest 25.
+ *   rows of kind X, not the X rows among the newest 25. A filtered read is
+ *   new, so it has no old leniency to keep: its `limit` is a whole number
+ *   from 1 to 500 (30 when absent), checked before anything is read.
  * - `before=<seq>` is the newest `limit` rows older than that record, and
  *   `after=<seq>` the oldest `limit` rows newer than it, so a reader can walk
  *   the whole log a page at a time in either direction (UI contract U3). With
@@ -2721,11 +2723,9 @@ function auditRows(audit, params) {
   const before = params.get('before')
   const after = params.get('after')
   const ofKind = (rows) => (kind === null ? rows : rows.filter((r) => typeof r.kind === 'string' && (r.kind === kind || r.kind.startsWith(`${kind}.`))))
-  if (before === null && after === null) {
-    const limit = Number(params.get('limit') || 30)
-    if (kind === null) return audit.read({ limit })
-    return ofKind(audit.read({ limit: Infinity })).slice(-limit)
-  }
+  // The unfiltered tail keeps its old reading of limit, so `audit tail` is
+  // unchanged. Nothing else reads it that way.
+  if (before === null && after === null && kind === null) return audit.read({ limit: Number(params.get('limit') || 30) })
   if (before !== null && after !== null) {
     throw deny('AV_POLICY_DENIED', 'give before or after, not both', { rule: 'audit_range' })
   }
@@ -2733,6 +2733,7 @@ function auditRows(audit, params) {
   if (limitRaw !== null && !(/^[1-9][0-9]{0,2}$/.test(limitRaw) && Number(limitRaw) <= AUDIT_PAGE_MAX)) {
     throw deny('AV_POLICY_DENIED', `limit must be a whole number from 1 to ${AUDIT_PAGE_MAX}`, { rule: 'audit_range' })
   }
+  if (before === null && after === null) return ofKind(audit.read({ limit: Infinity })).slice(-(limitRaw === null ? 30 : Number(limitRaw)))
   const limit = limitRaw === null ? 100 : Number(limitRaw)
   const at = wholeParam(before ?? after, 0, before !== null ? 'before' : 'after')
   const rows = ofKind(audit.read({ limit: Infinity })).filter((r) => Number.isSafeInteger(r.seq))
