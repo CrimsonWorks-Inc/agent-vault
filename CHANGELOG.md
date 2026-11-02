@@ -35,7 +35,9 @@ reproduced first and has a test that fails without its fix.
   whole audit log (the daemon now pages it, filtered by kind before the limit).
   `paged=1` opts a UI route into `{items, next_cursor, prev_cursor, total}`;
   without it every route answers as before. Cursors are sealed, and a search
-  runs only over what the page is already shown.
+  runs only over what the page is already shown. What reads a whole list (the
+  overview's counts, the pickers, the waiting badge) follows every page to the
+  end, with no cap, and says so if a list never ends rather than count part of it.
 - **A prebuilt bundle, still zero runtime dependencies.** The page is built from
   `web/` into `src/ui/dist` and shipped prebuilt; React, Vite and Tailwind are
   devDependencies. The UI server serves it from memory under a strict policy

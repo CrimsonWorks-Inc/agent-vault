@@ -12,9 +12,10 @@ import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
 import { fetchAll, fetchPages, pageQuery, readEnvelope } from '../lib/paging.js'
 import { prfSupported } from '../lib/presence.js'
-import { expiresIn, plural, soonestExpiry } from '../lib/format.js'
+import { ago, expiresIn, plural, soonestExpiry } from '../lib/format.js'
 import { formatHash } from '../lib/router.js'
 import { Badge } from '../components/ui/Badge.jsx'
+import { Button } from '../components/ui/Button.jsx'
 import { Notice } from '../components/ui/Notice.jsx'
 import { PageHeader } from '../components/ui/PageHeader.jsx'
 import { Skeleton } from '../components/ui/Skeleton.jsx'
@@ -71,19 +72,22 @@ export async function loadOverview(api, slow, presence) {
     quiet(api.get('unlock/state')),
     presence.refresh(),
   ])
-  return { status, creds, sessions, report, tripwires, fired, notify, unlockState }
+  return { status, creds, sessions, report, tripwires, fired, notify, unlockState, readAt: new Date().toISOString() }
 }
 
 export function Overview() {
   const presence = usePresence()
   const vault = useVault()
   const slow = useSlowCache()
-  const { data, reload } = useApiQuery((api) => loadOverview(api, slow, presence), [], { poll: OVERVIEW_POLL_MS })
+  const { data, error, loading, reload } = useApiQuery((api) => loadOverview(api, slow, presence), [], { poll: OVERVIEW_POLL_MS })
   const changed = useCallback(() => { reload(); vault.refresh() }, [reload, vault])
   const webauthn = prfSupported()
 
-  if (!data) return <OverviewSkeleton />
-  const { status, creds, sessions, report, tripwires, fired, notify, unlockState } = data
+  // A first load that failed says so, with a way to ask again: never a
+  // skeleton that waits forever. (The daemon-down, UI-server-down and
+  // no-session screens replace the whole page before this is drawn.)
+  if (!data) return error && !loading ? <OverviewError error={error} onRetry={reload} /> : <OverviewSkeleton />
+  const { status, creds, sessions, report, tripwires, fired, notify, unlockState, readAt } = data
   const live = sessions.filter((s) => s.state === 'active')
   const pending = vault.pending
   const expiring = creds.filter((c) => c.expiry_warning === 'expired' || c.expiry_warning === 'soon')
@@ -98,6 +102,7 @@ export function Overview() {
       />
 
       <div className="space-y-4">
+        {error && <StaleNotice error={error} readAt={readAt} onRetry={reload} />}
         {status.locked && <LockBanner unlockState={unlockState} webauthn={webauthn} onChanged={changed} />}
         {presence.known && !presence.enrolled && <ConfirmationCard enrolled={false} onChanged={changed} />}
 
@@ -142,6 +147,40 @@ export function Overview() {
         </div>
       </div>
     </>
+  )
+}
+
+/** The first read failed: what was said, and Try again. */
+function OverviewError({ error, onRetry }) {
+  return (
+    <>
+      <PageHeader eyebrow="agent-vault" title="Overview" />
+      <Notice
+        tone="crit"
+        role="alert"
+        title="Could not read the overview."
+        actions={<Button size="sm" onClick={onRetry}>Try again</Button>}
+      >
+        {error.message}
+      </Notice>
+    </>
+  )
+}
+
+/**
+ * A refresh failed: the last good read stays, marked as stale, so a lock,
+ * a panic or a waiting decision is never shown as current when it is not.
+ */
+function StaleNotice({ error, readAt, onRetry }) {
+  return (
+    <Notice
+      tone="warn"
+      role="alert"
+      title={`This overview is stale: it was last read ${ago(readAt)}.`}
+      actions={<Button size="sm" onClick={onRetry}>Try again</Button>}
+    >
+      The last refresh failed: {error.message}
+    </Notice>
   )
 }
 

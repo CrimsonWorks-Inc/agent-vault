@@ -101,31 +101,48 @@ const ENVELOPE_KEYS = new Set(['items', 'next_cursor', 'prev_cursor', 'total'])
 
 /**
  * Every page of a list, asked with `paged=1` and the largest page, following
- * the cursors. Returns `{ items, beside }`:
+ * the cursors until the server says there are no more. There is no page cap:
+ * a reader that says it has the whole list has all of it, as the old page's
+ * did (it read each list in one answer). Returns `{ items, beside }`:
  *
  *   items   every row, in the server's order;
  *   beside  the fields an object answer keeps beside its page (tripwires'
  *           `enabled` and `defaults`, report/access's `complete`), from the
  *           first page.
+ *
+ * A walk that cannot end (a cursor the server already gave, or a page with no
+ * rows that still points onward) throws an IncompleteListError instead of
+ * looping or handing back part of the list as if it were all of it.
  */
-export async function fetchPages(get, path, { filters = {}, maxPages = 50 } = {}) {
+export async function fetchPages(get, path, { filters = {} } = {}) {
   const out = []
   let beside = null
   let cursor = null
-  for (let i = 0; i < maxPages; i++) {
+  const seen = new Set()
+  for (;;) {
     const data = await get(path, pageQuery({ limit: MAX_LIMIT, cursor, filters }))
     const page = readEnvelope(data)
     if (beside === null) beside = Object.fromEntries(Object.entries(data).filter(([k]) => !ENVELOPE_KEYS.has(k)))
     out.push(...page.items)
-    if (!page.next_cursor) break
+    if (!page.next_cursor) return { items: out, beside }
+    if (seen.has(page.next_cursor) || !page.items.length) throw new IncompleteListError(path, out.length)
+    seen.add(page.next_cursor)
     cursor = page.next_cursor
   }
-  return { items: out, beside: beside ?? {} }
+}
+
+/** A list whose pages never end: said, never shown as complete. */
+export class IncompleteListError extends Error {
+  constructor(path, read) {
+    super(`The ${path} list did not come to an end: the UI server kept pointing to more after ${read} rows. Nothing was counted from it; reload the page, and if this keeps happening restart the UI with agent-vault ui.`)
+    this.name = 'IncompleteListError'
+    this.code = 'AV_LIST_INCOMPLETE'
+  }
 }
 
 /**
- * Every item of a list, for a view that needs counts rather than a page (the
- * overview's "active sessions").
+ * Every item of a list, for a view that needs the whole set rather than a
+ * page (the overview's counts, the pickers, the waiting badge).
  */
 export async function fetchAll(get, path, opts = {}) {
   return (await fetchPages(get, path, opts)).items

@@ -217,6 +217,32 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
     expect(await screen.findByText('Cleared the expiry on openai')).toBeTruthy()
   })
 
+  it('a hostile upstream scope and health status are painted as text, never markup (legacy fixture)', async () => {
+    // control-ui-page.test.js at c027c8b: "a probe result is painted, never
+    // trusted as markup" and the hostile health status in "a credential's
+    // badges and pins", rendered through the page.
+    const HOSTILE = '<img src=x onerror=alert(1)>'
+    const soon = new Date(Date.now() + 3 * 86_400_000).toISOString()
+    const hostileCreds = CREDS.map((c) => (c.slug === 'gh-work'
+      ? { ...c, expiry_warning: 'soon', expires_at: soon, health: { status: HOSTILE }, quarantine: { since: soon } }
+      : c))
+    const server = fakeServer(pagesRoutes({
+      'GET credentials': hostileCreds,
+      'POST credentials/test': { status: 'ok', http_status: 200, latency_ms: 12, scopes: [HOSTILE] },
+    }))
+    const { container } = renderWith(<Enrolled><Credentials /></Enrolled>, { server })
+    await loaded()
+    await click(screen.getAllByRole('button', { name: 'Test gh-work' })[0])
+    await waitFor(() => expect(container.querySelector('[data-test-line]')?.textContent).toBe(`test: ok · 200 · 12ms · scopes: ${HOSTILE}`))
+    expect(screen.getAllByText(HOSTILE, { selector: '*' }).length).toBeGreaterThanOrEqual(1)
+    const row = container.querySelector('[data-test-line]').closest('tr, li, article, [role="row"]') ?? container
+    expect(row.textContent).toContain('quarantined')
+    expect(row.textContent).toContain('expires in 3d')
+    expect(container.textContent.split(HOSTILE).length - 1, 'the scope and the health status, both as text').toBeGreaterThanOrEqual(2)
+    expect(container.querySelector('img'), 'a hostile string became an element').toBeNull()
+    expect(container.querySelector('[onerror]')).toBeNull()
+  })
+
   it('Test probes the credential (open) and shows the result on its row', async () => {
     const server = fakeServer(pagesRoutes({ 'POST credentials/test': { status: 'ok', http_status: 200, latency_ms: 41, scopes: ['repo'] } }))
     const { container } = renderWith(<Enrolled><Credentials /></Enrolled>, { server })

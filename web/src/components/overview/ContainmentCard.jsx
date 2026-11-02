@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ExclamationTriangleIcon } from '@heroicons/react/20/solid'
 import { useAction } from '../../hooks/useAction.js'
 import { useApi, useSlowCache } from '../../hooks/useApi.js'
+import { usePaged } from '../../hooks/usePaged.js'
 import { usePresence } from '../../hooks/usePresence.js'
 import { useToast } from '../../hooks/useToast.js'
 import { ago, span } from '../../lib/format.js'
@@ -13,13 +14,23 @@ import { Disclosure } from '../ui/Disclosure.jsx'
 import { Field } from '../ui/Field.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
 import { Input } from '../ui/Input.jsx'
+import { Notice } from '../ui/Notice.jsx'
+import { Pagination } from '../ui/Pagination.jsx'
+import { SearchInput } from '../ui/SearchInput.jsx'
 import { Textarea } from '../ui/Textarea.jsx'
 import { readRules, shownRules, toggleBody } from './tripwires.js'
 
 /**
  * Panic, and the tripwires that can pull it for you (F16). Panic is open on
  * purpose: in an emergency a fingerprint prompt only slows you down, and it
- * only takes away. Tripwire changes are signed.
+ * only takes away. This page signs every tripwire change, turning them on
+ * included.
+ *
+ * `tripwires` is the complete settings snapshot (every rule, read through
+ * every page): the editor and the signed bodies work from it, so a rule on
+ * another page of the list, or hidden by a search, is never dropped. The
+ * list itself is a page of the server's rules, with search and paging (U3,
+ * U4), read again whenever the snapshot changes.
  */
 export function ContainmentCard({ tripwires, fired, onChanged }) {
   const tw = tripwires
@@ -38,10 +49,12 @@ export function ContainmentCard({ tripwires, fired, onChanged }) {
           title={<>Tripwires <Badge tone={on ? 'ok' : 'neutral'} dot>{on ? 'on' : 'off'}</Badge></>}
           meta={on
             ? 'A session that trips one of these is revoked before its refused request returns.'
-            : `Off. Turning them on uses ${rules.length ? 'your rules' : 'the default rules'} below.`}
+            : rules.length ? 'Off. Turning them on uses your rules below.'
+              : tw.rules_saved === false ? 'Off. Turning them on stores and uses the default rules below.'
+                : 'Off. Turning them on stores and uses the default rules.'}
           actions={<TripwireToggle tw={tw} onDone={onChanged} />}
         >
-          <RuleList rules={shown} />
+          <RuleList key={JSON.stringify([tw.enabled, tw.rules_saved, tw.rules])} />
           {recent.length > 0 && (
             <p className="mt-2 text-sm text-muted">
               Fired recently:{' '}
@@ -60,23 +73,41 @@ export function ContainmentCard({ tripwires, fired, onChanged }) {
   )
 }
 
-/** The rules, one per line: what trips it, how often, and what it does. */
-export function RuleList({ rules }) {
-  if (!rules.length) return <p className="mt-3 text-sm text-muted">No rules.</p>
+/**
+ * The rules in force, one per line: what trips it, how often, and what it
+ * does. A page at a time from the server, searchable, like every list.
+ */
+export function RuleList() {
+  const list = usePaged('tripwires', { storageKey: 'agent-vault.page-size.tripwire-rules' })
   return (
-    <ul className="mt-3 divide-y divide-line overflow-hidden rounded-control border border-line bg-sunken/60">
-      {rules.map((r, i) => {
-        const what = (r?.codes || []).length ? r.codes.join(', ') : r?.rule_prefix ? `${r.rule_prefix}*` : '?'
-        return (
-          <li key={`${r?.id}-${i}`} className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 px-3 py-2 text-xs">
-            <span className="font-mono font-medium text-ink">{r?.id}</span>
-            <span className="text-right text-muted"><span className="tabular-nums">{r?.threshold}</span> in {span(r?.window_s)}</span>
-            <span className="min-w-0 break-all font-mono text-muted">{what}</span>
-            <span className="text-right font-mono text-crit">→ {r?.action}</span>
-          </li>
-        )
-      })}
-    </ul>
+    <div className="mt-3 space-y-2">
+      <SearchInput value={list.q} onChange={list.setQ} label="Search tripwire rules" placeholder="Search rule, code, action…" />
+      {list.error && !list.loading && (
+        <Notice tone="crit" role="alert" title="Could not read the tripwire rules." actions={<Button size="sm" onClick={list.reload}>Try again</Button>}>
+          {list.error.message}
+        </Notice>
+      )}
+      {!list.items.length
+        ? !list.loading && !list.error && <p className="text-sm text-muted">{list.q ? 'No rule matches that search.' : 'No rules.'}</p>
+        : (
+          <ul aria-label="Tripwire rules" className="divide-y divide-line overflow-hidden rounded-control border border-line bg-sunken/60">
+            {list.items.map((r, i) => <RuleLine key={`${r?.id}-${i}`} r={r} />)}
+          </ul>
+        )}
+      <Pagination {...list.pagination} label="Tripwire rule pages" />
+    </div>
+  )
+}
+
+function RuleLine({ r }) {
+  const what = (r?.codes || []).length ? r.codes.join(', ') : r?.rule_prefix ? `${r.rule_prefix}*` : '?'
+  return (
+    <li className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-0.5 px-3 py-2 text-xs">
+      <span className="font-mono font-medium text-ink">{r?.id}</span>
+      <span className="text-right text-muted"><span className="tabular-nums">{r?.threshold}</span> in {span(r?.window_s)}</span>
+      <span className="min-w-0 break-all font-mono text-muted">{what}</span>
+      <span className="text-right font-mono text-crit">→ {r?.action}</span>
+    </li>
   )
 }
 

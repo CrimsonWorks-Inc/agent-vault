@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeServer, renderWith } from '../test/harness.jsx'
 import { Containment } from './Containment.jsx'
+import { operationFor } from '../lib/presence.js'
 
 const CHALLENGE = { challengeId: 'ch1', challenge: 'AAEC', allowCredentials: [{ id: 'Y3JlZDE' }], rpId: 'localhost' }
 const AN_HOUR_AGO = new Date(Date.now() - 3600e3).toISOString()
@@ -57,14 +58,54 @@ describe('Containment', () => {
   it('reads the tripwires paged, walking every cursor page, and keeps every rule in the shape the card reads', async () => {
     const server = fakeServer(routes())
     renderWith(<Containment />, { server })
-    expect(await screen.findByText('deny_paths')).toBeTruthy()
-    for (const id of ['replay', 'bad_location', 'cross_session', 'deny_paths']) expect(screen.getAllByText(id).length).toBeGreaterThan(0)
+    // The complete snapshot (for the editor and the signed body) walks every page at 200.
+    await waitFor(() => expect(server.calls.filter((c) => c.path === 'tripwires' && c.query.cursor === 't3').length).toBe(1))
     const reads = server.calls.filter((c) => c.method === 'GET' && c.path === 'tripwires')
-    expect(reads.map((c) => c.query.cursor)).toEqual([undefined, 't2', 't3'])
+    expect(reads.filter((c) => c.query.limit === '200').map((c) => c.query.cursor)).toEqual([undefined, 't2', 't3'])
     for (const c of reads) expect(c.query).toMatchObject({ paged: '1' })
+    // The list shows one server page at a time; Next follows the server's cursor.
+    const list = await screen.findByRole('list', { name: 'Tripwire rules' })
+    expect(within(list).getAllByRole('listitem').map((li) => li.firstChild.textContent)).toEqual(['replay', 'bad_location'])
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Tripwire rule pages' })).getByRole('button', { name: /Next/ }))
+    await waitFor(() => expect(within(screen.getByRole('list', { name: 'Tripwire rules' })).getAllByRole('listitem').map((li) => li.firstChild.textContent)).toEqual(['cross_session']))
     fireEvent.click(screen.getByRole('button', { name: /Edit rules/ }))
     const editor = await screen.findByRole('textbox', { name: /Rules \(JSON\)/ })
     expect(JSON.parse(editor.value).map((r) => r.id)).toEqual(RULES.map((r) => r.id))
+  })
+
+  it('32 rules: the list pages and searches through the server; the editor and the signed save keep all 32', async () => {
+    const MANY = Array.from({ length: 32 }, (_, i) => ({ id: `rule-${String(i).padStart(2, '0')}`, codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 60, action: 'revoke_session' }))
+    // The daemon's own answer: paged here exactly as the UI server pages it.
+    const server = fakeServer(routes({ 'GET tripwires': { enabled: true, rules_saved: true, rules: MANY, defaults: [] } }))
+    renderWith(<Containment />, { server })
+    const ids = () => within(screen.getByRole('list', { name: 'Tripwire rules' })).getAllByRole('listitem').map((li) => li.firstChild.textContent)
+    await waitFor(() => expect(ids()).toHaveLength(25))
+    expect(ids()).toEqual(MANY.slice(0, 25).map((r) => r.id))
+    const nav = screen.getByRole('navigation', { name: 'Tripwire rule pages' })
+    expect(nav.textContent).toContain('Showing 1–25 of 32')
+    expect(within(nav).getByRole('button', { name: 'Rows per page' })).toBeTruthy()
+    expect(screen.getByRole('searchbox', { name: 'Search tripwire rules' })).toBeTruthy()
+    const shown = server.calls.filter((c) => c.path === 'tripwires' && c.query.limit === '25')
+    expect(shown.length).toBeGreaterThan(0)
+    for (const c of shown) expect(c.query.paged).toBe('1')
+
+    fireEvent.click(within(nav).getByRole('button', { name: 'Next page' }))
+    await waitFor(() => expect(ids()).toEqual(MANY.slice(25).map((r) => r.id)))
+    expect(screen.getByRole('navigation', { name: 'Tripwire rule pages' }).textContent).toContain('Showing 26–32 of 32')
+
+    // Search is the server's (q), back on page one.
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search tripwire rules' }), { target: { value: 'rule-07' } })
+    await waitFor(() => expect(ids()).toEqual(['rule-07']))
+    expect(server.calls.some((c) => c.path === 'tripwires' && c.query.q === 'rule-07' && !c.query.cursor)).toBe(true)
+
+    // The editor and the signed body are the complete snapshot, whatever the list shows.
+    fireEvent.click(screen.getByRole('button', { name: /Edit rules/ }))
+    const editor = await screen.findByRole('textbox', { name: /Rules \(JSON\)/ })
+    expect(JSON.parse(editor.value)).toEqual(MANY)
+    fireEvent.click(screen.getByRole('button', { name: /Save rules/ }))
+    await waitFor(() => expect(server.calls.some((c) => c.method === 'POST' && c.path === 'tripwires')).toBe(true))
+    expect(server.calls.find((c) => c.path === 'presence/challenge').body.operation).toEqual(await operationFor('tripwires.set', { rules: MANY }))
+    expect(server.calls.find((c) => c.method === 'POST' && c.path === 'tripwires').body.rules).toEqual(MANY)
   })
 
   it('Panic is confirmed in a page-drawn dialog and sent unsigned', async () => {

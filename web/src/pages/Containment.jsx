@@ -4,9 +4,11 @@
 // quarantine was a row action on the old page's Credentials page and lives here
 // too, beside the history of every tripwire that fired.
 //
-// Panic, quarantine and turning tripwires on only take capability away, so
-// none of them asks for a fingerprint. Releasing a credential, turning
-// tripwires off and changing the rules give capability back, so they are signed.
+// Panic and quarantine only take capability away, so neither asks for a
+// fingerprint. Releasing a credential gives capability back, so it is signed,
+// and this page signs every tripwire change, turning them on included. (The
+// daemon lets the CLI turn tripwires on unsigned only when rules are already
+// stored; the first turn-on stores the defaults and needs confirmation.)
 
 import { useCallback } from 'react'
 import { useApiQuery, useSlowCache } from '../hooks/useApi.js'
@@ -47,7 +49,7 @@ export function Containment() {
       <PageHeader
         eyebrow="agent-vault"
         title="Containment"
-        description="End every session at once, stop one credential, or let tripwires revoke a session that behaves like an attack. Panic, quarantine and turning tripwires on ask for no fingerprint, because each only takes capability away; nothing comes back by itself."
+        description="End every session at once, stop one credential, or let tripwires revoke a session that behaves like an attack. Panic and quarantine ask for no fingerprint, because each only takes capability away; nothing comes back by itself. Changing tripwires here, turning them on included, asks you to confirm."
       />
       <div className="space-y-4">
         {q.error && !q.data && (

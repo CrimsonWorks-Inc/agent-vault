@@ -89,7 +89,8 @@ test('B1: the page shows the defaults as defaults, and turning on stores them, w
   assert.deepEqual(toggleBody({ ...mine, enabled: true }), { enabled: false })
   // The card says which, from shownRules' answer (rendered in web/src/pages/Containment.test.jsx).
   const card = readFileSync(new URL('../../web/src/components/overview/ContainmentCard.jsx', import.meta.url), 'utf8')
-  assert.match(card, /Turning them on uses \$\{rules\.length \? 'your rules' : 'the default rules'\} below\./)
+  assert.match(card, /rules\.length \? 'Off\. Turning them on uses your rules below\.'/)
+  assert.match(card, /tw\.rules_saved === false \? 'Off\. Turning them on stores and uses the default rules below\.'/)
   assert.match(card, /const \{ rules, shown \} = shownRules\(tw\)/)
   assert.match(card, /const body = toggleBody\(tw\)/)
 })

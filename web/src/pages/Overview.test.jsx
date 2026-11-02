@@ -8,6 +8,60 @@ import { LIST_ROUTES } from '../lib/paging.js'
 const settle = (server) => waitFor(() => expect(server.calls.some((c) => c.path === 'notify')).toBe(true))
 
 describe('Overview (parity with the old page)', () => {
+  it('a first read that fails shows the error and Try again, not a skeleton that never ends', async () => {
+    let fail = true
+    const server = fakeServer(overviewRoutes({
+      'GET status': () => (fail ? { __status: 500, body: { error: 'status failed in the daemon' } } : overviewRoutes()['GET status']),
+    }))
+    renderWith(<Overview />, { server })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Could not read the overview.')
+    expect(alert.textContent).toContain('status failed in the daemon')
+    expect(screen.queryByRole('status', { name: 'Loading the overview' })).toBeNull()
+    fail = false
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByRole('region', { name: 'At a glance' })).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a required list that fails on the first read is shown the same way', async () => {
+    const server = fakeServer(overviewRoutes({ 'GET sessions': { __status: 500, body: { error: 'sessions could not be listed' } } }))
+    renderWith(<Overview />, { server })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Could not read the overview.')
+    expect(alert.textContent).toContain('sessions could not be listed')
+    expect(within(alert).getByRole('button', { name: 'Try again' })).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'At a glance' })).toBeNull()
+  })
+
+  it('a refresh that fails keeps the last good read, marked stale, with the failure shown', async () => {
+    let fail = false
+    const good = overviewRoutes()['GET status']
+    const server = fakeServer(overviewRoutes({
+      'GET status': () => (fail ? { __status: 500, body: { error: 'refresh failed in the daemon' } } : good),
+    }))
+    renderWith(<Overview />, { server })
+    await settle(server)
+    const glance = await screen.findByRole('region', { name: 'At a glance' })
+    expect(within(glance).getByText('214')).toBeTruthy()
+    expect(screen.queryByText(/This overview is stale/)).toBeNull()
+
+    fail = true
+    const reads = () => server.calls.filter((c) => c.path === 'status').length
+    const before = reads()
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(reads()).toBeGreaterThan(before))
+    const stale = await screen.findByText(/This overview is stale: it was last read/)
+    const notice = stale.closest('[role="alert"]')
+    expect(notice.textContent).toContain('The last refresh failed: refresh failed in the daemon')
+    // The last good data is still there.
+    expect(within(screen.getByRole('region', { name: 'At a glance' })).getByText('214')).toBeTruthy()
+
+    fail = false
+    fireEvent.click(within(notice).getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(screen.queryByText(/This overview is stale/)).toBeNull())
+  })
+
   it('shows the daemon, the lock state and the four numbers', async () => {
     const server = fakeServer(overviewRoutes())
     renderWith(<Overview />, { server })
@@ -92,6 +146,35 @@ describe('Overview (parity with the old page)', () => {
     expect(document.body.textContent).not.toMatch(/\u202e/)
     expect(screen.getByText('never used: DELETE, PUT')).toBeTruthy()
     expect(screen.getByText('quarantined')).toBeTruthy()
+  })
+
+  it('access review (legacy fixture): flags unused methods, quarantined and expired; leaves out what is fine', async () => {
+    // test/security/control-ui-page.test.js at c027c8b, "the access review
+    // flags unused methods and expiring or quarantined credentials", rendered.
+    const server = fakeServer(overviewRoutes({
+      'GET report/access': {
+        complete: true, since: '7d',
+        sessions: [{ id: 's_1', label: 'triage', unused_methods: ['POST'] }, { id: 's_2', unused_methods: [] }],
+        credentials: [{ slug: 'a', quarantined: true }, { slug: 'b', expiry_warning: 'expired' }, { slug: 'c' }],
+      },
+    }))
+    renderWith(<Overview />, { server })
+    await settle(server)
+    const card = (await screen.findByRole('heading', { name: 'Access review' })).closest('section, article, div[class*="rounded-card"]')
+    await within(card).findByText('triage')
+    expect(within(card).getByText('never used: POST')).toBeTruthy()
+    expect(within(card).getByText('a').parentElement.textContent).toContain('quarantined')
+    expect(within(card).getByText('b').parentElement.textContent).toContain('expired')
+    expect(within(card).queryByText('c'), 'an ordinary credential is not a finding').toBeNull()
+    expect(within(card).queryByText('s_2'), 'a session that used every method is not a finding').toBeNull()
+    expect(card.textContent).toContain('3 things to tighten')
+    expect(card.textContent).not.toContain('incomplete')
+  })
+
+  it('access review (legacy fixture): an incomplete log says the review is incomplete', async () => {
+    const server = fakeServer(overviewRoutes({ 'GET report/access': { complete: false, since: '7d', sessions: [], credentials: [] } }))
+    renderWith(<Overview />, { server })
+    expect(await screen.findByText('The audit log does not cover the whole period, so this review is incomplete.')).toBeTruthy()
   })
 
   it('a long review shows the first few and the rest on request', async () => {

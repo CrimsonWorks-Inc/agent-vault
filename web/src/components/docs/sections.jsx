@@ -350,12 +350,14 @@ function Safety({ c }) {
         <P>Tripwires act for you when a session behaves like an attack: a replayed placeholder, a
           placeholder put where it does not belong, one session&apos;s placeholder used in another, or repeated
           attempts at paths you denied. The session is revoked before the refused request even returns.
-          They are off until you turn them on. Turning them on needs nothing; turning them off or changing
-          the rules needs your passphrase or fingerprint.</P>
-        <P>The trade, stated plainly: panic, quarantine and turning tripwires on are open to anything that
-          can reach the vault, because each one only takes capability away. So an agent can end your
-          sessions or quarantine a credential. That is a denial of service against your own work, and it is
-          audited; it can never gain the agent anything.</P>
+          They are off until you turn them on. This page asks for your passphrase or fingerprint before
+          it changes tripwires at all, turning them on included. From the command line, <C>tripwire on</C>{' '}
+          needs nothing once rules are stored; the first time, it also stores the default rules, and that
+          needs your passphrase or fingerprint. Turning them off or changing the rules always does.</P>
+        <P>The trade, stated plainly: panic, quarantine and turning on tripwires whose rules are already
+          stored are open to anything that can reach the vault, because each one only takes capability
+          away. So an agent can end your sessions or quarantine a credential. That is a
+          denial of service against your own work, and it is audited; it can never gain the agent anything.</P>
       </Prose>
       <Cmd code={`${c.cli} tripwire on\n${c.cli} tripwire show`} />
       <Prose>

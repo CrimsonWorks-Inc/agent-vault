@@ -260,6 +260,31 @@ describe('Sessions: detail and access review', () => {
     expect(screen.getByRole('button', { name: 'Copy as Markdown' })).toBeTruthy()
   })
 
+  it('detail (legacy fixture): hostile markup in the label, a payload rule key and a path stays text', async () => {
+    // control-ui-page.test.js at c027c8b: "the session detail and its
+    // Markdown escape what the agent chose", rendered through the page.
+    const HOSTILE = '<img src=x onerror=alert(1)>'
+    const detail = {
+      session: { id: 's_1', label: HOSTILE, state: 'active', infinite: true, elevated: ['infinite'] },
+      grants: [{ cred: 'demo', state: 'active', effective: { methods: ['GET'], payload: [{ json: { [HOSTILE]: { absent: true } } }] },
+        placeholders: [{ id: 'ph_1', field: 'token', uses: 1, state: 'active' }] }],
+      activity: { complete: false, note: 'log started later', requests: { allowed: 1 }, paths: [{ method: 'GET', path: `/a/${HOSTILE}`, count: 1 }] },
+    }
+    const server = fakeServer(pagesRoutes({ 'GET sessions/detail': detail }))
+    const { container } = renderWith(<Enrolled><Sessions rest="detail:s_1" /></Enrolled>, { server })
+    expect(await screen.findByText(/History is incomplete: log started later/)).toBeTruthy()
+    await screen.findAllByText('ph_1')
+    expect(container.querySelector('img'), 'a label, rule key or path from the log became markup').toBeNull()
+    expect(container.querySelector('[onerror]')).toBeNull()
+    // Each of the three, as text: the label, the payload rule's key, the path.
+    expect(screen.getAllByText((t, el) => el?.children.length === 0 && t.includes(HOSTILE)).length).toBeGreaterThanOrEqual(1)
+    const payload = container.querySelector('figure[data-untrusted]')
+    expect(payload.textContent).toContain(HOSTILE)
+    expect(container.textContent).toContain(`/a/${HOSTILE}`)
+    expect(container.textContent.split(HOSTILE).length - 1).toBeGreaterThanOrEqual(3)
+    expect(container.textContent).toMatch(/never/)
+  })
+
   it('access review: both lists paged by the server, with what to tighten', async () => {
     const server = fakeServer(pagesRoutes())
     renderWith(<Enrolled><Sessions rest="review" /></Enrolled>, { server })
