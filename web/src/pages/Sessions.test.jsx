@@ -88,7 +88,7 @@ describe('Sessions: revoke and narrow are signed over exactly what is sent', () 
     ['Require approval for everything', { narrow: { approval: 'each' } }, 'Every request now needs your approval'],
     ['End in 1 hour', { narrow: {}, session_ttl_minutes: 60 }, 'Ends within the hour'],
   ]) {
-    it(`${label}: session.narrow over app.html's body, and the before/after card`, async () => {
+    it(`${label}: session.narrow over the old page's body, and the before/after card`, async () => {
       const result = { session_id: 's_live', expires_at: '2026-11-01T12:00:00Z', infinite: false, grants: [{ cred: 'gh-work', before: { methods: ['GET', 'POST'] }, after: { methods: ['GET', 'HEAD'] }, expires_at: null }] }
       const server = fakeServer(pagesRoutes({ 'POST sessions/narrow': result }))
       renderWith(<Enrolled><Sessions /></Enrolled>, { server })

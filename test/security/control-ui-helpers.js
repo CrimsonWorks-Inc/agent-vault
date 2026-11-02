@@ -1,13 +1,14 @@
 // Scaffolding for the control-ui tests: a stand-in daemon on a temp control
-// socket, and the page's own functions lifted out of app.html. Not a test file
-// itself — the glob only picks up *.test.js.
+// socket. The page's own logic is imported from web/src (plain JS modules) by
+// the tests that need it. Not a test file itself — the glob only picks up
+// *.test.js.
 //
 // The wave-3 control routes are built by another batch at the same time, so
 // the UI side is tested against a daemon that answers the contract's shapes
 // and records what it was sent. The presence routes behave like the real
 // daemon's: an enrolled authenticator, and challenges minted per operation.
 
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -68,42 +69,4 @@ export async function startStub(answer = () => ({ ok: true }), { enrolled = true
       rmSync(dir, { recursive: true, force: true })
     },
   }
-}
-
-export const PAGE = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
-
-/** The source of a named function in the page's script, braces balanced. */
-export function pageSource(name, { async = false } = {}) {
-  const head = `${async ? 'async ' : ''}function ${name}(`
-  const start = PAGE.indexOf(head)
-  if (start < 0) throw new Error(`the page has no ${name}()`)
-  let depth = 0
-  let i = PAGE.indexOf('{', start)
-  // Skip the parameter list's default-object braces by starting at the body:
-  // the first `{` after the closing parenthesis of the signature.
-  const close = PAGE.indexOf(') {', start)
-  if (close > 0) i = close + 2
-  for (; i < PAGE.length; i++) {
-    if (PAGE[i] === '{') depth++
-    else if (PAGE[i] === '}' && --depth === 0) break
-  }
-  return PAGE.slice(start, i + 1)
-}
-
-/** Named page functions as callables, sharing one scope and a prelude. */
-export function pageFunctions(names, prelude = '') {
-  const sources = names.map((n) => (typeof n === 'string' ? pageSource(n) : pageSource(n.name, n)))
-  const plain = names.map((n) => (typeof n === 'string' ? n : n.name))
-  return new Function(`${PAGE_PRELUDE}\n${prelude}\n${sources.join('\n')}\nreturn { ${plain.join(', ')} }`)()
-}
-
-/** The page's small shared helpers, as the page defines them. */
-const PAGE_PRELUDE = pageConst('esc')
-
-/** A `const NAME = …` statement from the page, verbatim. */
-export function pageConst(name) {
-  const start = PAGE.indexOf(`const ${name} = `)
-  if (start < 0) throw new Error(`the page has no const ${name}`)
-  const end = PAGE.indexOf('\n', start)
-  return PAGE.slice(start, end)
 }

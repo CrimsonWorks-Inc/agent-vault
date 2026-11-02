@@ -17,7 +17,6 @@ import { auditTime } from '../audit/kinds.js'
 export function FiredTable() {
   const list = usePaged('audit', {
     filters: { kind: 'tripwire.fired' },
-    searchFields: ['rule_id', 'session_id', 'credential_slug', 'action'],
     storageKey: 'agent-vault.page-size.tripwires-fired',
   })
   return (
@@ -25,7 +24,7 @@ export function FiredTable() {
       eyebrow="History"
       title="Tripwires that fired"
       padded={false}
-      actions={<SearchInput value={list.q} onChange={list.setQ} label="Search fired tripwires" placeholder="Search session, credential…" />}
+      actions={<SearchInput value={list.q} onChange={list.setQ} label="Search fired tripwires" placeholder="Search rule, session, credential…" />}
     >
       {list.error && !list.loading && (
         <Notice tone="crit" className="m-4" title="Could not read the audit log." actions={<Button size="sm" onClick={list.reload}>Try again</Button>}>

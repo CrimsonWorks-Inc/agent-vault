@@ -1,93 +1,74 @@
 // A narrowing that does not parse (C23). parseOverrides throws on a number
-// that is not finite or on routes/payload that are not JSON. The page runs
-// that parser (C21) and must then show why and send nothing: a decision that
-// went through without the narrowing typed for it would grant more than the
-// human chose.
+// that is not finite, on routes/payload that are not JSON, and on a key no
+// approval applies. The page reads the narrowing with that parser (C21) and
+// must then say why and send nothing: a decision that went through without
+// the narrowing typed for it would grant more than the human chose.
 //
-// Run against the page's own decide action and readNarrowing, with a stand-in
-// parser, so the test does not depend on which field the real one refuses.
+// Run against the page's own decision builder (web/src/components/approvals/
+// decide.js decisionCall, which Approvals calls inside the gated button's
+// operation, before any challenge is asked for), with recorders for what it
+// would sign and send.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { PAGE, pageSource } from './control-ui-helpers.js'
+import { readFileSync } from 'node:fs'
+import { decisionCall, readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { parseOverrides } from '../../src/pending.js'
 
-/** The page's `async decide(btn) { … }` action, braces balanced. */
-function decideSource() {
-  const start = PAGE.indexOf('async decide(btn) {')
-  assert.ok(start >= 0, 'the page has no decide action')
-  let depth = 0
-  let i = PAGE.indexOf('{', start)
-  for (; i < PAGE.length; i++) {
-    if (PAGE[i] === '{') depth++
-    else if (PAGE[i] === '}' && --depth === 0) break
-  }
-  return PAGE.slice(start, i + 1)
-}
+const ITEM = { id: 'sr_1', kind: 'session', narrowable: ['methods', 'budget', 'routes'], owner_settable: ['approval', 'infinite'] }
 
-/** decide, wired to a stand-in parser and recorders for everything it calls. */
-function harness(parseOverrides) {
-  const calls = { toast: [], gated: [], api: [], operationFor: [], render: 0 }
-  const input = (field, value) => ({ dataset: { field }, value })
-  const document = {
-    querySelectorAll: () => [input('budget', 'lots'), input('methods', 'GET')],
-    querySelector: () => null,
-  }
+/** decisionCall, with recorders for everything it calls. */
+async function decide(granted, fields, extra = {}) {
+  const calls = { operationFor: [], api: [], error: null, call: null }
   const deps = {
-    document,
-    parseOverrides,
-    drafts: new Map(),
-    toast: (m) => { calls.toast.push(String(m)) },
-    render: () => { calls.render++ },
     operationFor: async (op, params) => { calls.operationFor.push({ op, params }); return { op, ...params } },
-    gated: async (op, send) => { calls.gated.push(op); return send({ challengeId: 'c' }) },
-    api: async (method, path, body) => { calls.api.push({ method, path, body }); return {} },
+    api: { post: async (path, body) => { calls.api.push({ path, body }); return {} } },
   }
-  const make = new Function('deps', `
-    const { document, parseOverrides, drafts, toast, render, operationFor, gated, api } = deps
-    ${pageSource('readNarrowing')}
-    return { ${decideSource()} }`)
-  return { actions: make(deps), calls }
+  try {
+    calls.call = await decisionCall(ITEM, granted, { fields, ...extra }, deps)
+  } catch (e) { calls.error = String(e?.message ?? e) }
+  return calls
 }
 
-const approveBtn = { dataset: { id: 'sr_1', granted: '1', kind: 'session' } }
-
-test('a narrowing the parser refuses is shown, and nothing is signed or sent (C23)', async () => {
-  const { actions, calls } = harness(() => { throw new Error('budget must be a finite number') })
-  await actions.decide(approveBtn)
-  assert.equal(calls.operationFor.length, 0, 'an operation was built for a narrowing that did not parse')
-  assert.equal(calls.gated.length, 0, 'a signature was asked for')
-  assert.equal(calls.api.length, 0, 'a decision was sent without its narrowing')
-  assert.equal(calls.toast.length, 1)
-  assert.match(calls.toast[0], /budget must be a finite number/)
-  assert.doesNotMatch(calls.toast[0], /Approved/)
+test('a narrowing the parser refuses is said, and nothing is signed or sent (C23)', async () => {
+  for (const [fields, why] of [[{ budget: 'lots', methods: 'GET' }, /budget/], [{ routes: '[{not json' }, /routes/]]) {
+    const calls = await decide(true, fields)
+    assert.equal(calls.operationFor.length, 0, 'an operation was built for a narrowing that did not parse')
+    assert.equal(calls.api.length, 0, 'a decision was sent without its narrowing')
+    assert.equal(calls.call, null, 'nothing was handed to the gate to sign')
+    assert.match(calls.error ?? '', /^That narrowing does not parse, so nothing was sent: /)
+    assert.match(calls.error, why)
+  }
 })
 
 test('a narrowing that parses is signed and sent as parsed', async () => {
-  const { actions, calls } = harness((typed) => ({ methods: [typed.methods], budget: 7 }))
-  await actions.decide(approveBtn)
-  assert.equal(calls.gated.length, 1)
-  assert.deepEqual(calls.operationFor[0], { op: 'session_request.decide', params: { id: 'sr_1', granted: true, methods: ['GET'], budget: 7 } })
-  assert.deepEqual(calls.api[0].body.overrides, { methods: ['GET'], budget: 7 })
-  assert.deepEqual(calls.toast, ['Approved'])
+  const calls = await decide(true, { methods: 'get', budget: '7' })
+  assert.equal(calls.error, null)
+  // The owner's approval box goes as chosen, '' included, and the parser reads '' as unchanged.
+  const parsed = parseOverrides({ methods: 'get', budget: '7', approval: '' })
+  assert.deepEqual(calls.operationFor, [{ op: 'session_request.decide', params: { id: 'sr_1', granted: true, ...parsed } }])
+  await calls.call.send({ challengeId: 'c' })
+  assert.deepEqual(calls.api[0].body.overrides, parsed)
+  assert.deepEqual(calls.api[0].body.overrides.methods, ['GET'])
+  assert.equal(calls.api[0].body.overrides.budget, 7)
 })
 
-test('a denial reads no narrowing, so a refusing parser cannot block it', async () => {
-  let asked = 0
-  const { actions, calls } = harness((typed) => {
-    asked++
-    if (Object.keys(typed).length) throw new Error('unexpected')
-    return {}
-  })
-  await actions.decide({ dataset: { id: 'sr_1', granted: '0', kind: 'session' } })
-  assert.equal(asked, 1)
-  assert.equal(calls.api.length, 1)
+test('a denial reads no narrowing, so text the parser refuses cannot block it', async () => {
+  const calls = await decide(false, { budget: 'lots' })
+  assert.equal(calls.error, null)
+  assert.deepEqual(calls.operationFor, [{ op: 'session_request.decide', params: { id: 'sr_1', granted: false } }])
+  await calls.call.send({ challengeId: 'c' })
   assert.equal(calls.api[0].body.granted, false)
   assert.equal(calls.api[0].body.overrides, undefined)
 })
 
-test('decide reads the narrowing through readNarrowing before it signs anything', () => {
-  const decide = decideSource()
-  const read = decide.indexOf('readNarrowing(typed)')
-  assert.ok(read > 0 && read < decide.indexOf('gated('), 'the narrowing is not read before the signature')
-  assert.match(pageSource('readNarrowing'), /const overrides = parseOverrides\(typed\)/)
+test('the narrowing is read by the shared parser, and a refusal is never read as no narrowing', () => {
+  assert.deepEqual(readNarrowing({ methods: 'get,head', budget: '3' }), { overrides: parseOverrides({ methods: 'get,head', budget: '3' }) })
+  const bad = readNarrowing({ budget: 'Infinity' })
+  assert.equal(bad.overrides, undefined, 'a narrowing that does not parse came back as overrides')
+  assert.match(bad.error, /nothing was sent/)
+  // decisionCall reads the narrowing before it builds the operation.
+  const src = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  const body = src.slice(src.indexOf('export async function decisionCall('))
+  assert.ok(body.indexOf('readNarrowing(') < body.indexOf('operationFor('), 'the narrowing is not read before the operation is built')
 })

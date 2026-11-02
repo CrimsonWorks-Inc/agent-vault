@@ -3,14 +3,14 @@
 // A human narrows a session request in one of three places: `agent-vault
 // approve` with flags, the approvals page, or anything that posts to the UI
 // server. All three read the typed text with src/pending.js parseOverrides
-// (the page runs the copy the UI server injects), and the daemon rebinds the
+// (the page's bundle imports that module, C21), and the daemon rebinds the
 // signed operation from what reaches it. If any two read the same text
 // differently, either the signature fails (409 from the UI server, 403 from
 // the daemon) or, worse, one of them drops a field and the agent's own
 // proposal is what gets approved.
 //
 // So, for every C21/C23 field, the same typed narrowing must give the same
-// operation from the CLI, from the served page and through the UI server to the
+// operation from the CLI, from the page's modules and through the UI server to the
 // real daemon, and the session made must carry it. And a narrowing that cannot
 // be read must be refused everywhere, with nothing approved.
 
@@ -20,9 +20,10 @@ import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
 import { parseOverrides, OVERRIDE_KEYS } from '../../src/pending.js'
 import { startDaemon, cli, PASSPHRASE } from './fix-control-helpers.js'
-import { servedPageSigning, servedSource, startSigned, startCliStub, flagsOf } from './integrate3-helpers.js'
+import { decisionCall } from '../../web/src/components/approvals/decide.js'
+import { pageSigning, startSigned, startCliStub, flagsOf } from './integrate3-helpers.js'
 
-const page = servedPageSigning()
+const page = pageSigning()
 
 /** What an agent asks for: wide enough that every narrowing below narrows it. */
 const PROPOSAL = { cred: 'demo', methods: ['GET', 'HEAD', 'POST'], paths: ['/**'], budget: 50, ttl_minutes: 120, reason: 'integrate-3' }
@@ -61,11 +62,14 @@ async function pageOperation(id, typed) {
   return { overrides: read.overrides, op: await page.operationFor('session_request.decide', { id, granted: true, ...read.overrides }) }
 }
 
-test('the page runs the injected parser, and it reads every narrowing as the module does', () => {
+test('the page reads every narrowing with the module\'s parser, and keeps no second one', async () => {
   for (const [name, typed] of NARROWINGS) {
-    assert.deepEqual(page.parseOverrides(typed), parseOverrides(typed), name)
+    assert.deepEqual(page.readNarrowing(typed).overrides, parseOverrides(typed), name)
   }
-  assert.ok(!servedSource('function readNarrowing(').includes('parseNarrowing'), 'the page keeps a second parser')
+  const { readFileSync } = await import('node:fs')
+  const decide = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
+  assert.doesNotMatch(decide, /function parse(Overrides|Narrowing)\(/, 'the page keeps a second parser')
 })
 
 test('the CLI and the page sign the same operation for the same narrowing, field by field', async () => {
@@ -172,42 +176,34 @@ test('a narrowing that cannot be read: the CLI exits 2 naming the field, and sen
   } finally { await stub.stop() }
 })
 
-/** The page's decide action wired to the served parser, an input box per typed field, and recorders. */
-function pageDecide(typed) {
-  const calls = { toast: [], gated: 0, api: 0, operationFor: 0 }
-  const inputs = Object.entries(typed).map(([field, value]) => ({ dataset: { field }, value }))
-  const deps = {
-    document: { querySelectorAll: () => inputs, querySelector: () => null },
-    drafts: new Map(),
-    toast: (m) => { calls.toast.push(String(m)) },
-    render: () => {},
-    operationFor: async () => { calls.operationFor++; return {} },
-    gated: async () => { calls.gated++ },
-    api: async () => { calls.api++ },
-  }
-  const start = servedSource('async decide(btn) {')
-  const actions = new Function('deps', `
-    const { document, drafts, toast, render, operationFor, gated, api } = deps
-    ${servedSource('function parseOverrides(')}
-    ${servedSource('function readNarrowing(')}
-    return { ${start} }`)(deps)
-  return { decide: () => actions.decide({ dataset: { id: 'sr_1', granted: '1', kind: 'session' } }), calls }
+/**
+ * The page's decision for one session request (decide.js decisionCall, which
+ * Approvals runs inside the gated button's operation, before any challenge),
+ * with an input per typed field and recorders for what it would sign and send.
+ */
+async function pageDecide(typed) {
+  const calls = { error: null, operationFor: 0, api: 0 }
+  const item = { id: 'sr_1', kind: 'session', narrowable: Object.keys(typed), owner_settable: [] }
+  const recorder = { operationFor: async () => { calls.operationFor++; return {} }, api: { post: async () => { calls.api++ } } }
+  try {
+    calls.call = await decisionCall(item, true, { fields: typed }, recorder)
+  } catch (e) { calls.error = String(e?.message ?? e) }
+  return calls
 }
 
 test('a narrowing that cannot be read: the page shows why and builds, signs and sends nothing', async () => {
   for (const [field, typed] of UNREADABLE) {
-    const { decide, calls } = pageDecide(typed)
-    await decide()
-    assert.equal(calls.operationFor + calls.gated + calls.api, 0, `${JSON.stringify(typed)}: the page went ahead`)
-    assert.equal(calls.toast.length, 1)
-    assert.match(calls.toast[0], new RegExp(`nothing was sent: ${field}:`), JSON.stringify(typed))
+    const calls = await pageDecide(typed)
+    assert.equal(calls.operationFor + calls.api, 0, `${JSON.stringify(typed)}: the page went ahead`)
+    assert.ok(!calls.call, 'a call was built to be signed')
+    assert.match(calls.error ?? '', new RegExp(`nothing was sent: ${field}:`), JSON.stringify(typed))
   }
   // The same harness approves an ordinary narrowing, so the refusal above is the parser's.
-  const { decide, calls } = pageDecide({ budget: '5' })
-  await decide()
-  assert.equal(calls.api, 0, 'gated is a recorder, so nothing is sent from here')
+  const calls = await pageDecide({ budget: '5' })
+  assert.equal(calls.error, null)
+  assert.equal(calls.api, 0, 'nothing is sent until the signature exists')
   assert.equal(calls.operationFor, 1)
-  assert.equal(calls.gated, 1)
+  assert.equal(typeof calls.call.send, 'function')
 })
 
 test('a narrowing that cannot be read: the UI server answers 400 and the daemon 4xx, and nothing is approved', async () => {
@@ -254,9 +250,9 @@ test('a key no approval applies is refused by the shared parser, the UI server (
   for (const [field, typed] of UNAPPLIED) {
     assert.throws(() => parseOverrides(typed), (e) => e instanceof TypeError && e.field === field, JSON.stringify(typed))
     assert.match(page.readNarrowing(typed).error ?? '', new RegExp(`nothing was sent: ${field}:`), `the page read ${JSON.stringify(typed)}`)
-    const { decide, calls } = pageDecide(typed)
-    await decide()
-    assert.equal(calls.operationFor + calls.gated + calls.api, 0, `${JSON.stringify(typed)}: the page went ahead`)
+    const calls = await pageDecide(typed)
+    assert.equal(calls.operationFor + calls.api, 0, `${JSON.stringify(typed)}: the page went ahead`)
+    assert.ok(calls.error, `${JSON.stringify(typed)}: the page went ahead`)
   }
   // Not an object at all: every index is a key nobody reads.
   for (const bad of ['budget=5', ['budget']]) assert.throws(() => parseOverrides(bad), TypeError)

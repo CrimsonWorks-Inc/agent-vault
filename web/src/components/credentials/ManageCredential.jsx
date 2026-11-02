@@ -5,7 +5,7 @@ import { ExpiryEditor } from './ExpiryEditor.jsx'
 import { ScrubRules } from './ScrubRules.jsx'
 
 /**
- * The two things app.html kept under each row (scrub patterns and expiry),
+ * The two things the old page kept under each row (scrub patterns and expiry),
  * in one dialog per credential. `c` is the credential as the list has it now,
  * so a change shows here as soon as the list is read again.
  */

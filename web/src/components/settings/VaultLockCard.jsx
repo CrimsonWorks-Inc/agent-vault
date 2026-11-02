@@ -9,7 +9,7 @@ import { Button } from '../ui/Button.jsx'
 import { Card, Row } from '../ui/Card.jsx'
 
 /**
- * The lock (app.html's sidebar "Lock vault" / "Unlock vault"). Locking is a
+ * The lock (the old page's sidebar "Lock vault" / "Unlock vault"). Locking is a
  * signed change (POST lock, op vault.lock), confirmed in a page-drawn dialog
  * first. Unlocking is not behind the change gate: the passphrase is the proof.
  */

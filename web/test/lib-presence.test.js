@@ -119,7 +119,7 @@ test('a cancelled Touch ID changes nothing and says so', async () => {
   assert.equal(sent, false)
 })
 
-test('lock and turning off Touch ID unlock sign the same bare operations app.html did', async () => {
+test('lock and turning off Touch ID unlock sign the same bare operations the old page did', async () => {
   const { p, calls } = harness()
   await p.refresh()
   await p.lock()

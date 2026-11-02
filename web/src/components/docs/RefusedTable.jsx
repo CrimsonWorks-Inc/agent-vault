@@ -2,7 +2,7 @@ import { C } from './Prose.jsx'
 
 /**
  * Every refusal code a caller can hit, what happened and what to do, as
- * app.html's "When a request is refused" table had them. `fix` is a function
+ * The old page's "When a request is refused" table had them. `fix` is a function
  * of the CLI name where the fix is a command.
  */
 export const REFUSED = [

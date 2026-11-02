@@ -12,7 +12,7 @@
 
 import { checkDecisions, parseOverrides } from '../../../../src/pending.js'
 
-/** The approval modes an owner can choose for a session request, in app.html's order. */
+/** The approval modes an owner can choose for a session request, in the old page's order. */
 export const OWNER_APPROVALS = [
   { value: '', label: 'unchanged' },
   { value: 'on-write', label: 'on-write' },
@@ -25,7 +25,7 @@ export const OWNER_APPROVALS = [
  * What the human typed on one card, as the parser's input. Only when
  * approving: a denial carries no narrowing. The owner's approval is sent as
  * chosen, '' included (the parser reads '' as unchanged), and `infinite` only
- * when ticked, exactly as app.html read its inputs.
+ * when ticked, exactly as the old page read its inputs.
  *
  * `draft` is `{ fields: { [name]: text }, approval: string, infinite: boolean }`.
  */
@@ -59,7 +59,7 @@ export function readNarrowing(typed) {
 
 /**
  * The signed operation and the request for one decision, byte for byte what
- * app.html sent. The signature covers the verdict AND any narrowing, so an
+ * The old page sent. The signature covers the verdict AND any narrowing, so an
  * approval of "GET /user only" cannot be replayed to grant the wide original.
  *
  * Throws (before any signature is asked for) when the narrowing does not parse.

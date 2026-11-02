@@ -7,7 +7,7 @@ import { LIST_ROUTES } from '../lib/paging.js'
 
 const settle = (server) => waitFor(() => expect(server.calls.some((c) => c.path === 'notify')).toBe(true))
 
-describe('Overview (parity with app.html)', () => {
+describe('Overview (parity with the old page)', () => {
   it('shows the daemon, the lock state and the four numbers', async () => {
     const server = fakeServer(overviewRoutes())
     renderWith(<Overview />, { server })

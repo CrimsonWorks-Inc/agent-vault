@@ -82,10 +82,14 @@ test('vault_preflight refuses what it cannot read, an unknown credential, and an
       assert.equal(r.body.rule, 'preflight_shape', JSON.stringify(args))
     }
     assert.equal((await a.tool('vault_preflight', { cred: 'demo', method: 'GET', path: '/x' })).isError, true, 'no session, yet answered')
+    // Twelve at once, so they land inside the limiter's one-second window
+    // however loaded the machine is: one after another, under load, they
+    // spread past it. A batch that still spreads is tried again; with no
+    // limit, or one above ten a second, no batch is ever refused.
     let throttled = null
-    for (let i = 0; i < 12 && !throttled; i++) {
-      const r = await a.tool('vault_preflight', { cred: 'demo', method: 'GET', path: '/x' }, { token: s.token })
-      if (r.body.code === 'AV_QUOTA_EXCEEDED') throttled = r.body
+    for (let batch = 0; batch < 3 && !throttled; batch++) {
+      const answers = await Promise.all(Array.from({ length: 12 }, () => a.tool('vault_preflight', { cred: 'demo', method: 'GET', path: '/x' }, { token: s.token })))
+      throttled = answers.map((r) => r.body).find((b) => b.code === 'AV_QUOTA_EXCEEDED') ?? null
     }
     assert.ok(throttled, 'eleven preflights in a second were all answered')
     assert.equal(throttled.rule, 'preflight_rate')

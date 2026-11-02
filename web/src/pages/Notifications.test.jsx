@@ -5,7 +5,7 @@ import { Notifications } from './Notifications.jsx'
 
 afterEach(() => { delete globalThis.Notification })
 
-describe('Notifications (parity with app.html)', () => {
+describe('Notifications (parity with the old page)', () => {
   it('shows the webhook read-only, and the notify command with the server\'s cli name', async () => {
     const server = fakeServer({ 'GET notify': { webhook: { host: 'hooks.example.com', detail: 'minimal', configured_at: '2026-10-30T10:00:00Z' } } })
     renderWith(<Notifications />, { server, vault: { context: { cli: 'av' } } })

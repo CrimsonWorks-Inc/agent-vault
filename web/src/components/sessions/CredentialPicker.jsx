@@ -6,7 +6,7 @@ import { Check } from './Check.jsx'
 import { MAX_SESSION_CREDS } from './sessionLogic.js'
 
 /**
- * Which credentials a new session holds (app.html's multi-select). A filter
+ * Which credentials a new session holds (the old page's multi-select). A filter
  * box once there are more than a few; the picked ones stay listed first so a
  * filter never hides a choice already made.
  */

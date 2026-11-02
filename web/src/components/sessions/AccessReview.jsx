@@ -26,8 +26,8 @@ export function AccessReview() {
   const slow = useSlowCache()
   // The Overview's own reader and cache key, so the two never disagree.
   const header = useApiQuery((api) => slow.get('report', () => readAccessReport(api.get, REVIEW_SINCE)), [])
-  const sessions = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'sessions' }, searchFields: ['id', 'label', 'state'], storageKey: 'agent-vault.page-size.report/access:sessions' })
-  const creds = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'credentials' }, searchFields: ['slug'], storageKey: 'agent-vault.page-size.report/access:credentials' })
+  const sessions = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'sessions' }, storageKey: 'agent-vault.page-size.report/access:sessions' })
+  const creds = usePaged('report/access', { filters: { since: REVIEW_SINCE, list: 'credentials' }, storageKey: 'agent-vault.page-size.report/access:credentials' })
   const report = header.data
 
   const unused = Array.isArray(report?.sessions) ? report.sessions.filter((s) => (s.unused_methods || []).length).length : null

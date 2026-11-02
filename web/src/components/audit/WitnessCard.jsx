@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ShieldCheckIcon } from '@heroicons/react/20/solid'
 import { useAction } from '../../hooks/useAction.js'
 import { useApi, useApiQuery } from '../../hooks/useApi.js'
+import { useCopy } from '../../hooks/useCopy.js'
 import { useToast } from '../../hooks/useToast.js'
 import { pageQuery, readEnvelope } from '../../lib/paging.js'
 import { Badge } from '../ui/Badge.jsx'
@@ -14,21 +15,21 @@ import { Skeleton } from '../ui/Skeleton.jsx'
 /** The newest record: one row of the unfiltered log, newest first (U3). */
 export async function loadHead(api) {
   const data = await api.get('audit', pageQuery({ limit: 1 }))
-  const items = readEnvelope(data, { limit: 1 }).items
-  // A server that answers with a bare array gives the tail oldest first.
-  return items.reduce((a, r) => (Number.isInteger(r?.seq) && (!a || r.seq > a.seq) ? r : a), null)
+  const [newest] = readEnvelope(data).items
+  return newest ?? null
 }
 
 export const verifyText = (v) => (v?.ok ? `Chain intact across ${v.count} records` : `Chain broken at record ${v?.brokenAt}`)
 
 /**
- * The log's head, a signed checkpoint of it, and the chain check (app.html's
+ * The log's head, a signed checkpoint of it, and the chain check (the old page's
  * Witness card, with Verify chain from its Overview). A checkpoint kept where
  * an agent cannot write shows later whether records were cut from the end.
  */
 export function WitnessCard() {
   const api = useApi()
   const toast = useToast()
+  const copy = useCopy()
   const head = useApiQuery((a) => loadHead(a), [], { poll: 10_000 })
   const [checkpoint, setCheckpoint] = useState(null)
   const [verify, verifying] = useAction()
@@ -38,10 +39,9 @@ export function WitnessCard() {
   const getCheckpoint = () => fetchCheckpoint(async () => {
     const cp = await api.get('audit/checkpoint')
     setCheckpoint(cp)
-    try {
-      await globalThis.navigator.clipboard.writeText(JSON.stringify(cp))
-      toast('Checkpoint copied', { tone: 'ok' })
-    } catch { /* shown below with its own copy button */ }
+    // A refusal is the page's one toast; the checkpoint is also shown below
+    // with its own copy button.
+    if (await copy(JSON.stringify(cp))) toast('Checkpoint copied', { tone: 'ok' })
     return cp
   })
 

@@ -19,7 +19,7 @@ const MODES = [
 
 /**
  * A new value for a credential (F7): typed here, signed by digest, never
- * echoed. Two steps in one dialog, as app.html had them: the form, then the
+ * echoed. Two steps in one dialog, as the old page had them: the form, then the
  * exact operation the authenticator will sign ("Sign it"), because the
  * platform dialog cannot describe a rotation. The value lives only in this
  * dialog's state and is cleared when it closes.

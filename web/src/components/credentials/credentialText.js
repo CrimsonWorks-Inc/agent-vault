@@ -1,9 +1,9 @@
-// What the Credentials page says about a credential, ported from app.html's
+// What the Credentials page says about a credential, ported from the old page's
 // credentialBadges, pinsText, testLine and the row's meta as pure functions.
 
 import { ago, expiresIn, soonestExpiry } from '../../lib/format.js'
 
-/** The kinds a credential can be stored as, in app.html's order. */
+/** The kinds a credential can be stored as, in the old page's order. */
 export const KINDS = [
   { value: 'github', label: 'github' },
   { value: 'slack', label: 'slack' },
@@ -67,7 +67,7 @@ export function testParts(t) {
   return { ok: t?.status === 'ok', status: String(t?.status ?? ''), rest: ` · ${t?.http_status ?? 'no answer'} · ${t?.latency_ms}ms${scopes}` }
 }
 
-/** Midnight UTC of a date input's day, as app.html sent it. */
+/** Midnight UTC of a date input's day, as the old page sent it. */
 export const expiryIso = (day) => new Date(`${day}T00:00:00Z`).toISOString()
 
 /** The YYYY-MM-DD a date input shows for a stored expiry. */

@@ -1,4 +1,4 @@
-// Credentials, at parity with app.html's (contract U5): the stored list,
+// Credentials, at parity with the old page's (contract U5): the stored list,
 // paged and searchable (U3), with test, rotate, scrub patterns, expiry,
 // quarantine, release and remove on each row, and the form to add one.
 // Pins are shown, read-only; they are set from the command line, where the
@@ -17,13 +17,11 @@ import { ListError } from '../components/credentials/ListError.jsx'
 import { ManageCredential } from '../components/credentials/ManageCredential.jsx'
 import { RotateDialog } from '../components/credentials/RotateDialog.jsx'
 
-export const CREDENTIAL_SEARCH_FIELDS = ['slug', 'id', 'kind', 'label']
-
 export function Credentials() {
   const api = useApi()
   const slow = useSlowCache()
-  const list = usePaged('credentials', { searchFields: CREDENTIAL_SEARCH_FIELDS })
-  // The last probe and the last scrub sample, per credential, as app.html
+  const list = usePaged('credentials')
+  // The last probe and the last scrub sample, per credential, as the old page
   // kept them: they survive a re-read of the list, not a reload.
   const [tests, setTests] = useState(() => new Map())
   const [samples, setSamples] = useState(() => new Map())

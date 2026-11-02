@@ -6,7 +6,7 @@ import { bulkDecisions, bulkOutcome, decisionCall, readNarrowing, typedNarrowing
 const SESSION = { id: 'sr_1', kind: 'session', narrowable: ['methods', 'budget'], owner_settable: ['approval', 'infinite'] }
 const REQUEST = { id: 'ap_1', kind: 'request', narrowable: [], owner_settable: [] }
 
-describe('decide.js: one decision, read and signed as app.html did', () => {
+describe('decide.js: one decision, read and signed as the old page did', () => {
   it('reads only what was typed, only when approving; the owner approval goes as chosen, even empty', () => {
     const draft = { fields: { methods: ' GET ', budget: '' }, approval: '', infinite: false }
     expect(typedNarrowing(SESSION, draft, true)).toEqual({ methods: 'GET', approval: '' })

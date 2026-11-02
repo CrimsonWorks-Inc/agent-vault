@@ -7,17 +7,18 @@
 // still does not put a capability in a browser.
 //
 // And one parser of typed narrowing (C21): the page runs the function the
-// server rebinds with, injected when the page is served.
+// server rebinds with, src/pending.js's, imported into the page's bundle.
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { Script } from 'node:vm'
+import { readFileSync } from 'node:fs'
 import * as ph from '../../src/core/placeholder.js'
 import { operationFor } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
-import { servedPage, towardPage, PARSER_MARKER } from '../../src/ui/server.js'
-import { startStub, startUi, PAGE } from './control-ui-helpers.js'
+import { towardPage } from '../../src/ui/server.js'
+import { readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { startStub, startUi } from './control-ui-helpers.js'
 
 const PLACEHOLDER = ph.mint({ kPh: randomBytes(32), sid: ph.newSid(), slug: 'demo', field: 'token' }).text
 const TOKEN = `avs1.${ph.newSid()}.${randomBytes(24).toString('base64url')}`
@@ -96,20 +97,17 @@ test('the hand-off for a session made here still carries what the agent needs', 
 })
 
 test('the page runs the very parser the server rebinds a narrowing with (C21)', () => {
-  const served = servedPage()
-  assert.ok(served.includes(parseOverrides.toString()), 'the served page does not carry parseOverrides byte for byte')
-  assert.ok(!served.includes(PARSER_MARKER), 'the marker was left in place of the parser')
-  assert.ok(PAGE.includes(PARSER_MARKER), 'app.html lost its marker')
+  // The bundle's parseOverrides is src/pending.js's: proven from the build's
+  // module graph in one-source-of-truth.test.js. Here, the page's reader.
+  const decide = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
   // No second reader left in the page.
-  assert.ok(!/function parseNarrowing\(/.test(PAGE))
-  const decide = PAGE.slice(PAGE.indexOf('async decide(btn) {'))
-  assert.match(decide.slice(0, decide.indexOf('gated(')), /readNarrowing\(typed\)/)
-  assert.match(PAGE.slice(PAGE.indexOf('function readNarrowing(')), /^function readNarrowing\(typed\) \{\n {4}try \{\n {6}const overrides = parseOverrides\(typed\)/)
-  // The injected function stands alone: evaluated with nothing around it, it
-  // reads every field as the module's own copy does.
-  const alone = new Script(`(${parseOverrides.toString()})`).runInNewContext({})
+  assert.ok(!/function parse(?:Overrides|Narrowing)\(/.test(decide))
+  assert.match(decide, /export function readNarrowing\(typed\) \{\n {2}try \{\n {4}return \{ overrides: parseOverrides\(typed\) \}/)
+  // It reads every field as the module does, and refuses what it refuses.
   for (const raw of [{ methods: 'get, post', paths: '/a/**,/b', budget: '7', uses: '2', ttl_minutes: '30' }, { approval: 'auto', infinite: 'true' }]) {
-    assert.deepEqual(JSON.parse(JSON.stringify(alone(raw))), parseOverrides(raw))
+    assert.deepEqual(readNarrowing(raw).overrides, parseOverrides(raw))
   }
+  assert.match(readNarrowing({ budget: 'lots' }).error, /nothing was sent/)
 })
 

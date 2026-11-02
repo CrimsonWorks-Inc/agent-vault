@@ -1,4 +1,4 @@
-// Sessions, at parity with app.html's (contract U5): the list, paged and
+// Sessions, at parity with the old page's (contract U5): the list, paged and
 // searchable (U3), with details, the three one-click narrowings and revoke;
 // the New session form (free-form or from a template, infinite and
 // auto-approval with their warnings); the hand-off card, shown once; and the
@@ -30,8 +30,6 @@ import { SessionDetail } from '../components/sessions/SessionDetail.jsx'
 import { SessionsTable } from '../components/sessions/SessionsTable.jsx'
 import { NARROWINGS, sessionsRoute } from '../components/sessions/sessionLogic.js'
 
-export const SESSION_SEARCH_FIELDS = ['id', 'label', 'state']
-
 const go = (rest) => {
   try { globalThis.location.hash = formatHash('sessions', rest) } catch { /* no address bar to keep in step */ }
 }
@@ -45,7 +43,7 @@ export function Sessions({ rest = '' }) {
   // drops it with this component's state (U7).
   const [handoff, setHandoff] = useState(null)
   const [narrowed, setNarrowed] = useState(null)
-  const list = usePaged('sessions', { searchFields: SESSION_SEARCH_FIELDS })
+  const list = usePaged('sessions')
 
   // The address bar leads: a link to #sessions/new opens that tab.
   useEffect(() => {

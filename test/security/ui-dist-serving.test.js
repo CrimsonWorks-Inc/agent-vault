@@ -12,7 +12,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, unlinkSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { UiServer, STRICT_CSP, loadDist } from '../../src/ui/server.js'
@@ -138,7 +138,7 @@ test('traversal, encoded slashes, backslashes and dot segments are all 404', asy
     '/assets/..\\index.html', '/assets/nested\\inner.js', '/assets/%5c..%5cindex.html',
     '/assets/./index-Ab12Cd.js', '/assets//index-Ab12Cd.js', '/assets/index-Ab12Cd.js/',
     '/assets/index-Ab12Cd.js%00', '/assets/index-Ab12Cd.js%20', '/assets/%69ndex-Ab12Cd.js',
-    '/assets/', '/assets', '/index.html', '/manifest.json', '/app.html', '/assets/manifest.json',
+    '/assets/', '/assets', '/index.html', '/manifest.json', '/page.html', '/dist/index.html', '/assets/manifest.json',
   ]
   for (const path of tries) {
     const r = await raw(path)
@@ -217,21 +217,27 @@ test('no response the server makes allows unsafe-inline once the bundle is there
   }
 })
 
-// U2 wave-1 fallback: integration deletes app.html, this fallback and this test.
-test('U2 wave-1 fallback: with no dist/index.html the server still serves app.html', async () => {
+// U2: there is no other page. A server with no built bundle does not start,
+// and says which command builds it, rather than serving something else.
+test('U2: with no dist/index.html the server refuses to start and names npm run build:ui', () => {
   const empty = mkdtempSync(join(tmpdir(), 'av-nodist-'))
-  const fallback = await new UiServer(stub.sock, { port: 0, distDir: empty }).start()
   try {
-    assert.equal(fallback.dist, null)
-    const claim = await fetch(fallback.url, { redirect: 'manual' })
-    const c = claim.headers.get('set-cookie').split(';')[0]
-    const page = await fetch(`${fallback.origin}/`, { headers: { cookie: c } })
-    assert.equal(page.status, 200)
-    assert.match(await page.text(), /agent-vault/)
-    const asset = await fetch(`${fallback.origin}/assets/index-Ab12Cd.js`, { headers: { cookie: c } })
-    assert.equal(asset.status, 404, 'with no bundle there is no asset to serve')
+    assert.throws(() => new UiServer(stub.sock, { port: 0, distDir: empty }), /the built UI is missing .*run npm run build:ui/)
+    mkdirSync(join(empty, 'assets'))
+    writeFileSync(join(empty, 'assets', 'index-Ab12Cd.js'), 'x')
+    assert.throws(() => new UiServer(stub.sock, { port: 0, distDir: empty }), /npm run build:ui/, 'assets without an index.html is still no page')
   } finally {
-    await fallback.stop()
     rmSync(empty, { recursive: true, force: true })
+  }
+})
+
+test('U2: the shipped dist is what the server loads by default', () => {
+  const dist = loadDist(new URL('../../src/ui/dist', import.meta.url).pathname)
+  assert.ok(dist, 'src/ui/dist/index.html is missing; run npm run build:ui')
+  const manifest = JSON.parse(readFileSync(new URL('../../src/ui/dist/manifest.json', import.meta.url), 'utf8'))
+  for (const entry of Object.values(manifest)) {
+    for (const f of [entry.file, ...(entry.css || []), ...(entry.assets || [])]) {
+      assert.ok(dist.assets.has(f.replace(/^assets\//, '')), `${f} is in the manifest but would not be served`)
+    }
   }
 })

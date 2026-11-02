@@ -45,7 +45,7 @@ export function QuarantineNote({ q }) {
  * it is signed (cred.release).
  */
 export function QuarantineTable({ onChanged }) {
-  const list = usePaged('credentials', { searchFields: ['slug', 'id', 'kind', 'label'] })
+  const list = usePaged('credentials')
   const changed = () => { list.reload(); onChanged?.() }
   return (
     <Card

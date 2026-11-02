@@ -1,16 +1,16 @@
-// The Overview, at parity with app.html's (contract U5), and the reference
+// The Overview, at parity with the old page's (contract U5), and the reference
 // page for wave 2: data through useApiQuery + lib/api.js, slow reads through
 // the shared cache, gated changes through GatedButton / usePresence, agent
 // text through UntrustedText, and composed pieces under components/overview.
 //
 // Every card stands alone: a daemon without a route, or a locked vault,
-// leaves that card out rather than the page blank (app.html's `quiet`).
+// leaves that card out rather than the page blank (the old page's `quiet`).
 
 import { useCallback } from 'react'
 import { useApiQuery, useSlowCache } from '../hooks/useApi.js'
 import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
-import { fetchAll, fetchPages, itemsOf, pageQuery } from '../lib/paging.js'
+import { fetchAll, fetchPages, pageQuery, readEnvelope } from '../lib/paging.js'
 import { prfSupported } from '../lib/presence.js'
 import { expiresIn, plural, soonestExpiry } from '../lib/format.js'
 import { formatHash } from '../lib/router.js'
@@ -28,39 +28,36 @@ export const OVERVIEW_POLL_MS = 5000
 
 /**
  * Tripwires, paged (U3): the rules are the items, and `enabled`,
- * `rules_saved` and `defaults` sit beside them. A server from before U3
- * answers the whole object, which is used as it is.
+ * `rules_saved` and `defaults` sit beside them.
  */
 export async function readTripwires(get) {
   const r = await fetchPages(get, 'tripwires')
-  if (r.items === null) return r.legacy
   return { ...r.beside, rules: r.items }
 }
 
 /**
  * The access report, paged (U3): one list per request (`list=sessions`, then
  * `list=credentials`), with `complete` beside each page. Put back together in
- * the shape the card reads. A server from before U3 answers it whole.
+ * the shape the card reads.
  */
 export async function readAccessReport(get, since = '7d') {
   const s = await fetchPages(get, 'report/access', { filters: { since, list: 'sessions' } })
-  if (s.items === null) return s.legacy
   const c = await fetchPages(get, 'report/access', { filters: { since, list: 'credentials' } })
   const incomplete = s.beside.complete === false || c.beside.complete === false
   return {
     ...s.beside,
     sessions: s.items,
-    credentials: c.items ?? itemsOf(c.legacy?.credentials),
+    credentials: c.items,
     complete: incomplete ? false : (s.beside.complete ?? c.beside.complete),
   }
 }
 
 /** The last few tripwire firings: one page of audit, filtered in the daemon. */
 export function readFired(get, limit = 5) {
-  return get('audit', pageQuery({ limit, filters: { kind: 'tripwire.fired' } })).then(itemsOf)
+  return get('audit', pageQuery({ limit, filters: { kind: 'tripwire.fired' } })).then((data) => readEnvelope(data).items)
 }
 
-/** Everything the overview shows, in one load (app.html's views.overview). */
+/** Everything the overview shows, in one load (the old page's views.overview). */
 export async function loadOverview(api, slow, presence) {
   const [status, creds, sessions] = await Promise.all([
     api.get('status'), fetchAll(api.get, 'credentials'), fetchAll(api.get, 'sessions'),

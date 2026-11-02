@@ -39,7 +39,7 @@ test('every request is same-origin, carries the header, and sends JSON only with
   assert.deepEqual(JSON.parse(seen[1].init.body), { presence: { challengeId: 'c' } })
   assert.equal(seen[2].url, '/api/sessions?sid=s+1')
   assert.equal(seen[2].init.method, 'DELETE')
-  assert.equal(seen[3].init.body, undefined, 'a POST with no body sends none, as app.html did')
+  assert.equal(seen[3].init.body, undefined, 'a POST with no body sends none, as the old page did')
 })
 
 test('a refusal becomes an ApiError with status, code and detail', async () => {

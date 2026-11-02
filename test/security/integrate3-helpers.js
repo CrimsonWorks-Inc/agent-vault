@@ -1,53 +1,25 @@
-// Scaffolding for the integrate-3 seam tests: the page as the UI server really
-// serves it, a real daemon with an enrolled authenticator behind a real UI
-// server, and a stand-in control socket that records what the CLI sends. Not a
-// test file itself: the glob only picks up *.test.js.
+// Scaffolding for the integrate-3 seam tests: the page's own signing, a real
+// daemon with an enrolled authenticator behind a real UI server, and a
+// stand-in control socket that records what the CLI sends. Not a test file
+// itself: the glob only picks up *.test.js.
 
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { servedPage } from '../../src/ui/server.js'
+import { parseOverrides } from '../../src/pending.js'
+import { operationFor, canonicalJson } from '../../web/src/lib/presence.js'
+import { readNarrowing } from '../../web/src/components/approvals/decide.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, cli } from './fix-control-helpers.js'
 
-/** app.html with parseOverrides injected, exactly as a browser receives it. */
-export const SERVED = servedPage()
-
-/** The source of a function or method in the served page, braces balanced. */
-export function servedSource(head) {
-  const start = SERVED.indexOf(head)
-  if (start < 0) throw new Error(`the served page has no ${head}`)
-  // The body starts at the first `{` after the signature's `)`, so a default
-  // parameter's `{}` is not read as the body.
-  const close = SERVED.indexOf(') {', start)
-  let i = close > 0 ? close + 2 : SERVED.indexOf('{', start)
-  let depth = 0
-  for (; i < SERVED.length; i++) {
-    if (SERVED[i] === '{') depth++
-    else if (SERVED[i] === '}' && --depth === 0) break
-  }
-  return SERVED.slice(start, i + 1)
-}
-
-/** A `const NAME = …` line from the served page, verbatim. */
-export function servedConst(name) {
-  const start = SERVED.indexOf(`const ${name} = `)
-  if (start < 0) throw new Error(`the served page has no const ${name}`)
-  return SERVED.slice(start, SERVED.indexOf('\n', start))
-}
-
 /**
- * The page's own narrowing reader and operation builder, lifted out of the
- * served page into one scope: the injected parseOverrides, readNarrowing,
- * operationFor (WebCrypto digests), canonicalJson and DIGESTED.
+ * The page's own narrowing reader and operation builder, from the modules the
+ * bundle is built from: parseOverrides is src/pending.js's (the bundle imports
+ * it, C21; one-source-of-truth.test.js proves the built bundle does),
+ * readNarrowing is web/src/components/approvals/decide.js's, and
+ * operationFor / canonicalJson are web/src/lib/presence.js's (WebCrypto).
  */
-export function servedPageSigning() {
-  return new Function(`
-    ${servedSource('function parseOverrides(')}
-    ${servedSource('function readNarrowing(')}
-    ${servedSource('async function operationFor(')}
-    ${servedConst('DIGESTED')}
-    ${servedSource('function canonicalJson(')}
-    return { parseOverrides, readNarrowing, operationFor, canonicalJson }`)()
+export function pageSigning() {
+  return { parseOverrides, readNarrowing, operationFor, canonicalJson }
 }
 
 /**

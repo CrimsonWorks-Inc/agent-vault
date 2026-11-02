@@ -3,7 +3,7 @@ import { createApi } from './lib/api.js'
 import { createCache } from './lib/cache.js'
 import { fetchAll } from './lib/paging.js'
 import { parseHash } from './lib/router.js'
-import { batchText, createWatcher, notificationsOn } from './lib/notify.js'
+import { createWatcher, notificationsOn, showNotice } from './lib/notify.js'
 import { ApiContext } from './hooks/useApi.js'
 import { PresenceContext, usePresenceController } from './hooks/usePresence.js'
 import { usePrompt } from './hooks/usePrompt.js'
@@ -86,7 +86,7 @@ function Shell({ fatal, setFatal, pages }) {
 function useApiCtx() { return useContext(ApiContext) }
 
 /**
- * The header's truth, whichever page is open (app.html's refreshChrome): the
+ * The header's truth, whichever page is open (the old page's refreshChrome): the
  * lock state and what is waiting, every five seconds. A fresh item raises a
  * desktop notification when the human turned them on (F14).
  */
@@ -126,12 +126,5 @@ function useVaultController(api, enabled) {
   }), [lockState, pending, context, refresh])
 }
 
-/** A signal, never an approval channel: clicking only opens Approvals. */
-function notify(fresh) {
-  const N = globalThis.Notification
-  if (typeof N === 'undefined' || N.permission !== 'granted') return
-  try {
-    const n = new N('agent-vault', { body: batchText(fresh), tag: 'agent-vault-pending' })
-    n.onclick = () => { globalThis.focus?.(); globalThis.location.hash = `#approvals/${encodeURIComponent(fresh[0].id)}` }
-  } catch { /* a browser that will not show one has nothing to fall back to */ }
-}
+/** A signal, never an approval channel (lib/notify.js showNotice). */
+const notify = (fresh) => { showNotice(fresh) }

@@ -1,6 +1,6 @@
 // What the header always shows, whichever page is open: whether the vault is
 // locked, and how many decisions are waiting. Polled every five seconds,
-// app.html's refreshChrome.
+// The old page's refreshChrome.
 
 import { createContext, useContext } from 'react'
 

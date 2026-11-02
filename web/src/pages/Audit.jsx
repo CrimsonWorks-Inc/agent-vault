@@ -1,4 +1,4 @@
-// Audit, at parity with app.html's (contract U5), and paged through the whole
+// Audit, at parity with the old page's (contract U5), and paged through the whole
 // log rather than its last 60 records (U3): newest first, filtered by kind in
 // the daemon, searchable over the fields the server scrubbed for the page.
 //
@@ -22,7 +22,7 @@ import { Pagination } from '../components/ui/Pagination.jsx'
 import { SearchInput } from '../components/ui/SearchInput.jsx'
 import { Select } from '../components/ui/Select.jsx'
 import { WitnessCard } from '../components/audit/WitnessCard.jsx'
-import { AUDIT_SEARCH_FIELDS, KIND_FILTERS, auditNote, auditTime } from '../components/audit/kinds.js'
+import { KIND_FILTERS, auditNote, auditTime } from '../components/audit/kinds.js'
 
 const DESCRIPTION = 'Append-only, hash-chained, and anchored at its end. Paths are recorded and scrubbed; no credential value, body, query string or full placeholder ever is.'
 
@@ -42,7 +42,7 @@ export function Audit() {
   )
 }
 
-/** app.html's locked answer: nothing to read until the vault is unlocked. */
+/** the old page's locked answer: nothing to read until the vault is unlocked. */
 export function LockedAudit() {
   return (
     <Notice
@@ -57,7 +57,7 @@ export function LockedAudit() {
 
 function AuditLog({ onLockedMaybe }) {
   const [kind, setKind] = useState('')
-  const list = usePaged('audit', { filters: kind ? { kind } : {}, searchFields: AUDIT_SEARCH_FIELDS })
+  const list = usePaged('audit', { filters: kind ? { kind } : {} })
 
   // An error may be the vault locking under us: ask the vault rather than
   // reading the error text (an older daemon reports it as an internal error).

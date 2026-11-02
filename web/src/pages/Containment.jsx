@@ -1,16 +1,15 @@
 // Containment: what to pull when an agent does something you did not expect
-// (contract U5). Panic and the tripwires are app.html's containment card
+// (contract U5). Panic and the tripwires are the old page's containment card
 // (components/overview/ContainmentCard.jsx, shared with the Overview);
-// quarantine was a row action on app.html's Credentials page and lives here
+// quarantine was a row action on the old page's Credentials page and lives here
 // too, beside the history of every tripwire that fired.
 //
 // Panic, quarantine and turning tripwires on only take capability away, so
 // none of them asks for a fingerprint. Releasing a credential, turning
 // tripwires off and changing the rules give capability back, so they are signed.
 
-import { useCallback, useEffect } from 'react'
+import { useCallback } from 'react'
 import { useApiQuery, useSlowCache } from '../hooks/useApi.js'
-import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
 import { Button } from '../components/ui/Button.jsx'
 import { Notice } from '../components/ui/Notice.jsx'
@@ -39,8 +38,6 @@ export async function loadContainment(api, slow, locked) {
 export function Containment() {
   const vault = useVault()
   const slow = useSlowCache()
-  const { known, refresh } = usePresence()
-  useEffect(() => { if (!known) refresh() }, [known, refresh])
   const locked = vault.locked === true
   const q = useApiQuery((api) => loadContainment(api, slow, locked), [locked])
   const changed = useCallback(() => { slow.clear(); q.reload(); vault.refresh() }, [slow, q, vault])

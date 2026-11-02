@@ -7,7 +7,7 @@ import { SearchInput } from '../components/ui/SearchInput.jsx'
 
 let latest
 function List({ path = 'credentials', poll = 0 }) {
-  const list = usePaged(path, { searchFields: ['slug'], poll })
+  const list = usePaged(path, { poll })
   latest = list
   return (
     <>
@@ -64,13 +64,44 @@ describe('usePaged', () => {
     expect(localStorage.getItem('agent-vault.page-size.credentials')).toBe('100')
   })
 
-  it('a server that answers a bare array is paged here, the same way', async () => {
+  it('pages the daemon list the way the UI server does: slug order, sealed cursors, its search', async () => {
     const server = fakeServer({ 'GET credentials': Array.from({ length: 30 }, (_, i) => ({ slug: `c${i}` })) })
     renderWith(<List />, { server })
     await screen.findByText('c0')
     expect(screen.getByText('Showing 1–25 of 30')).toBeTruthy()
+    // Slug order, as src/ui/server.js LISTS.credentials sorts: c4 is the 25th.
+    expect(screen.getByText('c4')).toBeTruthy()
+    expect(screen.queryByText('c5')).toBeNull()
     await act(async () => { latest.next() })
-    await screen.findByText('c29')
+    await screen.findByText('c9')
     expect(screen.queryByText('c0')).toBeNull()
+    expect(server.calls.at(-1).query.cursor).toMatch(/^[A-Za-z0-9_-]{20,}$/)
+    await act(async () => { latest.setQ('C2') })
+    await waitFor(() => expect(screen.getByText('Showing 1–11 of 11')).toBeTruthy())
+  })
+
+  it('a list answer that is not a page is an error, not a guess', async () => {
+    const server = fakeServer({ 'GET credentials': () => ({ __status: 200, body: [{ slug: 'old' }] }) })
+    renderWith(<List />, { server })
+    await waitFor(() => expect(latest.error?.name).toBe('EnvelopeError'))
+    expect(screen.queryByText('old')).toBeNull()
+  })
+
+  it('a cursor the server no longer opens starts the list again', async () => {
+    let refuse = false
+    const server = fakeServer({
+      'GET credentials': ({ query }) => (refuse && query.cursor
+        ? { __status: 400, body: { error: 'that cursor is not one this server made', code: 'AV_BAD_CURSOR', detail: { code: 'AV_BAD_CURSOR' } } }
+        : envelope(query.cursor, query.q)),
+    })
+    renderWith(<List />, { server })
+    await screen.findByText('s0')
+    await act(async () => { latest.next() })
+    await screen.findByText('z')
+    refuse = true
+    await act(async () => { latest.reload() })
+    await screen.findByText('s0')
+    expect(latest.error).toBeNull()
+    expect(latest.page).toBe(1)
   })
 })

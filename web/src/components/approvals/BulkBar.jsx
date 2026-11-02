@@ -7,7 +7,7 @@ import { GatedButton } from '../ui/GatedButton.jsx'
 import { bulkDecisions, bulkOutcome } from './decide.js'
 
 /**
- * Several decisions, one signature (app.html's bulk bar). It appears only
+ * Several decisions, one signature (the old page's bulk bar). It appears only
  * when something is ticked and counts what is. `picked` is the ticked items
  * in the order they are shown; nothing else is ever in the list.
  */

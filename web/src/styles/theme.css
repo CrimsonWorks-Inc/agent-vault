@@ -5,7 +5,7 @@
  * never a literal colour.
  *
  * Tailwind is told exactly what to scan. Left to detect sources itself it
- * would read src/ui/app.html and the committed bundle in src/ui/dist, so the
+ * would read src/ui/the old page and the committed bundle in src/ui/dist, so the
  * CSS would depend on the previous build and the drift check could never be
  * stable.
  */

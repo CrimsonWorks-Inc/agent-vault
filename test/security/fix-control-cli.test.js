@@ -2,7 +2,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { writeFileSync, existsSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { writeFileSync, existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -37,9 +37,18 @@ test('listen add asks for the passphrase like every other gated command', async 
 
 test('the TLS listener port is the same everywhere it is written', () => {
   const read = (p) => readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8')
-  for (const file of ['README.md', 'src/ui/app.html', 'src/cli/index.js']) {
+  // The page's docs are the React sections, and what ships is the bundle
+  // built from them: both are checked, so neither a source nor a stale
+  // bundle can name the wrong port.
+  const docs = readdirSync(new URL('../../web/src/components/docs/', import.meta.url))
+    .filter((f) => /\.jsx?$/.test(f)).map((f) => `web/src/components/docs/${f}`)
+  const bundle = readdirSync(new URL('../../src/ui/dist/assets/', import.meta.url))
+    .filter((f) => f.endsWith('.js')).map((f) => `src/ui/dist/assets/${f}`)
+  assert.ok(docs.length && bundle.length, 'the docs sources and the bundle are where this test looks')
+  for (const file of ['README.md', ...docs, 'web/src/pages/Docs.jsx', ...bundle, 'src/cli/index.js']) {
     assert.ok(!read(file).includes('7449'), `${file} still names 7449; the code binds 7443`)
   }
+  assert.ok(read('web/src/components/docs/sections.jsx').includes('127.0.0.1:7443'), 'the docs still show the TLS listener')
 })
 
 test('env quotes what it exports, and refuses what a token or placeholder cannot be', async () => {

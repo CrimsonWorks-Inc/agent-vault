@@ -26,10 +26,8 @@ export const KIND_FILTERS = [
   { value: 'daemon', label: 'Daemon', description: 'daemon.*' },
 ]
 
-/** The searchable fields, for a server that still answers with a bare array. */
-export const AUDIT_SEARCH_FIELDS = ['kind', 'seq', 'session_id', 'request_id', 'grant_id', 'approval_id', 'credential_slug', 'reason_code', 'code', 'rule', 'actor']
 
-/** app.html's note column: the most telling field a record has. */
+/** the old page's note column: the most telling field a record has. */
 export function auditNote(r) {
   const v = r?.reason_code || r?.credential_slug || r?.cred || r?.detail || ''
   return typeof v === 'string' ? v : JSON.stringify(v)

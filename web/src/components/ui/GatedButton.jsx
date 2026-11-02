@@ -21,7 +21,7 @@ import { Modal } from './Modal.jsx'
  * Before the platform dialog opens the page names the operation ("Touch ID to
  * revoke session s_123", PresenceStatus), because the platform dialog says who
  * is asking and never what for (U7). With `review`, the exact operation is
- * shown first and signing waits for "Sign it" (app.html's showOperation, used
+ * shown first and signing waits for "Sign it" (the old page's showOperation, used
  * where the dialog cannot describe the change, like a rotation).
  */
 export function GatedButton({

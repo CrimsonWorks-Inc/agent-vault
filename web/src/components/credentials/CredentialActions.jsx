@@ -12,7 +12,7 @@ import { Menu } from '../ui/Menu.jsx'
 import { heldDenied } from './credentialText.js'
 
 /**
- * What can be done to one credential (app.html's row buttons): Test and
+ * What can be done to one credential (the old page's row buttons): Test and
  * Rotate in view, Release in view while it is quarantined, the rest in a
  * menu. Each gated change is signed over exactly what is sent.
  */

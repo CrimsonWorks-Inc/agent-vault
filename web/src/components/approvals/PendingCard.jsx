@@ -34,7 +34,7 @@ export function PickBox({ item, checked, onChange, className }) {
 }
 
 /**
- * One waiting decision, of whichever kind (app.html's approvals card). What
+ * One waiting decision, of whichever kind (the old page's approvals card). What
  * it shows came from GET pending, built by src/pending.js: the headline is
  * the daemon's summary of what it actually received; the claim is whatever
  * the agent said, shown and never believed.

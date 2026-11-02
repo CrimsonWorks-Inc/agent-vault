@@ -13,7 +13,7 @@ import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import * as ph from '../../src/core/placeholder.js'
 import { operationFor } from '../../src/ui/webauthn.js'
-import { servedPage, towardPage, handoffTowardPage, PARSER_MARKER } from '../../src/ui/server.js'
+import { towardPage, handoffTowardPage } from '../../src/ui/server.js'
 import { startStub, startUi } from './control-ui-helpers.js'
 
 const PLACEHOLDER = ph.mint({ kPh: randomBytes(32), sid: ph.newSid(), slug: 'demo', field: 'token' }).text
@@ -155,16 +155,11 @@ test('towardPage folds case and hyphens and leaves other keys alone (F2)', () =>
   assert.deepEqual(towardPage([[{ a: { 'token-hash': 't', Tokens: 2, values: [1] } }]]), [[{ a: { 'token-hash': 't', Tokens: 2, values: [1] } }]])
 })
 
-test('the page will not be served with a parser that could end its own script', () => {
-  assert.doesNotThrow(() => servedPage())
-  for (const src of ["'</script>'", "'</SCRIPT '", "'<!--'", JSON.stringify(PARSER_MARKER)]) {
-    // eslint-disable-next-line no-new-func
-    const fn = new Function(`return ${src}`)
-    assert.throws(() => servedPage(fn), /cannot be put in the page/, src)
-  }
-  // Ordinary source with a '<' in it is fine.
-  assert.doesNotThrow(() => servedPage(function p(x) { return x < 2 && '<script' }))
-})
+// 'the page will not be served with a parser that could end its own script'
+// guarded the old page's inline-script injection of parseOverrides. Nothing
+// is injected now: the bundle imports src/pending.js at build time (C21,
+// one-source-of-truth.test.js), and the page is served under a policy with
+// no inline script at all (ui-dist-serving.test.js, control-ui-docs.test.js).
 
 test('a reserved operation field is a 403 refusal, not a 500, and is not forwarded', async () => {
   const body = { slug: 'demo', kind: 'github', value: VALUE }

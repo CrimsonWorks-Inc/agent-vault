@@ -28,7 +28,7 @@ export function Card({ title, eyebrow, description, actions, footer, padded = tr
 
 /**
  * One line inside a card: a title and its meta on the left, actions on the
- * right; stacks on small screens. app.html's `.row`.
+ * right; stacks on small screens. The old page's `.row`.
  */
 export function Row({ title, meta, actions, children, className }) {
   return (

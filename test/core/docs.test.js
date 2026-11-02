@@ -10,12 +10,34 @@ import { AGENTS } from '../../src/cli/mcp-install.js'
 import { PROFILES } from '../../src/connectors/profiles.js'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
-const app = read('../../src/ui/app.html')
 const cli = read('../../src/cli/index.js')
 const readme = read('../../README.md')
 
-/** The section ids the docs page defines, in order. */
-const sections = [...app.matchAll(/^\s*id: '([a-z]+)',\n\s*title: '/gm)].map((m) => m[1])
+// The docs page is built from the React sections in web/src/components/docs,
+// so what they say is what a reader sees.
+const SECTIONS_SRC = read('../../web/src/components/docs/sections.jsx')
+const REFUSED_SRC = read('../../web/src/components/docs/RefusedTable.jsx')
+
+/** The section ids the docs page defines, in order (SECTIONS in sections.jsx). */
+const sectionList = [...SECTIONS_SRC.matchAll(/\{ id: '([a-z]+)', title: '[^']+', Body: (\w+) \}/g)].map((m) => ({ id: m[1], body: m[2] }))
+const sections = sectionList.map((s) => s.id)
+
+/**
+ * One section's source: its Body function, and whatever it reads that is
+ * declared between the previous section's function and its own (the tool
+ * table before Connect, the model table before Models, the command
+ * reference before Commands).
+ */
+function section(id) {
+  const i = sectionList.findIndex((s) => s.id === id)
+  assert.ok(i >= 0, `no ${id} section`)
+  const end = (k) => {
+    const start = SECTIONS_SRC.indexOf(`\nfunction ${sectionList[k].body}(`)
+    assert.ok(start >= 0, `no ${sectionList[k].body}()`)
+    return SECTIONS_SRC.indexOf('\n}\n', start) + 3
+  }
+  return SECTIONS_SRC.slice(i === 0 ? 0 : end(i - 1), end(i))
+}
 
 test('the docs page defines the sections it advertises', () => {
   assert.ok(sections.length >= 6, `found only ${sections.length} docs sections`)
@@ -36,19 +58,20 @@ test('every denial a caller can hit is explained in the docs', () => {
   // These four mean something is broken rather than something was decided, and
   // carry their own hint at the point of failure.
   const internal = new Set(['AV_INTERNAL', 'AV_NOT_FOUND', 'AV_MCP_PROTOCOL', 'AV_MCP_SESSION_UNKNOWN'])
-  const missing = Object.keys(CODES).filter((c) => !internal.has(c) && !app.includes(`'${c}'`))
+  // The refused table is REFUSED in RefusedTable.jsx, one row per code.
+  const missing = Object.keys(CODES).filter((c) => !internal.has(c) && !REFUSED_SRC.includes(`['${c}',`))
   assert.deepEqual(missing, [], `these denials have no entry in the docs table: ${missing.join(', ')}`)
 })
 
 test('the docs name every agent mcp install can configure', () => {
-  const connect = app.slice(app.indexOf("id: 'connect'"), app.indexOf("id: 'models'"))
+  const connect = section('connect')
   for (const agent of Object.keys(AGENTS)) {
     assert.ok(connect.includes(agent), `mcp install supports ${agent} but the docs never say so`)
   }
 })
 
 test('the docs route every model profile that declares environment variables', () => {
-  const models = app.slice(app.indexOf("id: 'models'"), app.indexOf("id: 'locking'"))
+  const models = section('models')
   // A profile with a base-url env var is one an SDK can be pointed at the vault
   // without touching its code, which is exactly what that section is for.
   const routable = Object.entries(PROFILES).filter(([, p]) => p.env)
@@ -61,25 +84,35 @@ test('the docs route every model profile that declares environment variables', (
 })
 
 test('the mark in the page matches the one in mark.svg', () => {
-  // The keyhole geometry lives in two files: mark.svg, and inline in the page's
-  // brand block. Two copies of a shape drift, and a logo that is subtly
-  // different in the sidebar than in the icon is worse than no logo.
+  // The keyhole geometry lives in two files: mark.svg, and the Mark component
+  // the sidebar and the lockup draw. Two copies of a shape drift, and a logo
+  // that is subtly different in the sidebar than in the icon is worse than no
+  // logo. (web/test/brand.test.js holds the rest of Mark.jsx to mark.svg.)
   const mark = read('../../src/ui/mark.svg')
+  const component = read('../../web/src/components/ui/Mark.jsx')
   const path = /d="(M28\.8[^"]+)"/.exec(mark)
   assert.ok(path, 'mark.svg should hold the keyhole path')
-  assert.ok(app.includes(path[1]), 'the page and mark.svg disagree about the mark')
-  assert.ok(app.includes('circle cx="32" cy="25" r="8.5"'), 'and about the bow')
+  assert.ok(component.includes(path[1]), 'the page and mark.svg disagree about the mark')
+  assert.ok(mark.includes('circle cx="32" cy="25" r="8.5"'), 'mark.svg lost the bow')
+  assert.ok(component.includes('circle cx="32" cy="25" r="8.5"'), 'and about the bow')
 })
 
 test('the page carries a favicon that is well-formed', () => {
-  const link = /<link rel="icon" href="data:image\/svg\+xml,([^"]+)">/.exec(app)
+  const index = read('../../src/ui/dist/index.html')
+  const link = /<link rel="icon" type="image\/svg\+xml" href="\/assets\/([^"]+\.svg)">/.exec(index)
   assert.ok(link, 'the UI should have a favicon')
-  const svg = decodeURIComponent(link[1])
+  const manifest = JSON.parse(read('../../src/ui/dist/manifest.json'))
+  assert.ok(Object.values(manifest).some((e) => e.file === `assets/${link[1]}` || (e.assets || []).includes(`assets/${link[1]}`)),
+    'the favicon is a built asset the server will serve')
+  const svg = read(`../../src/ui/dist/assets/${link[1]}`).trim()
   assert.match(svg, /^<svg /)
   assert.match(svg, /<\/svg>$/)
-  // It cannot use currentColor — nothing sets a colour on a favicon — so it
-  // carries both themes itself.
-  assert.match(svg, /prefers-color-scheme:dark/)
+  // Nothing sets a colour on a favicon, so currentColor would draw it in the
+  // browser's default (black, invisible on a dark tab strip). The old page
+  // carried a light and a dark fill for that reason; this one carries its own
+  // brand colours, which read on both, and must never fall back on currentColor.
+  assert.doesNotMatch(svg, /currentColor/)
+  assert.match(svg, /fill="(#|url\(#)/, 'it paints with colours of its own')
 })
 
 test('the readme points at the docs page rather than duplicating it', () => {

@@ -23,7 +23,10 @@ import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { startE2E } from './integrate3-e2e-helpers.js'
 import { startApi, PASSPHRASE } from './control-api-helpers.js'
-import { pageFunctions, pageConst } from './control-ui-helpers.js'
+import { shownRules, toggleBody } from '../../web/src/components/overview/tripwires.js'
+import { notificationText } from '../../web/src/lib/notify.js'
+import { cleanLine, cleanText as pageCleanText } from '../../web/src/lib/text.js'
+import { copyable } from '../../web/src/lib/clipboard.js'
 import { Daemon } from '../../src/daemon/server.js'
 import { DEFAULT_RULES } from '../../src/daemon/tripwire.js'
 import { cleanHeadline } from '../../src/daemon/notify.js'
@@ -74,17 +77,21 @@ test('B1: tripwire show on a vault that never saved rules lists the defaults; se
 })
 
 test('B1: the page shows the defaults as defaults, and turning on stores them, when none were saved', () => {
-  const PRELUDE = 'const ago = (iso) => `since ${iso}`'
-  const page = pageFunctions(['tripwireRuleText', 'containmentCard'], PRELUDE)
-  const html = page.containmentCard({ enabled: false, rules: structuredClone(DEFAULT_RULES), rules_saved: false, defaults: DEFAULT_RULES }, [])
-  assert.match(html, /Turning them on uses the default rules below/)
-  const mine = page.containmentCard({ enabled: false, rules: [DEFAULT_RULES[0]], rules_saved: true, defaults: DEFAULT_RULES }, [])
-  assert.match(mine, /Turning them on uses your rules below/)
-  // The handler that turns them on, read as text: no saved rules means the
-  // defaults go with it, which the daemon gates.
-  const source = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
-  const on = source.slice(source.indexOf("async 'tripwires-on'()"), source.indexOf("async 'tripwires-off'()"))
-  assert.match(on, /rules_saved !== false/)
+  // web/src/components/overview/tripwires.js, which the containment card
+  // (Overview and Containment pages) reads both decisions from.
+  const defaults = { enabled: false, rules: structuredClone(DEFAULT_RULES), rules_saved: false, defaults: DEFAULT_RULES }
+  assert.deepEqual(shownRules(defaults).rules, [], 'the defaults in force are not the owner\'s rules')
+  assert.deepEqual(shownRules(defaults).shown, DEFAULT_RULES)
+  assert.deepEqual(toggleBody(defaults), { enabled: true, rules: 'defaults' }, 'turning on stores the defaults, which the daemon gates')
+  const mine = { enabled: false, rules: [DEFAULT_RULES[0]], rules_saved: true, defaults: DEFAULT_RULES }
+  assert.deepEqual(shownRules(mine).rules, [DEFAULT_RULES[0]])
+  assert.deepEqual(toggleBody(mine), { enabled: true }, 'with rules saved, turning on only enables them')
+  assert.deepEqual(toggleBody({ ...mine, enabled: true }), { enabled: false })
+  // The card says which, from shownRules' answer (rendered in web/src/pages/Containment.test.jsx).
+  const card = readFileSync(new URL('../../web/src/components/overview/ContainmentCard.jsx', import.meta.url), 'utf8')
+  assert.match(card, /Turning them on uses \$\{rules\.length \? 'your rules' : 'the default rules'\} below\./)
+  assert.match(card, /const \{ rules, shown \} = shownRules\(tw\)/)
+  assert.match(card, /const body = toggleBody\(tw\)/)
 })
 
 // --- B2 ----------------------------------------------------------------------------
@@ -210,11 +217,15 @@ test('N4: every shared cleaner strips bidi controls; the terminal ones strip lin
   // separators a space, as the other controls are.
   assert.equal(cleanHeadline(hostile), 'abcdefghij k l')
 
-  const page = pageFunctions(['previewBlock', 'notificationText'], [pageConst('UNTRUSTED')].join('\n'))
-  const html = page.previewBlock({ method: 'POST', host: 'h', path: `/fix${'\u202e'}evil`, query: [['q', '\u2066v\u2069']], headers: [], body: { text: 'b\u202eody', bytes: 5, kind: 'json' }, placeholders: [] }, 'ap_1')
-  assert.ok(!BIDI.test(html), JSON.stringify(html))
-  assert.match(html, /fixevil/)
-  const note = page.notificationText({ kind: 'request', headline: hostile })
+  // The page's cleaners (web/src/lib/text.js): a preview's path and query go
+  // through cleanLine, its body through UntrustedText's cleanText, and every
+  // copy through copyable. The rendered preview is held in
+  // web/src/components/approvals/RequestPreview.test.jsx.
+  assert.equal(cleanLine(`/fix${'\u202e'}evil`), '/fixevil')
+  assert.equal(cleanLine('\u2066v\u2069'), 'v')
+  assert.equal(pageCleanText(hostile), cleanText(hostile), 'the page strips what the CLI strips')
+  assert.ok(!BIDI.test(copyable(hostile)) && !BIDI.test(cleanLine(hostile)))
+  const note = notificationText({ kind: 'request', headline: hostile })
   assert.equal(note, 'Held request: abcdefghij k l')
 })
 

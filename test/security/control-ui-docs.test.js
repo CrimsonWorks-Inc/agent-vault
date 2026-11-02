@@ -3,25 +3,58 @@
 // Each feature the page or the CLI gained is documented where a reader looks
 // for it, with commands written through `${c.cli}` so they paste on this
 // machine (and so a command added by another batch is never named here as a
-// literal before it exists).
+// literal before it exists). The docs are the React sections in
+// web/src/components/docs/sections.jsx; the page is the built bundle in
+// src/ui/dist.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Script } from 'node:vm'
-import { servedPage } from '../../src/ui/server.js'
-import { PAGE } from './control-ui-helpers.js'
+import { readFileSync } from 'node:fs'
 
-const section = (id) => {
-  const start = PAGE.indexOf(`id: '${id}',`)
-  assert.ok(start > 0, `no ${id} section`)
-  const next = PAGE.indexOf("\n    {\n      id: '", start)
-  return PAGE.slice(start, next > 0 ? next : undefined)
+const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
+
+/** The docs sections' source, read as text. */
+function docsSource() {
+  return read('web/src/components/docs/sections.jsx')
 }
 
-test('the served page is one script that parses', () => {
-  const html = servedPage()
-  const code = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'))
-  assert.doesNotThrow(() => new Script(code))
+const SRC = docsSource()
+const LIST = [...SRC.matchAll(/\{ id: '([a-z]+)', title: '[^']+', Body: (\w+) \}/g)].map((m) => ({ id: m[1], body: m[2] }))
+
+/**
+ * One section: its Body function, plus what is declared between the previous
+ * section's function and its own (the tool table before Connect, the command
+ * reference before Commands).
+ */
+const section = (id) => {
+  const i = LIST.findIndex((s) => s.id === id)
+  assert.ok(i >= 0, `no ${id} section`)
+  const end = (k) => {
+    const start = SRC.indexOf(`\nfunction ${LIST[k].body}(`)
+    assert.ok(start >= 0, `no ${LIST[k].body}()`)
+    return SRC.indexOf('\n}\n', start) + 3
+  }
+  return SRC.slice(i === 0 ? 0 : end(i - 1), end(i))
+}
+
+test('the served page is one module script from the bundle, and nothing inline', () => {
+  // The old page was one inline script that had to parse. The built page
+  // loads exactly one module from /assets, named in the Vite manifest the
+  // server's allowlist is read from, and carries no inline script or style
+  // (U2: the policy has no 'unsafe-inline').
+  const html = read('src/ui/dist/index.html')
+  const manifest = JSON.parse(read('src/ui/dist/manifest.json'))
+  const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+  assert.equal(scripts.length, 1, 'one script tag')
+  const [, attrs, body] = scripts[0]
+  assert.match(attrs, /\btype="module"/)
+  assert.equal(body.trim(), '', 'the script tag carries no inline code')
+  const src = /\bsrc="\/assets\/([^"]+)"/.exec(attrs)?.[1]
+  assert.ok(src, 'the script is served from /assets')
+  const entry = Object.values(manifest).find((e) => e.isEntry)
+  assert.equal(entry?.file, `assets/${src}`, 'the script is the manifest entry')
+  assert.ok(read(`src/ui/dist/assets/${src}`).length > 0)
+  assert.doesNotMatch(html, /<style\b|\sstyle=|\son[a-z]+=/i, 'no inline style or handler')
 })
 
 test('containment and recovery covers every wave-3 safety feature', () => {
@@ -29,7 +62,7 @@ test('containment and recovery covers every wave-3 safety feature', () => {
   for (const heading of ['Narrow it instead', 'Panic', 'Quarantine a credential', 'Tripwires', 'Rotate a credential',
     'Know when a token runs out', 'Extra shapes to scrub, and pinned keys', 'Hear about it when something is waiting',
     'Review what each session did', 'Back up and restore', 'Keep a witness']) {
-    assert.ok(safety.includes(`<h3>${heading}</h3>`), `safety has no "${heading}"`)
+    assert.ok(safety.includes(`<H3>${heading}</H3>`), `safety has no "${heading}"`)
   }
   assert.ok(safety.includes('The backup is encrypted with a recovery passphrase that is not your vault passphrase. Sessions and placeholders are never backed up: after a restore, every agent needs a new session.'))
   assert.match(safety, /denial of service against your own work/, 'the trade panic and quarantine make is stated')
@@ -45,8 +78,10 @@ test('containment and recovery covers every wave-3 safety feature', () => {
 test('the agent tools are documented, read-only ones said to be so', () => {
   const connect = section('connect')
   assert.match(connect, /It gains nine tools/)
-  assert.match(connect, /<code>vault_describe_access<\/code> — [^<]*Read-only/)
-  assert.match(connect, /<code>vault_preflight<\/code> — [^<]*Nothing is sent upstream and nothing is spent/)
+  // The tool list is MCP_TOOLS: [name, what it does], rendered "name — what".
+  assert.match(connect, /\['vault_describe_access', '[^']*Read-only/)
+  assert.match(connect, /\['vault_preflight', '[^']*Nothing is sent upstream and nothing is spent/)
+  assert.match(connect, /\{what \? `— \$\{what\}`/, 'each tool is shown with what it does')
 })
 
 test('the new session limits and templates are explained where sessions are', () => {

@@ -1,7 +1,7 @@
 // Reads that change slowly (the access report, tripwires, notify settings),
 // kept for half a minute so the five-second overview refresh does not ask
 // the daemon for each of them every time. Anything the page changes clears it
-// (app.html's `slow` map).
+// (the old page's `slow` map).
 
 export function createCache({ ms = 30_000, now = () => Date.now() } = {}) {
   const hits = new Map()

@@ -135,7 +135,7 @@ function LockState({ locked }) {
 
 /**
  * Lock is a gated change (POST lock), confirmed in a page-drawn dialog first.
- * Unlock is not gated: the passphrase is the proof (app.html's lockBtn).
+ * Unlock is not gated: the passphrase is the proof (the old page's lockBtn).
  */
 function LockButton({ locked, onChanged }) {
   const api = useApi()
@@ -179,7 +179,7 @@ function LockButton({ locked, onChanged }) {
 }
 
 /**
- * Unlocking with the passphrase, as app.html's `unlock` action: asked for only
+ * Unlocking with the passphrase, as the old page's `unlock` action: asked for only
  * when the vault needs one. Resolves true when unlocked, false when refused,
  * null when cancelled.
  */

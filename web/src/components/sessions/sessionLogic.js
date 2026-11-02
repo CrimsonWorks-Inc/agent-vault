@@ -1,5 +1,5 @@
-// The Sessions page's rules, ported from src/ui/app.html as pure functions so
-// the tests can hold them to app.html's behaviour. Nothing here touches the
+// The Sessions page's rules, ported from src/ui/the old page as pure functions so
+// the tests can hold them to the old page's behaviour. Nothing here touches the
 // DOM or the network: the components read their inputs, call these, and send
 // exactly what comes back.
 
@@ -7,7 +7,7 @@ import { canonicalJson } from '../../lib/presence.js'
 import { policyValue, until } from '../../lib/format.js'
 import { cleanLine } from '../../lib/text.js'
 
-// ---- constants, as app.html named them -------------------------------------
+// ---- constants, as the old page named them -------------------------------------
 
 export const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
 export const APPROVAL_ORDER = ['auto', 'first-use', 'on-write', 'each']
@@ -49,7 +49,7 @@ export const autoWrites = (approval, methods) =>
 /**
  * The session's strictest mode. When it lets writes through unasked, its
  * laxest mode instead (auto, or first-use), shown as a warning. Null when it
- * has no credentials to read a mode from (app.html's approvalBadge).
+ * has no credentials to read a mode from (the old page's approvalBadge).
  */
 export function approvalMode(s) {
   const modes = (s?.creds || []).map((c) => c?.approval ?? 'auto')
@@ -104,7 +104,7 @@ export function narrowSummary(r) {
 // ---- the new-session form ------------------------------------------------------
 
 /**
- * GrantSpec fields from the advanced inputs (app.html advancedFields). Rate
+ * GrantSpec fields from the advanced inputs (the old page advancedFields). Rate
  * and quota go as typed, for the daemon to parse; numbers go as numbers; the
  * payload is parsed here, before anything is signed. Empty means absent.
  */
@@ -148,7 +148,7 @@ export function advancedFields(raw) {
 export const picksModel = (picked, kinds) => picked.some((slug) => MODEL_KINDS.includes(kinds.get(slug)))
 
 /**
- * What the free-form New session form would create (app.html
+ * What the free-form New session form would create (the old page
  * readSessionForm), or `{ error }`. `form` holds the inputs' values as typed.
  */
 export function buildSessionBody(form, kinds = new Map()) {
@@ -185,7 +185,7 @@ export function buildSessionBody(form, kinds = new Map()) {
   }
 }
 
-/** The form's starting values (app.html freeForm's defaults). */
+/** The form's starting values (the old page freeForm's defaults). */
 export function freshForm(creds = []) {
   return {
     picked: creds.length ? [creds[0].slug] : [],
@@ -319,7 +319,7 @@ export function envCommand({ cli, sessionId, mappings }) {
 /**
  * The hand-off from a create answer. Only the fields the card shows are kept,
  * so nothing else the answer carried lingers in state. The first grant's own
- * injection site comes from the credential, as app.html read it.
+ * injection site comes from the credential, as the old page read it.
  */
 export function handoffFrom(created, { cli, creds = [], picked = [] }) {
   const first = created?.grants?.[0]?.cred ?? picked[0]

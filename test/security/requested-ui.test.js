@@ -13,38 +13,23 @@ import { readFileSync } from 'node:fs'
 import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
-import { UiServer, servedPage } from '../../src/ui/server.js'
+import { UiServer } from '../../src/ui/server.js'
+import { readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { until } from '../../web/src/lib/format.js'
+import {
+  AUTO_WARNING, NEVER_WARNING, autoWrites, envCommand, suggestedName, defaultMappings,
+} from '../../web/src/components/sessions/sessionLogic.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
 
-const PAGE = readFileSync(new URL('../../src/ui/app.html', import.meta.url), 'utf8')
-
-/** A named function from the page's script, as a callable. */
-function pageFunction(name, prelude = '', page = PAGE) {
-  const PAGE = page
-  const start = PAGE.indexOf(`function ${name}(`)
-  assert.ok(start >= 0, `the page has no ${name}()`)
-  let depth = 0
-  // The body, not a default parameter's braces: `(args = {}) {`.
-  let i = PAGE.indexOf(') {', start) + 2
-  for (; i < PAGE.length; i++) {
-    if (PAGE[i] === '{') depth++
-    else if (PAGE[i] === '}' && --depth === 0) break
-  }
-  return new Function(`${prelude}\n${PAGE.slice(start, i + 1)}; return ${name}`)()
-}
-
-/** A `const name = (…) => …` arrow from the page, as a callable: up to the next statement. */
-function pageArrow(name) {
-  const start = PAGE.indexOf(`const ${name} = (`)
-  assert.ok(start >= 0, `the page has no ${name}`)
-  const ends = ['\n\n', '\n  /**', '\n  const ', '\n  let ', '\n  function ']
-    .map((e) => PAGE.indexOf(e, start + 1)).filter((i) => i > 0)
-  return new Function(`${PAGE.slice(start, Math.min(...ends))}; return ${name}`)()
-}
 
 test('the page reads owner options exactly as the CLI and the daemon do', () => {
-  // The parser the page runs is the one the server puts in it (C21).
-  const narrowing = pageFunction('parseOverrides', '', servedPage())
+  // The page reads the owner's options with src/pending.js's parser, which
+  // its bundle imports (C21), through the approvals page's own reader.
+  const narrowing = (raw) => {
+    const r = readNarrowing(raw)
+    assert.ok(!r.error, r.error)
+    return r.overrides
+  }
   for (const raw of [
     { approval: 'auto' }, { infinite: true }, { approval: 'each', methods: 'get,post', infinite: true },
     { approval: '' }, { infinite: false },
@@ -58,8 +43,8 @@ test('the page reads owner options exactly as the CLI and the daemon do', () => 
 })
 
 test('a session with no expiry renders as never, and garbage as expired', () => {
-  const until = pageArrow('until')
-  assert.equal(until(null), 'never')
+  assert.equal(until(null), 'never expires')
+  assert.equal(until('2030-01-01T00:00:00Z', { infinite: true }), 'never expires', 'infinite wins over any date')
   assert.equal(until('garbage'), 'expired')
   assert.equal(until(new Date(Date.now() + 2 * 3600_000 + 60_000).toISOString()), '2h left')
 })
@@ -72,32 +57,32 @@ test('the decisions that can be elevated are re-verified by the daemon', () => {
 })
 
 test('the page warns before it signs an elevated session', () => {
-  assert.ok(PAGE.includes('No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.'))
-  assert.ok(PAGE.includes('This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.'))
-  const autoWrites = pageArrow('autoWrites')
-  // The arrow reads SAFE_METHODS from the page; give it the same list.
-  globalThis.SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS']
-  try {
-    assert.equal(autoWrites('auto', ['GET', 'POST']), true)
-    assert.equal(autoWrites('auto', ['get', 'head']), false)
-    assert.equal(autoWrites('auto', undefined), false)
-    assert.equal(autoWrites('on-write', ['POST']), false)
-    // C26: first-use asks once, then never again, so it warns like auto.
-    assert.equal(autoWrites('first-use', ['GET', 'DELETE']), true)
-    assert.equal(autoWrites('first-use', ['GET', 'HEAD']), false)
-    assert.equal(autoWrites('each', ['POST']), false)
-  } finally { delete globalThis.SAFE_METHODS }
+  assert.equal(AUTO_WARNING, 'No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.')
+  assert.equal(NEVER_WARNING, 'This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.')
+  // The form shows them before the tap (web/src/pages/Sessions.test.jsx).
+  const form = readFileSync(new URL('../../web/src/components/sessions/NewSessionForm.jsx', import.meta.url), 'utf8')
+  assert.match(form, /AUTO_WARNING/)
+  assert.match(form, /NEVER_WARNING/)
+  assert.equal(autoWrites('auto', ['GET', 'POST']), true)
+  assert.equal(autoWrites('auto', ['get', 'head']), false)
+  assert.equal(autoWrites('auto', undefined), false)
+  assert.equal(autoWrites('on-write', ['POST']), false)
+  // C26: first-use asks once, then never again, so it warns like auto.
+  assert.equal(autoWrites('first-use', ['GET', 'DELETE']), true)
+  assert.equal(autoWrites('first-use', ['GET', 'HEAD']), false)
+  assert.equal(autoWrites('each', ['POST']), false)
 })
 
 test('the hand-off card offers an env command with no session token in it', () => {
-  const start = PAGE.indexOf('const envCmd = ')
-  assert.ok(start > 0)
-  const line = PAGE.slice(start, PAGE.indexOf('\n', start))
-  assert.match(line, /env --session \$\{s\.session_id\} --out \.env/)
-  assert.doesNotMatch(line, /token/, 'the command must not carry the session token')
-  const suggested = pageArrow('suggestedName')
-  assert.equal(suggested({ cred: 'oai', env: { key: 'OPENAI_API_KEY' } }), 'OPENAI_API_KEY')
-  assert.equal(suggested({ cred: 'gh-work', env: null }), 'GH_WORK_TOKEN')
+  const grants = [{ cred: 'oai', env: { key: 'OPENAI_API_KEY' }, placeholder: 'av1.ph' }, { cred: 'gh-work', env: null }]
+  const cmd = envCommand({ cli: 'agent-vault', sessionId: 's_1', mappings: defaultMappings(grants) })
+  assert.equal(cmd, 'agent-vault env --session s_1 --out .env --map OPENAI_API_KEY=oai --map GH_WORK_TOKEN=gh-work')
+  assert.doesNotMatch(cmd, /avs1\.|token=|av1\.ph/, 'the command must not carry the session token or a placeholder')
+  const src = readFileSync(new URL('../../web/src/components/sessions/sessionLogic.js', import.meta.url), 'utf8')
+  const fn = src.slice(src.indexOf('export function envCommand('), src.indexOf('\n}\n', src.indexOf('export function envCommand(')))
+  assert.doesNotMatch(fn, /token/, 'envCommand never reads a token')
+  assert.equal(suggestedName({ cred: 'oai', env: { key: 'OPENAI_API_KEY' } }), 'OPENAI_API_KEY')
+  assert.equal(suggestedName({ cred: 'gh-work', env: null }), 'GH_WORK_TOKEN')
 })
 
 test('approving a request with owner options from the page creates the session they chose', async () => {
@@ -160,23 +145,23 @@ test('an auto-approving multi-credential session made from the page needs only i
   } finally { await u.stop(); await d.stop() }
 })
 
+/** The docs sections' source (web/src/components/docs/sections.jsx), read as text. */
+function docsSource() {
+  return readFileSync(new URL('../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
+}
+
 test('the docs say how to start an auto-approving session, and that read-only needs nothing', () => {
-  assert.ok(PAGE.includes('3b. Let it write without asking'))
-  assert.ok(PAGE.includes('session create --cred ${c.cred} --methods GET,POST --approval auto'))
-  assert.ok(PAGE.includes('auto means no approval prompts at all, including for writes. Because that takes you out of the loop for the life of the session, creating one asks for your passphrase or fingerprint every time, even inside the five-minute window, and is refused on a vault with no passphrase. Read-only sessions are unaffected: GET and HEAD never ask under on-write either.'))
-  assert.ok(PAGE.includes('Give a tool an env file'))
-  assert.ok(PAGE.includes('env --out .env --map GH_TOKEN=${c.cred} --profile-vars'))
-  assert.ok(PAGE.includes('The file holds placeholders, which only work through this vault, and is written readable by you alone. It is never overwritten unless you say so.'))
-  assert.ok(PAGE.includes('Revoking: agent-vault session revoke &lt;sid&gt;, or Panic, ends an infinite session like any other.'))
+  const DOCS = docsSource()
+  assert.ok(DOCS.includes('<H3>3b. Let it write without asking</H3>'))
+  assert.ok(DOCS.includes('session create --cred ${c.cred} --methods GET,POST --approval auto'))
+  assert.ok(DOCS.includes('auto means no approval prompts at all, including for writes. Because that takes you out of the loop for the life of the session, creating one asks for your passphrase or fingerprint every time, even inside the five-minute window, and is refused on a vault with no passphrase. Read-only sessions are unaffected: GET and HEAD never ask under on-write either.'))
+  assert.ok(DOCS.includes('<H3>Give a tool an env file</H3>'))
+  assert.ok(DOCS.includes('env --out .env --map GH_TOKEN=${c.cred} --profile-vars'))
+  assert.ok(DOCS.includes('The file holds placeholders, which only work through this vault, and is written readable by you alone. It is never overwritten unless you say so.'))
+  // JSX reads &lt;sid&gt; as the entity, so the page shows "<sid>", as before.
+  assert.ok(DOCS.includes('Revoking: agent-vault session revoke &lt;sid&gt;, or Panic, ends an infinite session like any other.'))
 })
 
-test('what the human typed on an approval survives the five-second re-render', () => {
-  // The approvals view re-renders on a timer. Narrowings and owner options
-  // were inputs it rebuilt from scratch, so they vanished mid-edit.
-  const render = PAGE.slice(PAGE.indexOf('async function render() {'), PAGE.indexOf('async function refreshChrome()'))
-  assert.match(render, /restoreDrafts\(\)/)
-  assert.match(PAGE, /const DRAFTED = '\.narrow-input, \.owner-approval, \.owner-infinite'/)
-  const decide = PAGE.slice(PAGE.indexOf('async decide(btn) {'))
-  assert.match(decide.slice(0, decide.indexOf("toast(granted ? 'Approved' : 'Denied')")), /drafts\.delete\(key\)/,
-    'a decided item’s drafts are forgotten, so they cannot reappear on another')
-})
+// 'what the human typed on an approval survives the five-second re-render'
+// is a rendered behaviour now: web/src/pages/Approvals.test.jsx, "what was
+// typed survives the refresh; a decided item's draft is forgotten".

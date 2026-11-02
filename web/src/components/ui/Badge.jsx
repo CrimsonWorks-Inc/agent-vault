@@ -30,5 +30,5 @@ export function Badge({ tone = 'neutral', dot = false, mono = false, className, 
   )
 }
 
-/** The same thing by app.html's name for it. */
+/** The same thing by the old page's name for it. */
 export const Pill = Badge

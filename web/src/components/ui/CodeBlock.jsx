@@ -1,34 +1,22 @@
 import { useState } from 'react'
 import { CheckIcon, ClipboardDocumentIcon } from '@heroicons/react/16/solid'
+import { useCopy } from '../../hooks/useCopy.js'
+import { copyable } from '../../lib/clipboard.js'
 import { cx } from '../../lib/cx.js'
-import { BIDI } from '../../lib/text.js'
-
-/**
- * What the page shows in a code block and what any copy button writes: the
- * text with bidi embeddings, overrides and isolates removed (lib/text.js
- * BIDI, the ranges app.html's esc() removed), so a token or a summary cannot
- * read or paste in a different order than it holds. Everything else is kept
- * as it is, `& < > " '` included: React text nodes escape those, and a
- * pasted command needs them.
- */
-export const copyable = (text) => String(text ?? '').replace(BIDI, '')
 
 /**
  * Text to read or paste: a command, a JSON body, a Markdown summary. Shown as
- * text (never HTML) with a copy button. `label` names it for the copy button
- * ("Copy the CLI line").
+ * text (never HTML), bidi removed as the copy is (lib/clipboard.js), with a
+ * copy button. `label` names it for the copy button ("Copy the CLI line"). A
+ * refused copy is a toast, as it is for every copy button.
  */
 export function CodeBlock({ code, label = 'Copy', copy = true, wrap = false, className, inline = false }) {
+  const copyText = useCopy()
   const [copied, setCopied] = useState(false)
-  const [failed, setFailed] = useState(false)
   const doCopy = async () => {
-    try {
-      await globalThis.navigator.clipboard.writeText(copyable(code))
-      setCopied(true); setFailed(false)
-      setTimeout(() => setCopied(false), 1400)
-    } catch {
-      setFailed(true)
-    }
+    if (!(await copyText(code))) return
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1400)
   }
   if (inline) return <code className={cx('rounded-[0.3rem] bg-sunken px-1.5 py-0.5 font-mono text-[0.8125rem] text-ink', className)}>{copyable(code)}</code>
   return (
@@ -45,7 +33,6 @@ export function CodeBlock({ code, label = 'Copy', copy = true, wrap = false, cla
           {copied ? 'Copied' : 'Copy'}
         </button>
       )}
-      {failed && <p role="alert" className="px-3.5 pb-2 text-xs text-warn">Your browser would not let the page copy. Select the text instead.</p>}
     </div>
   )
 }

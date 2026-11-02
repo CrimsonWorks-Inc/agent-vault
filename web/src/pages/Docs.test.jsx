@@ -10,7 +10,7 @@ import { Docs, docsContext } from './Docs.jsx'
 
 const CTX = { cli: 'av', gateway_port: 7999, cred_slugs: ['gh-mine', 'openai'], version: '0.2.0' }
 
-describe('Docs (parity with app.html)', () => {
+describe('Docs (parity with the old page)', () => {
   it('prints every command with the server\'s cli name, port and first credential', () => {
     renderWith(<Docs rest="start" />, { vault: { context: CTX } })
     expect(screen.getByText('v0.2.0')).toBeTruthy()
@@ -19,7 +19,7 @@ describe('Docs (parity with app.html)', () => {
     expect(screen.queryByText(/^agent-vault setup/)).toBeNull()
   })
 
-  it('falls back to app.html\'s defaults when the daemon said nothing', () => {
+  it('falls back to the old page\'s defaults when the daemon said nothing', () => {
     expect(docsContext({})).toEqual({ cli: 'agent-vault', gateway_port: 7411, cred: 'gh-work', version: null })
   })
 

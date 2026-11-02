@@ -3,6 +3,7 @@
 // Development only: never shipped (web/ is not in "files").
 //
 //   node web/scripts/dev-vault.mjs [--port 5180] [--enrolled] [--locked] [--pending 3]
+//                                  [--sessions 64] [--creds 6] [--templates 0]
 //
 // It builds nothing. It serves whatever is in src/ui/dist, so run
 // `npm run build:ui` first. In one process it:
@@ -12,22 +13,25 @@
 //      than 200 audit records, so every list has pages;
 //   2. starts a daemon on that vault (its own control socket, gateway port 0)
 //      and an `agent-vault ui` server for it (src/ui/server.js, unchanged);
-//   3. claims the UI server's launch token itself and serves src/ui/dist on
-//      http://localhost:<port> with the strict CSP of contract U2, proxying
-//      /api/* to the UI server with that session cookie.
+//   3. claims the UI server's launch token itself and forwards everything on
+//      http://127.0.0.1:<port> to that UI server with its session cookie, so
+//      the page, its assets and their CSP are exactly what the UI server
+//      serves (U2), and the link can be opened by any number of browsers.
 //
 // --enrolled stores a generated P-256 key as the presence authenticator, so
 // the page shows the enrolled state (no signature can be made with it from a
 // browser; gated flows stop at the presence prompt, as U9 says they will).
 // --locked locks the vault after seeding. --pending N leaves N session
-// requests waiting in Approvals.
+// requests waiting in Approvals. --creds N stores N credentials (at least the
+// six named ones) and --templates N saves N session templates, so those
+// lists have pages too.
 //
 // Ctrl-C removes the temp dir.
 
 import http from 'node:http'
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, extname, normalize } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import { parseArgs } from 'node:util'
@@ -45,11 +49,10 @@ const { values: args } = parseArgs({
     locked: { type: 'boolean', default: false },
     pending: { type: 'string', default: '3' },
     sessions: { type: 'string', default: '64' },
+    creds: { type: 'string', default: '6' },
+    templates: { type: 'string', default: '0' },
   },
 })
-
-const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff2': 'font/woff2', '.svg': 'image/svg+xml', '.json': 'application/json' }
 
 if (!existsSync(join(DIST, 'index.html'))) {
   console.error('src/ui/dist/index.html is missing: run npm run build:ui first')
@@ -79,6 +82,7 @@ const CREDS = [
   ['stripe-test', 'sk_test_', 'Ee'],
   ['internal-api', 'tok_test_', 'Ff'],
 ]
+for (let i = CREDS.length; i < Number(args.creds); i++) CREDS.push([`svc-${String(i).padStart(2, '0')}`, 'tok_test_', 'Zz'])
 for (const [slug, prefix, fill] of CREDS) {
   vault.addCredential({
     slug, kind: 'http', connector: { host: upHost, scheme: 'http' },
@@ -162,6 +166,15 @@ for (let i = 0; i < nPending; i++) {
   }).catch((e) => console.error(`request ${i}: ${e.message}`))
 }
 
+for (let i = 0; i < Number(args.templates); i++) {
+  await control('POST', '/v1/presence/window', { passphrase: PASSPHRASE }).catch(() => {})
+  await control('POST', '/v1/templates', {
+    name: `tpl-${String(i + 1).padStart(2, '0')}`,
+    spec: { cred: CREDS[i % 5][0], methods: i % 2 ? ['GET'] : ['GET', 'POST'], paths: ['/repos/**'], ttl_hours: 1 + (i % 8) },
+    presence: { passphrase: PASSPHRASE },
+  }).catch((e) => console.error(`template ${i}: ${e.message}`))
+}
+
 if (args.enrolled) {
   const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
   vault.setPresenceKey({
@@ -179,41 +192,23 @@ if (!cookie) throw new Error('could not claim the UI server session')
 
 if (args.locked) await control('POST', '/v1/lock', {}).catch((e) => console.error(`lock: ${e.message}`))
 
-// ---- 3. the page, under the strict CSP ------------------------------------------
+// ---- 3. the page, as the UI server serves it ---------------------------------
 
-// Read on each request, so `npm run build:ui` shows on reload. Only the files
-// the manifest names are served, as the real server will (U2).
-function listAssets() {
-  const manifest = JSON.parse(readFileSync(join(DIST, 'manifest.json'), 'utf8'))
-  const out = new Set()
-  for (const e of Object.values(manifest)) { out.add(e.file); for (const a of e.assets || []) out.add(a); for (const c of e.css || []) out.add(c) }
-  return [...out]
-}
-function fileFor(path) {
-  const allowed = new Set(['/index.html', ...listAssets().map((f) => `/${f}`)])
-  return allowed.has(path) ? readFileSync(join(DIST, path)) : null
-}
-
+// Every path goes to the real UI server (src/ui/server.js), which serves the
+// built page and its assets from memory under the strict CSP (U2) and answers
+// /api. This only adds the session cookie, and the Host and Origin the UI
+// server expects, so the link works for any browser and any number of loads.
 const page = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost')
-  if (url.pathname.startsWith('/api/')) {
-    const headers = { ...req.headers, host: `localhost:${ui.boundPort}`, cookie: `av_ui=${cookie}` }
-    if (headers.origin) headers.origin = ui.origin
-    const up = http.request({ host: '127.0.0.1', port: ui.boundPort, path: req.url, method: req.method, headers }, (r) => {
-      const h = { ...r.headers }
-      delete h['set-cookie']
-      res.writeHead(r.statusCode, h)
-      r.pipe(res)
-    })
-    up.on('error', () => { res.writeHead(502); res.end('{"error":"ui server gone"}') })
-    req.pipe(up)
-    return
-  }
-  const path = url.pathname === '/' ? '/index.html' : normalize(url.pathname)
-  const body = fileFor(path)
-  if (!body) { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('not found'); return }
-  res.writeHead(200, { 'content-type': TYPES[extname(path)] || 'application/octet-stream', 'cache-control': 'no-store', 'content-security-policy': CSP, 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' })
-  res.end(body)
+  const headers = { ...req.headers, host: `localhost:${ui.boundPort}`, cookie: `av_ui=${cookie}` }
+  if (headers.origin) headers.origin = ui.origin
+  const up = http.request({ host: '127.0.0.1', port: ui.boundPort, path: req.url, method: req.method, headers }, (r) => {
+    const h = { ...r.headers }
+    delete h['set-cookie']
+    res.writeHead(r.statusCode, h)
+    r.pipe(res)
+  })
+  up.on('error', () => { res.writeHead(502); res.end('{"error":"ui server gone"}') })
+  req.pipe(up)
 })
 await new Promise((r) => page.listen(Number(args.port), '127.0.0.1', r))
 
@@ -223,6 +218,8 @@ console.log(JSON.stringify({
   ui_server: ui.origin,
   vault_dir: dir,
   sessions: tokens.length,
+  credentials: CREDS.length,
+  templates: Number(args.templates),
   audit_records: Array.isArray(audit) ? audit.length : null,
   pending: nPending,
   enrolled: args.enrolled,

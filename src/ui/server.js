@@ -38,7 +38,7 @@ import { findAll as findPlaceholders } from '../core/placeholder.js'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, extname } from 'node:path'
-import { Cursors, PagingError, pagingOf, pageList, matches } from './list-paging.js'
+import { Cursors, PagingError, pagingOf, pageAnswer, matches, LISTS, AUDIT_FIELDS } from './list-paging.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const IDLE_EXIT_MS = 30 * 60_000
@@ -68,12 +68,10 @@ export class UiServer {
     // The built page (UI contract U2): index.html and an allowlist of assets,
     // read once here and served from memory, so no request ever names a file
     // on disk.
+    // There is no other page: a missing bundle stops the server here, with
+    // the command that builds it, rather than serving something else.
     this.dist = loadDist(distDir)
-    // U2 wave-1 fallback: until the bundle is built into src/ui/dist, a missing
-    // dist/index.html serves app.html as before, so this branch stays usable.
-    // Integration removes this and app.html together, and a missing bundle
-    // becomes a startup error that says to run `npm run build:ui`.
-    this.html = this.dist ? null : servedPage()
+    if (!this.dist) throw new Error(`the built UI is missing (no index.html in ${distDir}); run npm run build:ui`)
     // Cursors for paged lists (U3) are sealed with a key that lives only here.
     this.cursors = new Cursors()
     // Outstanding presence challenges, each bound to one operation and good
@@ -166,7 +164,7 @@ export class UiServer {
     }
     const name = url.pathname.slice('/assets/'.length)
     const asIs = String(req.url).split('?')[0] === url.pathname
-    const asset = req.method === 'GET' && asIs && ASSET_NAME.test(name) ? this.dist?.assets.get(name) : undefined
+    const asset = req.method === 'GET' && asIs && ASSET_NAME.test(name) ? this.dist.assets.get(name) : undefined
     if (!asset) return this.#send(res, 404, { error: 'not found' })
     this.#touch(res)
     res.writeHead(200, {
@@ -191,10 +189,7 @@ export class UiServer {
 
     if (cookie && this.sessionCookie && safeEqual(cookie, this.sessionCookie)) {
       this.#touch(res)
-      if (this.dist) return this.#sendHtml(res, this.dist.index)
-      // U2 wave-1 fallback: app.html runs inline script and style, so it keeps
-      // its old policy until integration deletes it.
-      return this.#sendHtml(res, this.html, 200, LEGACY_PAGE_CSP)
+      return this.#sendHtml(res, this.dist.index)
     }
 
     if (offered && !this.sessionCookie && safeEqual(offered, this.launchToken)) {
@@ -766,12 +761,7 @@ export class UiServer {
     const answer = await load()
     if (!paging) return answer
     const shown = towardPage(answer)
-    if (within === null) return pageList(shown, spec, paging, filters, this.cursors)
-    const beside = {}
-    if (isRecord(shown)) {
-      for (const [k, v] of Object.entries(shown)) if (k !== within && !drop.includes(k)) beside[k] = v
-    }
-    return { ...beside, ...pageList(isRecord(shown) ? shown[within] : [], spec, paging, filters, this.cursors) }
+    return pageAnswer(shown, spec, paging, { within, drop, filters }, this.cursors)
   }
 
   /**
@@ -1015,13 +1005,13 @@ export class UiServer {
     res.end(payload)
   }
 
-  #sendHtml(res, html, status = 200, csp = STRICT_CSP) {
+  #sendHtml(res, html, status = 200) {
     res.writeHead(status, {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      'content-security-policy': csp,
+      'content-security-policy': STRICT_CSP,
     })
     res.end(html)
   }
@@ -1031,38 +1021,6 @@ const canonical = webauthn.canonicalOperation
 
 const DIST_DIR = join(HERE, 'dist')
 
-/**
- * Each paged list: its order (a key ending in something unique, so the order
- * is total and a cursor always lands in the same place) and the visible
- * fields `q` may match. Order: credentials by slug, templates by name,
- * listeners by id, sessions and pending newest first, tripwire rules as saved,
- * a session's grants by credential, the access report's sessions most
- * recently seen first and its credentials by slug.
- */
-const LISTS = {
-  credentials: { name: 'credentials', key: (c) => [c.slug, c.id], dirs: [1, 1], fields: (c) => [c.slug, c.id, c.kind, c.label] },
-  sessions: {
-    name: 'sessions', key: (s) => [s.created_at, s.id], dirs: [-1, -1],
-    fields: (s) => [s.id, s.label, s.state, Array.isArray(s.creds) ? s.creds.map((c) => c?.slug) : []],
-  },
-  pending: { name: 'pending', key: (p) => [p.created_at, p.kind, p.id], dirs: [-1, 1, -1], fields: (p) => [p.id, p.kind, p.headline, p.grant_id] },
-  templates: { name: 'templates', key: (t) => [t.name], dirs: [1], fields: (t) => [t.name, t.creds] },
-  listeners: { name: 'listeners', key: (l) => [l.id, l.address], dirs: [1, 1], fields: (l) => [l.id, l.address, l.state, l.surfaces] },
-  tripwireRules: { name: 'tripwires', key: (_r, i) => [i], dirs: [1], fields: (r) => [r.id, r.action, r.codes, r.rule_prefix] },
-  detailGrants: { name: 'sessions/detail', key: (g) => [g.cred, g.grant_id], dirs: [1, 1], fields: (g) => [g.grant_id, g.cred, g.state] },
-  reportSessions: {
-    name: 'report/access:sessions', key: (s) => [s.last_seen_at, s.id], dirs: [-1, 1],
-    fields: (s) => [s.id, s.label, s.state, s.creds],
-  },
-  reportCredentials: { name: 'report/access:credentials', key: (c) => [c.slug], dirs: [1], fields: (c) => [c.slug] },
-}
-
-// The audit page's searchable fields: identifiers and codes (C27, C28 keep
-// free text out of the rows anyway).
-const AUDIT_FIELDS = (r) => [
-  r.kind, r.seq, r.session_id, r.request_id, r.grant_id, r.approval_id, r.credential_slug,
-  r.reason_code, r.code, r.rule, r.actor,
-]
 // How many rows each step of an audit search reads from the daemon (its most).
 const AUDIT_BATCH = 500
 
@@ -1074,9 +1032,6 @@ const AUDIT_BATCH = 500
  */
 export const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 
-// U2 wave-1 fallback: the policy app.html has always had. Everything in it is
-// inline, so it needs 'unsafe-inline'. Integration deletes this with app.html.
-const LEGACY_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 // What may be served from dist/assets: a plain name with no leading dot and
 // no empty segment (so no '..'), of a type the build produces. Anything else
@@ -1117,28 +1072,6 @@ export function loadDist(distDir) {
     assets.set(entry.name, { body, type })
   }
   return { index, assets }
-}
-
-/** Where app.html takes the one parser of typed narrowing (contract C21). */
-export const PARSER_MARKER = '/* parseOverrides: injected by src/ui/server.js from src/pending.js */'
-
-/**
- * The page as served: app.html with parseOverrides put in at the marker, so
- * the page reads a narrowing with the same function this server rebinds the
- * signed operation with. A page without the marker is a build error, not a
- * page that cannot approve anything.
- */
-export function servedPage(parser = parseOverrides) {
-  const html = readFileSync(join(HERE, 'app.html'), 'utf8')
-  if (html.split(PARSER_MARKER).length !== 2) throw new Error('app.html must carry the parseOverrides marker exactly once')
-  // The source goes into an inline <script> as it is. Text that would end the
-  // script, open an HTML comment, or put the marker back would change what
-  // the page runs, so it stops the server from starting instead.
-  const source = parser.toString()
-  if (/<\/script/i.test(source) || source.includes('<!--') || source.includes(PARSER_MARKER)) {
-    throw new Error('parseOverrides cannot be put in the page: its source holds </script, <!-- or the marker')
-  }
-  return html.replace(PARSER_MARKER, () => source)
 }
 
 /** The request minus its proof, for a daemon route that does not check one. */

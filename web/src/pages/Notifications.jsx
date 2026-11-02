@@ -1,4 +1,4 @@
-// Notifications, at parity with app.html's card (contract U5): desktop
+// Notifications, at parity with the old page's card (contract U5): desktop
 // notices in this tab, and the webhook, which is read-only here because its
 // URL is a credential in its own right and is set from the command line.
 // The notices themselves are raised by App.jsx, whichever page is open.

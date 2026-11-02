@@ -12,7 +12,7 @@ import { Notice } from '../ui/Notice.jsx'
 
 /**
  * The vault is locked: unlock with Touch ID (when enrolled for unlock and the
- * browser can), or with the passphrase. app.html's lock banner.
+ * browser can), or with the passphrase. The old page's lock banner.
  */
 export function LockBanner({ unlockState, webauthn, onChanged }) {
   const api = useApi()

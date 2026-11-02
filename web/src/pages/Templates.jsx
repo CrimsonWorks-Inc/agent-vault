@@ -1,4 +1,4 @@
-// Templates (F17), at parity with app.html's templates card: the saved
+// Templates (F17), at parity with the old page's templates card: the saved
 // session shapes, paged and searchable (U3, by name), with delete (signed),
 // a view of each spec, and a way to start a session from one. Templates are
 // saved from New session ("Save as template").
@@ -15,10 +15,8 @@ import { ListError } from '../components/credentials/ListError.jsx'
 import { TemplatesTable } from '../components/templates/TemplatesTable.jsx'
 import { TemplateView } from '../components/templates/TemplateView.jsx'
 
-export const TEMPLATE_SEARCH_FIELDS = ['name', 'summary']
-
 export function Templates() {
-  const list = usePaged('templates', { searchFields: TEMPLATE_SEARCH_FIELDS })
+  const list = usePaged('templates')
   const [viewing, setViewing] = useState(null)
 
   return (

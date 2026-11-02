@@ -29,11 +29,10 @@ const WIDTH = ['w-0', 'w-[5%]', 'w-[10%]', 'w-[15%]', 'w-[20%]', 'w-[25%]', 'w-[
 /**
  * The whole record for the header, the activity and the Markdown copy:
  * every page of grants (paged=1, U3) with `session` and `activity` from
- * beside them. A server from before U3 answers it whole.
+ * beside them.
  */
 export async function readSessionDetail(get, sid) {
   const r = await fetchPages(get, 'sessions/detail', { filters: { sid } })
-  if (r.items === null) return r.legacy
   return { ...r.beside, grants: r.items }
 }
 
@@ -45,7 +44,7 @@ export async function readSessionDetail(get, sid) {
  */
 export function SessionDetail({ sid, onClose }) {
   const { data: d, error, loading } = useApiQuery((api) => readSessionDetail(api.get, sid), [sid])
-  const grants = usePaged('sessions/detail', { filters: { sid }, searchFields: ['grant_id', 'cred', 'state'] })
+  const grants = usePaged('sessions/detail', { filters: { sid } })
 
   if (error && !d) {
     return (

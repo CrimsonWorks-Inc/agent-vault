@@ -1,4 +1,4 @@
-// The WebAuthn flows, ported from src/ui/app.html without changing a byte of
+// The WebAuthn flows, ported from src/ui/the old page without changing a byte of
 // what goes over the wire (contract U4).
 //
 // Everything that changes what an agent can do is signed: the page asks the
@@ -11,7 +11,7 @@
 //
 // Plain ESM with every platform object injected, so node --test can drive it.
 
-// ---- encodings, as app.html wrote them ----------------------------------
+// ---- encodings, as the old page wrote them ----------------------------------
 
 export const b64uToBuf = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))
 export const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
@@ -354,5 +354,5 @@ export function createPresence({
 /** The daemon refuses Touch ID unlock without a passphrase to fall back on. */
 export const TOUCHID_NEEDS_PASSPHRASE = 'Touch ID unlock needs a passphrase to fall back on if the authenticator is lost. Set one, then enable Touch ID unlock again: agent-vault passphrase set'
 
-/** Whether this browser can do WebAuthn at all (app.html's prfSupported). */
+/** Whether this browser can do WebAuthn at all (the old page's prfSupported). */
 export const prfSupported = () => typeof globalThis.PublicKeyCredential !== 'undefined'

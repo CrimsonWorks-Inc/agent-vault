@@ -128,7 +128,8 @@ export function parseOverrides(args = {}) {
   // Every key read below. Any other THROWS, naming it: a key copied into
   // nothing (a host list, a typo) was approved as if it narrowed, where the
   // daemon refuses it outright. Kept in step with OVERRIDE_KEYS by a test;
-  // it cannot be shared, because this function's source is put in the page.
+  // it is spelled out here so the function stands on its own in the page's
+  // bundle, which imports it from this module (C21).
   const known = [
     'methods', 'paths', 'budget', 'uses', 'ttl_minutes', 'ttl-minutes', 'grant_ttl_minutes', 'grant-ttl', 'grant_ttl',
     'max_concurrent', 'concurrency', 'redirects', 'spend_tokens', 'spend-tokens', 'spend_usd', 'spend-usd',

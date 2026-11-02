@@ -1,4 +1,4 @@
-// Dates, durations and counts, worded the way app.html worded them so the
+// Dates, durations and counts, worded the way the old page worded them so the
 // two pages agree while both exist.
 
 const now = () => Date.now()
@@ -66,7 +66,7 @@ export function span(seconds) {
   return w % 3600 === 0 ? `${w / 3600}h` : w % 60 === 0 ? `${w / 60}m` : `${w}s`
 }
 
-/** `replay  AV_PH_REPLAY  1 in 10m  → revoke_session`, as app.html printed it. */
+/** `replay  AV_PH_REPLAY  1 in 10m  → revoke_session`, as the old page printed it. */
 export function tripwireRuleText(r) {
   const what = (r?.codes || []).length ? r.codes.join(',') : r?.rule_prefix ? `${r.rule_prefix}*` : '?'
   return `${r?.id}  ${what}  ${r?.threshold} in ${span(r?.window_s)}  → ${r?.action}`

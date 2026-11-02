@@ -1,4 +1,4 @@
-// The Sessions page's rules, held to what app.html did with the same inputs.
+// The Sessions page's rules, held to what the old page did with the same inputs.
 import { describe, expect, it } from 'vitest'
 import {
   advancedFields, approvalMode, autoWrites, buildSessionBody, defaultMappings, describedRows, detailMarkdown, envCommand,
@@ -8,7 +8,7 @@ import {
 
 const kinds = new Map([['gh-work', 'github'], ['openai', 'openai']])
 
-describe('buildSessionBody (app.html readSessionForm)', () => {
+describe('buildSessionBody (the old page readSessionForm)', () => {
   it('builds one grant per picked credential with the shared limits', () => {
     const form = { ...freshForm([{ slug: 'gh-work' }]), picked: ['gh-work', 'openai'], label: '  triage ', methods: 'get, head ,post', paths: '/a/**, /b' }
     const { body, picked } = buildSessionBody(form, kinds)
@@ -29,11 +29,11 @@ describe('buildSessionBody (app.html readSessionForm)', () => {
     expect('ttl_hours' in body).toBe(false)
   })
 
-  it('an empty label is "ui session", as app.html sent it', () => {
+  it('an empty label is "ui session", as the old page sent it', () => {
     expect(buildSessionBody(freshForm([{ slug: 'gh-work' }]), kinds).body.label).toBe('ui session')
   })
 
-  it('refuses nothing picked and more than 16, in app.html words', () => {
+  it('refuses nothing picked and more than 16, in the old page words', () => {
     expect(buildSessionBody({ ...freshForm([]), picked: [] }, kinds)).toEqual({ error: 'Pick at least one credential' })
     const many = Array.from({ length: 17 }, (_, i) => `c${i}`)
     expect(buildSessionBody({ ...freshForm([]), picked: many }, kinds)).toEqual({ error: 'A session holds at most 16 credentials' })
@@ -48,7 +48,7 @@ describe('buildSessionBody (app.html readSessionForm)', () => {
   })
 })
 
-describe('advancedFields (app.html)', () => {
+describe('advancedFields (the old page)', () => {
   it('passes rate and quota as typed, numbers as numbers, empty as absent', () => {
     expect(advancedFields({ rate: ' 60/min ', quota: '1000/day', concurrency: '3', redirects: '', grantTtl: '30' }))
       .toEqual({ fields: { rate: '60/min', quota: '1000/day', max_concurrent: 3, grant_ttl_minutes: 30 } })
@@ -83,7 +83,7 @@ describe('warnings and badges', () => {
     expect(approvalMode({ creds: [{ approval: null }] })).toEqual({ mode: 'auto', elevated: false })
     expect(approvalMode({ creds: [] })).toBeNull()
   })
-  it('the three narrowings send exactly app.html\'s bodies', () => {
+  it('the three narrowings send exactly the old page\'s bodies', () => {
     expect(NARROWINGS['drop-writes'].body('s_1')).toEqual({ sid: 's_1', narrow: { methods: ['GET', 'HEAD'] } })
     expect(NARROWINGS['approve-each'].body('s_1')).toEqual({ sid: 's_1', narrow: { approval: 'each' } })
     expect(NARROWINGS['end-1h'].body('s_1')).toEqual({ sid: 's_1', narrow: {}, session_ttl_minutes: 60 })
@@ -169,7 +169,7 @@ describe('detail and narrow', () => {
     expect(barSteps(5000, 0, 1000)).toEqual({ used: 20, reserved: 20 })
     expect(barSteps(1, 1, 0)).toBeNull()
   })
-  it('the Markdown summary is app.html\'s', () => {
+  it('the Markdown summary is the old page\'s', () => {
     const md = detailMarkdown({ session: { id: 's_1', label: 'a\nb', state: 'active', infinite: true }, grants: [{ cred: 'gh', state: 'active', effective: { methods: ['GET'], budget: { limit: 5 } }, budget: { used: 1 } }], activity: { complete: false, requests: { allowed: 1 }, paths: [{ count: 1, method: 'GET', path: '/u' }] } })
     expect(md).toBe([
       '## Session `s_1` (a b)', '', '- state: active', '- expires: never', '- elevated: no',

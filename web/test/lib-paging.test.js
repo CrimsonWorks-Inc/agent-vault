@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  pageQuery, readEnvelope, localPage, firstPage, nextPage, prevPage, showing, recallLimit, rememberLimit,
-  clampLimit, fetchAll, itemsOf, matches, PAGE_SIZES, DEFAULT_LIMIT,
+  pageQuery, readEnvelope, firstPage, nextPage, prevPage, showing, recallLimit, rememberLimit,
+  clampLimit, fetchAll, fetchPages, PAGE_SIZES, DEFAULT_LIMIT, EnvelopeError,
 } from '../src/lib/paging.js'
+import { Cursors, LISTS, pageAnswer, pagingOf } from '../../src/ui/list-paging.js'
 
 test('every page asks for the envelope with paged=1 and a limit', () => {
   assert.deepEqual(pageQuery({}), { paged: 1, limit: 25 })
@@ -20,22 +21,50 @@ test('page sizes are 25, 50 and 100; anything else is the default', () => {
 test('the envelope is read as given; cursors are passed through untouched', () => {
   const env = readEnvelope({ items: [{ id: 1 }], next_cursor: 'eyJvIjoyNX0', prev_cursor: null, total: 312 })
   assert.deepEqual(env, { items: [{ id: 1 }], next_cursor: 'eyJvIjoyNX0', prev_cursor: null, total: 312 })
-  assert.deepEqual(readEnvelope({}), { items: [], next_cursor: null, prev_cursor: null, total: null })
+  assert.deepEqual(readEnvelope({ items: [] }), { items: [], next_cursor: null, prev_cursor: null, total: null })
 })
 
-test('a bare array is paged locally, with q over visible fields', () => {
-  const all = Array.from({ length: 60 }, (_, i) => ({ slug: `cred-${i}`, kind: i % 2 ? 'github' : 'http' }))
-  const p1 = readEnvelope(all, { limit: 25 })
-  assert.equal(p1.items.length, 25)
-  assert.equal(p1.total, 60)
-  assert.equal(p1.next_cursor, '@25')
-  const p3 = localPage(all, { limit: 25, cursor: '@50' })
-  assert.equal(p3.items.length, 10)
-  assert.equal(p3.next_cursor, null)
-  const gh = localPage(all, { limit: 25, q: 'GITHUB' })
-  assert.equal(gh.total, 30)
-  assert.ok(gh.items.every((x) => x.kind === 'github'))
-  assert.equal(matches({ secret: { value: 'x' }, slug: 'a' }, 'x'), false, 'nested objects are not searched')
+test('a list answer that is not a page is refused, never paged or guessed at here', () => {
+  for (const notAPage of [[{ slug: 'a' }], {}, { rules: [] }, null, 'x']) {
+    assert.throws(() => readEnvelope(notAPage), EnvelopeError)
+  }
+})
+
+// The UI server's own paging (src/ui/list-paging.js), as src/ui/server.js
+// #listed runs it, behind a `get` with the client's query.
+function realServer(answers) {
+  const cursors = new Cursors()
+  const asked = []
+  const get = async (path, query) => {
+    asked.push(query)
+    const params = new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))
+    const { spec, within = null, drop = [], filters = {} } = answers[path](params)
+    return pageAnswer(answers[`${path} data`], spec, pagingOf(params), { within, drop, filters }, cursors)
+  }
+  return { get, asked }
+}
+
+test('fetchAll walks the real server sealed cursors to the end, in the server order', async () => {
+  const creds = Array.from({ length: 450 }, (_, i) => ({ slug: `c${String(i).padStart(3, '0')}` })).reverse()
+  const { get, asked } = realServer({ credentials: () => ({ spec: LISTS.credentials }), 'credentials data': creds })
+  const all = await fetchAll(get, 'credentials')
+  assert.equal(all.length, 450)
+  assert.deepEqual(all.map((c) => c.slug), [...creds].map((c) => c.slug).sort())
+  assert.equal(asked.length, 3)
+  assert.ok(asked.every((q) => q.paged === 1 && q.limit === 200))
+  assert.equal(asked[0].cursor, undefined)
+  assert.match(asked[1].cursor, /^[A-Za-z0-9_-]+$/)
+})
+
+test('fetchPages keeps what the real server puts beside a page (tripwires)', async () => {
+  const rules = Array.from({ length: 205 }, (_, i) => ({ id: `r${i}`, codes: ['AV_X'], threshold: 1, window_s: 60, action: 'revoke_session' }))
+  const { get } = realServer({
+    tripwires: () => ({ spec: LISTS.tripwireRules, within: 'rules' }),
+    'tripwires data': { enabled: true, rules_saved: true, rules, defaults: [{ id: 'd' }] },
+  })
+  const r = await fetchPages(get, 'tripwires')
+  assert.deepEqual(r.items.map((x) => x.id), rules.map((x) => x.id), 'saved order, every page')
+  assert.deepEqual(r.beside, { enabled: true, rules_saved: true, defaults: [{ id: 'd' }] })
 })
 
 test('Next pushes and Prev pops the cursor stack', () => {
@@ -66,7 +95,7 @@ test('the page size is remembered, and storage that throws is survived', () => {
   assert.doesNotThrow(() => rememberLimit(hostile, 'k', 50))
 })
 
-test('fetchAll follows cursors with the largest page, and takes a bare array as it is', async () => {
+test('fetchAll follows cursors with the largest page', async () => {
   const asked = []
   const pages = { '': { items: [1, 2], next_cursor: 'b' }, b: { items: [3], next_cursor: null } }
   const all = await fetchAll(async (path, q) => { asked.push(q); return pages[q.cursor ?? ''] }, 'sessions')
@@ -74,27 +103,11 @@ test('fetchAll follows cursors with the largest page, and takes a bare array as 
   assert.equal(asked[0].limit, 200)
   assert.equal(asked[0].paged, 1)
   assert.equal(asked[1].cursor, 'b')
-  assert.deepEqual(await fetchAll(async () => [9, 8], 'x'), [9, 8])
-  assert.deepEqual(itemsOf([1]), [1])
-  assert.deepEqual(itemsOf({ items: [2] }), [2])
-  assert.deepEqual(itemsOf(null), [])
+  await assert.rejects(fetchAll(async () => [9, 8], 'x'), EnvelopeError)
 })
 
-test('fetchPages keeps what an object answer holds beside its page, and spots a legacy answer', async () => {
-  const { fetchPages, LIST_ROUTES } = await import('../src/lib/paging.js')
-  const pages = {
-    '': { items: [{ id: 'r1' }], next_cursor: 'n', prev_cursor: null, total: null, enabled: true, defaults: [1] },
-    n: { items: [{ id: 'r2' }], next_cursor: null, prev_cursor: 'p', total: null, enabled: true, defaults: [1] },
-  }
-  const asked = []
-  const r = await fetchPages(async (path, q) => { asked.push(q); return pages[q.cursor ?? ''] }, 'tripwires')
-  assert.deepEqual(r.items, [{ id: 'r1' }, { id: 'r2' }])
-  assert.deepEqual(r.beside, { enabled: true, defaults: [1] })
-  assert.equal(r.legacy, null)
-  assert.ok(asked.every((q) => q.paged === 1))
-
-  const old = { enabled: false, rules: [], defaults: [] }
-  assert.deepEqual(await fetchPages(async () => old, 'tripwires'), { items: null, beside: {}, legacy: old })
-  assert.deepEqual((await fetchPages(async () => [1], 'x')).items, [1])
+test('fetchPages refuses an object answer with no page in it', async () => {
+  const { LIST_ROUTES } = await import('../src/lib/paging.js')
+  await assert.rejects(fetchPages(async () => ({ enabled: false, rules: [], defaults: [] }), 'tripwires'), EnvelopeError)
   assert.ok(['tripwires', 'audit', 'report/access'].every((r) => LIST_ROUTES.includes(r)))
 })

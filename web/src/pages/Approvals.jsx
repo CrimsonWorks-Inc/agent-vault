@@ -1,4 +1,4 @@
-// Approvals, at parity with app.html's (contract U5): every held request and
+// Approvals, at parity with the old page's (contract U5): every held request and
 // session request, from GET pending (built by src/pending.js, the module the
 // CLI renders from). This page paints what it is given and decides nothing:
 // which kinds exist, what may be narrowed and which route settles each one
@@ -11,7 +11,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckBadgeIcon } from '@heroicons/react/24/outline'
 import { usePaged } from '../hooks/usePaged.js'
-import { usePresence } from '../hooks/usePresence.js'
 import { useVault } from '../hooks/useVault.js'
 import { formatHash } from '../lib/router.js'
 import { cleanLine } from '../lib/text.js'
@@ -30,12 +29,7 @@ export const APPROVALS_POLL_MS = 5000
 
 export function Approvals({ rest = '' }) {
   const vault = useVault()
-  const presence = usePresence()
-  // A deep link lands here first: know whether this device can sign before
-  // the first Approve is pressed (the Overview is not the only way in).
-  const { known, refresh } = presence
-  useEffect(() => { if (!known) refresh() }, [known, refresh])
-  const list = usePaged('pending', { poll: APPROVALS_POLL_MS, searchFields: ['id', 'kind', 'headline'] })
+  const list = usePaged('pending', { poll: APPROVALS_POLL_MS })
   const [selected, setSelected] = useState(() => new Set())
   const [drafts, setDrafts] = useState(() => ({}))
   const focus = rest ? cleanLine(rest) : ''

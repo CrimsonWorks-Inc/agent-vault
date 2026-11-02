@@ -1,5 +1,5 @@
 // Settings: the authenticator that confirms every change, Touch ID unlock,
-// and the lock (contract U5). In app.html these were the Overview's
+// and the lock (contract U5). In the old page these were the Overview's
 // Confirmation and Unlocking cards, its lock banner, and the sidebar's lock
 // button; the cards are components/overview/SecurityCards.jsx, shared with
 // the Overview, so the two pages cannot drift.
@@ -18,7 +18,7 @@ import { ConfirmationCard, LockBanner, UnlockingCard } from '../components/overv
 import { VaultLockCard } from '../components/settings/VaultLockCard.jsx'
 import { Cmd } from '../components/docs/Prose.jsx'
 
-/** Presence state and the unlock factors, each standing alone (app.html's `quiet`). */
+/** Presence state and the unlock factors, each standing alone (the old page's `quiet`). */
 export async function loadSettings(api, presence) {
   const [unlockState, lockState] = await Promise.all([
     api.get('unlock/state').catch(() => null),

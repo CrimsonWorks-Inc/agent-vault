@@ -34,7 +34,7 @@ test('theme goes on <html> only when picked', () => {
   assert.equal(attrs.has('data-theme'), false)
 })
 
-test('routes: app.html\'s fragments still open the same views', () => {
+test('routes: the old page\'s fragments still open the same views', () => {
   assert.deepEqual(parseHash('#docs/connect'), { page: 'docs', rest: 'connect' })
   assert.deepEqual(parseHash('#approvals/req%2F1'), { page: 'approvals', rest: 'req/1' })
   assert.deepEqual(parseHash('#/sessions'), { page: 'sessions', rest: '' })

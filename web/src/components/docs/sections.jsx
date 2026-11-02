@@ -1,4 +1,4 @@
-// The Docs page's sections, ported from app.html's DOCS (contract U5). The
+// The Docs page's sections, ported from the old page's DOCS (contract U5). The
 // commands are built from this install's own daemon: its CLI name, its port
 // and its first credential, so the reader can paste them without translating.
 // `c` is { cli, gateway_port, cred } (pages/Docs.jsx docsContext).
@@ -513,7 +513,7 @@ function Commands({ c }) {
   )
 }
 
-/** In the order app.html showed them; the ids are the `#docs/<id>` links. */
+/** In the order the old page showed them; the ids are the `#docs/<id>` links. */
 export const SECTIONS = [
   { id: 'how', title: 'How it works', Body: How },
   { id: 'start', title: 'Start here', Body: Start },

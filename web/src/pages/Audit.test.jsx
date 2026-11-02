@@ -28,7 +28,7 @@ function routes(over = {}) {
 
 const table = () => screen.getByRole('table', { name: 'Audit records, newest first' })
 
-describe('Audit (parity with app.html, paged through the whole log)', () => {
+describe('Audit (parity with the old page, paged through the whole log)', () => {
   it('shows the witness head and the records newest first, decisions in words', async () => {
     const server = fakeServer(routes())
     renderWith(<Audit />, { server })
@@ -122,7 +122,7 @@ describe('Audit (parity with app.html, paged through the whole log)', () => {
   })
 
   it('an empty log says so', async () => {
-    const server = fakeServer(routes({ 'GET audit': { items: [], next_cursor: null, prev_cursor: null, total: null } }))
+    const server = fakeServer(routes({ 'GET audit': [] }))
     renderWith(<Audit />, { server })
     expect(await screen.findByText('No records yet')).toBeTruthy()
     expect(await screen.findByText('head: no records yet')).toBeTruthy()

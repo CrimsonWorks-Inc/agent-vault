@@ -14,12 +14,7 @@ import { Field } from '../ui/Field.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
 import { Input } from '../ui/Input.jsx'
 import { Textarea } from '../ui/Textarea.jsx'
-
-/** The rules a "turn on" would use: the stored ones, else the defaults. */
-export function shownRules(tw) {
-  const rules = tw?.rules_saved !== false && Array.isArray(tw?.rules) && tw.rules.length ? tw.rules : []
-  return { rules, shown: rules.length ? rules : (Array.isArray(tw?.defaults) ? tw.defaults : []) }
-}
+import { readRules, shownRules, toggleBody } from './tripwires.js'
 
 /**
  * Panic, and the tripwires that can pull it for you (F16). Panic is open on
@@ -44,7 +39,7 @@ export function ContainmentCard({ tripwires, fired, onChanged }) {
           meta={on
             ? 'A session that trips one of these is revoked before its refused request returns.'
             : `Off. Turning them on uses ${rules.length ? 'your rules' : 'the default rules'} below.`}
-          actions={<TripwireToggle on={on} stored={rules.length > 0} onDone={onChanged} />}
+          actions={<TripwireToggle tw={tw} onDone={onChanged} />}
         >
           <RuleList rules={shown} />
           {recent.length > 0 && (
@@ -85,13 +80,14 @@ export function RuleList({ rules }) {
   )
 }
 
-function TripwireToggle({ on, stored, onDone }) {
+function TripwireToggle({ tw, onDone }) {
   const api = useApi()
   const slow = useSlowCache()
   const toast = useToast()
   const { operationFor } = usePresence()
+  const on = tw?.enabled === true
   // With no rules stored yet, turning them on also stores the defaults.
-  const body = on ? { enabled: false } : stored ? { enabled: true } : { enabled: true, rules: 'defaults' }
+  const body = toggleBody(tw)
   return (
     <GatedButton
       variant={on ? 'secondary' : 'primary'}
@@ -113,13 +109,7 @@ function RulesEditor({ shown, onDone }) {
   const [text, setText] = useState(() => JSON.stringify(shown, null, 2))
   const [error, setError] = useState('')
 
-  /** The rules as typed, or an error said before any signature is spent. */
-  const read = () => {
-    let rules
-    try { rules = JSON.parse(text) } catch (e) { throw new Error(`The rules are not JSON: ${e.message}`) }
-    if (!Array.isArray(rules)) throw new Error('The rules must be a JSON list')
-    return rules
-  }
+  const read = () => readRules(text)
   return (
     <Disclosure title="Edit rules" className="mt-3">
       <Field label="Rules (JSON)" error={error}>

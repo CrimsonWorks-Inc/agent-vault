@@ -142,10 +142,14 @@ test('a forked session can only narrow its parent\'s grants', () => {
 test('an expired session takes its placeholders with it', async () => {
   const v = fresh()
   try {
-    const { session } = v.vault.createSession({ label: 'short', ttlMs: 400 })
+    // Two seconds to make the grant and the placeholder: under a heavily
+    // loaded machine a 400 ms session expired before its own grant was
+    // made. The wait is then measured from the session's own expiry, so a
+    // session that outlives it still fails.
+    const { session } = v.vault.createSession({ label: 'short', ttlMs: 2000 })
     const grant = v.vault.createGrant({ sessionId: session.id, credentialId: v.cred.id, fields: ['token'], policy: POLICY })
     v.vault.issuePlaceholder({ grantId: grant.id })
-    await new Promise((r) => setTimeout(r, 450))
+    await new Promise((r) => setTimeout(r, Math.max(0, Date.parse(session.expires_at) - Date.now()) + 50))
     assert.throws(() => v.vault.assertSessionLive(session), /expired/)
     assert.ok(v.vault.listPlaceholders(session.id).every((p) => p.state === 'dead'))
     assert.equal(v.vault.stats().placeholders_live, 0)

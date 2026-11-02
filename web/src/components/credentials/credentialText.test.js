@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { credentialBadges, credentialFacts, expiryIso, expiryLine, heldDenied, pinsText, quarantineLine, testParts } from './credentialText.js'
 
-describe('credential text (app.html parity)', () => {
+describe('credential text (the old page parity)', () => {
   it('badges say what to notice, in words', () => {
     expect(credentialBadges({ quarantine: {}, expiry_warning: 'expired', health: { status: 'ok' } }))
       .toEqual([{ tone: 'crit', text: 'quarantined' }, { tone: 'crit', text: 'expired' }, { tone: 'ok', text: 'healthy' }])

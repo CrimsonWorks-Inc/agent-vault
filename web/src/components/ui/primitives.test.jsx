@@ -109,13 +109,21 @@ describe('primitives', () => {
     expect(screen.getByRole('button', { name: 'Clear search' }).className).toContain('focus-visible:outline-focus')
   })
 
-  it('CodeBlock copies its text, and says when the browser refuses', async () => {
+  it('CodeBlock copies its text, and says when the browser refuses with the one toast', async () => {
     const writes = []
     Object.defineProperty(globalThis.navigator, 'clipboard', { value: { writeText: async (t) => writes.push(t) }, configurable: true })
-    render(<CodeBlock code="agent-vault ui" label="Copy the command" />)
+    const { unmount } = render(<ToastProvider><CodeBlock code={'agent-vault ui\u202e'} label="Copy the command" /></ToastProvider>)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy the command' })) })
     expect(writes).toEqual(['agent-vault ui'])
     expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy()
+    unmount()
+
+    Object.defineProperty(globalThis.navigator, 'clipboard', { value: { writeText: async () => { throw new Error('denied') } }, configurable: true })
+    render(<ToastProvider><CodeBlock code="agent-vault ui" label="Copy the command" /></ToastProvider>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy the command' })) })
+    expect(await screen.findByText('Your browser would not let the page copy. Select the text instead.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Copy the command' })).toBeTruthy()
   })
 
   it('Toast shows a message in a live region', async () => {

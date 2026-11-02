@@ -1,6 +1,6 @@
 // Hash routing. The fragment survives the redirect that burns the launch
 // token, so `agent-vault ui` can open the page on a view: /#docs/connect,
-// /#approvals/<id>. The same shape app.html used, so those links still work.
+// /#approvals/<id>. The same shape the old page used, so those links still work.
 
 /** Every page in the sidebar, in order (contract U1). */
 export const PAGES = [

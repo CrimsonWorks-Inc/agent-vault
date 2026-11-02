@@ -32,7 +32,7 @@ test('credential expiry: the sooner of the set and the observed', () => {
   assert.equal(expiresIn(NOW - 1, NOW), 'expired')
 })
 
-test('tripwire rules read as app.html printed them', () => {
+test('tripwire rules read as the old page printed them', () => {
   assert.equal(tripwireRuleText({ id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' }),
     'replay  AV_PH_REPLAY  1 in 10m  → revoke_session')
   assert.equal(tripwireRuleText({ id: 'x', rule_prefix: 'host_', threshold: 3, window_s: 7200, action: 'panic' }), 'x  host_*  3 in 2h  → panic')

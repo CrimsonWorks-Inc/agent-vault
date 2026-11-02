@@ -12,7 +12,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -42,13 +42,18 @@ test('the published package contains everything it needs and nothing it should n
   const r = packed((pkg) => {
     // Every file the code imports has to be in the tarball. A missing one
     // imports fine from the checkout and throws on a user's machine.
+    // The UI is the prebuilt bundle (U1, U2): index.html, the Vite manifest
+    // and every asset it names. The server refuses to start without it.
+    const dist = ['src/ui/dist/index.html', 'src/ui/dist/manifest.json',
+      ...readdirSync(join(ROOT, 'src/ui/dist/assets')).map((f) => `src/ui/dist/assets/${f}`)]
     for (const f of ['bin/agent-vault.js', 'bin/agent-vault-setup.js', 'src/core/index.js',
-      'src/daemon/server.js', 'src/store/vault.js', 'src/ui/app.html', 'LICENSE']) {
+      'src/daemon/server.js', 'src/store/vault.js', 'src/ui/server.js', ...dist, 'LICENSE']) {
       assert.ok(existsSync(join(pkg, f)), `${f} is missing from the published package`)
     }
     // And things that must NOT ship: the tests describe attacks, the demo
-    // hardcodes a fake secret, and neither belongs in a dependency.
-    for (const f of ['test', 'demo', '.github', 'node_modules']) {
+    // hardcodes a fake secret, and neither belongs in a dependency. web/ is
+    // the UI's source and build tooling; users get the bundle, not the tools.
+    for (const f of ['test', 'demo', '.github', 'node_modules', 'web']) {
       assert.ok(!existsSync(join(pkg, f)), `${f} was published`)
     }
     // A license users can actually read.

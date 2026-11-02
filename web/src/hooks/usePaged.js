@@ -1,6 +1,6 @@
 // One page of a list route, with search, page size and Prev/Next (U4).
 //
-//   const list = usePaged('credentials', { searchFields: ['slug', 'kind'] })
+//   const list = usePaged('credentials')
 //   <SearchInput value={list.q} onChange={list.setQ} />
 //   <DataTable rows={list.items} loading={list.loading} ... />
 //   <Pagination {...list.pagination} />
@@ -18,7 +18,7 @@ import {
 const SEARCH_DEBOUNCE_MS = 250
 const storage = () => { try { return globalThis.localStorage } catch { return null } }
 
-export function usePaged(path, { limit: initialLimit, filters = {}, searchFields = null, poll = 0, storageKey = `agent-vault.page-size.${path}` } = {}) {
+export function usePaged(path, { limit: initialLimit, filters = {}, poll = 0, storageKey = `agent-vault.page-size.${path}` } = {}) {
   const api = useApi()
   const filterKey = JSON.stringify(filters)
   // Everything that decides which page is asked for lives in one state, so a
@@ -46,10 +46,10 @@ export function usePaged(path, { limit: initialLimit, filters = {}, searchFields
     const mine = ++seq.current
     setLoading(true)
     try {
-      const opts = { limit: view.limit, cursor: view.cursor, q: view.q, searchFields }
+      const opts = { limit: view.limit, cursor: view.cursor, q: view.q }
       const data = await api.get(view.path, pageQuery({ ...opts, filters: JSON.parse(view.filterKey) }))
       if (mine !== seq.current) return
-      const env = readEnvelope(data, opts)
+      const env = readEnvelope(data)
       // A page emptied under us (its last item was revoked) steps back one.
       if (!env.items.length && view.stack.length) {
         setView((v) => ({ ...v, ...prevPage(v) }))
@@ -58,12 +58,17 @@ export function usePaged(path, { limit: initialLimit, filters = {}, searchFields
       setResult(env)
       setError(null)
     } catch (e) {
-      if (mine === seq.current) setError(e)
+      if (mine !== seq.current) return
+      // Cursors are sealed per UI server process: one it no longer opens
+      // means start the list again, not an error to show.
+      if (e?.code === 'AV_BAD_CURSOR' && view.cursor) {
+        setView((v) => ({ ...v, ...firstPage() }))
+        return
+      }
+      setError(e)
     } finally {
       if (mine === seq.current) setLoading(false)
     }
-  // searchFields is read, not watched: a new array each render must not refetch.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, view])
 
   useEffect(() => { load() }, [load])

@@ -28,54 +28,26 @@ export function pageQuery({ limit = DEFAULT_LIMIT, cursor = null, q = '', filter
 }
 
 /**
- * `{items, next_cursor, prev_cursor, total}` from a list route.
- *
- * A route that predates paging answers with a bare array (wave 1, before the
- * api piece lands). That is paged here instead, over the already-scrubbed
- * items the server sent, so the controls behave the same either way.
+ * `{items, next_cursor, prev_cursor, total}` from a list route asked with
+ * `paged=1`. The UI server and this page ship together, so any other shape
+ * is a server that does not match this page, and it is said, not guessed at.
  */
-export function readEnvelope(data, { limit = DEFAULT_LIMIT, cursor = null, q = '', searchFields = null } = {}) {
-  if (Array.isArray(data)) return localPage(data, { limit, cursor, q, searchFields })
-  const items = Array.isArray(data?.items) ? data.items : []
+export function readEnvelope(data) {
+  if (!Array.isArray(data?.items)) throw new EnvelopeError()
   return {
-    items,
-    next_cursor: typeof data?.next_cursor === 'string' && data.next_cursor ? data.next_cursor : null,
-    prev_cursor: typeof data?.prev_cursor === 'string' && data.prev_cursor ? data.prev_cursor : null,
-    total: Number.isInteger(data?.total) ? data.total : null,
+    items: data.items,
+    next_cursor: typeof data.next_cursor === 'string' && data.next_cursor ? data.next_cursor : null,
+    prev_cursor: typeof data.prev_cursor === 'string' && data.prev_cursor ? data.prev_cursor : null,
+    total: Number.isInteger(data.total) ? data.total : null,
   }
 }
 
-// Local cursors are the page's own ("@<offset>"), so reading them is fine;
-// a server cursor never reaches this function's parser.
-const LOCAL = /^@(\d+)$/
-
-/** Page an array the server returned whole: q filters, then a slice. */
-export function localPage(all, { limit = DEFAULT_LIMIT, cursor = null, q = '', searchFields = null } = {}) {
-  const term = String(q ?? '').trim().toLowerCase()
-  const matching = term ? all.filter((item) => matches(item, term, searchFields)) : all
-  const m = LOCAL.exec(cursor ?? '')
-  const offset = m ? Math.min(Number(m[1]), Math.max(0, matching.length - 1)) : 0
-  const items = matching.slice(offset, offset + limit)
-  return {
-    items,
-    next_cursor: offset + limit < matching.length ? `@${offset + limit}` : null,
-    prev_cursor: offset > 0 ? `@${Math.max(0, offset - limit)}` : null,
-    total: matching.length,
+/** A list answer that is not a page: the UI server is older than this page. */
+export class EnvelopeError extends Error {
+  constructor() {
+    super('The UI server answered a list without paging it. Close this tab and start the UI again with agent-vault ui.')
+    this.name = 'EnvelopeError'
   }
-}
-
-/**
- * A case-insensitive substring match over the item's visible fields, which
- * is what U3 says the server's `q` does. Only strings and numbers are read,
- * at the top level or in the named fields.
- */
-export function matches(item, term, fields = null) {
-  const t = String(term).toLowerCase()
-  const keys = fields || Object.keys(item || {})
-  return keys.some((k) => {
-    const v = item?.[k]
-    return (typeof v === 'string' || typeof v === 'number') && String(v).toLowerCase().includes(t)
-  })
 }
 
 /**
@@ -129,15 +101,12 @@ const ENVELOPE_KEYS = new Set(['items', 'next_cursor', 'prev_cursor', 'total'])
 
 /**
  * Every page of a list, asked with `paged=1` and the largest page, following
- * the cursors. Returns `{ items, beside, legacy }`:
+ * the cursors. Returns `{ items, beside }`:
  *
  *   items   every row, in the server's order;
  *   beside  the fields an object answer keeps beside its page (tripwires'
  *           `enabled` and `defaults`, report/access's `complete`), from the
- *           first page;
- *   legacy  the answer itself when the server did not page it (a route from
- *           before U3): a bare array, or an object with no `items`. Then
- *           `items` is the array, or null for an object.
+ *           first page.
  */
 export async function fetchPages(get, path, { filters = {}, maxPages = 50 } = {}) {
   const out = []
@@ -145,28 +114,19 @@ export async function fetchPages(get, path, { filters = {}, maxPages = 50 } = {}
   let cursor = null
   for (let i = 0; i < maxPages; i++) {
     const data = await get(path, pageQuery({ limit: MAX_LIMIT, cursor, filters }))
-    if (Array.isArray(data)) return { items: data, beside: {}, legacy: data }
-    if (!Array.isArray(data?.items)) return { items: null, beside: {}, legacy: data ?? null }
+    const page = readEnvelope(data)
     if (beside === null) beside = Object.fromEntries(Object.entries(data).filter(([k]) => !ENVELOPE_KEYS.has(k)))
-    out.push(...data.items)
-    if (typeof data.next_cursor !== 'string' || !data.next_cursor) break
-    cursor = data.next_cursor
+    out.push(...page.items)
+    if (!page.next_cursor) break
+    cursor = page.next_cursor
   }
-  return { items: out, beside: beside ?? {}, legacy: null }
+  return { items: out, beside: beside ?? {} }
 }
 
 /**
  * Every item of a list, for a view that needs counts rather than a page (the
- * overview's "active sessions"). A route that answers with a bare array is
- * used as it is.
+ * overview's "active sessions").
  */
 export async function fetchAll(get, path, opts = {}) {
-  const r = await fetchPages(get, path, opts)
-  return r.items ?? itemsOf(r.legacy)
-}
-
-/** The rows of a list answer, whether it came back paged or as a bare array. */
-export function itemsOf(data) {
-  if (Array.isArray(data)) return data
-  return Array.isArray(data?.items) ? data.items : []
+  return (await fetchPages(get, path, opts)).items
 }

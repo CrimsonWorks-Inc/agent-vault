@@ -181,3 +181,51 @@ export function pageList(items, spec, paging, filters, cursors) {
     total: sorted.length,
   }
 }
+
+/**
+ * Each paged list: its order (a key ending in something unique, so the order
+ * is total and a cursor always lands in the same place) and the visible
+ * fields `q` may match. Order: credentials by slug, templates by name,
+ * listeners by id, sessions and pending newest first, tripwire rules as saved,
+ * a session's grants by credential, the access report's sessions most
+ * recently seen first and its credentials by slug.
+ */
+export const LISTS = {
+  credentials: { name: 'credentials', key: (c) => [c.slug, c.id], dirs: [1, 1], fields: (c) => [c.slug, c.id, c.kind, c.label] },
+  sessions: {
+    name: 'sessions', key: (s) => [s.created_at, s.id], dirs: [-1, -1],
+    fields: (s) => [s.id, s.label, s.state, Array.isArray(s.creds) ? s.creds.map((c) => c?.slug) : []],
+  },
+  pending: { name: 'pending', key: (p) => [p.created_at, p.kind, p.id], dirs: [-1, 1, -1], fields: (p) => [p.id, p.kind, p.headline, p.grant_id] },
+  templates: { name: 'templates', key: (t) => [t.name], dirs: [1], fields: (t) => [t.name, t.creds] },
+  listeners: { name: 'listeners', key: (l) => [l.id, l.address], dirs: [1, 1], fields: (l) => [l.id, l.address, l.state, l.surfaces] },
+  tripwireRules: { name: 'tripwires', key: (_r, i) => [i], dirs: [1], fields: (r) => [r.id, r.action, r.codes, r.rule_prefix] },
+  detailGrants: { name: 'sessions/detail', key: (g) => [g.cred, g.grant_id], dirs: [1, 1], fields: (g) => [g.grant_id, g.cred, g.state] },
+  reportSessions: {
+    name: 'report/access:sessions', key: (s) => [s.last_seen_at, s.id], dirs: [-1, 1],
+    fields: (s) => [s.id, s.label, s.state, s.creds],
+  },
+  reportCredentials: { name: 'report/access:credentials', key: (c) => [c.slug], dirs: [1], fields: (c) => [c.slug] },
+}
+
+// The audit page's searchable fields: identifiers and codes (C27, C28 keep
+// free text out of the rows anyway).
+export const AUDIT_FIELDS = (r) => [
+  r.kind, r.seq, r.session_id, r.request_id, r.grant_id, r.approval_id, r.credential_slug,
+  r.reason_code, r.code, r.rule, r.rule_id, r.actor,
+]
+
+/**
+ * A list route's answer, already through towardPage, as one page (U3).
+ * `within` names the list inside an object answer; the rest of that object
+ * rides beside the page, minus `drop`.
+ */
+export function pageAnswer(shown, spec, paging, { within = null, drop = [], filters = {} } = {}, cursors) {
+  if (within === null) return pageList(shown, spec, paging, filters, cursors)
+  const record = shown !== null && typeof shown === 'object' && !Array.isArray(shown)
+  const beside = {}
+  if (record) {
+    for (const [k, v] of Object.entries(shown)) if (k !== within && !drop.includes(k)) beside[k] = v
+  }
+  return { ...beside, ...pageList(record ? shown[within] : [], spec, paging, filters, cursors) }
+}

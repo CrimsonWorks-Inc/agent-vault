@@ -14,7 +14,7 @@ export const REVIEW_PREVIEW = 6
  * Access review (F19): methods granted and never used in the last 7 days, and
  * credentials that are quarantined or expiring. A session's label is chosen
  * by whoever created it (a session request cannot carry one), so it is shown
- * as cleaned text, as app.html showed it.
+ * as cleaned text, as the old page showed it.
  */
 export function AccessReviewCard({ report }) {
   const [all, setAll] = useState(false)

@@ -1,4 +1,4 @@
-// Docs, at parity with app.html's (contract U5): eight sections, each with
+// Docs, at parity with the old page's (contract U5): eight sections, each with
 // commands written against this install. The CLI name, port and credential
 // names come from GET docs/context, which App.jsx reads once into
 // useVault().context, so `sudo agent-vault`-style installs and renamed
@@ -13,7 +13,7 @@ import { Card } from '../components/ui/Card.jsx'
 import { PageHeader } from '../components/ui/PageHeader.jsx'
 import { SECTIONS } from '../components/docs/sections.jsx'
 
-/** What the sections print, with app.html's defaults for a daemon that said nothing. */
+/** What the sections print, with the old page's defaults for a daemon that said nothing. */
 export function docsContext(ctx = {}) {
   return {
     cli: ctx.cli || 'agent-vault',

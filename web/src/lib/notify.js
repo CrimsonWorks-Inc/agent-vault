@@ -40,3 +40,17 @@ export function batchText(fresh) {
   if (!fresh.length) return ''
   return fresh.length > 1 ? `${notificationText(fresh[0])} (and ${fresh.length - 1} more)` : notificationText(fresh[0])
 }
+
+/**
+ * Raise the desktop notice for fresh items. A signal, never an approval
+ * channel: it carries the daemon's headline (never the agent's claim), has
+ * no actions, and clicking it only opens Approvals at the first item.
+ */
+export function showNotice(fresh, { Notification: N = globalThis.Notification, focus = () => globalThis.focus?.(), location = globalThis.location } = {}) {
+  if (!fresh?.length || typeof N === 'undefined' || N.permission !== 'granted') return null
+  try {
+    const n = new N('agent-vault', { body: batchText(fresh), tag: 'agent-vault-pending' })
+    n.onclick = () => { focus(); location.hash = `#approvals/${encodeURIComponent(fresh[0].id)}` }
+    return n
+  } catch { return null /* a browser that will not show one has nothing to fall back to */ }
+}

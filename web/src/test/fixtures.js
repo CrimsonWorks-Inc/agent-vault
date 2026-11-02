@@ -24,7 +24,7 @@ export function overviewRoutes(over = {}) {
       credentials: [{ slug: 'old', quarantined: true, expiry_warning: 'expired' }],
     },
     'GET tripwires': { enabled: false, rules_saved: false, rules: [], defaults: [{ id: 'replay', codes: ['AV_PH_REPLAY'], threshold: 1, window_s: 600, action: 'revoke_session' }] },
-    'GET audit': [{ kind: 'tripwire.fired', rule_id: 'replay', ts: new Date().toISOString(), action: 'revoke_session' }],
+    'GET audit': [{ seq: 211, kind: 'tripwire.fired', rule_id: 'replay', ts: new Date().toISOString(), action: 'revoke_session' }],
     'GET notify': { webhook: null },
     'GET docs/context': { cli: 'agent-vault', gateway_port: 7411 },
     'GET audit/verify': { ok: true, count: 214 },
