@@ -51,23 +51,23 @@ export function TemplatesTable({ list, onView, onChanged }) {
           key: 'actions', header: 'Actions', align: 'right', className: 'w-px',
           cell: (t) => (
             <div className="flex flex-wrap items-center gap-1.5 md:flex-nowrap md:justify-end">
-              <Button size="sm" icon={EyeIcon} onClick={() => onView(t.name)} aria-label={`View template ${t.name}`}>View</Button>
+              <Button size="sm" icon={EyeIcon} onClick={() => onView(t.name)} aria-label={`View template ${cleanLine(t.name)}`}>View</Button>
               <Button
                 size="sm"
                 icon={PlayIcon}
                 onClick={() => { globalThis.location.hash = formatHash('sessions', `new:${t.name}`) }}
-                aria-label={`Start a session from ${t.name}`}
+                aria-label={`Start a session from ${cleanLine(t.name)}`}
               >
                 Use
               </Button>
               <GatedButton
                 size="sm"
                 variant="danger"
-                label={`delete template ${t.name}`}
+                label={`delete template ${cleanLine(t.name)}`}
                 operation={queryBound('DELETE templates', { name: t.name }).operation}
                 send={(proof) => { const r = queryBound('DELETE templates', { name: t.name }); return api.del(r.path, r.query, { presence: proof }) }}
-                onDone={() => { toast(`Deleted template ${t.name}`, { tone: 'ok' }); onChanged?.() }}
-                aria-label={`Delete template ${t.name}`}
+                onDone={() => { toast(`Deleted template ${cleanLine(t.name)}`, { tone: 'ok' }); onChanged?.() }}
+                aria-label={`Delete template ${cleanLine(t.name)}`}
               >
                 Delete
               </GatedButton>

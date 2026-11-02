@@ -429,7 +429,7 @@ export function detailMarkdown(d) {
   const a = d?.activity || {}
   const tick = (v) => `\`${String(v ?? '').replace(/`/g, "'")}\``
   const lines = [
-    `## Session ${tick(s.id)}${s.label ? ` (${String(s.label).replace(/[\r\n]/g, ' ')})` : ''}`,
+    `## Session ${tick(s.id)}${s.label ? ` (${cleanLine(s.label)})` : ''}`,
     '',
     `- state: ${s.state ?? 'unknown'}`,
     `- expires: ${s.infinite === true ? 'never' : s.expires_at ?? 'unknown'}`,
@@ -447,7 +447,8 @@ export function detailMarkdown(d) {
   }
   const req = a.requests || {}
   lines.push('', '### Activity', '', `- ${req.allowed ?? 0} allowed, ${req.denied ?? 0} refused, ${req.held ?? 0} held`)
-  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${p.method} ${p.path}`)}`)
+  // The method and path are what the agent sent: one clean line each.
+  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${cleanLine(p.method)} ${cleanLine(p.path)}`)}`)
   for (const x of a.denials || []) lines.push(`- refused ${x.count} × ${tick(`${x.code} ${x.rule || ''}`.trim())}`)
   return lines.join('\n')
 }

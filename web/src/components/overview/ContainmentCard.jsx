@@ -6,6 +6,7 @@ import { usePaged } from '../../hooks/usePaged.js'
 import { usePresence } from '../../hooks/usePresence.js'
 import { useToast } from '../../hooks/useToast.js'
 import { ago, span } from '../../lib/format.js'
+import { cleanLine } from '../../lib/text.js'
 import { Badge } from '../ui/Badge.jsx'
 import { Button } from '../ui/Button.jsx'
 import { Card, Row } from '../ui/Card.jsx'
@@ -61,7 +62,7 @@ export function ContainmentCard({ tripwires, fired, onChanged }) {
               {recent.map((r, i) => (
                 <span key={`${r.rule_id}-${r.ts}-${i}`}>
                   {i > 0 && ' · '}
-                  <span className="font-mono text-ink">{r.rule_id}</span> {r.ts ? ago(r.ts) : ''} → {r.action || ''}
+                  <span className="font-mono text-ink">{cleanLine(r.rule_id)}</span> {r.ts ? ago(r.ts) : ''} → {cleanLine(r.action || '')}
                 </span>
               ))}
             </p>

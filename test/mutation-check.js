@@ -4306,7 +4306,7 @@ const MUTATIONS = [
   {
     what: "r6 N4: the page's copied and shown code keeps bidi controls",
     file: "web/src/lib/clipboard.js",
-    from: "export const copyable = (text) => String(text ?? '').replace(BIDI, '')",
+    from: "export const copyable = (text) => cleanText(text)",
     to: "export const copyable = (text) => String(text ?? '')",
     tests: ["test/security/integrate3-r6.test.js", "web/src/pages/Sessions.test.jsx"],
   },
@@ -4538,6 +4538,21 @@ const MUTATIONS = [
     from: "    seen.add(page.next_cursor)\n    cursor = page.next_cursor",
     to: "    return { items: out, beside }",
     tests: ["web/test/lib-paging.test.js"],
+  },
+  // Fix round 1 (Grok security review, finding 1): a copy carries no terminal controls.
+  {
+    what: 'U7 fr1: a copy keeps C0 controls and ESC (only bidi removed)',
+    file: 'web/src/lib/clipboard.js',
+    from: 'export const copyable = (text) => cleanText(text)',
+    to: "export const copyable = (text) => String(text ?? '').replace(/[\\u202a-\\u202e\\u2066-\\u2069]/g, '')",
+    tests: ['test/security/control-ui-page.test.js'],
+  },
+  {
+    what: 'U7 fr1: the session Markdown carries an agent path with its controls',
+    file: 'web/src/components/sessions/sessionLogic.js',
+    from: '  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${cleanLine(p.method)} ${cleanLine(p.path)}`)}`)',
+    to: '  for (const p of a.paths || []) lines.push(`- ${p.count} × ${tick(`${p.method} ${p.path}`)}`)',
+    tests: ['test/security/control-ui-page.test.js'],
   },
   // Fix round 1 (parity review): complete-list reads, the overview's errors,
   // and the tripwire rule list.

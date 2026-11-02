@@ -20,6 +20,7 @@ import {
   templateLimits, templateOverrides, advancedFields, buildSessionBody, detailMarkdown, narrowSummary, MODEL_KINDS,
 } from '../../web/src/components/sessions/sessionLogic.js'
 import { credentialBadges, pinsText, testParts } from '../../web/src/components/credentials/credentialText.js'
+import { copyable, copyText } from '../../web/src/lib/clipboard.js'
 
 const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
 const HOSTILE = '<img src=x onerror=alert(1)>'
@@ -90,6 +91,30 @@ test('the session Markdown says when it never expires and when history is incomp
   const md = detailMarkdown(detail)
   assert.match(md, /history incomplete/)
   assert.match(md, /- expires: never/)
+})
+
+test('Copy as Markdown carries no terminal controls from what the agent sent', async () => {
+  // Grok's final security review, finding 1: a path with SOH, ESC and an
+  // RTL override, pasted into a terminal, must not carry the ESC with it.
+  const path = '/a\u0001b\u001b[31mc\u202ed'
+  const detail = {
+    session: { id: 's_1', label: 'lab\u001b]0;x\u0007el\u202e', state: 'active' },
+    grants: [],
+    activity: { complete: true, requests: { allowed: 1 }, paths: [{ method: 'G\u001bET', path, count: 2 }] },
+  }
+  const CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u2028\u2029]/
+  const md = detailMarkdown(detail)
+  assert.doesNotMatch(md, CONTROLS, 'the Markdown itself is clean')
+  assert.match(md, /- 2 × `G ET \/a b \[31mcd`/)
+  assert.match(md, /^## Session `s_1` \(lab \]0;x el\)$/m)
+  // What a copy writes: the same cleaning for any text, newlines and tabs kept.
+  const raw = `line one\tA\nline\u0001 two\u001b[0m\r\n\u0085\u2028end & < > " '`
+  const copied = copyable(raw)
+  assert.doesNotMatch(copied, CONTROLS)
+  assert.equal(copied, `line one\tA\nline two[0m\nend & < > " '`)
+  const written = []
+  await copyText(`x\u001by${path}`, { writeText: async (t) => { written.push(t) } })
+  assert.deepEqual(written, ['xy/ab[31mcd'])
 })
 
 test('a narrow result lists only what changed', () => {
