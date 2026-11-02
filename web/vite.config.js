@@ -11,6 +11,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import { availableParallelism } from 'node:os'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -65,5 +66,15 @@ export default defineConfig(() => ({
     include: ['src/**/*.test.{js,jsx}'],
     setupFiles: ['./test/vitest.setup.js'],
     restoreMocks: true,
+    // npm test runs this right after the node suite, and CI and busy laptops
+    // run it beside other work. The defaults (5 s per test, one worker per
+    // core) gave timeouts under load that passed when run alone, so: a
+    // generous per-test budget (a hang still fails, just later), and a capped
+    // number of jsdom workers so the suite does not starve itself. The
+    // Testing Library wait budget is set in test/vitest.setup.js.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+    teardownTimeout: 30_000,
+    maxWorkers: Math.max(1, Math.min(4, Math.floor(availableParallelism() / 2))),
   },
 }))
