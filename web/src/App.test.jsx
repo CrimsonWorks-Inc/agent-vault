@@ -38,11 +38,13 @@ describe('App shell', () => {
     expect(screen.getByRole('link', { name: /^2 waiting/ })).toBeTruthy()
   })
 
-  it('a page not yet ported says so', async () => {
+  // Was "a page not yet ported says so"; Credentials is ported now (pages-a).
+  it('the hash opens that page, which asks for its list paged', async () => {
     location.hash = '#credentials'
     const server = fakeServer(overviewRoutes())
     render(<App fetch={server.fetch} />)
-    expect(await screen.findByText('Credentials is ported in wave 2')).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Credentials', level: 1 })).toBeTruthy()
+    await waitFor(() => expect(server.calls.some((c) => c.path === 'credentials' && c.query.paged === '1')).toBe(true))
   })
 
   it('a lost session shows "No session", and the page stops asking', async () => {
