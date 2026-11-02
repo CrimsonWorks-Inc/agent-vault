@@ -1,16 +1,21 @@
 <!--
-  The agent-vault mark: a keyhole.
+  The agent-vault mark: a vault door with a keyhole in its dial.
 
-  Two forms from one geometry. The positive keyhole sits beside the wordmark;
-  the same shape punched out of a rounded square is the icon, where it needs to
-  fill its own space. Colour is currentColor, so both follow the page's light
-  and dark themes rather than shipping as two assets.
+  The body is the rounded hexagon from ioLite Labs' published agent-vault mark
+  (iolitelabs.com/agent-vault-mark.svg, also docs/logo.svg). The keyhole is
+  the one this product has always used, the same bow and slot, scaled into the
+  dial, so the old mark and the new one are one shape at two sizes.
 
-  What it does not try to do is encode the placeholder idea. Earlier attempts —
-  a solid key beside a hollow one, two keys crossed into a V, a keyhole whose
-  slot was a V — all died the same way: the part carrying the meaning was the
-  first thing to disappear when the mark got small, and a keyhole slot widens
-  downward while a V narrows, so those two shapes collapse into a teardrop.
+  One colour, punched out rather than drawn on top: the dial ring, its twelve
+  ticks and the keyhole are holes in the door. Colour is currentColor, so the
+  same file follows the page's light and dark themes. The ticks are the first
+  detail to go when it gets small; under 24 px the page draws the "compact"
+  form, which is this without the ticks (web/src/components/ui/Mark.jsx).
+
+  What it does not try to do is encode the placeholder idea. Earlier attempts
+  (a solid key beside a hollow one, two keys crossed into a V, a keyhole whose
+  slot was a V) all died the same way: the part carrying the meaning was the
+  first thing to disappear when the mark got small.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
   <defs>
@@ -20,10 +25,15 @@
     </g>
     <mask id="av-punch">
       <rect width="64" height="64" fill="#fff"/>
-      <use href="#av-keyhole" fill="#000"/>
+      <circle cx="32" cy="32" r="15" fill="none" stroke="#000" stroke-width="2.6"/>
+      <g stroke="#000" stroke-width="2" stroke-linecap="round">
+        <path d="M32 13.2V10.6M41.4 15.72L42.7 13.47M48.28 22.6L50.53 21.3M50.8 32H53.4M48.28 41.4L50.53 42.7M41.4 48.28L42.7 50.53M32 50.8V53.4M22.6 48.28L21.3 50.53M15.72 41.4L13.47 42.7M13.2 32H10.6M15.72 22.6L13.47 21.3M22.6 15.72L21.3 13.47"/>
+      </g>
+      <use href="#av-keyhole" fill="#000" transform="translate(32 32.6) scale(0.56) translate(-32 -32.25)"/>
     </mask>
   </defs>
 
-  <!-- The icon: the keyhole taken out of a solid field. -->
-  <rect width="64" height="64" rx="15" fill="currentColor" mask="url(#av-punch)"/>
+  <!-- The door: the hexagon with the dial and keyhole taken out of it. -->
+  <path fill="currentColor" mask="url(#av-punch)"
+    d="M26.8,6 Q32,3 37.2,6 L51.92,14.5 Q57.11,17.5 57.11,23.5 L57.11,40.5 Q57.11,46.5 51.92,49.5 L37.2,58 Q32,61 26.8,58 L12.08,49.5 Q6.89,46.5 6.89,40.5 L6.89,23.5 Q6.89,17.5 12.08,14.5 Z"/>
 </svg>
