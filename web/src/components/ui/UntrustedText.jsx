@@ -16,7 +16,10 @@ import { cx } from '../../lib/cx.js'
  * inline otherwise (one line, controls become spaces).
  */
 export function UntrustedText({ text, block = false, source = 'agent', label, className, maxHeight = 'max-h-80' }) {
-  const who = label ?? (source === 'agent' ? 'Written by the agent, not verified' : `Written by ${source}, not verified`)
+  // The attribution can be agent-controlled too (a writer's name), and it is
+  // the caption, the title and the screen-reader text: cleaned like the body,
+  // so a bidi override cannot reorder "Written by ..., not verified".
+  const who = cleanLine(label ?? (source === 'agent' ? 'Written by the agent, not verified' : `Written by ${source}, not verified`))
   if (block) {
     return (
       <figure data-untrusted="" className={cx('my-1.5 overflow-hidden rounded-control border border-dashed border-warn/70 bg-warn-soft/40', className)}>

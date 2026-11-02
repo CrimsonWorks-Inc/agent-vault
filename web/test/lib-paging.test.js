@@ -79,3 +79,22 @@ test('fetchAll follows cursors with the largest page, and takes a bare array as 
   assert.deepEqual(itemsOf({ items: [2] }), [2])
   assert.deepEqual(itemsOf(null), [])
 })
+
+test('fetchPages keeps what an object answer holds beside its page, and spots a legacy answer', async () => {
+  const { fetchPages, LIST_ROUTES } = await import('../src/lib/paging.js')
+  const pages = {
+    '': { items: [{ id: 'r1' }], next_cursor: 'n', prev_cursor: null, total: null, enabled: true, defaults: [1] },
+    n: { items: [{ id: 'r2' }], next_cursor: null, prev_cursor: 'p', total: null, enabled: true, defaults: [1] },
+  }
+  const asked = []
+  const r = await fetchPages(async (path, q) => { asked.push(q); return pages[q.cursor ?? ''] }, 'tripwires')
+  assert.deepEqual(r.items, [{ id: 'r1' }, { id: 'r2' }])
+  assert.deepEqual(r.beside, { enabled: true, defaults: [1] })
+  assert.equal(r.legacy, null)
+  assert.ok(asked.every((q) => q.paged === 1))
+
+  const old = { enabled: false, rules: [], defaults: [] }
+  assert.deepEqual(await fetchPages(async () => old, 'tripwires'), { items: null, beside: {}, legacy: old })
+  assert.deepEqual((await fetchPages(async () => [1], 'x')).items, [1])
+  assert.ok(['tripwires', 'audit', 'report/access'].every((r) => LIST_ROUTES.includes(r)))
+})

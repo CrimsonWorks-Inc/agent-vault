@@ -37,4 +37,14 @@ describe('UntrustedText (U7)', () => {
     render(<UntrustedText block source="whoever quarantined it" text="x" />)
     expect(screen.getByText('Written by whoever quarantined it, not verified')).toBeTruthy()
   })
+
+  it('cleans the attribution too: a bidi override in the writer\'s name or label goes', () => {
+    const { container } = render(<UntrustedText block source={'owner\u202e evil'} text="x" />)
+    expect(container.innerHTML).not.toMatch(/\u202e/)
+    expect(screen.getByText('Written by owner evil, not verified')).toBeTruthy()
+    const inline = render(<UntrustedText source={'who\u202e\u2066x'} label={'label\u202e\nnext'} text="y" />)
+    expect(inline.container.innerHTML).not.toMatch(/[\u202a-\u202e\u2066-\u2069\n]/)
+    expect(inline.container.querySelector('[title]').getAttribute('title')).toBe('label next')
+    expect(inline.container.querySelector('.sr-only').textContent).toBe('label next:')
+  })
 })

@@ -120,22 +120,49 @@ export function rememberLimit(storage, key, n) {
 }
 
 /**
- * Every item of a list, for a view that needs counts rather than a page (the
- * overview's "active sessions"). Asks with the largest page and follows the
- * cursors; a route that answers with a bare array is used as it is.
+ * The list routes (U3). Every request the page makes to one of these sends
+ * `paged=1`; the overview test holds the page to it.
  */
-export async function fetchAll(get, path, { filters = {}, maxPages = 50 } = {}) {
+export const LIST_ROUTES = ['credentials', 'sessions', 'pending', 'templates', 'listeners', 'tripwires', 'audit', 'report/access', 'sessions/detail']
+
+const ENVELOPE_KEYS = new Set(['items', 'next_cursor', 'prev_cursor', 'total'])
+
+/**
+ * Every page of a list, asked with `paged=1` and the largest page, following
+ * the cursors. Returns `{ items, beside, legacy }`:
+ *
+ *   items   every row, in the server's order;
+ *   beside  the fields an object answer keeps beside its page (tripwires'
+ *           `enabled` and `defaults`, report/access's `complete`), from the
+ *           first page;
+ *   legacy  the answer itself when the server did not page it (a route from
+ *           before U3): a bare array, or an object with no `items`. Then
+ *           `items` is the array, or null for an object.
+ */
+export async function fetchPages(get, path, { filters = {}, maxPages = 50 } = {}) {
   const out = []
+  let beside = null
   let cursor = null
   for (let i = 0; i < maxPages; i++) {
     const data = await get(path, pageQuery({ limit: MAX_LIMIT, cursor, filters }))
-    if (Array.isArray(data)) return data
-    const env = readEnvelope(data)
-    out.push(...env.items)
-    if (!env.next_cursor) return out
-    cursor = env.next_cursor
+    if (Array.isArray(data)) return { items: data, beside: {}, legacy: data }
+    if (!Array.isArray(data?.items)) return { items: null, beside: {}, legacy: data ?? null }
+    if (beside === null) beside = Object.fromEntries(Object.entries(data).filter(([k]) => !ENVELOPE_KEYS.has(k)))
+    out.push(...data.items)
+    if (typeof data.next_cursor !== 'string' || !data.next_cursor) break
+    cursor = data.next_cursor
   }
-  return out
+  return { items: out, beside: beside ?? {}, legacy: null }
+}
+
+/**
+ * Every item of a list, for a view that needs counts rather than a page (the
+ * overview's "active sessions"). A route that answers with a bare array is
+ * used as it is.
+ */
+export async function fetchAll(get, path, opts = {}) {
+  const r = await fetchPages(get, path, opts)
+  return r.items ?? itemsOf(r.legacy)
 }
 
 /** The rows of a list answer, whether it came back paged or as a bare array. */

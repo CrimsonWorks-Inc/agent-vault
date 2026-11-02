@@ -45,6 +45,12 @@ export async function operationFor(op, params = {}, { subtle = globalThis.crypto
   for (const key of Object.keys(params).sort()) {
     const v = params[key]
     if (v === undefined || key === 'presence') continue
+    // The reserved names, refused exactly as webauthn.js refuses them, and
+    // before any digest is written: a body naming another op is the swap, and
+    // a caller's own `value_sha256` would overwrite the digest of the real
+    // value. A body that repeats the route's own op says nothing new.
+    if (key === 'op' && v === op) continue
+    if (key === 'op' || key.endsWith('_sha256')) throw reservedField(key)
     // A string is its own bytes; anything else its canonical form, which is
     // how the servers digest it too.
     if (DIGESTED.includes(key)) {
@@ -56,6 +62,59 @@ export async function operationFor(op, params = {}, { subtle = globalThis.crypto
     out[key] = v
   }
   return out
+}
+
+/** webauthn.js's refusal, in the same words, with the same code and rule. */
+function reservedField(key) {
+  return Object.assign(new Error(`a request cannot carry a field named ${JSON.stringify(key)}`), {
+    code: 'AV_POLICY_DENIED', rule: 'reserved_operation_field',
+  })
+}
+
+/**
+ * The gated routes whose operation the server binds from the QUERY string
+ * (server.js #operationFor, `url.searchParams.get(name)`), with the op and
+ * the fields it reads. A field that is absent from the query is read as
+ * null, so it must be signed as null, never left out: "remove every pin for
+ * the host" is `spki: null`, and an operation without the key is a different
+ * operation, refused with 409.
+ */
+export const QUERY_BOUND = Object.freeze({
+  'DELETE credentials': { op: 'cred.remove', fields: ['slug'] },
+  'DELETE sessions': { op: 'session.revoke', fields: ['sid'] },
+  'DELETE credentials/scrub': { op: 'cred.scrub_remove', fields: ['slug', 'id'] },
+  'DELETE credentials/pins': { op: 'cred.pins_remove', fields: ['slug', 'host', 'spki'] },
+  'DELETE templates': { op: 'template.delete', fields: ['name'] },
+})
+
+/**
+ * One query-bound request, built once so the query sent and the operation
+ * signed cannot disagree:
+ *
+ *   const r = queryBound('DELETE credentials/pins', { slug, host })   // spki left out: every pin
+ *   <GatedButton operation={r.operation} label={describeOperation(r.operation)}
+ *     send={(proof) => api.del(r.path, r.query, { presence: proof })} />
+ *
+ * Each field is read the way the server reads it: a string, or null when it
+ * is absent, null or empty (lib/api.js `withQuery` leaves those out of the
+ * URL, so the server sees no parameter). Numbers become strings, as they do
+ * in a URL. A field the route does not bind is refused rather than dropped.
+ */
+export function queryBound(route, params = {}) {
+  const spec = QUERY_BOUND[route]
+  if (!spec) throw new Error(`${route} is not a query-bound gated route`)
+  const extra = Object.keys(params).filter((k) => !spec.fields.includes(k) && params[k] !== undefined)
+  if (extra.length) throw new Error(`${route} does not bind ${extra.join(', ')}`)
+  const operation = { op: spec.op }
+  const query = {}
+  for (const f of spec.fields) {
+    const v = params[f]
+    const text = v === undefined || v === null || v === '' ? null : String(v)
+    operation[f] = text
+    if (text !== null) query[f] = text
+  }
+  const [method, path] = route.split(' ')
+  return { method, path, query, operation }
 }
 
 /**
