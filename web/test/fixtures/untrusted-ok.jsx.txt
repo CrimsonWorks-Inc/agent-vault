@@ -1,0 +1,16 @@
+// Passing fixture for untrusted-scan: every agent-written field reaches the page
+// through UntrustedText's text prop, inline or as a block, on one line or several.
+export function Ok({ r, q }) {
+  const options = { reason: r.reason_untrusted }
+  return (
+    <div title="don't render raw text">
+      <UntrustedText text={r.reason_untrusted} block />
+      <UntrustedText
+        source="whoever quarantined it"
+        text={q.reason_untrusted}
+      />
+      <UntrustedText text={r.preview?.agent_reason_untrusted ?? ''} block maxHeight="max-h-40" />
+      {r.reason_untrusted && <UntrustedText text={r.reason_untrusted} />}
+    </div>
+  )
+}
