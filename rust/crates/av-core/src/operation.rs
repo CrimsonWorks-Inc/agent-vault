@@ -1,11 +1,6 @@
 //! The operation a WebAuthn presence proof binds to: the pure parts of
 //! `src/ui/webauthn.js`. Signature verification stays in av-daemon.
 
-// `VaultError` (errors.rs, not owned here) is ~208 bytes, so clippy's
-// `result_large_err` fires on every `Result<T>` signature. The fix belongs in
-// errors.rs (box the extras); until then it is allowed in this module only.
-#![allow(clippy::result_large_err)]
-
 use crate::errors::Result;
 
 /// Request fields that carry a secret and are bound by SHA-256 digest

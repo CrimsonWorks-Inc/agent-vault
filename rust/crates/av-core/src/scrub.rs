@@ -13,11 +13,6 @@
 //! Honest limit: byte-and-encoding based. A secret split across markup,
 //! re-encoded in a scheme not listed, or transformed upstream is not caught.
 
-// `VaultError` (errors.rs, not owned here) is ~208 bytes, so clippy's
-// `result_large_err` fires on every `Result<T>` signature. The fix belongs in
-// errors.rs (box the extras); until then it is allowed in this module only.
-#![allow(clippy::result_large_err)]
-
 use crate::errors::Result;
 use crate::secret::SecretString;
 

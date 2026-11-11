@@ -288,7 +288,7 @@ pub struct AuditLog {
 impl std::fmt::Debug for AuditLog {
     /// Redacted: never the key. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("AuditLog").finish_non_exhaustive()
     }
 }
 

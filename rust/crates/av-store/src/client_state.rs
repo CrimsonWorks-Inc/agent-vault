@@ -59,7 +59,7 @@ pub struct ClientState {
 impl std::fmt::Debug for ClientState {
     /// Redacted: never the token. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("ClientState").finish_non_exhaustive()
     }
 }
 
@@ -80,7 +80,7 @@ pub struct RememberedSession {
 impl std::fmt::Debug for RememberedSession {
     /// Redacted: never the token. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("RememberedSession").finish_non_exhaustive()
     }
 }
 

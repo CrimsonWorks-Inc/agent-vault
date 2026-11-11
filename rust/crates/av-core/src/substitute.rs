@@ -7,11 +7,6 @@
 //! location against the field's declared sites; anywhere else is
 //! `AV_BAD_LOCATION` and the request never reaches an upstream.
 
-// `VaultError` (errors.rs, not owned here) is ~208 bytes, so clippy's
-// `result_large_err` fires on every `Result<T>` signature. The fix belongs in
-// errors.rs (box the extras); until then it is allowed in this module only.
-#![allow(clippy::result_large_err)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::detect::{DetectHit, HitEncoding};

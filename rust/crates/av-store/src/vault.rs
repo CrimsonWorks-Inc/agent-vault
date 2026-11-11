@@ -237,7 +237,7 @@ pub struct CreateOptions {
 impl std::fmt::Debug for CreateOptions {
     /// Redacted. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("CreateOptions").finish_non_exhaustive()
     }
 }
 
@@ -255,7 +255,7 @@ pub struct UnlockMaterial {
 impl std::fmt::Debug for UnlockMaterial {
     /// Redacted. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("UnlockMaterial").finish_non_exhaustive()
     }
 }
 
@@ -329,7 +329,7 @@ pub struct NewCredential {
 impl std::fmt::Debug for NewCredential {
     /// Redacted: names only. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("NewCredential").finish_non_exhaustive()
     }
 }
 
@@ -349,7 +349,7 @@ pub struct StoredSecret {
 impl std::fmt::Debug for StoredSecret {
     /// Redacted. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("StoredSecret").finish_non_exhaustive()
     }
 }
 
@@ -408,7 +408,7 @@ pub struct RotateOptions {
 impl std::fmt::Debug for RotateOptions {
     /// Redacted. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("RotateOptions").finish_non_exhaustive()
     }
 }
 
@@ -457,7 +457,7 @@ pub struct NotifyWebhook {
 impl std::fmt::Debug for NotifyWebhook {
     /// Redacted: host and detail only. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("NotifyWebhook").finish_non_exhaustive()
     }
 }
 
@@ -548,7 +548,7 @@ pub struct CreatedSession {
 impl std::fmt::Debug for CreatedSession {
     /// Redacted: never the token. No JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("CreatedSession").finish_non_exhaustive()
     }
 }
 
@@ -748,7 +748,10 @@ impl std::fmt::Debug for Vault {
     /// Redacted: the dir and whether it is locked, never key material. No
     /// JS source.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("Vault")
+            .field("dir", &self.dir)
+            .field("locked", &self.vmk.is_none())
+            .finish_non_exhaustive()
     }
 }
 
@@ -926,7 +929,7 @@ impl Vault {
     }
 
     /// The session-token key (AV_LOCKED while locked). No JS method: ports
-    /// `crypt.kToken(vault.vmk)` as the daemon would call it.
+    /// `crypt.kToken(vault.vmk)` (`src/store/crypto.js`) as the daemon would call it.
     pub fn k_token(&self) -> Result<Key32> {
         todo!()
     }

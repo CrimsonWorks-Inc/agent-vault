@@ -11,11 +11,6 @@
 //! [`Checked`]: the typed value when it has the right shape, otherwise the raw
 //! JSON, which `validate` reports and every evaluation refuses.
 
-// `VaultError` (errors.rs, not owned here) is ~208 bytes, so clippy's
-// `result_large_err` fires on every `Result<T>` signature. The fix belongs in
-// errors.rs (box the extras); until then it is allowed in this module only.
-#![allow(clippy::result_large_err)]
-
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::errors::Result;

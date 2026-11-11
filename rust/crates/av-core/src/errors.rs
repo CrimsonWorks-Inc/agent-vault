@@ -262,7 +262,8 @@ pub const CODES: &[CodeSpec] = &[
 ];
 
 impl ErrorCode {
-    /// The wire string, e.g. `"AV_NO_GRANT"`. Ports the `code` keys of `CODES`.
+    /// The wire string, e.g. `"AV_NO_GRANT"`. Ports the `code` keys of `CODES` in
+    /// `src/core/errors.js`.
     pub fn as_str(self) -> &'static str {
         todo!()
     }
@@ -308,6 +309,11 @@ pub struct DenyExtra {
 /// A denial or failure an agent can see. Ports `class VaultError` in
 /// `src/core/errors.js`. The `Display` form is `"<code>: <detail>"`, like the
 /// JS `message`.
+///
+/// The JS fields `http`, `exit` and `auditKind` come from the registry, so
+/// they are methods here ([`VaultError::http`], …) rather than stored copies.
+/// The optional `extra` fields are boxed so `Result<T, VaultError>` stays
+/// small (clippy's `result_large_err`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{}: {detail}", code.as_str())]
 pub struct VaultError {
@@ -315,34 +321,36 @@ pub struct VaultError {
     pub code: ErrorCode,
     /// What happened, in the agent's terms. Never contains a secret.
     pub detail: String,
-    /// HTTP status (from the registry).
-    pub http: u16,
-    /// CLI exit code (from the registry).
-    pub exit: Exit,
-    /// Audit record kind (`auditKind` in the JS).
-    pub audit_kind: &'static str,
-    /// `extra.hint` or the registry hint.
-    pub hint: String,
-    /// `extra.rule`.
-    pub rule: Option<String>,
-    /// `extra.next`.
-    pub next: Option<String>,
-    /// `extra.requestId`.
-    pub request_id: Option<String>,
-    /// `extra.nextPlaceholder`.
-    pub next_placeholder: Option<String>,
-    /// `extra.factors`.
-    pub factors: Option<Vec<String>>,
-    /// `extra.refunded`.
-    pub refunded: Option<bool>,
-    /// `extra.retryAfter ?? extra.retry_after_s`, kept only when an integer.
-    pub retry_after: Option<u64>,
+    /// `extra` as given to the constructor: hint override, rule, next,
+    /// requestId, nextPlaceholder, factors, refunded, retryAfter.
+    pub extra: Box<DenyExtra>,
 }
 
 impl VaultError {
     /// Build an error from a code, a detail and extras. Ports the
     /// `VaultError` constructor in `src/core/errors.js`.
     pub fn new(code: ErrorCode, detail: impl Into<String>, extra: DenyExtra) -> Self {
+        todo!()
+    }
+
+    /// HTTP status: `this.http` (`spec.http`) in `src/core/errors.js`.
+    pub fn http(&self) -> u16 {
+        todo!()
+    }
+
+    /// CLI exit code: `this.exit` (`spec.exit`) in `src/core/errors.js`.
+    pub fn exit(&self) -> Exit {
+        todo!()
+    }
+
+    /// Audit record kind: `this.auditKind` (`spec.audit`) in
+    /// `src/core/errors.js`.
+    pub fn audit_kind(&self) -> &'static str {
+        todo!()
+    }
+
+    /// `this.hint`: `extra.hint || spec.hint` in `src/core/errors.js`.
+    pub fn hint(&self) -> &str {
         todo!()
     }
 
