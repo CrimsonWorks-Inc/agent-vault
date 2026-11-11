@@ -104,6 +104,7 @@ installed by the setup), `agent-vault-daemon`, `agent-vault-setup`.
 | `src/core/*` (placeholder, base32, canon, detect, scrub, substitute, sites, policy, payload, request-view, model-usage, errors) | av-core |
 | `src/store/*` (crypto, vault, audit, backup, activity, ids), `src/pending.js`, `src/client-state.js` | av-store |
 | `src/daemon/*`, `src/ui/server.js`, `src/ui/webauthn.js`, `src/ui/list-paging.js`, `src/connectors/*` | av-daemon |
+| The pure, I/O-free parts that the store needs: `src/connectors/profiles.js` (`PROFILES`, `getProfile`, `listProfiles`, `defaultSites`, `defaultField`, `extractHealth`) → `av_core::profiles`; from `src/connectors/pinning.js` (`PIN_RE`, `pinListState`, `urlHostOf`, `hostHeaderMatches`, `pinsFor`) → `av_core::pins`; from `src/ui/webauthn.js` (`canonicalOperation`, `DIGESTED`, `operationFor`, `challengeForOperation`) → `av_core::operation` | av-core (owned by core; av-daemon re-exports them and keeps the network, TLS and WebAuthn-verification parts) |
 | `src/cli/*`, `bin/agent-vault.js`, `bin/agent-vault-setup.js` | av-cli |
 
 ## Dependencies
