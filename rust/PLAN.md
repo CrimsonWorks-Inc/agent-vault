@@ -65,6 +65,17 @@ PR that the owner approves.
    (format and version as in `src/store/backup.js`, scrypt N=131072 r=8 p=1,
    ChaCha20-Poly1305). New backups may use a new version (see below).
 
+## Known JavaScript quirks the port keeps
+
+The conformance worker listed eight places where today's CLI or control API
+does not follow its own `--json` envelope, or refuses in a surprising way
+(`conformance/QUESTIONS.md`): `passphrase set/remove --json`, `daemon
+--json`, `setup --dev --json` on create, `exec --json`, `preflight --json`
+exit codes, `backup export` on a pipe, `cred test` single vs `--all`, and
+`POST /v1/sessions` with `{}` / rotating to the same value. **The port
+reproduces all of them exactly.** Fixing them is a separate change after the
+port, so the conformance suite stays a pure equivalence check.
+
 ## Intended changes
 
 - **Storage**: SQLite, not `vault.json`.
