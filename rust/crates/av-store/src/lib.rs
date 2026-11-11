@@ -15,9 +15,12 @@ pub mod backup;
 pub mod client_state;
 pub mod crypto;
 pub mod db;
+pub mod error;
 pub mod ids;
+pub mod migrate;
 #[allow(unsafe_code)]
 pub mod mlock;
+pub mod model;
 pub mod pending;
 pub mod schema;
 pub mod vault;

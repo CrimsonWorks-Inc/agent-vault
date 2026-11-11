@@ -50,7 +50,11 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let conn = Connection::open_with_flags(path, flags)?;
+    // NOFOLLOW refuses a symlink anywhere in the path, and on macOS the temp
+    // and /var directories are reached through one, so resolve it first. The
+    // file itself was just created by us above.
+    let real = std::fs::canonicalize(path).map_err(io_err)?;
+    let conn = Connection::open_with_flags(&real, flags)?;
     configure(&conn)?;
     migrate(&conn)?;
     Ok(conn)
@@ -122,7 +126,9 @@ pub fn schema_version(conn: &Connection) -> rusqlite::Result<u32> {
     if !exists {
         return Ok(0);
     }
-    conn.query_row("SELECT version FROM schema_version WHERE id = 1", [], |r| r.get(0))
+    conn.query_row("SELECT version FROM schema_version WHERE id = 1", [], |r| {
+        r.get(0)
+    })
 }
 
 fn io_err(e: std::io::Error) -> rusqlite::Error {
@@ -180,7 +186,9 @@ mod tests {
     fn extension_loading_is_off() {
         let (_dir, conn) = temp_db();
         let err = conn
-            .query_row("SELECT load_extension('av-no-such-extension')", [], |_| Ok(()))
+            .query_row("SELECT load_extension('av-no-such-extension')", [], |_| {
+                Ok(())
+            })
             .unwrap_err();
         assert!(err.to_string().contains("not authorized"), "{err}");
     }
@@ -196,7 +204,10 @@ mod tests {
     #[test]
     fn file_is_0600() {
         let (dir, _conn) = temp_db();
-        let mode = std::fs::metadata(dir.path().join(DB_FILE)).unwrap().permissions().mode();
+        let mode = std::fs::metadata(dir.path().join(DB_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -221,7 +232,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(DB_FILE);
         let conn = open(&path).unwrap();
-        conn.execute("UPDATE schema_version SET version = ?1", [DB_SCHEMA_VERSION + 1]).unwrap();
+        conn.execute(
+            "UPDATE schema_version SET version = ?1",
+            [DB_SCHEMA_VERSION + 1],
+        )
+        .unwrap();
         drop(conn);
         assert!(open(&path).is_err());
     }
@@ -276,7 +291,10 @@ mod tests {
             let id = format!("ph_{reason}");
             dead_row(&conn, &id, reason, 3);
             let err = refund(&conn, &id, 2).unwrap_err();
-            assert!(err.to_string().contains("cannot become active"), "{reason}: {err}");
+            assert!(
+                err.to_string().contains("cannot become active"),
+                "{reason}: {err}"
+            );
         }
     }
 
@@ -301,10 +319,22 @@ mod tests {
         let (_dir, conn) = temp_db();
         seed(&conn);
         dead_row(&conn, "ph_g", "exhausted", 3);
-        conn.execute("UPDATE grants SET state = 'revoked' WHERE id = 'grant_1'", []).unwrap();
+        conn.execute(
+            "UPDATE grants SET state = 'revoked' WHERE id = 'grant_1'",
+            [],
+        )
+        .unwrap();
         assert!(refund(&conn, "ph_g", 2).is_err(), "grant revoked");
-        conn.execute("UPDATE grants SET state = 'active' WHERE id = 'grant_1'", []).unwrap();
-        conn.execute("UPDATE sessions SET state = 'revoked' WHERE id = 'sid000000001'", []).unwrap();
+        conn.execute(
+            "UPDATE grants SET state = 'active' WHERE id = 'grant_1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE sessions SET state = 'revoked' WHERE id = 'sid000000001'",
+            [],
+        )
+        .unwrap();
         assert!(refund(&conn, "ph_g", 2).is_err(), "session revoked");
     }
 
@@ -313,7 +343,10 @@ mod tests {
         let (_dir, conn) = temp_db();
         seed(&conn);
         dead_row(&conn, "ph_id", "burned", 0);
-        let r = conn.execute("UPDATE placeholders SET nonce_hash = 'other' WHERE id = 'ph_id'", []);
+        let r = conn.execute(
+            "UPDATE placeholders SET nonce_hash = 'other' WHERE id = 'ph_id'",
+            [],
+        );
         assert!(r.is_err());
     }
 
@@ -326,9 +359,13 @@ mod tests {
             [],
         )
         .unwrap();
-        let up = conn.execute("UPDATE audit SET kind = 'x' WHERE seq = 1", []).unwrap_err();
+        let up = conn
+            .execute("UPDATE audit SET kind = 'x' WHERE seq = 1", [])
+            .unwrap_err();
         assert!(up.to_string().contains("append-only"), "{up}");
-        let del = conn.execute("DELETE FROM audit WHERE seq = 1", []).unwrap_err();
+        let del = conn
+            .execute("DELETE FROM audit WHERE seq = 1", [])
+            .unwrap_err();
         assert!(del.to_string().contains("append-only"), "{del}");
     }
 

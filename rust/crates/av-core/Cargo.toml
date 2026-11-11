@@ -18,6 +18,7 @@ hmac.workspace = true
 base64.workspace = true
 regex.workspace = true
 getrandom.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

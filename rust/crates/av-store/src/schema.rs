@@ -6,7 +6,7 @@
 //! | `vault.json` | table(s) |
 //! |---|---|
 //! | `schema_version` | `schema_version` (the SQLite schema's own version) |
-//! | `kv.vault_id`, `kv.created_at`, `kv.locked`, `kv.audit_anchored`, `kv.prf_salt`, anchors | `kv` |
+//! | `kv.vault_id`, `kv.created_at`, `kv.locked`, `kv.audit_anchored`, `kv.prf_salt`, `kv.ui_origins`, anchors | `kv` |
 //! | `kv.settings` (incl. `tripwires`, `retention_days`) | `settings` |
 //! | `kv.vmk_wraps` | `vmk_wraps` |
 //! | `kv.presence_factors` | `presence_factors` |
@@ -18,6 +18,7 @@
 //! | `grants` | `grants` |
 //! | `placeholders` | `placeholders` |
 //! | `approvals` | `approvals` |
+//! | `kv.session_requests` | `session_requests` |
 //! | `clients` | `clients` |
 //! | `listeners` | `listeners` |
 //! | `templates` | `templates` |
@@ -183,7 +184,7 @@ CREATE TABLE sessions (
     elevated         TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(elevated)),
     template         TEXT,
     template_version INTEGER,
-    parent_id        TEXT,                          -- forkSession
+    parent_sid       TEXT,                          -- forkSession
     last_seen_at     TEXT,
     ended_at         TEXT,                          -- for retention pruning
     CHECK ((template IS NULL) = (template_version IS NULL)),
@@ -268,6 +269,20 @@ CREATE TABLE approvals (
     doc        TEXT NOT NULL CHECK (json_valid(doc))
 ) STRICT, WITHOUT ROWID;
 
+-- kv.session_requests (src/daemon/session-requests.js): sessions an agent
+-- asked for, waiting on a human.
+CREATE TABLE session_requests (
+    id               TEXT PRIMARY KEY NOT NULL,
+    collect_hash     TEXT NOT NULL,
+    proposal         TEXT NOT NULL CHECK (json_valid(proposal)),
+    fingerprint      TEXT NOT NULL,
+    summary          TEXT NOT NULL,
+    reason_untrusted TEXT,
+    state            TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    decided_at       TEXT
+) STRICT, WITHOUT ROWID;
+
 -- vault.json's `clients` collection (empty in the JS today).
 CREATE TABLE clients (
     id         TEXT PRIMARY KEY NOT NULL,
@@ -343,6 +358,7 @@ pub const TABLES: &[&str] = &[
     "grants",
     "placeholders",
     "approvals",
+    "session_requests",
     "clients",
     "listeners",
     "templates",
