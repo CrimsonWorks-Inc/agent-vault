@@ -73,24 +73,157 @@ pub struct InvalidSite(pub String);
 /// Parse a site string into a descriptor. Ports `parseSite` in
 /// `src/core/sites.js`.
 pub fn parse_site(spec: &str) -> Result<Site, InvalidSite> {
-    todo!()
+    let (kind, rest) = spec.split_once(':').unwrap_or((spec, ""));
+    let mut site = Site {
+        spec: spec.into(),
+        kind: SiteKind::Header,
+        name: None,
+        scheme: None,
+        part: None,
+        key: None,
+        pointer: None,
+    };
+    let invalid = |message: &str| InvalidSite(format!("{message}: {spec}"));
+    match kind {
+        "header" => {
+            let (name, scheme) = rest
+                .split_once(':')
+                .map_or((rest, None), |(n, s)| (n, Some(s.to_owned())));
+            if name.is_empty() {
+                return Err(invalid("header site needs a name"));
+            }
+            site.name = Some(name.to_lowercase());
+            site.scheme = scheme;
+        }
+        "basic" => {
+            if rest != "user" && rest != "pass" {
+                return Err(invalid("basic site must be user or pass"));
+            }
+            site.kind = SiteKind::Basic;
+            site.part = Some(rest.into());
+        }
+        "query" | "form" => {
+            if rest.is_empty() {
+                return Err(invalid(&format!("{kind} site needs a key")));
+            }
+            site.kind = if kind == "query" {
+                SiteKind::Query
+            } else {
+                SiteKind::Form
+            };
+            site.key = Some(rest.into());
+        }
+        "json" => {
+            if !rest.starts_with('/') {
+                return Err(invalid("json site needs an RFC 6901 pointer"));
+            }
+            site.kind = SiteKind::Json;
+            site.pointer = Some(rest.into());
+        }
+        "url" | "proxy" => {
+            if rest != "userinfo" {
+                return Err(invalid(&format!("{kind} site must be userinfo")));
+            }
+            site.kind = if kind == "url" {
+                SiteKind::Url
+            } else {
+                SiteKind::Proxy
+            };
+            site.part = Some(rest.into());
+        }
+        _ => return Err(invalid("unknown site kind")),
+    }
+    Ok(site)
 }
 
 /// Parse every site string, failing on the first bad one. Ports `parseSites`
 /// in `src/core/sites.js`.
 pub fn parse_sites<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Site>, InvalidSite> {
-    todo!()
+    specs.iter().map(|s| parse_site(s.as_ref())).collect()
 }
 
 /// True when any declared site writes into the request body (`json` or
 /// `form`). Ports `hasBodySite` in `src/core/sites.js`.
 pub fn has_body_site(sites: &[Site]) -> bool {
-    todo!()
+    sites
+        .iter()
+        .any(|s| matches!(s.kind, SiteKind::Json | SiteKind::Form))
 }
 
 /// Human- and agent-readable usage for a site, e.g.
 /// `Authorization: Bearer <placeholder>`. Pass [`DEFAULT_PLACEHOLDER_HINT`]
 /// for the JS default. Ports `describeSite` in `src/core/sites.js`.
 pub fn describe_site(site: &Site, placeholder: &str) -> String {
-    todo!()
+    match site.kind {
+        SiteKind::Header => {
+            let name = site
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .split('-')
+                .map(|p| {
+                    let mut c = p.chars();
+                    c.next().map_or(String::new(), |x| {
+                        x.to_uppercase().collect::<String>() + c.as_str()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("-");
+            match site.scheme.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => format!("{name}: {s} {placeholder}"),
+                None => format!("{name}: {placeholder}"),
+            }
+        }
+        SiteKind::Basic => {
+            if site.part.as_deref() == Some("user") {
+                format!("Authorization: Basic base64({placeholder}:x)")
+            } else {
+                format!("Authorization: Basic base64(x:{placeholder})")
+            }
+        }
+        SiteKind::Query => format!("?{}={placeholder}", site.key.as_deref().unwrap_or("")),
+        SiteKind::Form => format!(
+            "form field {}={placeholder}",
+            site.key.as_deref().unwrap_or("")
+        ),
+        SiteKind::Json => format!("JSON body at {}", site.pointer.as_deref().unwrap_or("")),
+        SiteKind::Url => "connection string username field".into(),
+        SiteKind::Proxy => "proxy userinfo".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sites_and_descriptions() {
+        for (spec, description) in [
+            (
+                "header:authorization:Bearer",
+                "Authorization: Bearer <placeholder>",
+            ),
+            ("basic:user", "Authorization: Basic base64(<placeholder>:x)"),
+            ("basic:pass", "Authorization: Basic base64(x:<placeholder>)"),
+            ("query:key", "?key=<placeholder>"),
+            ("form:field", "form field field=<placeholder>"),
+            ("json:/a/~1", "JSON body at /a/~1"),
+            ("url:userinfo", "connection string username field"),
+            ("proxy:userinfo", "proxy userinfo"),
+        ] {
+            let site = parse_site(spec).unwrap();
+            assert_eq!(describe_site(&site, DEFAULT_PLACEHOLDER_HINT), description);
+        }
+        for bad in [
+            "path:/",
+            "header:",
+            "basic:password",
+            "query:",
+            "json:x",
+            "url:password",
+        ] {
+            assert!(parse_site(bad).is_err());
+        }
+        assert!(has_body_site(&parse_sites(&["json:/x"]).unwrap()));
+        assert!(!has_body_site(&parse_sites(&["header:x"]).unwrap()));
+    }
 }
