@@ -72,7 +72,10 @@ does not follow its own `--json` envelope, or refuses in a surprising way
 (`conformance/QUESTIONS.md`): `passphrase set/remove --json`, `daemon
 --json`, `setup --dev --json` on create, `exec --json`, `preflight --json`
 exit codes, `backup export` on a pipe, `cred test` single vs `--all`, and
-`POST /v1/sessions` with `{}` / rotating to the same value. **The port
+`POST /v1/sessions` with `{}` / rotating to the same value. A ninth, found by
+the scaffold: the JS CLI **ignores unknown flags** on every command outside its
+`knownFlags` set (`status --frob` runs normally), while clap refuses them; the
+Rust CLI must accept and ignore them on exactly those commands. **The port
 reproduces all of them exactly.** Fixing them is a separate change after the
 port, so the conformance suite stays a pure equivalence check.
 
