@@ -337,6 +337,14 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
             copy_tree(&entry.path(), &dest)?;
         } else if ty.is_file() {
             fs::copy(entry.path(), &dest)?;
+            // fs::copy keeps the source's mtime. The mutation target dir is
+            // shared between runs, so a restored file that looks older than
+            // the last mutant's build would be skipped by cargo and the stale
+            // mutant tested as the baseline. Stamp every copy with now.
+            fs::File::options()
+                .write(true)
+                .open(&dest)?
+                .set_modified(SystemTime::now())?;
         }
         // Symlinks are skipped: the workspace has none, and following one
         // could copy something outside the tree.
@@ -388,6 +396,14 @@ mod tests {
         copy_tree(&src, &dst).unwrap();
         assert!(dst.join("crates/a/src/lib.rs").is_file());
         assert!(!dst.join("target").exists());
+        let age = fs::metadata(dst.join("crates/a/src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            age.elapsed().unwrap() < Duration::from_secs(60),
+            "copies are stamped with now"
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 
