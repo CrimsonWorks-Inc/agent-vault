@@ -1,5 +1,7 @@
 # Questions for the coordinator
 
+The contract is the JavaScript daemon's actual behavior. The eight items below stay as the suite asserts them; the port will reproduce those quirks, and cleaning them up is a separate change after the port.
+
 The suite matches the JavaScript daemon. These are places that JavaScript does not match the frozen contract's `--json` envelope, or where a refusal is easy to misread. `src/` was not changed.
 
 1. `passphrase set --json` does not print `{ok, data}`. On success it prints the human line `passphrase set` and exits 0. `passphrase remove --json` also prints human text on the success path. That path is unreachable while the passphrase is the only human factor: remove then exits 6 with `{ok:false}` and the message that the last factor cannot be dropped.
