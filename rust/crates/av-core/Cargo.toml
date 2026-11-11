@@ -20,5 +20,7 @@ regex.workspace = true
 getrandom.workspace = true
 url.workspace = true
 
+time.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true

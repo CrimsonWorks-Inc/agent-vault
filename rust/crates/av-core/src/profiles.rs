@@ -298,7 +298,10 @@ pub struct UnknownKind(pub String);
 /// Fetch a profile. Its policy ceiling is [`Profile::policy_ceiling`]. Ports
 /// `getProfile` in `src/connectors/profiles.js`.
 pub fn get_profile(kind: &str) -> Result<&'static Profile, UnknownKind> {
-    todo!()
+    PROFILES
+        .iter()
+        .find(|p| p.kind == kind)
+        .ok_or_else(|| UnknownKind(kind.into()))
 }
 
 impl Profile {
@@ -306,7 +309,16 @@ impl Profile {
     /// deny_paths }`. Ports the `policyCeiling` that `getProfile` in
     /// `src/connectors/profiles.js` precomputes.
     pub fn policy_ceiling(&self) -> Policy {
-        todo!()
+        use crate::policy::Checked;
+        Policy {
+            kind: Some(Checked::Valid(self.kind.into())),
+            hosts: (!self.hosts.is_empty())
+                .then(|| Checked::Valid(self.hosts.iter().map(|s| s.to_string()).collect())),
+            deny_paths: Some(Checked::Valid(
+                self.deny_paths.iter().map(|s| s.to_string()).collect(),
+            )),
+            ..Default::default()
+        }
     }
 }
 
@@ -329,19 +341,34 @@ pub struct ProfileSummary {
 /// Every profile summarized, in table order. Ports `listProfiles` in
 /// `src/connectors/profiles.js`.
 pub fn list_profiles() -> Vec<ProfileSummary> {
-    todo!()
+    PROFILES
+        .iter()
+        .map(|p| ProfileSummary {
+            kind: p.kind.into(),
+            hosts: p.hosts.iter().map(|s| s.to_string()).collect(),
+            fields: p.fields.iter().map(|f| f.name.to_string()).collect(),
+            l4: p.l4,
+            implemented: p.implemented,
+        })
+        .collect()
 }
 
 /// Default sites for a field, or [`DEFAULT_SITES`] for an unknown kind or
 /// field. Ports `defaultSites` in `src/connectors/profiles.js`.
 pub fn default_sites(kind: &str, field: &str) -> &'static [&'static str] {
-    todo!()
+    get_profile(kind)
+        .ok()
+        .and_then(|p| p.fields.iter().find(|f| f.name == field))
+        .map_or(DEFAULT_SITES, |f| f.sites)
 }
 
 /// The first field of the kind's profile, or [`DEFAULT_FIELD`]. Ports
 /// `defaultField` in `src/connectors/profiles.js`.
 pub fn default_field(kind: &str) -> &'static str {
-    todo!()
+    get_profile(kind)
+        .ok()
+        .and_then(|p| p.fields.first())
+        .map_or(DEFAULT_FIELD, |f| f.name)
 }
 
 /// Month abbreviations for RFC 1123 dates. Ports `MONTHS` in
@@ -381,5 +408,156 @@ pub struct Health {
 /// does not name is never read; `None` when the profile has no health block
 /// or nothing parsed. Ports `extractHealth` in `src/connectors/profiles.js`.
 pub fn extract_health(profile: Option<&Profile>, headers: &[(String, String)]) -> Option<Health> {
-    todo!()
+    let h = profile?.health?;
+    let header = |name: Option<&str>| -> Option<String> {
+        let name = name?;
+        let found: Vec<_> = headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        (!found.is_empty()).then(|| found.join(", "))
+    };
+    let observed_expires_at = header(h.expiry_header).and_then(|s| parse_expiry(&s));
+    let scopes = header(h.scopes_header).and_then(|s| {
+        let scopes: Vec<_> = s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        (!scopes.is_empty()).then_some(scopes)
+    });
+    let ratelimit_remaining = header(h.ratelimit_remaining_header).and_then(|s| {
+        let s = s.trim();
+        if s.len() > 16 {
+            return None;
+        }
+        crate::policy::budget_integer(&serde_json::Value::String(s.into()))
+    });
+    if observed_expires_at.is_none() && scopes.is_none() && ratelimit_remaining.is_none() {
+        None
+    } else {
+        Some(Health {
+            observed_expires_at,
+            scopes,
+            ratelimit_remaining,
+        })
+    }
+}
+
+fn parse_expiry(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let iso=regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2}))?$").ok()?;
+    let github =
+        regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) UTC$").ok()?;
+    let rfc = regex::Regex::new(
+        r"^(?:[A-Za-z]{3}, )?(\d{1,2}) ([A-Za-z]{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$",
+    )
+    .ok()?;
+    let (year, month, day, hour, minute, second, offset) =
+        if let Some(c) = iso.captures(s).or_else(|| github.captures(s)) {
+            let n = |i| c.get(i).and_then(|m| m.as_str().parse::<i32>().ok());
+            (
+                n(1)?,
+                n(2)?,
+                n(3)?,
+                n(4).unwrap_or(0),
+                n(5).unwrap_or(0),
+                n(6).unwrap_or(0),
+                c.get(8).map(|m| m.as_str()).unwrap_or("Z").to_owned(),
+            )
+        } else if let Some(c) = rfc.captures(s) {
+            let n = |i: usize| c[i].parse::<i32>().ok();
+            (
+                n(3)?,
+                MONTHS.iter().find(|(m, _)| *m == c[2].to_lowercase())?.1 as i32,
+                n(1)?,
+                n(4)?,
+                n(5)?,
+                n(6)?,
+                "Z".into(),
+            )
+        } else {
+            return None;
+        };
+    // Date.UTC treats years 0..99 as 1900..1999, which fails JS's roundtrip.
+    if year < 100 {
+        return None;
+    }
+    let date = time::Date::from_calendar_date(
+        year,
+        time::Month::try_from(u8::try_from(month).ok()?).ok()?,
+        u8::try_from(day).ok()?,
+    )
+    .ok()?;
+    let clock = time::Time::from_hms(
+        u8::try_from(hour).ok()?,
+        u8::try_from(minute).ok()?,
+        u8::try_from(second).ok()?,
+    )
+    .ok()?;
+    let mut date = time::PrimitiveDateTime::new(date, clock).assume_utc();
+    if offset != "Z" {
+        let digits = offset[1..].replace(':', "");
+        let hours = digits[..2].parse::<i64>().ok()?;
+        let minutes = digits[2..].parse::<i64>().ok()?;
+        if hours > 14 || minutes > 59 || (hours == 14 && minutes > 0) {
+            return None;
+        }
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
+        date = date.checked_sub(time::Duration::minutes(sign * (hours * 60 + minutes)))?;
+    }
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        date.year(),
+        date.month() as u8,
+        date.day(),
+        date.hour(),
+        date.minute(),
+        date.second()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn js_profiles_and_health_vectors() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/profile-vectors.json")).unwrap();
+        assert_eq!(
+            serde_json::to_value(list_profiles()).unwrap(),
+            v["profiles"]
+        );
+        for d in v["defaults"].as_array().unwrap() {
+            let k = d["kind"].as_str().unwrap();
+            assert_eq!(default_field(k), d["field"]);
+            assert_eq!(
+                serde_json::to_value(default_sites(k, default_field(k))).unwrap(),
+                d["sites"]
+            );
+            assert!(crate::policy::validate(
+                &get_profile(k).unwrap().policy_ceiling(),
+                &Default::default()
+            )
+            .is_empty());
+        }
+        for h in v["health"].as_array().unwrap() {
+            let headers = vec![
+                (
+                    "GitHub-Authentication-Token-Expiration".into(),
+                    h["date"].as_str().unwrap().into(),
+                ),
+                ("X-OAuth-Scopes".into(), "repo, user, ".into()),
+                ("X-Ratelimit-Remaining".into(), "0".into()),
+            ];
+            assert_eq!(
+                serde_json::to_value(extract_health(get_profile("github").ok(), &headers)).unwrap(),
+                h["result"],
+                "{}",
+                h["date"]
+            );
+        }
+    }
 }
