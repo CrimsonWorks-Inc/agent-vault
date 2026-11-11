@@ -1,0 +1,24 @@
+[package]
+name = "av-core"
+description = "Pure logic: placeholders, policy, scrubbing, substitution, errors (ports src/core/*)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+secrecy.workspace = true
+subtle.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+base64.workspace = true
+regex.workspace = true
+getrandom.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

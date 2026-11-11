@@ -1,0 +1,28 @@
+[package]
+name = "av-cli"
+description = "The agent-vault and agent-vault-setup command-line apps (ports src/cli/*, bin/*)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "agent-vault"
+path = "src/bin/agent-vault.rs"
+
+[[bin]]
+name = "agent-vault-setup"
+path = "src/bin/agent-vault-setup.rs"
+
+[dependencies]
+av-core.workspace = true
+av-store.workspace = true
+av-daemon.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true

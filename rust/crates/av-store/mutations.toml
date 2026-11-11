@@ -1,0 +1,31 @@
+# Protections in av-store that the tests must catch. `cargo xtask mutation`
+# applies each swap to a temporary copy of rust/ and requires `cargo test` to
+# fail. Fields: name, file (relative to this crate), from (must appear exactly
+# once), to, and optionally test (a `cargo test` name filter).
+#
+# Port the av-store entries of test/mutation-check.js here.
+
+[[mutation]]
+name = "secure_delete is switched off when the vault database is opened"
+file = "src/db.rs"
+from = '("secure_delete", "ON"),'
+to = '("secure_delete", "OFF"),'
+test = "db::tests::"
+
+[[mutation]]
+name = "deleting a credential cascades into its grants and the placeholder ledger"
+file = "src/schema.rs"
+from = """
+    credential_id TEXT NOT NULL,
+    fields"""
+to = """
+    credential_id TEXT NOT NULL REFERENCES credentials (id) ON DELETE CASCADE,
+    fields"""
+test = "db::tests::"
+
+[[mutation]]
+name = "the refund trigger lets a placeholder whose grant row is missing come back"
+file = "src/schema.rs"
+from = "IFNULL((SELECT state FROM grants WHERE id = OLD.grant_id), '') = 'active'"
+to = "(SELECT state FROM grants WHERE id = OLD.grant_id) = 'active'"
+test = "db::tests::"
