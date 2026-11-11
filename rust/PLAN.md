@@ -138,7 +138,10 @@ credentials. `#![forbid(unsafe_code)]` everywhere else.
 - **Prepared statements with bound parameters only.** No SQL text built from
   values. A test greps the crate source and fails on `format!` near SQL.
 - Insert-only triggers: placeholder ledger rows can never move from a dead
-  state back to `active`; audit rows can never be updated or deleted.
+  state back to `active`, with one exception that mirrors `refundPlaceholder`:
+  `dead_reason='exhausted'` → `active` with `dead_reason` cleared, `uses`
+  lowered by exactly one, no other column changed, and the row's grant and
+  session both still `active`. Audit rows can never be updated or deleted.
 - Schema versioning via a `schema_version` row; migrations are forward-only.
 - The audit log may live in the same database or stay an append-only file;
   either way chain, anchor and witness semantics are unchanged.
