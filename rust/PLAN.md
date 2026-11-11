@@ -46,15 +46,30 @@ PR that the owner approves.
    `src/cli/index.js`), `--json` envelopes (`{ok, data}` / `{ok:false,
    error:{message,next}}`) and the wording of human output where tests check
    it. Both `agent-vault` and `av` names.
-5. **Web UI**: the React app in `web/` is not ported. The Rust daemon serves
-   the same built `web/dist` with the same API, headers, cookies, CSP and the
-   WebAuthn op-gate.
+5. **Web UI**: the React app in `web/` is not ported. As today, the UI is
+   served by the **`agent-vault ui` CLI process** (running as the human's
+   account), not by the daemon; it talks to the daemon over the control
+   socket. The built files are Vite's output in `src/ui/dist` (not
+   `web/dist`); the Rust `agent-vault` binary **embeds them at compile time**,
+   so the install needs no separate UI directory. Same API, headers, cookies,
+   CSP, file allowlist, Host/Origin checks and WebAuthn op-gate. The UI server
+   code lives in av-daemon as a library; av-cli's `ui` command runs it.
 6. **Install layout and environment**: `/var/db/agent-vault/{app,run,vault,
    runtime}`, the `_agentvault` user and `_agentvault_users` group, the
    launchd label, and these variables with the same meaning:
    `AGENT_VAULT_DIR AV_VAULT_DIR AV_RUN_DIR AV_PORT AGENT_VAULT_PORT
    AGENT_VAULT_SESSION AV_ENROLLED_UID AV_CLIENT_GROUP AGENT_VAULT_ALLOW_ROOT
    NO_COLOR SUDO_USER SUDO_COMMAND`.
+   Startup behavior the conformance harness depends on, now frozen:
+   - `agent-vault-daemon` (and `agent-vault daemon`) prints
+     `gateway http://127.0.0.1:<port>` on stdout once it is ready to serve.
+   - `AV_PORT=0` (or `--port 0`) binds an ephemeral port, and the printed
+     port is the one actually bound.
+   - First start in an empty vault dir creates an unlocked vault with no
+     unlock factor (as `bin/agent-vault-daemon.js` does in dev mode).
+   - When stdin is not a TTY, the CLI reads secrets from it one line per
+     prompt (`cred add`, `cred rotate`, `notify set`, `passphrase set`,
+     `unlock`, `backup export`, and any other prompt).
 7. **Placeholders and tokens**: same grammar, checksum and encodings
    (`src/core/placeholder.js`, `src/core/base32.js`). A placeholder or session
    token minted by the JS daemon must verify in the Rust daemon after
@@ -238,7 +253,9 @@ agent-vault migrate [--from <dir>] [--to <dir>] [--dry-run] [--json]
 - `conformance/` is the black-box suite. It drives only the control socket,
   the gateway, MCP and the CLI. It runs against the JS daemon (`npm run
   conformance`) and against the Rust binaries (`AV_IMPL=rust npm run
-  conformance`).
+  conformance`). Every acceptance gate on the Rust binaries runs with
+  `AV_REQUIRE_IMPL=1`, which fails instead of skipping when a binary is
+  missing.
 
 ## Safety rules for every worker
 
