@@ -208,3 +208,37 @@ fn setup_verbs_parse() {
         .expect("uninstall parses");
     assert!(matches!(cli.command, Some(SetupCommand::Uninstall(u)) if u.purge));
 }
+
+fn refused(line: &str) -> bool {
+    let argv = std::iter::once("agent-vault").chain(line.split_whitespace());
+    Cli::try_parse_from(argv).is_err()
+}
+
+#[test]
+fn env_takes_session_and_uses() {
+    // resolveMappings in src/cli/index.js reads both, for env and exec.
+    let Some(Command::Env(e)) = parse("env --session S --uses 3").command else {
+        panic!("not env")
+    };
+    assert_eq!(e.session.as_deref(), Some("S"));
+    assert_eq!(e.uses.as_deref(), Some("3"));
+}
+
+#[test]
+fn exec_takes_session_and_uses() {
+    let Some(Command::Exec(e)) = parse("exec --session S --uses 3 -- cmd").command else {
+        panic!("not exec")
+    };
+    assert_eq!(e.session.as_deref(), Some("S"));
+    assert_eq!(e.uses.as_deref(), Some("3"));
+    assert_eq!(e.command, ["cmd"]);
+}
+
+#[test]
+fn bare_uses_and_session_are_refused() {
+    // The JS refuses a valueless --uses / --session with EXIT.USAGE.
+    assert!(refused("env --uses"), "env --uses");
+    assert!(refused("env --session"), "env --session");
+    assert!(refused("exec --uses -- cmd"), "exec --uses");
+    assert!(refused("exec --session -- cmd"), "exec --session");
+}

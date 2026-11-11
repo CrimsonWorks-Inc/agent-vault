@@ -27,9 +27,8 @@
 //!    stderr otherwise) with `EXIT.USAGE`, not clap's own rendering. The
 //!    message text differs from the JS in these cases, all of which exit
 //!    USAGE in both:
-//!    - unknown flags: the JS accepted and ignored most of them, except
-//!      where `knownFlags` refuses them (`session create`, `session
-//!      narrow`, `template save`, `approve`) with
+//!    - unknown flags where `knownFlags` refuses them (`session create`,
+//!      `session narrow`, `template save`, `approve`): the JS says
 //!      `<command> does not take --<flag>; nothing was sent`;
 //!    - a value flag given with no value (`--out` alone): the JS stores
 //!      `true` and later says `--out needs a value` / `needs a file name`;
@@ -38,6 +37,13 @@
 //!      the stdio bridge in the JS (extra positionals are ignored); clap
 //!      refuses it.
 //!    - extra positionals are ignored by the JS and refused by clap.
+//!
+//!    **Not the same exit code: unknown flags everywhere else.** The JS
+//!    parser (`parseArgs`) stores any `--flag` and every other command simply
+//!    never reads it, so `agent-vault status --frob` or `deny <id> --route r`
+//!    runs and exits as usual, while clap refuses them with USAGE. The CLI
+//!    worker must decide how to keep the JS behavior (e.g. pre-strip flags a
+//!    command does not declare, or `ignore_errors`); the JS is the contract.
 //! 3. **Flag values that look like flags.** The JS takes the next token as a
 //!    flag's value only when it does not start with `-`; otherwise the flag
 //!    is `true`. So `--reason -x` is a usage error in the JS ("needs a
@@ -714,8 +720,9 @@ pub struct PhCheckArgs {
 }
 
 /// `env [--out F [--force]] [--map NAME=<slug>[:base_url]]... [--map-file F]
-/// [--profile-vars] [--format dotenv|shell]`. Ports the flags read by
-/// `COMMANDS.env`, `wantsMapping` and `parseMappings` in `src/cli/index.js`.
+/// [--profile-vars] [--format dotenv|shell] [--session S] [--uses N]`. Ports
+/// the flags read by `COMMANDS.env`, `wantsMapping`, `parseMappings` and
+/// `resolveMappings` in `src/cli/index.js`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct EnvArgs {
     /// Write to this file (0600, never replaced without `--force`).
@@ -736,11 +743,19 @@ pub struct EnvArgs {
     /// `dotenv` (default) or `shell`.
     #[arg(long)]
     pub format: Option<String>,
+    /// Session id (default: the current one). A bare `--session` is a usage
+    /// error, as in `resolveMappings` (`src/cli/index.js`).
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Uses per minted placeholder (a whole number, 1 or more). A bare
+    /// `--uses` is a usage error, as in `resolveMappings`.
+    #[arg(long)]
+    pub uses: Option<String>,
 }
 
-/// `exec [--map NAME=<slug>]... [--map-file F] [--profile-vars] --
-/// <command>`. Ports the flags read by `COMMANDS.exec` in
-/// `src/cli/index.js`.
+/// `exec [--map NAME=<slug>]... [--map-file F] [--profile-vars] [--session S]
+/// [--uses N] -- <command>`. Ports the flags read by `COMMANDS.exec` and
+/// `resolveMappings` in `src/cli/index.js`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct ExecArgs {
     /// `NAME=SPEC` (repeatable).
@@ -752,6 +767,14 @@ pub struct ExecArgs {
     /// Map each profile's conventional variable names.
     #[arg(long = "profile-vars")]
     pub profile_vars: bool,
+    /// Session id (default: the current one). A bare `--session` is a usage
+    /// error, as in `resolveMappings` (`src/cli/index.js`).
+    #[arg(long)]
+    pub session: Option<String>,
+    /// Uses per minted placeholder (a whole number, 1 or more). A bare
+    /// `--uses` is a usage error, as in `resolveMappings`.
+    #[arg(long)]
+    pub uses: Option<String>,
     /// The command line to run.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
