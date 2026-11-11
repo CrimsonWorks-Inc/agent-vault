@@ -5,6 +5,9 @@
 //! `unsafe` is denied crate-wide and allowed only in [`mlock`], a small
 //! commented wrapper around `mlock(2)` for the VMK.
 #![deny(unsafe_code)]
+// Scaffold: bodies are `todo!()` until the next wave fills them in. Remove
+// this allow when the last `todo!()` in the crate is gone.
+#![allow(unused_variables)]
 
 pub mod activity;
 pub mod audit;

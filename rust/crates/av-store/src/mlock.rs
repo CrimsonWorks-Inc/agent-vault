@@ -10,13 +10,11 @@
 /// Returns `false` when the OS refuses (e.g. `RLIMIT_MEMLOCK`); callers keep
 /// going and log once. No JS source: new in the Rust port.
 pub fn lock(buf: &mut [u8]) -> bool {
-    let _ = buf;
     todo!()
 }
 
 /// Undo [`lock`] after the buffer has been zeroized. No JS source: new in the
 /// Rust port.
 pub fn unlock(buf: &mut [u8]) {
-    let _ = buf;
     todo!()
 }

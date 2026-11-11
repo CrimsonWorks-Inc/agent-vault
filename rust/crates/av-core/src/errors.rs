@@ -270,7 +270,6 @@ impl ErrorCode {
     /// Parse a wire string. Unknown strings return `None`. Ports the
     /// `CODES[code]` lookup in `src/core/errors.js` / `src/cli/index.js`.
     pub fn parse(code: &str) -> Option<Self> {
-        let _ = code;
         todo!()
     }
 
@@ -344,7 +343,6 @@ impl VaultError {
     /// Build an error from a code, a detail and extras. Ports the
     /// `VaultError` constructor in `src/core/errors.js`.
     pub fn new(code: ErrorCode, detail: impl Into<String>, extra: DenyExtra) -> Self {
-        let _ = (code, detail.into(), extra);
         todo!()
     }
 
