@@ -379,4 +379,84 @@ mod tests {
         );
         assert!(r.is_err());
     }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn deleting_a_credential_keeps_its_grants_and_placeholders() {
+        // deleteCredential in src/store/vault.js revokes the grants and
+        // deletes only the credential; the ledger must survive so an old
+        // placeholder replays as dead, not unknown.
+        let (_dir, conn) = temp_db();
+        seed(&conn);
+        dead_row(&conn, "ph_kept", "revoked", 1);
+        conn.execute("DELETE FROM credentials WHERE id = 'cred_1'", [])
+            .unwrap();
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM grants WHERE id = 'grant_1'"),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM placeholders WHERE id = 'ph_kept'"
+            ),
+            1
+        );
+        // The credential's own parts still go with it.
+        assert_eq!(count(&conn, "SELECT count(*) FROM credential_fields"), 0);
+    }
+
+    #[test]
+    fn a_grant_may_name_a_credential_that_no_longer_exists() {
+        // The migrate case: a JS vault that ever deleted a credential holds
+        // grants whose credential_id names nothing.
+        let (_dir, conn) = temp_db();
+        seed(&conn);
+        conn.execute(
+            "INSERT INTO grants (id, session_id, credential_id, fields, policy, state, created_at)
+             VALUES ('grant_orphan', 'sid000000001', 'cred_deleted', '[]', '{}', 'revoked', 'now')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM grants WHERE id = 'grant_orphan'"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn no_refund_when_the_grant_or_session_row_is_missing() {
+        // A missing row makes the subquery NULL; the trigger must still refuse.
+        // Foreign keys are switched off only to make the missing row possible.
+        let (_dir, conn) = temp_db();
+        seed(&conn);
+        dead_row(&conn, "ph_nogrant", "exhausted", 3);
+        conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn.execute("DELETE FROM grants WHERE id = 'grant_1'", [])
+            .unwrap();
+        let err = refund(&conn, "ph_nogrant", 2).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot become active"),
+            "grant missing: {err}"
+        );
+
+        let (_dir2, conn2) = temp_db();
+        seed(&conn2);
+        dead_row(&conn2, "ph_nosession", "exhausted", 3);
+        conn2.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+        conn2
+            .execute("DELETE FROM sessions WHERE id = 'sid000000001'", [])
+            .unwrap();
+        let err = refund(&conn2, "ph_nosession", 2).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot become active"),
+            "session missing: {err}"
+        );
+    }
 }

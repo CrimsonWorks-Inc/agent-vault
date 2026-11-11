@@ -195,7 +195,11 @@ CREATE INDEX sessions_state ON sessions (state, ended_at);
 CREATE TABLE grants (
     id            TEXT PRIMARY KEY NOT NULL,
     session_id    TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
-    credential_id TEXT NOT NULL REFERENCES credentials (id) ON DELETE CASCADE,
+    -- No foreign key: deleteCredential (src/store/vault.js) revokes the
+    -- credential's grants and deletes only the credential, so grant rows (and
+    -- their placeholders, which must replay as dead, not unknown) outlive it,
+    -- and migrate must copy vaults that hold such grants.
+    credential_id TEXT NOT NULL,
     fields        TEXT NOT NULL CHECK (json_valid(fields)),
     policy        TEXT NOT NULL CHECK (json_valid(policy)),
     budget_used   INTEGER NOT NULL DEFAULT 0 CHECK (budget_used >= 0),
@@ -246,8 +250,10 @@ WHEN OLD.state = 'dead' AND NEW.state = 'active'
          AND NEW.created_at = OLD.created_at
          AND NEW.expires_at IS OLD.expires_at
          AND NEW.last_used_at IS OLD.last_used_at
-         AND (SELECT state FROM grants WHERE id = OLD.grant_id) = 'active'
-         AND (SELECT state FROM sessions WHERE id = OLD.sid) = 'active'
+         -- A missing row is not active: IFNULL keeps the comparison from
+         -- becoming NULL, which would stop the trigger firing.
+         AND IFNULL((SELECT state FROM grants WHERE id = OLD.grant_id), '') = 'active'
+         AND IFNULL((SELECT state FROM sessions WHERE id = OLD.sid), '') = 'active'
      )
 BEGIN
     SELECT RAISE(ABORT, 'a dead placeholder cannot become active again');
