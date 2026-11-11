@@ -197,5 +197,70 @@ if (skip) {
       assert.equal(mcp.status, 403)
       assert.equal(mcp.json.code, 'AV_BROWSER_ORIGIN')
     })
+
+    test('a method-override cannot name a method the grant did not allow', async () => {
+      const before = w.upstream.hits.length
+      const header = await gateway(w, `/p/${w.slug}/user`, {
+        token: token(),
+        placeholder: placeholder(),
+        headers: { 'x-http-method-override': 'DELETE' },
+      })
+      assert.equal(header.status, 403, header.text)
+      assert.equal(header.json.code, 'AV_POLICY_DENIED')
+      assert.equal(header.json.rule, 'methods')
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(header.text), null)
+
+      const field = await gateway(w, `/p/${w.slug}/user?_method=DELETE`, {
+        token: token(),
+        placeholder: placeholder(),
+      })
+      assert.equal(field.status, 403, field.text)
+      assert.equal(field.json.code, 'AV_POLICY_DENIED')
+      assert.equal(field.json.rule, 'method_override')
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(field.text), null)
+
+      const ok = await gateway(w, `/p/${w.slug}/user`, {
+        token: token(),
+        placeholder: placeholder(),
+        headers: { 'x-http-method-override': 'GET' },
+      })
+      assert.equal(ok.status, 200, ok.text)
+      assert.equal(ok.json.ordinary, 'ordinary-traffic-control')
+      assert.equal(w.upstream.hits.at(-1).seen, 'test-secret-conform-0123456789abcdef')
+      assert.equal(leaksSecret(ok.text), null)
+    })
+
+    test('a placeholder rotated off the live ledger is stale, and the newest still works', async () => {
+      const made = await w.control('POST', '/v1/sessions', {
+        cred: w.slug, label: 'ledger', methods: ['GET'], paths: ['/**'], budget: 20, approval: 'on-write', ttl_hours: 1,
+      })
+      assert.equal(made.status, 200, made.text)
+      const mint = () => w.control('POST', '/v1/placeholders', { cred: w.slug, sid: made.json.session_id })
+      const use = (ph) => gateway(w, `/p/${w.slug}/user`, { token: made.json.token, placeholder: ph })
+      const first = await mint()
+      assert.equal(first.status, 200, first.text)
+      const used = await use(first.json.placeholder)
+      assert.equal(used.status, 200, used.text)
+      assert.equal(used.json.ordinary, 'ordinary-traffic-control')
+      let newest = first
+      for (let i = 0; i < 8; i++) {
+        newest = await mint()
+        assert.equal(newest.status, 200, newest.text)
+        const res = await use(newest.json.placeholder)
+        assert.equal(res.status, 200, `${i} ${res.text}`)
+        assert.equal(res.json.ordinary, 'ordinary-traffic-control')
+        assert.equal(leaksSecret(res.text), null)
+      }
+      const stale = await use(first.json.placeholder)
+      assert.notEqual(stale.status, 200)
+      assert.equal(stale.json.code, 'AV_PH_STALE')
+      assert.equal(leaksSecret(stale.text), null)
+      const again = await use(newest.json.placeholder)
+      assert.equal(again.status, 200, again.text)
+      assert.equal(again.json.ordinary, 'ordinary-traffic-control')
+      assert.equal(leaksSecret(again.text), null)
+    })
   })
 }
