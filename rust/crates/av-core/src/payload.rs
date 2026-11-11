@@ -230,7 +230,118 @@ pub struct PayloadRuleSet {
 /// `{ field: 'payload', message: 'invalid payload constraint' }`; empty means
 /// valid. Ports `validatePayload` in `src/core/payload.js`.
 pub fn validate_payload(set: &serde_json::Value) -> Vec<Problem> {
-    todo!()
+    let mut problems = Vec::new();
+    let mut bad = || {
+        problems.push(Problem {
+            field: "payload".into(),
+            message: "invalid payload constraint".into(),
+        })
+    };
+    let Some(o) = set.as_object() else {
+        bad();
+        return problems;
+    };
+    for k in o.keys() {
+        if !RULE_SET_KEYS.contains(&k.as_str()) {
+            bad();
+        }
+    }
+    if o.get("max_body_bytes")
+        .is_some_and(|v| v.as_u64().is_none())
+    {
+        bad();
+    }
+    if o.get("query_strict").is_some_and(|v| !v.is_boolean()) {
+        bad();
+    }
+    for kind in ["json", "form", "query"] {
+        let Some(v) = o.get(kind) else {
+            continue;
+        };
+        let Some(map) = v.as_object().filter(|m| m.len() <= 32) else {
+            bad();
+            continue;
+        };
+        for (key, c) in map {
+            if kind == "json" {
+                let b = key.as_bytes();
+                if !key.starts_with('/')
+                    || key.encode_utf16().count() > 256
+                    || key.split('/').any(|x| x == "-")
+                    || b.iter()
+                        .enumerate()
+                        .any(|(i, c)| *c == b'~' && !matches!(b.get(i + 1), Some(b'0' | b'1')))
+                {
+                    bad();
+                }
+            }
+            let Some(c) = c.as_object() else {
+                bad();
+                continue;
+            };
+            for k in c.keys() {
+                if !CONSTRAINT_KEYS.contains(&k.as_str()) {
+                    bad();
+                }
+            }
+            for k in ["required", "absent"] {
+                if c.get(k).is_some_and(|v| !v.is_boolean()) {
+                    bad();
+                }
+            }
+            if c.get("required").and_then(|v| v.as_bool()) == Some(true)
+                && c.get("absent").and_then(|v| v.as_bool()) == Some(true)
+            {
+                bad();
+            }
+            for k in ["min", "max"] {
+                if c.get(k).is_some_and(|v| !v.is_number()) {
+                    bad();
+                }
+            }
+            if c.get("max_length").is_some_and(|v| v.as_u64().is_none()) {
+                bad();
+            }
+            if c.get("one_of").is_some_and(|v| {
+                v.as_array().is_none_or(|a| {
+                    a.len() > 64
+                        || a.iter().any(|v| {
+                            !v.is_null()
+                                && !v.is_boolean()
+                                && !v.is_number()
+                                && !v.as_str().is_some_and(|s| s.encode_utf16().count() <= 256)
+                        })
+                })
+            }) {
+                bad();
+            }
+        }
+    }
+    if let Some(g) = o.get("graphql") {
+        let name = regex::Regex::new(r"^[_A-Za-z][_0-9A-Za-z]*$").expect("name regex");
+        if !g.as_object().is_some_and(|g| {
+            g.keys()
+                .all(|k| ["operations", "deny_fields"].contains(&k.as_str()))
+                && g.get("operations")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| {
+                        a.iter().all(|v| {
+                            v.as_str()
+                                .is_some_and(|s| ["query", "mutation", "subscription"].contains(&s))
+                        })
+                    })
+                && g.get("deny_fields").is_none_or(|v| {
+                    v.as_array().is_some_and(|a| {
+                        a.len() <= 64
+                            && a.iter()
+                                .all(|v| v.as_str().is_some_and(|s| name.is_match(s)))
+                    })
+                })
+        }) {
+            bad();
+        }
+    }
+    problems
 }
 
 /// Strict JSON: recursive descent that refuses a duplicate key
