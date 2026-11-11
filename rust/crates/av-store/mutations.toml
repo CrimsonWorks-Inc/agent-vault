@@ -1,0 +1,13 @@
+# Protections in av-store that the tests must catch. `cargo xtask mutation`
+# applies each swap to a temporary copy of rust/ and requires `cargo test` to
+# fail. Fields: name, file (relative to this crate), from (must appear exactly
+# once), to, and optionally test (a `cargo test` name filter).
+#
+# Port the av-store entries of test/mutation-check.js here.
+
+[[mutation]]
+name = "secure_delete is switched off when the vault database is opened"
+file = "src/db.rs"
+from = '("secure_delete", "ON"),'
+to = '("secure_delete", "OFF"),'
+test = "db::tests::"
