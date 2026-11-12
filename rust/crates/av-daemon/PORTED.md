@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 180 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **800 not yet ported**.
+Totals: 1090 JS tests: 200 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **780 not yet ported**.
 
 ## Mutation check
 
@@ -573,12 +573,12 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-payload.test.js | payload validation rejects unknown keys and all malformed constraints | tests/ported_gateway_payload.rs::payload_validation_refuses_unknown_keys_and_malformed_constraints |
 | gateway-w2-payload.test.js | GraphQL parses full operations, fragments, arguments and strings | tests/ported_gateway_payload.rs::graphql_parser_checks_full_operations_fragments_arguments_and_strings |
 | gateway-w2-payload.test.js | GraphQL request classification checks batches and persisted queries | tests/ported_gateway_payload.rs::graphql_request_classification_checks_batches_persisted_queries_and_decoded_duplicates |
-| gateway-w2-pipeline.test.js | rate allows capacity, limits pending requests, and never spends a refused use | not yet ported |
+| gateway-w2-pipeline.test.js | rate allows capacity, limits pending requests, and never spends a refused use | tests/ported_gateway_core.rs::rate_capacity_and_pending_requests_are_limited_before_use_or_budget_is_spent |
 | gateway-w2-pipeline.test.js | malformed limits and persisted counters fail closed without an upstream | not yet ported |
-| gateway-w2-pipeline.test.js | quota charges one per call, survives restart and rollback, refunds pre-connect errors | not yet ported |
-| gateway-w2-pipeline.test.js | concurrency releases after success, pre-connect failure and post-connect failure | not yet ported |
-| gateway-w2-pipeline.test.js | SSE slots release on completion, immediate close and scrubber cut | not yet ported |
-| gateway-w2-pipeline.test.js | payload and method-bound routes run before approval and consume | not yet ported |
+| gateway-w2-pipeline.test.js | quota charges one per call, survives restart and rollback, refunds pre-connect errors | tests/ported_gateway_core.rs::quota_charges_once_survives_restart_and_rollback_and_refunds_preconnect_failure |
+| gateway-w2-pipeline.test.js | concurrency releases after success, pre-connect failure and post-connect failure | tests/ported_gateway_core.rs::concurrency_slots_release_after_success_and_both_classes_of_upstream_failure |
+| gateway-w2-pipeline.test.js | SSE slots release on completion, immediate close and scrubber cut | tests/ported_gateway_core.rs::sse_concurrency_slots_release_on_completion_agent_close_and_scrubber_cut |
+| gateway-w2-pipeline.test.js | payload and method-bound routes run before approval and consume | tests/ported_gateway_core.rs::payload_and_method_bound_routes_refuse_before_approval_or_consume |
 | gateway-w2-pipeline.test.js | custom patterns from every credential scrub bodies, headers and errors; corrupt pattern withholds | not yet ported |
 | gateway-w2-pipeline.test.js | token reservations block concurrent overspend and settle buffered usage | not yet ported |
 | gateway-w2-pipeline.test.js | unpriced and unmodeled spend refuses while ordinary free GET passes | not yet ported |
@@ -588,8 +588,8 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | allowed redirect follows, charges each hop and forwards correct pins without body | not yet ported |
 | gateway-w2-pipeline.test.js | pins map to safe problem and refund; health observer receives response metadata | not yet ported |
 | gateway-w2-pipeline.test.js | approval preview scrubs secrets and placeholders and notifications fire once | not yet ported |
-| gateway-w2-pipeline.test.js | quarantine and grant expiry stop before consume, and denyApprovals returns only a count | not yet ported |
-| gateway-w2-pipeline.test.js | preflight is observational, peeks limits and reports a hold without creating approval | not yet ported |
+| gateway-w2-pipeline.test.js | quarantine and grant expiry stop before consume, and denyApprovals returns only a count | tests/ported_gateway_core.rs::quarantine_and_grant_expiry_stop_before_consume_and_bulk_deny_returns_count |
+| gateway-w2-pipeline.test.js | preflight is observational, peeks limits and reports a hold without creating approval | tests/ported_gateway_core.rs::preflight_observes_limits_without_mutating_vault_or_creating_approval |
 | gateway-w2-pipeline.test.js | preflight denial never trips and the eleventh call is throttled | not yet ported |
 | gateway-w2-pipeline.test.js | tripwires revoke only authenticated matching session and deny its approvals | not yet ported |
 | gateway-w2-pipeline.test.js | tripwires default off; panic hook awaits and reports unwired or failed denial honestly | not yet ported |
@@ -601,10 +601,10 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | quarantine tripwire pauses only its credential and leaves other sessions active | not yet ported |
 | gateway-w2-pipeline.test.js | a redirect hop is held to the GraphQL rules a direct request is held to | not yet ported |
 | gateway-w2-pipeline.test.js | a redirect hop answers to the body rules as a body-less request, not to none | not yet ported |
-| gateway-w2-pipeline.test.js | a single-valued header sent twice, differently, is refused before anything is sent | not yet ported |
-| gateway-w2-pipeline.test.js | one Content-Type, or an exact repeat of it, is checked and sent as that one value | not yet ported |
-| gateway-w2-pipeline.test.js | a repeated list header goes upstream once per name, carrying every value | not yet ported |
-| gateway-w2-pipeline.test.js | a query a URL would cut or rewrite is refused before the payload rules read it | not yet ported |
+| gateway-w2-pipeline.test.js | a single-valued header sent twice, differently, is refused before anything is sent | tests/ported_gateway_core.rs::conflicting_single_valued_headers_are_refused_without_spending_or_upstream |
+| gateway-w2-pipeline.test.js | one Content-Type, or an exact repeat of it, is checked and sent as that one value | tests/ported_gateway_core.rs::exact_repeat_content_type_is_sent_once_and_the_selected_form_rules_apply |
+| gateway-w2-pipeline.test.js | a repeated list header goes upstream once per name, carrying every value | not yet ported: waiting for daemon header fix; regression tests/ported_gateway_core.rs::repeated_list_headers_preserve_every_value_and_substitute_only_the_targeted_copy |
+| gateway-w2-pipeline.test.js | a query a URL would cut or rewrite is refused before the payload rules read it | tests/ported_gateway_core.rs::query_url_rewrite_shapes_are_refused_and_encoded_value_controls_pass |
 | gateway-w2-pipeline.test.js | a request a method override made a write does not have its redirect followed | not yet ported |
 | gateway-w2-pipeline.test.js | a followed redirect sends nothing of the agent's but the credential and the hop allowlist | not yet ported |
 | gateway-w2-pipeline.test.js | a credential declared at a body or framing header is not sent on a hop | not yet ported |
@@ -621,12 +621,12 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | a name a server could fold onto a rule's name is refused, and a repeated name is a duplicate | not yet ported |
 | gateway-w2-pipeline.test.js | generated requests: what the policy read is what a local upstream received, and every reader reads it within the policy | not yet ported |
 | gateway-w2-pipeline.test.js | ordinary traffic is untouched: & queries, provider APIs, and a redirect that keeps its version headers | not yet ported |
-| gateway-w2-pipeline.test.js | the view reads a query as the union of its readers | not yet ported |
+| gateway-w2-pipeline.test.js | the view reads a query as the union of its readers | tests/ported_gateway_payload.rs::query_view_is_union_of_readers_and_payload_rejects_ambiguous_semicolons |
 | gateway-w2-pipeline.test.js | Grok round 6, payload: a name PHP reads as a ruled one is refused, and nothing is sent | not yet ported |
 | gateway-w2-pipeline.test.js | Grok round 6, method: a name PHP reads as _method is refused, and a hop to it is not followed | not yet ported |
 | gateway-w2-pipeline.test.js | a stray name is refused on every path under any rules, and a hop to one is not followed | not yet ported |
 | gateway-w2-pipeline.test.js | a multipart part is named by every name in its Content-Disposition, folded or not | not yet ported |
-| gateway-w2-pipeline.test.js | a name is folded the way PHP registers it: cut at NUL, leading spaces dropped | not yet ported |
+| gateway-w2-pipeline.test.js | a name is folded the way PHP registers it: cut at NUL, leading spaces dropped | tests/ported_gateway_payload.rs::php_name_folding_cuts_at_nul_drops_leading_spaces_and_marks_only_stray_names |
 | gateway-w2-pipeline.test.js | ordinary provider traffic is sent unchanged under the name check | not yet ported |
 | gateway-w2-pipeline.test.js | Grok round 7, payload: a bracket-wrapped name is refused, and a hop to it is not followed | not yet ported |
 | gateway-w2-pipeline.test.js | Grok round 7, method: a bracket-wrapped _method is refused, and a hop to it is not followed | not yet ported |
@@ -651,26 +651,26 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-seams.test.js | pins on a plaintext credential refuse before any connection; no pins still connects | not yet ported |
 | gateway-w2-seams.test.js | a throwing health reader or recorder never turns an executed request into a failure | not yet ported |
 | gateway-w2-seams.test.js | onPending gets the id and headline only, and a throwing hook still holds the request | not yet ported |
-| gateway-w2-seams.test.js | denyApprovals filters by session, credential and grant ids, records the reason, and returns a count | not yet ported |
+| gateway-w2-seams.test.js | denyApprovals filters by session, credential and grant ids, records the reason, and returns a count | tests/ported_gateway_core.rs::deny_approvals_filters_by_session_or_grant_records_reason_and_skips_consumed_requests |
 | gateway-w2-seams.test.js | panic denies held requests, revokes every session including an infinite one, then the hook, then the record, then the lock | not yet ported |
 | gateway-w2-seams.test.js | a panic whose hook fails still revokes everything and records a partial panic | not yet ported |
 | gateway-w2-seams.test.js | a tripwire that throws while firing cannot cost the agent its denial | not yet ported |
 | gateway-w2-seams.test.js | with tripwires on, a bad-location run revokes the session; ordinary requests never count | not yet ported |
 | gateway-w2-seams.test.js | an unauthenticated replay never counts against the session its placeholder names | not yet ported |
-| gateway-w2-seams.test.js | a quarantined credential is refused before anything is spent, and works again once released | not yet ported |
+| gateway-w2-seams.test.js | a quarantined credential is refused before anything is spent, and works again once released | tests/ported_gateway_core.rs::quarantine_refuses_without_spending_limits_and_release_restores_ordinary_request |
 | gateway-w2-seams.test.js | preflight and the real route agree on finite, expired, infinite and legacy sessions and grants | not yet ported |
-| gateway-w2-seams.test.js | preflight writes one record with nulls, not undefined, and puts no hint where there was none | not yet ported |
+| gateway-w2-seams.test.js | preflight writes one record with nulls, not undefined, and puts no hint where there was none | tests/ported_gateway_core.rs::preflight_audit_uses_nulls_and_unhinted_checks_never_have_nonstring_hints |
 | gateway-w2-seams.test.js | a redirect to another port on an allowed host is not followed; the same port is | not yet ported |
 | gateway-w2-seams.test.js | a redirect hop that cannot connect closes the redirect it was following and is not refunded | not yet ported |
-| gateway-w2-seams.test.js | GraphQL rules read the URL query on a POST too, and the decided path ends the /graphql check | not yet ported |
-| gateway-w2-seams.test.js | a binary upload passes a grant whose payload rules only constrain the query | not yet ported |
-| gateway-w2-seams.test.js | a strict-query refusal names the parameter by its index and never echoes a name or value | not yet ported |
+| gateway-w2-seams.test.js | GraphQL rules read the URL query on a POST too, and the decided path ends the /graphql check | tests/ported_gateway_core.rs::graphql_checks_post_url_query_and_normalized_graphql_path |
+| gateway-w2-seams.test.js | a binary upload passes a grant whose payload rules only constrain the query | tests/ported_gateway_core.rs::query_only_payload_rules_allow_binary_upload_and_refuse_unsafe_query |
+| gateway-w2-seams.test.js | a strict-query refusal names the parameter by its index and never echoes a name or value | tests/ported_gateway_core.rs::strict_query_denials_name_positions_and_never_echo_hostile_names_or_values |
 | gateway-w2-seams.test.js | a spend refusal says what is left and what the call could cost; a call that fits passes | not yet ported |
 | gateway-w2-seams.test.js | a CRLF-framed stream settles on its usage; a cut stream charges the full reservation | not yet ported |
 | gateway-w2-seams.test.js | a pipeline built while the vault is locked charges stale reservations at the first request after unlock | not yet ported |
 | gateway-w2-seams.test.js | an extra pattern scrubs an error detail, is redacted within an event, and cuts a stream that splits it | not yet ported |
-| gateway-w2-seams.test.js | a method-override header is held to the route pairs as well as the methods list | not yet ported |
-| gateway-w2-seams.test.js | a held request is recorded as held, an allowed one as allow, a refused one as deny (C11) | not yet ported |
+| gateway-w2-seams.test.js | a method-override header is held to the route pairs as well as the methods list | tests/ported_gateway_core.rs::method_override_is_bound_by_route_pairs_and_allowed_tmp_control_runs |
+| gateway-w2-seams.test.js | a held request is recorded as held, an allowed one as allow, a refused one as deny (C11) | tests/ported_gateway_core.rs::held_allowed_and_denied_requests_are_recorded_with_the_right_decisions |
 | integrate2-c12-surfaces.test.js | /p/ on a network listener: the infinite token is refused before anything is sent, a finite one works | not yet ported |
 | integrate2-c12-surfaces.test.js | /mcp on a network listener: every tool that needs a session refuses the infinite token as AV_REMOTE_FORBIDDEN, sends nothing, mints nothing, and records it | not yet ported |
 | integrate2-c12-surfaces.test.js | /mcp on a network listener: the handshake and the ungated tools treat the infinite token as a dead one | not yet ported |

@@ -207,3 +207,178 @@ fn graphql_request_classification_checks_batches_persisted_queries_and_decoded_d
         "payload_duplicate_key",
     );
 }
+
+#[test]
+fn query_view_is_union_of_readers_and_payload_rejects_ambiguous_semicolons() {
+    let headers = vec![("X-HTTP-Method-Override".into(), "put, PATCH".into())];
+    let view = request_view(&RequestInput {
+        method: Some("post"),
+        query: Some("?a=1;b=2&%5Fmethod=DELETE&c+d=e%20f&flag"),
+        headers: &headers,
+        ..Default::default()
+    });
+    assert_eq!(view.method, "POST");
+    assert_eq!(view.query, "a=1;b=2&%5Fmethod=DELETE&c+d=e%20f&flag");
+    assert!(view.semicolon);
+    assert_eq!(
+        view.params
+            .iter()
+            .map(|p| (p.raw_name.as_str(), p.name.as_str(), p.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("a", "a", "1"),
+            ("b", "b", "2"),
+            ("%5Fmethod", "_method", "DELETE"),
+            ("c+d", "c d", "e f"),
+            ("flag", "flag", "")
+        ]
+    );
+    assert_eq!(view.overrides.headers, vec!["PUT", "PATCH"]);
+    assert_eq!(view.overrides.fields, vec!["DELETE", "DELETE"]);
+    assert_eq!(
+        request_view(&RequestInput {
+            query: Some(".method=GET;force=1"),
+            ..Default::default()
+        })
+        .overrides
+        .fields,
+        vec!["GET", "GET;force=1"]
+    );
+    let sets = json!([{"query":{"dry_run":{"required":true},"force":{"absent":true}}}]);
+    refuses(
+        evaluate(sets.clone(), json!({"query":"dry_run=true;force=true"})),
+        "request_ambiguous",
+    );
+    let view = request_view(&RequestInput {
+        query: Some("dry_run=true;force=true"),
+        ..Default::default()
+    });
+    let sets = serde_json::from_value(sets).unwrap();
+    refuses(
+        evaluate_payload(
+            Some(&sets),
+            &PayloadInput {
+                view: &view,
+                path: "",
+            },
+        ),
+        "request_ambiguous",
+    );
+    evaluate(
+        json!([{"query":{"dry_run":{"required":true},"force":{"absent":true}}}]),
+        json!({"query":"dry_run=true"}),
+    )
+    .unwrap();
+}
+#[test]
+fn php_name_folding_cuts_at_nul_drops_leading_spaces_and_marks_only_stray_names() {
+    for name in [
+        "_method\0",
+        "_method\0x",
+        " _method",
+        "  _method",
+        "   _method[]",
+        " .method",
+        "_METHOD\0[]",
+    ] {
+        assert!(is_override_field(name), "{name:?}");
+    }
+    for name in ["my_method", "x\0_method", "method"] {
+        assert!(!is_override_field(name), "{name:?}");
+    }
+    assert!(folded_names("force\0x").contains(&"force".into()));
+    assert!(folded_names("  force[]").contains(&"force".into()));
+    for query in [
+        "dry_run=true&force%00=true",
+        "dry_run=true&force%00x=true",
+        "dry_run=true&force%00[]=true",
+        "dry_run=true&+force=true",
+        "dry_run=true&%20force=true",
+        "dry_run=true&++force=true",
+        "%20dry_run=true",
+    ] {
+        refuses(
+            evaluate(
+                json!([{"query":{"dry_run":{"required":true},"force":{"absent":true}}}]),
+                json!({"query":query}),
+            ),
+            "request_ambiguous",
+        );
+    }
+    refuses(
+        evaluate(
+            json!([{"form":{"force":{"absent":true},"amount":{"required":true}}}]),
+            json!({"method":"POST","contentType":"application/x-www-form-urlencoded","body":"amount=2000&force%00=1"}),
+        ),
+        "request_ambiguous",
+    );
+    for query in [
+        "_method%00=DELETE",
+        "%20%20_method=DELETE",
+        "+_method=DELETE",
+    ] {
+        assert_eq!(
+            request_view(&RequestInput {
+                method: Some("POST"),
+                query: Some(query),
+                ..Default::default()
+            })
+            .overrides
+            .fields,
+            vec!["DELETE"]
+        );
+    }
+    for query in [
+        "force%00=1",
+        "+force=1",
+        "%20%20force=1",
+        "x%00=1",
+        "%00x=1",
+        "x%01=1",
+        "%1Fx=1",
+        "x%7F=1",
+        "%09x=1",
+        "x%09=1",
+        "+x=1",
+        "x+=1",
+        "%20x=1",
+        "x%20=1",
+        "x%0Ay=1",
+        "%C3%A9=1",
+        "caf%C3%A9=1",
+        "x%FF=1",
+        "=1",
+        "a=1&=2",
+        "a=1;%20b=2",
+    ] {
+        assert!(
+            request_view(&RequestInput {
+                query: Some(query),
+                ..Default::default()
+            })
+            .stray_name,
+            "{query}"
+        );
+    }
+    for query in [
+        "a=1",
+        "flag",
+        "a=1&&b=2",
+        "q=caf%C3%A9&tag=a+b",
+        "c+d=e",
+        "expand[]=data",
+        "metadata[order id]=1",
+        "a=1;b=2",
+    ] {
+        assert!(
+            !request_view(&RequestInput {
+                query: Some(query),
+                ..Default::default()
+            })
+            .stray_name,
+            "{query}"
+        );
+    }
+    assert!(is_stray_name(""));
+    assert!(!is_stray_name("a b"));
+}
