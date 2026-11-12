@@ -584,3 +584,191 @@ async fn a_single_placeholder_uses_is_normalized_not_refused() {
         assert_eq!(max, want, "uses {uses}");
     }
 }
+
+/// "a request carrying the hash marker's text literally collides with one
+/// carrying the placeholder", where header values and the query are hashed:
+/// the placeholder in the header with the marker's own text in the query
+/// must not hash like the marker's text in the header with the placeholder
+/// in the query.
+#[tokio::test(flavor = "multi_thread")]
+async fn marker_text_swapped_with_the_placeholder_between_header_and_query_is_a_new_request() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "hq", "kind": "http", "host": "hq.example.test", "value": "hq-secret-0123456789abcdef", "sites": ["header:x-key", "query:key"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "hq", "methods": ["GET"], "paths": ["/**"], "approval": "each", "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+    let ph = v["placeholder"].as_str().unwrap().to_string();
+    let grant = v["grant_id"].as_str().unwrap().to_string();
+    let field = w
+        .shared
+        .run(move |c| {
+            c.vault
+                .list_placeholders(None)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.grant_id == grant)
+                .unwrap()
+        })
+        .await
+        .unwrap();
+    let marker = format!("<av:{}:{}>", field.grant_id, field.field);
+    let send = |header: String, query: String| {
+        let token = token.clone();
+        let d = w.daemon.clone();
+        async move {
+            d.pipeline
+                .handle(crate::pipeline::GatewayRequest {
+                    method: "GET".into(),
+                    path: "/p/hq/x".into(),
+                    query: format!("key={query}"),
+                    headers: vec![
+                        ("host".into(), "127.0.0.1".into()),
+                        ("av-session".into(), token),
+                        ("x-key".into(), header),
+                    ],
+                    body: None,
+                    listener: None,
+                })
+                .await
+        }
+    };
+    let a = send(ph.clone(), marker.clone()).await;
+    assert_eq!(a.status, 202, "{:?}", a.error);
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/approvals",
+            json!({"id": approval_id(&a), "granted": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let b = send(marker.clone(), ph.clone()).await;
+    assert_eq!(
+        b.status, 202,
+        "B is not the request the human approved: {:?}",
+        b.error
+    );
+    assert_eq!(w.up.count(), 0);
+}
+
+/// 'a case-folded secret in a response header name reaches the agent', for
+/// a secret with capitals: lower-casing the name alone does not find it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_response_header_named_by_a_mixed_case_secret_in_another_case_is_dropped() {
+    let w = World::seeded(json!({})).await;
+    let mixed = "Mixed-Case-Secret-ABCdef0123456789";
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "mixed", "kind": "http", "host": "mixed.example.test", "value": mixed, "sites": ["header:x-key"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "mixed", "methods": ["GET"], "paths": ["/**"], "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (token, ph) = (
+        v["token"].as_str().unwrap().to_string(),
+        v["placeholder"].as_str().unwrap().to_string(),
+    );
+    let name = mixed.to_lowercase();
+    w.up.answer(Box::new(move |_| {
+        let mut r = json_response(200, &json!({}));
+        r.headers.push((name.clone(), "1".into()));
+        Ok(r)
+    }));
+    let r = w
+        .daemon
+        .pipeline
+        .handle(crate::pipeline::GatewayRequest {
+            method: "GET".into(),
+            path: "/p/mixed/x".into(),
+            query: String::new(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token),
+                ("x-key".into(), ph),
+            ],
+            body: None,
+            listener: None,
+        })
+        .await;
+    assert_eq!(r.status, 200, "{:?}", r.error);
+    assert!(
+        !r.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(mixed)),
+        "{:?}",
+        r.headers
+    );
+}
+
+/// 'a forged placeholder touches the session it names': a placeholder whose
+/// checksum does not verify is refused before its session is looked up, so
+/// the session's last-seen time does not move.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_placeholder_leaves_the_session_it_names_untouched() {
+    let w = World::seeded(json!({})).await;
+    let sid = w.session_id.clone();
+    let seen = |w: &World| {
+        let sid = sid.clone();
+        let shared = w.shared.clone();
+        async move {
+            shared
+                .run(move |c| {
+                    c.vault
+                        .sessions()
+                        .unwrap()
+                        .into_iter()
+                        .find(|s| s.id == sid)
+                        .unwrap()
+                        .last_seen_at
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let before = seen(&w).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let mut forged = w.placeholder.clone();
+    let last = forged.pop().unwrap();
+    forged.push(if last == 'a' { 'b' } else { 'a' });
+    let r = w
+        .daemon
+        .pipeline
+        .handle(crate::pipeline::GatewayRequest {
+            method: "GET".into(),
+            path: "/p/demo/user".into(),
+            query: String::new(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("authorization".into(), format!("Bearer {forged}")),
+            ],
+            body: None,
+            listener: None,
+        })
+        .await;
+    assert!(r.status >= 400);
+    assert_eq!(
+        seen(&w).await,
+        before,
+        "the forged placeholder touched the session"
+    );
+}
