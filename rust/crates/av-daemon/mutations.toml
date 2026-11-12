@@ -929,3 +929,73 @@ name = 'r6 F2 (Grok): a caller with no session gets the sentence of any no-sessi
 file = "src/mcp.rs"
 from = '                    Some(r) if sid.is_some() => {'
 to = '                    Some(r) => {'
+
+# ---------------------------------------------------- src/pending.js
+#
+# pending.js is ported in av-store (crates/av-store/src/pending.rs); three of
+# its entries are in crates/av-store/mutations.toml ('a batch verdict is read
+# by truthiness rather than as a boolean', 'approving a session request
+# records nothing', 'the shared narrowing parser drops a key it does not read
+# instead of refusing it'). The rest are here, and src/tests/mutants_pending.rs
+# catches them from av-daemon's own tests.
+
+[[mutation]]
+name = "a human's numeric override is coerced, so a typo becomes null and is dropped"
+file = "../av-store/src/pending.rs"
+from = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),
+            _ => None,'''
+to = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),
+            other => Some(if truthy(other) { 1.0 } else { 0.0 }),'''
+
+[[mutation]]
+name = "a held request's preview is dropped from the human's list (F13)"
+file = "../av-store/src/pending.rs"
+from = '            preview: Some(get("preview")),'
+to = '            preview: Some(Value::Null),'
+
+[[mutation]]
+name = "a JSON-string routes narrowing is dropped, so the agent's wider routes are approved (C21, C23)"
+file = "../av-store/src/pending.rs"
+from = '        out.routes = Some(json("routes", v)?);'
+to = '        if v.is_array() { out.routes = Some(v.clone()); }'
+
+[[mutation]]
+name = 'a JSON-string payload narrowing is dropped (C21, C23)'
+file = "../av-store/src/pending.rs"
+from = '        out.payload = Some(json("payload", v)?);'
+to = '        if v.is_object() { out.payload = Some(v.clone()); }'
+
+[[mutation]]
+name = 'a routes or payload narrowing that is not JSON is dropped instead of refused (C23)'
+file = "../av-store/src/pending.rs"
+from = '''        let parsed: Value =
+            serde_json::from_str(s).map_err(|_| fail(field, "not valid JSON".into()))?;'''
+to = '''        let Ok(parsed) = serde_json::from_str::<Value>(s) else {
+            return Ok(Value::Null);
+        };'''
+
+# NOT APPLICABLE: "parseOverrides reaches outside its own body, so the
+# page's injected copy throws (C21, C23)". The JS protection is that the
+# parser's source is self-contained, because the approvals page carries a
+# copy of it (web/src). The page stays JavaScript and keeps its own copy;
+# the Rust parse_overrides is never serialised into a page.
+
+[[mutation]]
+name = 'a numeric narrowing that is not finite is sent as NaN, which JSON drops (C23)'
+file = "../av-store/src/pending.rs"
+from = '            Some(n) if n.is_finite() => Ok(n),'
+to = '            Some(n) => Ok(n),'
+
+[[mutation]]
+name = 'a blank numeric narrowing becomes a limit of 0 (C23)'
+file = "../av-store/src/pending.rs"
+from = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),'''
+to = '''            Value::String(s) => js_parse_number(s.trim()).or(Some(0.0)).filter(|_| s.trim().is_empty()).or_else(|| js_parse_number(s.trim())),'''
+
+[[mutation]]
+name = 'a rate or quota narrowing is stringified and not trimmed (C23)'
+file = "../av-store/src/pending.rs"
+from = '''        Value::String(s) => Value::from(s.trim()),
+        other => other.clone(),'''
+to = '''        Value::String(s) => Value::from(s.as_str()),
+        other => Value::from(js_string(other)),'''

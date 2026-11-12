@@ -21,6 +21,7 @@ mod mutants;
 mod mutants_conn;
 mod mutants_mcp;
 mod mutants_notify;
+mod mutants_pending;
 mod mutants_sr;
 mod presence;
 mod ui;
