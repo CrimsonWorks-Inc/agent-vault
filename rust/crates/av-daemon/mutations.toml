@@ -2982,3 +2982,13 @@ name = 'an MCP fault leaves no daemon.handler_error record'
 file = "src/mcp.rs"
 from = '''                if crate::err::is_fault(&e) {'''
 to = '''                if false && crate::err::is_fault(&e) {'''
+
+# ui-dist-serving.test.js:157-176: the UI server routes a path only as it
+# arrived; an absolute-form target keeps its scheme and authority, as
+# Node's req.url does, and is never a literal path.
+
+[[mutation]]
+name = 'an absolute-form target is routed by the path inside it, so the page and the API answer it'
+file = "src/ui/server.rs"
+from = '''        let raw_url = if parts.uri.scheme().is_some() || parts.uri.authority().is_some() {'''
+to = '''        let raw_url = if false {'''

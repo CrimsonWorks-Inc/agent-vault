@@ -651,11 +651,18 @@ impl UiServer {
 
     async fn handle(&self, req: hyper::Request<hyper::body::Incoming>) -> Resp {
         let (parts, body) = req.into_parts();
-        let raw_url = parts
-            .uri
-            .path_and_query()
-            .map(|p| p.as_str().to_string())
-            .unwrap_or_else(|| parts.uri.to_string());
+        // `req.url` as Node gives it: the target as it arrived. An
+        // absolute-form target keeps its scheme and authority, so it is
+        // never a literal path and never routed (ui-dist-serving.test.js).
+        let raw_url = if parts.uri.scheme().is_some() || parts.uri.authority().is_some() {
+            parts.uri.to_string()
+        } else {
+            parts
+                .uri
+                .path_and_query()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_else(|| parts.uri.to_string())
+        };
         let Some((pathname, query)) = crate::http::parse_target(&raw_url, &self.inner.origin)
         else {
             return Self::send(404, &json!({"error": "not found"}));

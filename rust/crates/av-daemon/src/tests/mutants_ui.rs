@@ -372,6 +372,30 @@ async fn a_path_that_normalises_to_the_page_is_not_served() {
     }
 }
 
+/// ui-dist-serving.test.js:157-176: an absolute-form target is not a
+/// literal path, so even an authenticated one is never routed to the page,
+/// an asset or the API.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absolute_form_target_is_never_routed() {
+    let mut u = Ui::start().await;
+    u.claim().await;
+    assert_eq!(
+        u.get("/", "").await.status,
+        200,
+        "control: the literal page"
+    );
+    let port = u.port();
+    for t in [
+        format!("http://localhost:{port}/"),
+        format!("http://localhost:{port}/?x=1"),
+        format!("http://127.0.0.1:{port}/api/status"),
+    ] {
+        let r = u.get(&t, "X-AV-UI: 1\r\n").await;
+        assert_eq!(r.status, 404, "{t}: {}", r.body);
+    }
+    assert_eq!(u.get("/", "").await.status, 200, "still serving");
+}
+
 /// 'U2 fix2: a request target the URL parser refuses is thrown, not
 /// answered'.
 #[tokio::test(flavor = "multi_thread")]
