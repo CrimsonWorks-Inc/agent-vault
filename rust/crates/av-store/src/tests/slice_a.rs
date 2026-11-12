@@ -826,13 +826,14 @@ fn a_health_patch_keeps_only_well_formed_fields_and_a_locked_vault_records_nothi
         )
         .unwrap()
         .unwrap();
-    let keys: Vec<String> = serde_json::to_value(&h)
+    let mut keys: Vec<String> = serde_json::to_value(&h)
         .unwrap()
         .as_object()
         .unwrap()
         .keys()
         .cloned()
         .collect();
+    keys.sort();
     assert_eq!(
         keys,
         vec![

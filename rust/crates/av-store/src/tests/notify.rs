@@ -23,13 +23,14 @@ fn a_webhook_is_sealed_at_rest_and_only_its_host_is_shown_or_audited() {
     let view = v
         .set_notify_webhook(&s(URL_SECRET), NotifyDetail::Minimal)
         .unwrap();
-    let keys: Vec<String> = serde_json::to_value(&view)
+    let mut keys: Vec<String> = serde_json::to_value(&view)
         .unwrap()
         .as_object()
         .unwrap()
         .keys()
         .cloned()
         .collect();
+    keys.sort();
     assert_eq!(keys, vec!["configured_at", "detail", "host"]);
     assert_eq!(view.host, "hooks.example");
     assert_eq!(view.detail, NotifyDetail::Minimal);
