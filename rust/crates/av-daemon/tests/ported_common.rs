@@ -100,8 +100,8 @@ pub fn seed_panic_side_system_failure(dir: &std::path::Path) {
     assert_eq!(
         connection
             .execute(
-                "UPDATE credentials SET health=?1 WHERE slug='broken-health'",
-                ["\"unreadable legacy health\""]
+                "UPDATE credentials SET quarantine=?1 WHERE slug='broken-health'",
+                ["\"unreadable legacy marker\""]
             )
             .unwrap(),
         1
@@ -269,4 +269,19 @@ pub fn seed_credential_pins(dir: &std::path::Path, slug: &str, pins: &serde_json
                 .unwrap();
         }
     }
+}
+
+/// Legacy health metadata is tolerated as absent; only the closed test vault.
+pub fn seed_legacy_health_shape(dir: &std::path::Path) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE credentials SET health=?1 WHERE slug='broken-health'",
+                ["\"legacy health shape\""]
+            )
+            .unwrap(),
+        1
+    );
 }

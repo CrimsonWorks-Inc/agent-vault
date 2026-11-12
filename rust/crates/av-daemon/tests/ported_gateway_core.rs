@@ -17382,7 +17382,7 @@ async fn c25_human_expiry_stays_public_but_placeholder_use_ceiling_and_agent_exp
     .await
     .unwrap();
 }
-async fn c25_unreadable_fixture() -> Fixture {
+async fn c25_bystander_fixture() -> Fixture {
     let f = c25_fixture().await;
     f.shared
         .run(|c| {
@@ -17401,6 +17401,10 @@ async fn c25_unreadable_fixture() -> Fixture {
         })
         .await
         .unwrap();
+    f
+}
+async fn c25_unreadable_fixture() -> Fixture {
+    let f = c25_bystander_fixture().await;
     let f = control_session_restart_with_pass(
         f,
         ported_common::seed_panic_side_system_failure,
@@ -18720,7 +18724,6 @@ async fn integration_r6_no_session_denial_explains_only_code_and_rule_and_a_sess
 }
 
 #[tokio::test]
-#[ignore = "production mismatch, fix pending: internal store errors expose SQL conversion text"]
 async fn integration_c28_real_malformed_metadata_failure_returns_generic_internal_and_no_error_text_in_audits(
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(35), async {
@@ -18730,9 +18733,9 @@ async fn integration_c28_real_malformed_metadata_failure_returns_generic_interna
         assert_eq!(v["code"], "AV_INTERNAL");
         assert_eq!(v["detail"], "the request could not be handled");
         for text in [
-            "unreadable legacy health",
+            "unreadable legacy marker",
             "invalid type",
-            "Health",
+            "Quarantine",
             "credentials",
             "SELECT",
         ] {
@@ -18741,7 +18744,7 @@ async fn integration_c28_real_malformed_metadata_failure_returns_generic_interna
         integration_absent(
             &f,
             false,
-            &["unreadable legacy health", "invalid type", "SELECT"],
+            &["unreadable legacy marker", "invalid type", "SELECT"],
         )
         .await;
         credential_finish(&f).await;
@@ -19394,4 +19397,38 @@ fn fix_factor_factory_refuses_prf_only_before_writing_and_keeps_passphrase_and_n
     v.lock().unwrap();
     drop(v);
     assert!(Vault::open(&target).unwrap().unlock(None).unwrap());
+}
+
+#[tokio::test]
+async fn legacy_health_shape_is_absent_on_public_credential_listing_and_does_not_fail_secret_reads()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = c25_bystander_fixture().await;
+        let f = control_session_restart_with_pass(
+            f,
+            ported_common::seed_legacy_health_shape,
+            Some(WIDEN_PASS),
+        )
+        .await;
+        let (s, v) = credential_api(&f, "GET", "/v1/credentials", json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        let row = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["slug"] == "broken-health")
+            .unwrap();
+        assert!(row["health"].is_null());
+        assert!(f
+            .shared
+            .run(|c| c.vault.all_secrets().is_ok())
+            .await
+            .unwrap());
+        assert!(!v.to_string().contains("legacy health shape"));
+        assert!(!v.to_string().contains(C25_VALUE));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
 }
