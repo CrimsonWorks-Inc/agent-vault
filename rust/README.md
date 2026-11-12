@@ -68,10 +68,69 @@ to   = '("secure_delete", "OFF"),'
 test = "db::tests::"                    # optional cargo test name filter
 ```
 
-The task copies `rust/` to a temporary directory (the working tree is never
-modified), checks that the unmutated tests pass, then applies each swap in
-turn and runs `cargo test --workspace` there. A mutant must compile and must
+The task copies `rust/` to a temporary directory, together with the repo
+inputs the tests read (`src/`, `bin/`, `package.json`, `web/src`,
+`README.md`); the working tree is never modified. It checks that the
+unmutated tests pass, then applies each swap in turn and runs
+`cargo test --workspace` there (only the owning crate with `--scoped`). A mutant must compile and must
 make a test fail; a run that exceeds `MUTATION_TIMEOUT_SECS` (default 600)
 counts as caught. It exits non-zero if any mutation survives or an entry's
 `from` text no longer appears exactly once. `--only <name>` runs one entry;
 `--keep` keeps the copy and the logs.
+
+## Using the Rust build
+
+```sh
+cd rust
+cargo build --release
+# binaries: target/release/agent-vault, agent-vault-daemon, agent-vault-setup
+```
+
+The command line is the same as the JavaScript one (`agent-vault help`), with
+one addition: `agent-vault migrate`.
+
+### Moving an existing vault
+
+`agent-vault migrate` converts a JavaScript vault (`vault.json` plus its
+audit log) into `vault.db` beside it. Run the dry run first:
+
+```sh
+agent-vault migrate --dry-run          # counts per entity, audit range, what is dropped
+agent-vault migrate                    # asks for the passphrase on the terminal
+```
+
+What it does, and what it refuses:
+
+- It keeps the same vault master key, so placeholders and session tokens
+  minted before the migration still work after it.
+- It refuses while the JavaScript daemon is running against the vault; stop
+  the service first.
+- It verifies the old audit chain and its anchor first, and refuses on any
+  break (printing where). A half-written last line is dropped, as the
+  JavaScript reader drops it.
+- It writes one SQLite transaction to a temporary file, then renames it to
+  `vault.db`. `vault.json` and the old audit files are left untouched; delete
+  them yourself once you are satisfied.
+- A Touch ID / WebAuthn **unlock** wrap cannot be migrated, because it needs
+  the authenticator. It is dropped and reported, with the command to
+  re-enroll. WebAuthn **presence** keys do migrate.
+- Running it again after it finished says so and changes nothing.
+
+## Honest limits of the port
+
+- **The installer is still trust-on-first-use.** The first `sudo` runs the
+  `agent-vault-setup` binary you built in your checkout, which an agent
+  running as you could have replaced. After that, `agent-vault upgrade`
+  prints the root-owned installer, which an agent cannot edit, and it copies
+  the new binaries from your checkout's `rust/target/release`. A signed
+  release binary is still not built.
+- **The web UI is still JavaScript in the browser.** Its built files are
+  embedded in `agent-vault-daemon` at compile time. Its own tests stay in
+  the JS suite, and `crates/av-daemon/tests/fixtures/ui-parity` pins what the
+  browser and the Rust server must agree on.
+- **Linux is tested by CI only.** The port has run end to end on macOS; the
+  installer has never run as root on Linux.
+- **Behavior that differs on purpose** is listed under "Intended changes" in
+  [`PLAN.md`](PLAN.md); everything else is meant to match the JavaScript
+  byte for byte, and the conformance suite (`AV_IMPL=rust npm run
+  conformance`) checks it from outside.
