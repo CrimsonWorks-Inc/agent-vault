@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 297 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **683 not yet ported**.
+Totals: 1090 JS tests: 305 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **675 not yet ported**.
 
 ## Mutation check
 
@@ -327,14 +327,14 @@ the vault on every call instead of caching an audit handle.
 | control-ui-webauthn.test.js | the same bundle with its keys in another order is the same operation | not yet ported |
 | control-ui-webauthn.test.js | the page builds the same operation as the servers, field for field | not yet ported |
 | control-ui-webauthn.test.js | the page's digested fields are the servers' digested fields | not yet ported |
-| exfil.test.js | the control socket refuses a session aimed at a host the credential does not permit | not yet ported |
-| exfil.test.js | a session confined to the credential host cannot then be pointed elsewhere | not yet ported |
-| exfil.test.js | the real credential value never reaches a caller-controlled destination | not yet ported |
-| exfil.test.js | without a passphrase, widening is open but audited, not silently trusted | not yet ported |
-| exfil.test.js | with a passphrase set, the socket cannot unlock without it | not yet ported |
-| exfil.test.js | with a passphrase set, an agent cannot mint capability without it | not yet ported |
-| exfil.test.js | an agent cannot mint a placeholder against a grant it does not own | not yet ported |
-| exfil.test.js | a human with a presence window can still issue placeholders | not yet ported |
+| exfil.test.js | the control socket refuses a session aimed at a host the credential does not permit | `ported_gateway_core::exfil_control_refuses_foreign_hosts_and_ungated_session_creation_is_audited` |
+| exfil.test.js | a session confined to the credential host cannot then be pointed elsewhere | `ported_gateway_core::exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_fresh_presence` |
+| exfil.test.js | the real credential value never reaches a caller-controlled destination | `ported_gateway_core::exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_fresh_presence` |
+| exfil.test.js | without a passphrase, widening is open but audited, not silently trusted | `ported_gateway_core::exfil_control_refuses_foreign_hosts_and_ungated_session_creation_is_audited` |
+| exfil.test.js | with a passphrase set, the socket cannot unlock without it | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
+| exfil.test.js | with a passphrase set, an agent cannot mint capability without it | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
+| exfil.test.js | an agent cannot mint a placeholder against a grant it does not own | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
+| exfil.test.js | a human with a presence window can still issue placeholders | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
 | fix-control-approvals.test.js | denying with no human present is refused, and the request stays pending | not yet ported |
 | fix-control-approvals.test.js | a signature for approving cannot be spent on denying | not yet ported |
 | fix-control-approvals.test.js | a deny signed for exactly that deny goes through, as the UI sends it | not yet ported |

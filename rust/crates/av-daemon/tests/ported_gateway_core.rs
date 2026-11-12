@@ -8110,3 +8110,292 @@ async fn fractional_control_issuance_normalizes_uses_and_records_each_ledger_row
         assert!(!serde_json::to_string(&after).unwrap().contains(SECRET));
     }
 }
+
+async fn loopback_http(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut request = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1");
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let response = sender
+        .send_request(request.body(Full::new(Bytes::from(body))).unwrap())
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(n, v)| (n.as_str().into(), v.to_str().unwrap().into()))
+        .collect();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, body)
+}
+
+#[tokio::test]
+async fn exfil_control_refuses_foreign_hosts_and_ungated_session_creation_is_audited() {
+    let f = Fixture::new(&["header:authorization:Bearer"]).await;
+    let socket = f._dir.path().join("control.sock");
+    let before = f
+        .shared
+        .run(|core| core.vault.sessions().unwrap().len())
+        .await
+        .unwrap();
+    let(status,denied)=control(&socket,"/v1/sessions",json!({"cred":"demo","hosts":["127.0.0.1"],"methods":["GET"],"paths":["/**"],"approval":"auto","budget":10})).await;
+    assert_eq!(status, 403);
+    assert_eq!(denied["code"], "AV_POLICY_DENIED");
+    assert!(denied["detail"]
+        .as_str()
+        .unwrap()
+        .contains("outside what credential permits"));
+    assert_eq!(
+        f.shared
+            .run(|core| core.vault.sessions().unwrap().len())
+            .await
+            .unwrap(),
+        before
+    );
+    let (status, made) = control(
+        &socket,
+        "/v1/sessions",
+        json!({"cred":"demo","methods":["GET"],"paths":["/**"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{made}");
+    assert!(made["token"].as_str().unwrap().starts_with("avs1."));
+    assert!(audit_records(&f)
+        .await
+        .iter()
+        .any(|r| r["kind"] == "control.widening_ungated"));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    let ordinary = f
+        .send(
+            "GET",
+            "/ordinary",
+            vec![("authorization".into(), format!("Bearer {}", f.ph))],
+            None,
+        )
+        .await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+    for response in [denied, made] {
+        assert!(!serde_json::to_string(&response).unwrap().contains(SECRET));
+    }
+}
+
+#[tokio::test]
+async fn exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance()
+{
+    const PASS: &str = "fake-exfil-passphrase-123";
+    let f = Fixture::new(&["header:authorization:Bearer"]).await;
+    let socket = f._dir.path().join("control.sock");
+    let token = f.token.clone();
+    let sid = f
+        .shared
+        .run(move |core| core.vault.session_by_token(&token).unwrap().unwrap().id)
+        .await
+        .unwrap();
+    let (s, v) = control(
+        &socket,
+        "/v1/passphrase",
+        json!({"action":"set","passphrase":PASS}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(control(&socket, "/v1/lock", json!({})).await.0, 200);
+    for body in [json!({}), json!({"passphrase":"fake-wrong-guess"})] {
+        assert_eq!(control(&socket, "/v1/unlock", body).await.0, 423);
+    }
+    let (s, v) = control(&socket, "/v1/unlock", json!({"passphrase":PASS})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["locked"], false);
+    let (s, v) = control(
+        &socket,
+        "/v1/passphrase",
+        json!({"action":"remove","current":PASS}),
+    )
+    .await;
+    assert_eq!(s, 403);
+    assert_eq!(v["rule"], "last_factor");
+    for (path, body) in [
+        (
+            "/v1/credentials",
+            json!({"slug":"unauthorized","kind":"http","host":"foreign.example.test","value":"fake-credential-value"}),
+        ),
+        (
+            "/v1/sessions",
+            json!({"cred":"demo","methods":["GET"],"paths":["/**"]}),
+        ),
+        ("/v1/placeholders", json!({"cred":"demo"})),
+        ("/v1/placeholders", json!({"cred":"demo","sid":sid})),
+    ] {
+        let (s, v) = control(&socket, path, body).await;
+        assert_eq!(s, 401, "{path}: {v}");
+        assert_eq!(v["code"], "AV_PRESENCE_REQUIRED");
+        assert!(v.get("placeholder").is_none());
+        assert!(!serde_json::to_string(&v).unwrap().contains(SECRET));
+    }
+    let (s, v) = control(
+        &socket,
+        "/v1/presence/window",
+        json!({"passphrase":"fake-wrong-window"}),
+    )
+    .await;
+    assert_eq!(s, 403);
+    assert_eq!(v["code"], "AV_PRESENCE_DENIED");
+    assert_eq!(
+        control(&socket, "/v1/presence/window", json!({"passphrase":PASS}))
+            .await
+            .0,
+        200
+    );
+    let (s, v) = control(
+        &socket,
+        "/v1/sessions",
+        json!({"cred":"demo","methods":["GET"],"paths":["/**"]}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = control(
+        &socket,
+        "/v1/placeholders",
+        json!({"cred":"demo","sid":sid}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["placeholder"].as_str().unwrap().starts_with("av1."));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    let ordinary = f
+        .send(
+            "GET",
+            "/ordinary",
+            vec![("authorization".into(), format!("Bearer {}", f.ph))],
+            None,
+        )
+        .await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+    let logs = serde_json::to_string(&audit_records(&f).await).unwrap();
+    assert!(!logs.contains(PASS));
+}
+
+#[tokio::test]
+async fn exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_fresh_presence() {
+    use tokio::io::AsyncWriteExt;
+    for passphrase in [false, true] {
+        let f = Fixture::new(&["header:authorization:Bearer"]).await;
+        let socket = f._dir.path().join("control.sock");
+        let mut input = json!({"cred":"demo","methods":if passphrase {vec!["GET","POST"]}else{vec!["GET"]},"paths":["/**"],"approval":"auto","budget":10});
+        if passphrase {
+            let (s, v) = control(
+                &socket,
+                "/v1/passphrase",
+                json!({"passphrase":"fake-fresh-exfil-pass"}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            input["presence"] = json!({"passphrase":"fake-fresh-exfil-pass"});
+        }
+        let (s, made) = control(&socket, "/v1/sessions", input).await;
+        assert_eq!(s, 200, "{made}");
+        let token = made["token"].as_str().unwrap().to_string();
+        let marker = made["placeholder"].as_str().unwrap().to_string();
+        let catcher = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = catcher.local_addr().unwrap().port();
+        let real = Daemon::new(
+            f.shared.clone(),
+            DaemonOptions {
+                port: 0,
+                socket_path: Some(f._dir.path().join("real-control.sock")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        real.start().await.unwrap();
+        let gateway = real.gateway_port().unwrap();
+        for method in if passphrase {
+            vec!["GET", "POST"]
+        } else {
+            vec!["GET"]
+        } {
+            let body = if method == "POST" {
+                json!({"token":marker}).to_string().into_bytes()
+            } else {
+                vec![]
+            };
+            let (status, _, response) = loopback_http(
+                gateway,
+                method,
+                &format!("/t/http/127.0.0.1:{port}/x"),
+                vec![
+                    ("authorization".into(), format!("Bearer {marker}")),
+                    ("av-session".into(), token.clone()),
+                ],
+                body,
+            )
+            .await;
+            assert_eq!(status, 403, "{}", String::from_utf8_lossy(&response));
+            let problem: Value = serde_json::from_slice(&response).unwrap();
+            assert_eq!(problem["code"], "AV_NO_GRANT");
+            assert!(!String::from_utf8_lossy(&response).contains(SECRET));
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), catcher.accept())
+                .await
+                .is_err(),
+            "a forbidden gateway request connected to the catcher"
+        );
+        let expected = marker.clone();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = catcher.accept().await.unwrap();
+            let (headers, body) = read_wire_request(&mut socket).await;
+            let captured = format!("{headers}{}", String::from_utf8_lossy(&body));
+            assert!(captured.contains(&expected));
+            assert!(!captured.contains(SECRET));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+        let (status, _, _) = loopback_http(
+            port,
+            "POST",
+            "/collect",
+            vec![
+                ("authorization".into(), format!("Bearer {marker}")),
+                ("av-session".into(), token),
+            ],
+            serde_json::to_vec(&made).unwrap(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        peer.await.unwrap();
+        real.stop().await;
+        assert!(!serde_json::to_string(&audit_records(&f).await)
+            .unwrap()
+            .contains(SECRET));
+        assert!(f.up.hits.lock().unwrap().is_empty());
+    }
+}
