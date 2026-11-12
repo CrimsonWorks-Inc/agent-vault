@@ -19,8 +19,8 @@ use crate::audit::{self, AuditLog, AuditRow};
 use crate::crypto::{self, SealedV1, SealedV2};
 use crate::error::{CryptoError, Error};
 use crate::model::{
-    CredentialField, CredentialRecord, FactorClass, FactorState, LegacyDocument, NotifyRecord,
-    PresenceFactor, RetiredValue, SessionState, VmkWrap,
+    CredentialField, CredentialRecord, FactorClass, FactorState, GrantRuntime, LegacyDocument,
+    NotifyRecord, PresenceFactor, RetiredValue, SessionState, VmkWrap,
 };
 use crate::rows;
 use crate::util;
@@ -201,7 +201,8 @@ pub fn read_legacy(from: &Path) -> Result<LegacyVault, MigrateError> {
         }
         Err(e) => return Err(Error::from(e).into()),
     };
-    let document: LegacyDocument = serde_json::from_str(&text).map_err(Error::from)?;
+    let mut document: LegacyDocument = serde_json::from_str(&text).map_err(Error::from)?;
+    document.grant_runtime = legacy_grant_runtime(&text)?;
     if document.schema_version > SCHEMA_VERSION {
         return Err(Error::Invariant(format!(
             "vault schema {} is newer than this build ({SCHEMA_VERSION}); upgrade agent-vault",
@@ -258,6 +259,28 @@ pub fn read_legacy(from: &Path) -> Result<LegacyVault, MigrateError> {
         audit_anchor,
         files,
     })
+}
+
+/// Each JS grant's `quota_state` and `spend` (set on the grant object by
+/// `src/daemon/pipeline.js`), by grant id, exactly as stored. A grant with
+/// neither is left out: that is the JS default.
+fn legacy_grant_runtime(text: &str) -> Result<BTreeMap<String, GrantRuntime>, MigrateError> {
+    let raw: Value = serde_json::from_str(text).map_err(Error::from)?;
+    let mut out = BTreeMap::new();
+    let Some(grants) = raw.get("grants").and_then(Value::as_object) else {
+        return Ok(out);
+    };
+    for (id, g) in grants {
+        let take = |k: &str| g.get(k).filter(|v| !v.is_null()).cloned();
+        let rt = GrantRuntime {
+            quota_state: take("quota_state"),
+            spend: take("spend"),
+        };
+        if rt != GrantRuntime::default() {
+            out.insert(id.clone(), rt);
+        }
+    }
+    Ok(out)
 }
 
 /// Whether unlocking `legacy` needs a passphrase (its wraps include a
@@ -330,9 +353,28 @@ pub fn migrate(
     legacy: LegacyVault,
     passphrase: Option<&SecretString>,
 ) -> Result<MigrateReport, MigrateError> {
-    if opts.to.join(VAULT_DB_FILE).exists() {
+    // Step 1: a completed earlier migration is a no-op that succeeds; any
+    // other vault.db at the target (half-written, damaged, or not made by
+    // migrate) is refused.
+    let existing = opts.to.join(VAULT_DB_FILE);
+    if existing.exists() {
+        if completed_migration(&existing) {
+            return Ok(MigrateReport {
+                already_migrated: true,
+                dry_run: opts.dry_run,
+                counts: BTreeMap::new(),
+                audit_first_seq: None,
+                audit_last_seq: None,
+                audit_head: None,
+                dropped: Vec::new(),
+                written: None,
+                legacy_files: legacy.files.clone(),
+            });
+        }
         return Err(MigrateError::AlreadyMigrated(opts.to.clone()));
     }
+    // Step 2: never while the JS daemon is running against `--from`.
+    preflight(opts)?;
     // Step 4: the same VMK.
     let vmk = unlock_legacy(&legacy, passphrase)?;
     let k_audit = crypto::k_audit(&vmk);
@@ -621,6 +663,42 @@ pub fn migrate(
 
 use std::os::unix::fs::DirBuilderExt as _;
 
+/// Whether `path` is a finished `vault.db` that a migration wrote: it opens
+/// read-only, passes `quick_check`, has this build's schema, and its audit
+/// log holds the `vault.migrated` record (the last thing the migration's one
+/// transaction writes). Opened read-only so the check changes nothing; with
+/// no WAL beside it (a finished migration truncates and closes it) the file
+/// is opened `immutable`, so not even a `-shm` file is created.
+fn completed_migration(path: &Path) -> bool {
+    let check = || -> rusqlite::Result<bool> {
+        let real = std::fs::canonicalize(path)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut wal = real.as_os_str().to_owned();
+        wal.push("-wal");
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let conn = if Path::new(&wal).exists() {
+            Connection::open_with_flags(&real, flags)?
+        } else {
+            let mut u = url::Url::from_file_path(&real)
+                .map_err(|()| rusqlite::Error::InvalidPath(real.clone()))?;
+            u.set_query(Some("immutable=1"));
+            Connection::open_with_flags(u.as_str(), flags | rusqlite::OpenFlags::SQLITE_OPEN_URI)?
+        };
+        let ok: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if ok != "ok" || crate::db::schema_version(&conn)? != crate::schema::DB_SCHEMA_VERSION {
+            return Ok(false);
+        }
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM audit WHERE kind = 'vault.migrated')",
+            [],
+            |r| r.get(0),
+        )
+    };
+    check().unwrap_or(false)
+}
+
 /// Remove a temp database and its WAL and shared-memory files.
 fn remove_temp(temp_path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -769,6 +847,9 @@ fn write_entities(
     }
     for g in doc.grants.values() {
         rows::grant_put(c, g)?;
+        if let Some(rt) = doc.grant_runtime.get(&g.id) {
+            rows::grant_runtime_set(c, &g.id, rt)?;
+        }
     }
     for p in doc.placeholders.values() {
         rows::ph_insert(c, p)?;
