@@ -1452,13 +1452,12 @@ to = '''                    if false && core.vault.presence_key().v()?.is_some()
 # NOT APPLICABLE:
 #   'an uncaught error ends the daemon'
 #   'daemon.uncaught keeps the fault message (C28)'
-#   'a fault is recorded by its message (C28)'
 # The JS installs guardProcess, a process-wide uncaughtException and
 # unhandledRejection handler that records daemon.uncaught with the fault's
 # class. Here every connection and request runs in its own tokio task; a
-# panic ends that task only, so there is no process-wide handler to remove,
-# no daemon.uncaught record, and error_class has no caller that files a
-# fault.
+# panic ends that task only, so there is no process-wide handler to remove
+# and no daemon.uncaught record. (Request handler faults are guarded and
+# recorded as daemon.handler_error; see the #guard entries below.)
 
 [[mutation]]
 name = 'the shared window can change presence factors'
@@ -2917,3 +2916,42 @@ name = 'a redirect hop checks the budget on the copy taken before the request wa
 file = "src/pipeline.rs"
 from = '''            if !live.is_some_and(|g| self.pl_budget(&g, effective).is_ok()) {'''
 to = '''            if !live.is_some_and(|_| self.pl_budget(&route.grant, effective).is_ok()) {'''
+
+# src/daemon/server.js #guard (PLAN 4905f8d): a handler fault is recorded and
+# answered 500; release builds unwind so the guard can run. 'an uncaught
+# error ends the daemon' and the daemon.uncaught entries stay not applicable
+# (see above): there is no process-wide handler to port.
+
+[[mutation]]
+name = 'a control handler that throws is not guarded'
+file = "src/server.rs"
+from = '''        self.guard(async move { me.on_control_inner(req).await })
+            .await'''
+to = '''        (async move { me.on_control_inner(req).await })
+            .await'''
+
+[[mutation]]
+name = 'a handler fault is answered 500 without a daemon.handler_error record'
+file = "src/server.rs"
+from = '''                        core.audit_opt("daemon.handler_error", json!({"error": class}))'''
+to = '''                        core.audit_opt("daemon.handler_ok", json!({"error": class}))'''
+
+[[mutation]]
+name = 'release builds abort on a panic, so no handler fault is ever guarded'
+file = "../../Cargo.toml"
+from = '''codegen-units = 1
+# Panics unwind'''
+to = '''codegen-units = 1
+panic = "abort"
+# Panics unwind'''
+
+[[mutation]]
+name = 'a fault is recorded by its message (C28)'
+file = "src/server.rs"
+from = '''    let _ = fault;
+    PANIC_CLASS.to_string()'''
+to = '''    fault
+        .downcast_ref::<&str>()
+        .map(|m| m.to_string())
+        .or_else(|| fault.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| PANIC_CLASS.to_string())'''

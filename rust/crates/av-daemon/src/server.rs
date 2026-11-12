@@ -94,6 +94,37 @@ fn narrow_fields() -> Vec<&'static str> {
 
 /// The class name recorded for a fault: an `AV_*` code, else `other`.
 /// Ports `errorClass(err)`.
+/// The class a panic is recorded under in `daemon.handler_error`: what JS
+/// `errorClass` gives a plain `Error`.
+pub const PANIC_CLASS: &str = "Error";
+
+/// `errorClass(err)` for a panic: its class, never its message (C28).
+fn fault_class(fault: &(dyn std::any::Any + Send)) -> String {
+    let _ = fault;
+    PANIC_CLASS.to_string()
+}
+
+/// A handler future whose panic is caught where it is polled, in the same
+/// task (`catch_unwind` on each poll).
+struct CatchUnwind<F: std::future::Future> {
+    inner: std::pin::Pin<Box<F>>,
+}
+
+impl<F: std::future::Future> std::future::Future for CatchUnwind<F> {
+    type Output = Result<F::Output, Box<dyn std::any::Any + Send>>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let inner = &mut self.inner;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.as_mut().poll(cx))) {
+            Ok(p) => p.map(Ok),
+            Err(fault) => std::task::Poll::Ready(Err(fault)),
+        }
+    }
+}
+
 pub fn error_class(err: &VaultError) -> String {
     err.code.as_str().to_string()
 }
@@ -1053,8 +1084,54 @@ fn problem(e: &VaultError) -> Resp {
 impl Daemon {
     // ---------------------------------------------------------- the gateway
 
-    /// `#onGateway(req, res)`.
+    /// `#guard(req, res, fn)`: a handler that panics costs one request, not
+    /// the daemon. The fault is recorded as `daemon.handler_error` by class
+    /// only (a panic is JS's plain `Error`; its message never leaves), and
+    /// the request is answered 500. Runs in the handler's own task, so the
+    /// connection watch it was given still holds.
+    pub(crate) async fn guard(
+        self: &Arc<Self>,
+        handler: impl std::future::Future<Output = Resp> + Send,
+    ) -> Resp {
+        match (CatchUnwind {
+            inner: Box::pin(handler),
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(fault) => {
+                let class = fault_class(fault.as_ref());
+                let _ = self
+                    .shared
+                    .run(move |core| {
+                        core.audit_opt("daemon.handler_error", json!({"error": class}))
+                    })
+                    .await;
+                crate::http::response(
+                    500,
+                    &[("content-type".into(), "application/problem+json".into())],
+                    crate::util::js_stringify(
+                        &json!({"code": "AV_INTERNAL", "detail": "the request could not be handled"}),
+                    )
+                    .into_bytes(),
+                )
+            }
+        }
+    }
+
+    /// `#onGateway(req, res)`, under [`Daemon::guard`].
     pub(crate) async fn on_gateway(
+        self: &Arc<Self>,
+        req: Incoming,
+        listener: Option<ListenerInfo>,
+        peer: Option<String>,
+    ) -> Resp {
+        let me = Arc::clone(self);
+        self.guard(async move { me.on_gateway_inner(req, listener, peer).await })
+            .await
+    }
+
+    async fn on_gateway_inner(
         self: &Arc<Self>,
         req: Incoming,
         listener: Option<ListenerInfo>,
@@ -2278,8 +2355,18 @@ impl Daemon {
             .await?
     }
 
-    /// The control API. Ports `#onControl(req, res)`.
+    /// The control API, under [`Daemon::guard`]. Ports `#onControl(req, res)`.
     pub(crate) async fn on_control(self: &Arc<Self>, req: Incoming) -> Resp {
+        let me = Arc::clone(self);
+        self.guard(async move { me.on_control_inner(req).await })
+            .await
+    }
+
+    async fn on_control_inner(self: &Arc<Self>, req: Incoming) -> Resp {
+        #[cfg(test)]
+        if req.target == "/v1/test-only/panic" {
+            panic!("a test-only handler fault with a secret-looking message: s3cr3t");
+        }
         let json = |s: u16, v: Value| json_pretty(s, &v, &[]);
         let Some((path, query)) = crate::http::parse_target(&req.target, "http://control") else {
             return crate::http::json_compact(

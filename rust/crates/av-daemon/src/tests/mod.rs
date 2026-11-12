@@ -16,6 +16,7 @@ use crate::upstream::{
 mod control;
 mod gateway;
 mod guards;
+mod handler_guard;
 mod mcp;
 mod mutants;
 mod mutants_conn;
