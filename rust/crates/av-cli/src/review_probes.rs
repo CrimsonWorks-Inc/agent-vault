@@ -172,6 +172,20 @@ fn probe_service_units_control_label_present() {
     assert!(SETUP_SRC.contains("com.agentvault.daemon"));
 }
 
+/// `install_app` must copy the `--from` checkout. Copying `&app` passes the
+/// helper tests and then installs the tree that was just deleted.
+#[test]
+fn probe_install_app_copies_rust_bins_from_the_source_checkout() {
+    let start = SETUP_SRC.find("fn install_app(").expect("install_app");
+    let rest = &SETUP_SRC[start..];
+    let end = rest.find("\nfn ").expect("function after install_app");
+    let body = &rest[..end];
+    assert!(
+        body.contains("copy_rust_bins(&source, &app)"),
+        "install_app does not copy the --from checkout:\n{body}"
+    );
+}
+
 // ---- mcp bridge: the JSON-RPC error data omits absent fields as JS does.
 
 #[test]

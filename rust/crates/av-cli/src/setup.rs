@@ -554,12 +554,20 @@ struct CreatedItem {
 /// The installer's `state.json` document. `version` is 1. `retired` is set
 /// when uninstall moves the vault aside. `saved_ids` is what `save_state`
 /// persisted (empty when that call did not run); it is not part of the file.
+/// `service_step` and `save_step` order those two calls. `read_host_state`
+/// is set when `load_state` opened the real state file.
 struct InstallState {
     created: Vec<CreatedItem>,
     version: u32,
     retired: Option<String>,
     #[cfg(test)]
     saved_ids: Vec<String>,
+    #[cfg(test)]
+    service_step: u32,
+    #[cfg(test)]
+    save_step: u32,
+    #[cfg(test)]
+    read_host_state: bool,
 }
 
 fn empty_state() -> InstallState {
@@ -569,14 +577,58 @@ fn empty_state() -> InstallState {
         retired: None,
         #[cfg(test)]
         saved_ids: Vec::new(),
+        #[cfg(test)]
+        service_step: 0,
+        #[cfg(test)]
+        save_step: 0,
+        #[cfg(test)]
+        read_host_state: false,
     }
 }
 
 /// What a dry-run install recorded, and the ids `save_state` saw.
+/// `service_step` and `save_step` are a process-wide counter, so
+/// `save_step > service_step` means `save_state` ran after `install_service`.
 #[cfg(test)]
 pub(crate) struct RecordedInstall {
     pub created: Vec<(String, String)>,
     pub saved_ids: Vec<String>,
+    pub service_step: u32,
+    pub save_step: u32,
+    pub read_host_state: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SKIP_HOST_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While this guard is alive, `load_state` does not open the host
+/// `state.json`. A machine that already has an install would otherwise
+/// make `save_state`-before-`install_service` look ordered.
+#[cfg(test)]
+struct SkipHostState;
+
+#[cfg(test)]
+impl SkipHostState {
+    fn arm() -> Self {
+        SKIP_HOST_STATE.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SkipHostState {
+    fn drop(&mut self) {
+        SKIP_HOST_STATE.with(|cell| cell.set(false));
+    }
+}
+
+#[cfg(test)]
+fn next_install_step() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static STEP: AtomicU32 = AtomicU32::new(1);
+    STEP.fetch_add(1, Ordering::SeqCst)
 }
 
 fn record(state: &mut InstallState, kind: &str, id: &str) {
@@ -593,14 +645,22 @@ fn record(state: &mut InstallState, kind: &str, id: &str) {
 }
 
 fn load_state() -> InstallState {
+    #[cfg(test)]
+    if SKIP_HOST_STATE.with(|cell| cell.get()) {
+        return empty_state();
+    }
+    let mut state = empty_state();
+    #[cfg(test)]
+    {
+        state.read_host_state = true;
+    }
     let text = match std::fs::read_to_string(state_path()) {
         Ok(text) => text,
-        Err(_) => return empty_state(),
+        Err(_) => return state,
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return empty_state();
+        return state;
     };
-    let mut state = empty_state();
     if let Some(version) = value.get("version").and_then(|v| v.as_u64()) {
         state.version = version as u32;
     }
@@ -651,6 +711,7 @@ fn save_state(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     #[cfg(test)]
     {
         state.saved_ids = state.created.iter().map(|item| item.id.clone()).collect();
+        state.save_step = next_install_step();
     }
     if ctx.dry {
         return Ok(());
@@ -1064,42 +1125,60 @@ fn binary_inside(app: &Path) -> bool {
 }
 
 /// Hint for a self-install refusal. "Pass --from" is only right when the
-/// caller has not already passed it and this process is not the installed
-/// copy: that copy refuses even with `--from`, because it lives inside `app`.
+/// caller has not already passed it. Running the installed copy is a
+/// different problem from `--from` naming that copy.
 fn self_install_die(from_passed: bool, running_inside: bool) -> Die {
-    let hint = if running_inside || from_passed {
+    let hint = if running_inside {
         "Run the installer from your checkout, not the installed copy."
+    } else if from_passed {
+        "--from names the installed app; point it at your checkout."
     } else {
         "Pass --from <path to your checkout> so there is something new to install."
     };
     Die::new("refusing to install the app directory over itself.", hint)
 }
 
+/// Being inside `app` refuses the install only when `--from` was not passed.
+/// With `--from`, the bytes come from that checkout's release directory, and
+/// unlinking this executable is harmless on Unix.
+fn blocks_binary_inside(inside: bool, from_passed: bool) -> bool {
+    inside && !from_passed
+}
+
 fn refuse_self_install(ctx: &Ctx, source: &Path, app: &Path) -> Result<(), Die> {
+    let from_passed = value(&ctx.args, "from").is_some();
     let inside = binary_inside(app);
-    if refuses_self_install(source, app) || inside {
-        return Err(self_install_die(value(&ctx.args, "from").is_some(), inside));
+    if refuses_self_install(source, app) {
+        return Err(self_install_die(from_passed, inside));
+    }
+    if blocks_binary_inside(inside, from_passed) {
+        return Err(self_install_die(false, true));
     }
     Ok(())
 }
 
-/// The installed binary cannot install anything: `current_exe` is inside
-/// `app`, so the guard below would refuse after the tree had already changed.
-fn refuse_running_inside_app(ctx: &Ctx) -> Result<(), Die> {
-    if binary_inside(&app_dir()) {
-        return Err(self_install_die(value(&ctx.args, "from").is_some(), true));
+/// Refuse a self-install before anything is created. An installer inside
+/// `app` is allowed when `--from` is a checkout outside `app`. The inside
+/// check runs before `checkout_from`, so the installed copy does not walk
+/// up to some other tree and report that instead.
+fn guard_install_source(ctx: &Ctx) -> Result<PathBuf, Die> {
+    let app = app_dir();
+    let from_passed = value(&ctx.args, "from").is_some();
+    if blocks_binary_inside(binary_inside(&app), from_passed) {
+        return Err(self_install_die(false, true));
     }
-    Ok(())
+    let source = checkout_from(ctx)?;
+    refuse_self_install(ctx, &source, &app)?;
+    Ok(source)
 }
 
 /// Whether `install_app` would accept running `installer` to copy `source`
-/// into `app`. This is the guard `upgrade --print-only` has to satisfy: the
-/// installer is not inside `app`, and `--from` is a checkout outside it.
+/// into `app`. The root-owned installer lives inside `app`. That is allowed
+/// when `source` is a checkout outside it: the installed bytes are
+/// `<source>/rust/target/release`, not the running binary.
 #[cfg(test)]
 pub(crate) fn install_app_accepts(installer: &Path, source: &Path, app: &Path) -> bool {
-    if refuses_self_install(source, app)
-        || canonical_prefix(installer).starts_with(canonical_prefix(app))
-    {
+    if refuses_self_install(source, app) || !installer.is_file() {
         return false;
     }
     source.join("src").is_dir()
@@ -1168,7 +1247,10 @@ fn rust_release_dir(checkout: &Path) -> PathBuf {
     checkout.join("rust/target/release")
 }
 
-pub(crate) fn copy_rust_bins(checkout: &Path, app: &Path) -> Result<(), Die> {
+/// The release directory must exist and its daemon must be a regular file.
+/// Checked before anything is deleted, including on a dry run: a missing
+/// daemon used to be discovered only after `app` was removed.
+fn require_release_daemon(checkout: &Path) -> Result<PathBuf, Die> {
     let dir = rust_release_dir(checkout);
     if !dir.is_dir() {
         return Err(Die::new(
@@ -1179,6 +1261,34 @@ pub(crate) fn copy_rust_bins(checkout: &Path, app: &Path) -> Result<(), Die> {
             "Build them with cargo build --release in the checkout, then run that checkout's installer.",
         ));
     }
+    require_regular_daemon(&dir.join("agent-vault-daemon"))?;
+    Ok(dir)
+}
+
+/// True when `exe` is a build from `checkout` other than `rust/target/release`.
+/// The root-owned installer lives outside the checkout and is not this case.
+pub(crate) fn exe_is_checkout_debug_installer(exe: &Path, checkout: &Path) -> bool {
+    let exe = canonical_prefix(exe);
+    let checkout = canonical_prefix(checkout);
+    let release = canonical_prefix(&checkout.join("rust/target/release"));
+    exe.starts_with(&checkout) && !exe.starts_with(&release)
+}
+
+fn warn_if_checkout_debug_installer(checkout: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if exe_is_checkout_debug_installer(&exe, checkout) {
+        eprintln!(
+            "\nwarning  this installer ({}) is not the release binary in {}.\n  It installs the binaries from that directory, which may differ from this build.",
+            exe.display(),
+            rust_release_dir(checkout).display()
+        );
+    }
+}
+
+pub(crate) fn copy_rust_bins(checkout: &Path, app: &Path) -> Result<(), Die> {
+    let dir = require_release_daemon(checkout)?;
     let dest = app.join("bin");
     std::fs::create_dir_all(&dest)?;
     for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
@@ -1447,6 +1557,10 @@ fn install_service(ctx: &Ctx, enrolled: &Enrolled, state: &mut InstallState) -> 
         run(ctx, "systemctl", args)?;
         step(ctx, "installed and started the systemd service");
     }
+    #[cfg(test)]
+    {
+        state.service_step = next_install_step();
+    }
     Ok(())
 }
 
@@ -1598,13 +1712,21 @@ fn install(ctx: &Ctx) -> Result<(), Die> {
     install_recording(ctx).map(|_| ())
 }
 
-/// Dry-run install against the real root paths. Nothing is written.
-/// `saved_ids` is empty when `save_state` did not run.
+/// Dry-run install of `from` against the real root paths. Nothing is written.
+/// The host `state.json` is not read. `saved_ids` is empty when `save_state`
+/// did not run. `save_step` is greater than `service_step` when `save_state`
+/// ran after `install_service`.
 #[cfg(test)]
-pub(crate) fn dry_run_recorded_install() -> Result<RecordedInstall, Die> {
+pub(crate) fn dry_run_recorded_install(from: &Path) -> Result<RecordedInstall, Die> {
     std::env::remove_var("AGENT_VAULT_SETUP_DRY_ROOT");
+    let _skip_host = SkipHostState::arm();
     let ctx = Ctx {
-        args: vec!["install".into(), "--dry-run".into()],
+        args: vec![
+            "install".into(),
+            "--dry-run".into(),
+            "--from".into(),
+            from.display().to_string(),
+        ],
         dry: true,
         verb: "install".into(),
     };
@@ -1616,6 +1738,9 @@ pub(crate) fn dry_run_recorded_install() -> Result<RecordedInstall, Die> {
             .map(|item| (item.kind.clone(), item.id.clone()))
             .collect(),
         saved_ids: state.saved_ids,
+        service_step: state.service_step,
+        save_step: state.save_step,
+        read_host_state: state.read_host_state,
     })
 }
 
@@ -1627,9 +1752,14 @@ fn install_recording(ctx: &Ctx) -> Result<InstallState, Die> {
         ));
     }
     // Checked before the user, the group, or the tree exist, so a bad
-    // --port does not leave an install uninstall cannot see.
+    // --port, a self-install, or a missing release daemon does not leave
+    // an install uninstall cannot see. The release check runs on a dry
+    // run too: that is the path that used to report success and then
+    // delete `app` for real.
     service_port(value(&ctx.args, "port"))?;
-    refuse_running_inside_app(ctx)?;
+    let source = guard_install_source(ctx)?;
+    require_release_daemon(&source)?;
+    warn_if_checkout_debug_installer(&source);
     let enrolled = enrolled_user(ctx)?;
     say(&format!(
         "\n{}{}",

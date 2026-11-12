@@ -623,11 +623,69 @@ to = "LimitCORE=1\\n\\"
 test = "probe_service_units_keep_the_js_hardening"
 
 [[mutation]]
-name = "upgrade runs the installed Rust installer, which install_app refuses"
+name = "upgrade skips the root-owned installer because it lives in app"
 file = "src/commands.rs"
-from = "        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {"
-to = "        if installer_supports_from(&bytes) {"
+from = "        if installer_supports_from(&bytes) {"
+to = "        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {"
 test = "upgrade_print_only_names_an_installer_and_source_install_app_accepts"
+
+[[mutation]]
+name = "upgrade bootstraps with the debug installer beside the CLI"
+file = "src/commands.rs"
+from = "    if release.is_file() && !installer_runs_inside_app(&release) {"
+to = "    if false && !installer_runs_inside_app(&release) {"
+test = "upgrade_bootstraps_from_the_checkout_release_installer"
+
+[[mutation]]
+name = "a checkout walk that lands on app is treated as a checkout"
+file = "src/commands.rs"
+from = '                if dir.file_name().is_some_and(|name| name == "app") {'
+to = "                if false {"
+test = "checkout_root_refuses_the_installed_app"
+
+[[mutation]]
+name = "an installer inside app is refused even when --from is a checkout"
+file = "src/setup.rs"
+from = "    inside && !from_passed"
+to = "    inside"
+test = "probe_installed_setup_with_from_outside_app_is_not_a_self_install"
+
+[[mutation]]
+name = "--from that names the app is described as running the installed copy"
+file = "src/setup.rs"
+from = '"--from names the installed app; point it at your checkout."'
+to = '"Run the installer from your checkout, not the installed copy."'
+test = "probe_from_that_names_the_installed_app"
+
+[[mutation]]
+name = "a dry run does not notice that the release daemon is missing"
+file = "src/setup.rs"
+from = "    require_release_daemon(&source)?;"
+to = "    let _ = &source;"
+test = "probe_dry_run_rejects_a_missing_release_before_any_plan"
+
+[[mutation]]
+name = "save_state runs before the service file is recorded"
+file = "src/setup.rs"
+from = """    install_service(ctx, &enrolled, &mut state)?;
+    save_state(ctx, &mut state)?;"""
+to = """    save_state(ctx, &mut state)?;
+    install_service(ctx, &enrolled, &mut state)?;"""
+test = "install_dry_run_records_and_saves_state"
+
+[[mutation]]
+name = "install_app copies the rust bins from the app it is about to replace"
+file = "src/setup.rs"
+from = "        copy_rust_bins(&source, &app)?;"
+to = "        copy_rust_bins(&app, &app)?;"
+test = "probe_install_app_copies_rust_bins_from_the_source_checkout"
+
+[[mutation]]
+name = "a debug installer does not say it will install the release binaries"
+file = "src/setup.rs"
+from = "    if exe_is_checkout_debug_installer(&exe, checkout) {"
+to = "    if false && exe_is_checkout_debug_installer(&exe, checkout) {"
+test = "probe_debug_installer_warns_it_is_not_the_release_binary"
 
 [[mutation]]
 name = "install checks --port only after the tree exists"

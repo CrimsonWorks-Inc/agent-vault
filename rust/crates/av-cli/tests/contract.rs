@@ -247,10 +247,27 @@ fn setup_plan_names_one_program_and_does_not_sudo() {
     assert!(!line.contains("node"), "{line}");
 }
 
+fn release_checkout(root: &Path) -> PathBuf {
+    let checkout = root.join("checkout");
+    fs::create_dir_all(checkout.join("src")).unwrap();
+    fs::create_dir_all(checkout.join("bin")).unwrap();
+    fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
+    fs::write(checkout.join("package.json"), "{}").unwrap();
+    fs::write(
+        checkout.join("rust/target/release/agent-vault-daemon"),
+        b"daemon",
+    )
+    .unwrap();
+    checkout
+}
+
 #[test]
 fn installer_dry_run_names_the_boundary_without_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = release_checkout(tmp.path());
     let out = Command::new(bin("agent-vault-setup"))
-        .args(["install", "--dry-run"])
+        .args(["install", "--dry-run", "--from"])
+        .arg(&checkout)
         .env_remove("AGENT_VAULT_SETUP_DRY_ROOT")
         .output()
         .unwrap();
@@ -281,8 +298,14 @@ fn installer_refuses_a_symlinked_checkout_and_plans_a_clean_one() {
     let dirty = tempfile::tempdir().unwrap();
     fs::create_dir_all(dirty.path().join("src/store")).unwrap();
     fs::create_dir_all(dirty.path().join("bin")).unwrap();
+    fs::create_dir_all(dirty.path().join("rust/target/release")).unwrap();
     fs::write(dirty.path().join("package.json"), "{}").unwrap();
     fs::write(dirty.path().join("bin/agent-vault.js"), "// real").unwrap();
+    fs::write(
+        dirty.path().join("rust/target/release/agent-vault-daemon"),
+        b"daemon",
+    )
+    .unwrap();
     std::os::unix::fs::symlink(
         "/tmp/agent-owned.js",
         dirty.path().join("src/store/vault.js"),
@@ -304,9 +327,15 @@ fn installer_refuses_a_symlinked_checkout_and_plans_a_clean_one() {
     let clean = tempfile::tempdir().unwrap();
     fs::create_dir_all(clean.path().join("src/store")).unwrap();
     fs::create_dir_all(clean.path().join("bin")).unwrap();
+    fs::create_dir_all(clean.path().join("rust/target/release")).unwrap();
     fs::write(clean.path().join("package.json"), "{}").unwrap();
     fs::write(clean.path().join("bin/agent-vault.js"), "// real").unwrap();
     fs::write(clean.path().join("src/store/vault.js"), "// real").unwrap();
+    fs::write(
+        clean.path().join("rust/target/release/agent-vault-daemon"),
+        b"daemon",
+    )
+    .unwrap();
     let planned = Command::new(bin("agent-vault-setup"))
         .args(["install", "--dry-run", "--from"])
         .arg(clean.path())

@@ -92,13 +92,20 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn checkout_root() -> PathBuf {
+fn checkout_root() -> Result<PathBuf, CliError> {
     let mut starts = vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             starts.push(dir.to_path_buf());
         }
     }
+    resolve_checkout_root(&starts)
+}
+
+/// Walk `starts` upward for a directory that has `package.json`, `src` and
+/// `bin`. The installed tree has those too: it is the directory named `app`.
+/// Landing on it would print `app/rust/target/release`, which is not there.
+pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliError> {
     for start in starts {
         let mut dir = start.as_path();
         loop {
@@ -106,7 +113,14 @@ fn checkout_root() -> PathBuf {
                 && dir.join("src").is_dir()
                 && dir.join("bin").is_dir()
             {
-                return dir.to_path_buf();
+                if dir.file_name().is_some_and(|name| name == "app") {
+                    return Err(err_next(
+                        "run agent-vault upgrade from your checkout.",
+                        Exit::Usage,
+                        "This directory is the installed app, not a checkout.",
+                    ));
+                }
+                return Ok(dir.to_path_buf());
             }
             let Some(parent) = dir.parent() else { break };
             if parent == dir {
@@ -115,7 +129,7 @@ fn checkout_root() -> PathBuf {
             dir = parent;
         }
     }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn setup_bin() -> PathBuf {
@@ -414,7 +428,7 @@ pub async fn setup(ctx: &Context, args: &SetupArgs) -> Outcome {
     }
     if !dev {
         let installer = setup_bin();
-        let checkout = checkout_root();
+        let checkout = checkout_root()?;
         let mut cmd = format!(
             "sudo {} install --from {}",
             installer.display(),
@@ -604,7 +618,7 @@ pub async fn upgrade(ctx: &Context, args: &UpgradeArgs) -> Outcome {
         ));
     }
     let checkout_installer = setup_bin();
-    let checkout = checkout_root();
+    let checkout = checkout_root()?;
     let root_owned = PathBuf::from(SYSTEM_ROOT).join("app/bin/agent-vault-setup");
     let (cmd, installer, using_root) =
         format_upgrade_command(&root_owned, &checkout_installer, &checkout);
@@ -663,9 +677,9 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// The installed setup binary lives at `<root>/app/bin/agent-vault-setup`.
-/// Running it puts `current_exe` inside the app directory, and `install_app`
-/// refuses that even when `--from` names a real checkout.
+/// True when `path` is `<something>/app/bin/<file>`. The root-owned installer
+/// has this shape. It is safe to run when `--from` names a checkout outside
+/// `app`, because the installed bytes come from that checkout's release dir.
 pub(crate) fn installer_runs_inside_app(path: &Path) -> bool {
     let Some(bin_dir) = path.parent() else {
         return false;
@@ -677,24 +691,27 @@ pub(crate) fn installer_runs_inside_app(path: &Path) -> bool {
         && app.file_name().is_some_and(|name| name == "app")
 }
 
-/// Prefer a root-owned installer that supports `--from` only when running it
-/// would not land inside `app`. A Rust install's copy always does, so the
-/// command names the checkout's `rust/target/release/agent-vault-setup`.
+/// Prefer the root-owned installer when it understands `--from`. An agent
+/// cannot edit that binary. The checkout's release installer is only the
+/// bootstrap, for an installed copy that is missing or too old to take
+/// `--from`. A debug binary next to the CLI is not that installer: it would
+/// copy whatever is in `rust/target/release`, which may be stale.
 pub(crate) fn choose_upgrade_installer(
     root_owned: &Path,
     checkout_installer: &Path,
     checkout_root: &Path,
 ) -> (PathBuf, bool) {
     if let Ok(bytes) = std::fs::read(root_owned) {
-        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {
+        if installer_supports_from(&bytes) {
             return (root_owned.to_path_buf(), true);
         }
     }
-    if installer_runs_inside_app(checkout_installer) {
-        let release = checkout_root.join("rust/target/release/agent-vault-setup");
-        if !installer_runs_inside_app(&release) {
-            return (release, false);
-        }
+    let release = checkout_root.join("rust/target/release/agent-vault-setup");
+    if release.is_file() && !installer_runs_inside_app(&release) {
+        return (release, false);
+    }
+    if installer_runs_inside_app(checkout_installer) && !installer_runs_inside_app(&release) {
+        return (release, false);
     }
     (checkout_installer.to_path_buf(), false)
 }

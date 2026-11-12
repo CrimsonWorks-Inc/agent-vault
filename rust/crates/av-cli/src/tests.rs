@@ -399,8 +399,10 @@ fn upgrade_print_only_names_an_installer_and_source_install_app_accepts() {
     let app = tmp.path().join("app");
     let root_owned = app.join("bin/agent-vault-setup");
     std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
-    // The installed Rust installer contains the `--from` marker, which used
-    // to make upgrade print this path. install_app refuses it.
+    // The installed Rust installer contains the `--from` marker. It is the
+    // one upgrade prints: an agent cannot edit a root-owned binary, and
+    // install_app copies `<--from>/rust/target/release` rather than the
+    // directory the installer itself lives in.
     std::fs::write(&root_owned, b"#!/bin/sh\n--from\n").unwrap();
     let checkout = tmp.path().join("checkout");
     std::fs::create_dir_all(checkout.join("src")).unwrap();
@@ -410,23 +412,84 @@ fn upgrade_print_only_names_an_installer_and_source_install_app_accepts() {
     let release = checkout.join("rust/target/release/agent-vault-setup");
     std::fs::write(&release, b"checkout-setup").unwrap();
     let (cmd, installer, using_root) =
-        crate::commands::format_upgrade_command(&root_owned, &root_owned, &checkout);
-    assert!(!using_root, "the installed copy was selected: {cmd}");
+        crate::commands::format_upgrade_command(&root_owned, &release, &checkout);
+    assert!(
+        using_root,
+        "the root-owned installer was not selected: {cmd}"
+    );
     assert!(cmd.starts_with("sudo "), "{cmd}");
     assert!(cmd.contains(" install --from "), "{cmd}");
     let rest = cmd.strip_prefix("sudo ").unwrap();
     let (named_installer, named_source) = rest.split_once(" install --from ").unwrap();
-    assert_eq!(named_installer, release.display().to_string(), "{cmd}");
+    assert_eq!(named_installer, root_owned.display().to_string(), "{cmd}");
     assert_eq!(named_source, checkout.display().to_string(), "{cmd}");
-    assert_eq!(installer, release);
+    assert_eq!(installer, root_owned);
     assert!(
         crate::setup::install_app_accepts(&installer, &checkout, &app),
         "upgrade --print-only named an installer install_app refuses: {cmd}"
     );
     assert!(
-        !crate::setup::install_app_accepts(&root_owned, &checkout, &app),
-        "the installed copy must stay refused"
+        !crate::setup::install_app_accepts(&root_owned, &app, &app),
+        "installing the app over itself must stay refused"
     );
+}
+
+#[test]
+fn upgrade_bootstraps_from_the_checkout_release_installer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_owned = tmp.path().join("app/bin/agent-vault-setup");
+    std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
+    std::fs::write(&root_owned, b"old installer without the flag").unwrap();
+    let checkout = tmp.path().join("checkout");
+    let release = checkout.join("rust/target/release/agent-vault-setup");
+    std::fs::create_dir_all(release.parent().unwrap()).unwrap();
+    std::fs::write(&release, b"release").unwrap();
+    let debug = checkout.join("rust/target/debug/agent-vault-setup");
+    std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+    std::fs::write(&debug, b"debug").unwrap();
+    let (path, using_root) =
+        crate::commands::choose_upgrade_installer(&root_owned, &debug, &checkout);
+    assert!(!using_root, "a too-old install was treated as root-owned");
+    assert_eq!(path, release);
+}
+
+#[test]
+fn checkout_root_refuses_the_installed_app() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(app.join("bin")).unwrap();
+    std::fs::write(app.join("package.json"), "{}").unwrap();
+    let err = crate::commands::resolve_checkout_root(&[app.join("bin")]).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("run agent-vault upgrade from your checkout"),
+        "{text}"
+    );
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    let found = crate::commands::resolve_checkout_root(&[checkout.join("src")]).unwrap();
+    assert_eq!(found, checkout);
+}
+
+#[test]
+fn exe_outside_the_checkout_is_not_a_debug_installer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("checkout");
+    let release = checkout.join("rust/target/release/agent-vault-setup");
+    let debug = checkout.join("rust/target/debug/agent-vault-setup");
+    assert!(crate::setup::exe_is_checkout_debug_installer(
+        &debug, &checkout
+    ));
+    assert!(!crate::setup::exe_is_checkout_debug_installer(
+        &release, &checkout
+    ));
+    assert!(!crate::setup::exe_is_checkout_debug_installer(
+        &tmp.path().join("app/bin/agent-vault-setup"),
+        &checkout
+    ));
 }
 
 #[test]
@@ -448,7 +511,22 @@ fn copy_rust_bins_copies_the_checkout_release_not_the_running_binary() {
 
 #[test]
 fn install_dry_run_records_and_saves_state() {
-    let recorded = crate::setup::dry_run_recorded_install().expect("dry-run install");
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
+    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::write(
+        checkout.join("rust/target/release/agent-vault-daemon"),
+        b"daemon",
+    )
+    .unwrap();
+    let recorded = crate::setup::dry_run_recorded_install(&checkout).expect("dry-run install");
+    assert!(
+        !recorded.read_host_state,
+        "the ordering check read the host state.json"
+    );
     let app = recorded
         .created
         .iter()
@@ -478,6 +556,12 @@ fn install_dry_run_records_and_saves_state() {
         recorded.saved_ids.len(),
         recorded.created.len(),
         "save_state did not see the full record"
+    );
+    assert!(
+        recorded.service_step > 0 && recorded.save_step > recorded.service_step,
+        "save_state ran before install_service: save {} service {}",
+        recorded.save_step,
+        recorded.service_step
     );
 }
 
