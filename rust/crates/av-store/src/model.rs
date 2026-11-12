@@ -447,7 +447,10 @@ pub struct SessionRecord {
     pub max_expires_at: Option<String>,
     /// Idle extension step; null when infinite.
     pub idle_timeout_ms: Option<u64>,
-    /// R3: never expires (only with `expires_at` null).
+    /// R3: never expires (only with `expires_at` null). Sessions written
+    /// before R3 have no such field; JS reads them as not infinite
+    /// (`s.infinite === true`).
+    #[serde(default)]
     pub infinite: bool,
     /// C3 elevations it was created with (`approval_auto_writes`,
     /// `infinite`).

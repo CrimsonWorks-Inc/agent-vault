@@ -1061,3 +1061,16 @@ file = "src/migrate.rs"
 from = '''    files.iter().filter(|f| !same(f, &kept)).cloned().collect()'''
 to = '''    files.to_vec()'''
 test = "tests::migrate::deleting_every_file"
+
+# Found migrating the owner's real vault (2026-11-12): sessions written before
+# R3 have no `infinite` field, and migrate refused the whole vault.
+
+[[mutation]]
+name = 'a session without infinite (written before R3) fails the migration'
+file = "src/model.rs"
+from = '''    /// (`s.infinite === true`).
+    #[serde(default)]
+    pub infinite: bool,'''
+to = '''    /// (`s.infinite === true`).
+    pub infinite: bool,'''
+test = "tests::migrate::a_session_written_before_infinite"
