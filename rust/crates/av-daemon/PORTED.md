@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 604 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **492 not yet ported**.
+Totals: 1207 JS tests: 613 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **483 not yet ported**.
 
 ## Mutation check
 
@@ -59,15 +59,15 @@ the vault on every call instead of caching an audit handle.
 | carrier.test.js | the AV-Session carrier behaves the same way | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
 | carrier.test.js | a session token smuggled into an unrelated header is dropped too | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
 | carrier.test.js | headers that carry no token are forwarded untouched | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
-| connectors-health.test.js | a GitHub expiry header becomes observed_expires_at | not yet ported |
-| connectors-health.test.js | ISO 8601 and RFC 1123 expiries parse, and the header name is case-insensitive | not yet ported |
-| connectors-health.test.js | an unparseable expiry is ignored, and so is a calendar date that is not a date | not yet ported |
-| connectors-health.test.js | a rate-limit header that is not a non-negative integer is ignored | not yet ported |
-| connectors-health.test.js | an ordinary Date header is not treated as an expiry | not yet ported |
-| connectors-health.test.js | a profile with no health block yields nothing, even when GitHub headers are present | not yet ported |
-| connectors-health.test.js | no profile carries a built-in SPKI pin | not yet ported |
-| connectors-health.test.js | header arrays and a Headers-like get() are read the same way | not yet ported |
-| connectors-health.test.js | V-H2: an ISO expiry with an offset is a real calendar date, shifted by the offset | not yet ported |
+| connectors-health.test.js | a GitHub expiry header becomes observed_expires_at | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
+| connectors-health.test.js | ISO 8601 and RFC 1123 expiries parse, and the header name is case-insensitive | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
+| connectors-health.test.js | an unparseable expiry is ignored, and so is a calendar date that is not a date | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
+| connectors-health.test.js | a rate-limit header that is not a non-negative integer is ignored | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
+| connectors-health.test.js | an ordinary Date header is not treated as an expiry | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
+| connectors-health.test.js | a profile with no health block yields nothing, even when GitHub headers are present | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
+| connectors-health.test.js | no profile carries a built-in SPKI pin | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
+| connectors-health.test.js | header arrays and a Headers-like get() are read the same way | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
+| connectors-health.test.js | V-H2: an ISO expiry with an offset is a real calendar date, shifted by the offset | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
 | connectors-pinning.test.js | spkiOf is the SHA-256 of the SubjectPublicKeyInfo openssl emits | not yet ported |
 | connectors-pinning.test.js | a trusted chain with a leaf, intermediate or root pin is sent, and the response comes back | not yet ported |
 | connectors-pinning.test.js | a trusted chain with a mismatched pin sends nothing and rejects AV_PIN_MISMATCH | not yet ported |
