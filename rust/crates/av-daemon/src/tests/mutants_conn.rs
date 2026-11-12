@@ -297,6 +297,13 @@ impl Upstream for Odd {
         Box::pin(async move {
             let (tx, rx) = tokio::sync::mpsc::channel(4);
             match self.mode {
+                "pin" => {
+                    return Err(UpstreamError {
+                        code: "AV_PIN_MISMATCH".into(),
+                        message: "certificate pin mismatch".into(),
+                        ..Default::default()
+                    });
+                }
                 "failwrite" => {
                     // Any later write of a credential row now fails.
                     let c = rusqlite::Connection::open(self.dir.join("vault.db")).unwrap();
@@ -376,4 +383,20 @@ async fn a_probe_gives_up_on_a_body_that_never_ends() {
     .await
     .expect("the drain is bounded in time");
     assert!(r.is_ok(), "{r:?}");
+}
+
+/// 'a probe refusal (a pin mismatch) is answered as an internal error (F12)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_pin_mismatch_is_answered_as_one() {
+    let (w, _) = gh().await;
+    let up = Arc::new(Odd {
+        dir: w._dir.path().to_path_buf(),
+        mode: "pin",
+        sent: Arc::default(),
+    });
+    let e = crate::connectors::probe::run_probe(&w.shared, "gh".into(), Some(up))
+        .await
+        .expect_err("refused");
+    assert_eq!(e.code, crate::err::C::PinMismatch, "{e:?}");
+    assert_eq!(e.extra.rule.as_deref(), Some("spki_pin"));
 }
