@@ -120,3 +120,45 @@ async fn a_minimal_webhook_carries_no_headline() {
     assert!(body.contains("\"waiting\":1"), "{body}");
     assert!(!body.contains("secret-looking-path"), "{body}");
 }
+
+/// control-api-notify.test.js:130: events back to back, with no await
+/// between them, still make one POST per interval; the first takes the
+/// slot before the second can look at it.
+#[tokio::test(flavor = "multi_thread")]
+async fn events_back_to_back_make_one_post() {
+    let posts: Posts = Arc::new(Mutex::new(Vec::new()));
+    let p2 = posts.clone();
+    let send: crate::notify::Sender = Arc::new(move |_url: String, body: String| {
+        p2.lock().unwrap().push(body);
+        Box::pin(async move { Ok(204) })
+    });
+    let w = World::seeded_with(
+        json!({"approval": "each"}),
+        NotifierOptions { send: Some(send) },
+    )
+    .await;
+    // Something waiting before the webhook exists, so nothing is posted yet.
+    hold(&w, "/a").await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/notify",
+            json!({"webhook_url": "https://hooks.example.test/x", "detail": "minimal"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(posts.lock().unwrap().is_empty());
+    let n = w.daemon.notifier.clone();
+    w.shared
+        .run(move |core| {
+            let event = core.dm_waiting_items().remove(0);
+            for _ in 0..3 {
+                n.pending(core, &event);
+            }
+        })
+        .await
+        .unwrap();
+    posted(&posts, 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(posts.lock().unwrap().len(), 1, "one post per interval");
+}

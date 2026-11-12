@@ -159,6 +159,14 @@ struct Inner {
     closed: bool,
 }
 
+/// A webhook POST whose interval slot is already taken.
+struct Pending {
+    url: String,
+    host: String,
+    body: String,
+    count: usize,
+}
+
 /// The pending-item notifier. Ports `class Notifier`.
 pub struct Notifier {
     inner: Mutex<Inner>,
@@ -226,11 +234,13 @@ impl Notifier {
                 .subscribers
                 .retain(|s| s.send(frame.clone()).is_ok());
         }
-        let configured = core.vault.notify_config().ok().flatten().is_some();
-        self.schedule(configured);
+        self.schedule(core);
     }
 
-    fn schedule(self: &Arc<Self>, configured: bool) {
+    /// `#scheduleWebhook()`: at most one POST per interval. Runs under the
+    /// lock, so the slot is taken before the next event can look at it.
+    fn schedule(self: &Arc<Self>, core: &mut Core) {
+        let configured = core.vault.notify_config().ok().flatten().is_some();
         let wait = {
             let mut i = self.inner();
             if i.timer || !configured {
@@ -242,20 +252,66 @@ impl Notifier {
             }
             wait
         };
-        let me = Arc::clone(self);
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            if wait > 0 {
+                self.inner().timer = false;
+            }
             return;
         };
-        rt.spawn(async move {
-            if wait > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
-                me.inner().timer = false;
+        let me = Arc::clone(self);
+        if wait == 0 {
+            if let Some(send) = self.take_slot(core) {
+                rt.spawn(async move { me.send_webhook(send).await });
             }
-            me.send_webhook().await;
+            return;
+        }
+        rt.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
+            let Some(shared) = me
+                .shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .upgrade()
+            else {
+                me.inner().timer = false;
+                return;
+            };
+            let m2 = Arc::clone(&me);
+            let send = shared
+                .run(move |core| {
+                    m2.inner().timer = false;
+                    m2.take_slot(core)
+                })
+                .await
+                .ok()
+                .flatten();
+            if let Some(send) = send {
+                me.send_webhook(send).await;
+            }
         });
     }
 
-    async fn send_webhook(self: &Arc<Self>) {
+    /// The synchronous half of `#sendWebhook()`: the hook and what is
+    /// waiting, with `lastSent` reserved at once. Runs under the lock.
+    fn take_slot(&self, core: &mut Core) -> Option<Pending> {
+        let (url, host, detail) = webhook_of(core)?;
+        if self.inner().closed {
+            return None;
+        }
+        let items = Notifier::waiting(core);
+        if items.is_empty() {
+            return None;
+        }
+        self.inner().last_sent = now_ms();
+        Some(Pending {
+            url,
+            host,
+            body: webhook_payload(&items, &detail, "pending"),
+            count: items.len(),
+        })
+    }
+
+    async fn send_webhook(self: &Arc<Self>, p: Pending) {
         let Some(shared) = self
             .shared
             .lock()
@@ -264,24 +320,7 @@ impl Notifier {
         else {
             return;
         };
-        let got = shared
-            .run(|core| {
-                let hook = webhook_of(core)?;
-                let items = Notifier::waiting(core);
-                Some((hook, items))
-            })
-            .await
-            .ok()
-            .flatten();
-        let Some(((url, host, detail), items)) = got else {
-            return;
-        };
-        if self.inner().closed || items.is_empty() {
-            return;
-        }
-        self.inner().last_sent = now_ms();
-        let body = webhook_payload(&items, &detail, "pending");
-        let _ = self.post(&shared, url, host, body, items.len()).await;
+        let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
     }
 
     async fn post(

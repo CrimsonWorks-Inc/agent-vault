@@ -2849,3 +2849,53 @@ name = 'an untrusted chain is named by the order of the appended certificates, n
 file = "src/connectors/pinning.rs"
 from = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| sub == issuer));'''
 to = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| !sub.is_empty() || sub == issuer));'''
+
+# control-api-notify.test.js:130: the interval slot is taken synchronously,
+# before the next event can look at it.
+
+[[mutation]]
+name = 'the webhook slot is reserved only once the POST task runs, so events back to back each post'
+file = "src/notify.rs"
+from = '''
+        self.inner().last_sent = now_ms();
+        Some(Pending {
+            url,
+            host,
+            body: webhook_payload(&items, &detail, "pending"),
+            count: items.len(),
+        })
+    }
+
+    async fn send_webhook(self: &Arc<Self>, p: Pending) {
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
+'''
+to = '''
+        Some(Pending {
+            url,
+            host,
+            body: webhook_payload(&items, &detail, "pending"),
+            count: items.len(),
+        })
+    }
+
+    async fn send_webhook(self: &Arc<Self>, p: Pending) {
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        tokio::task::yield_now().await;
+        self.inner().last_sent = now_ms();
+        let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
+'''
