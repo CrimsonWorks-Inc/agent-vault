@@ -271,6 +271,11 @@ impl Core {
         Ok(json!({"request_id": record.id, "decision": decision, "cred": cred, "proposed": shape_of(&record.proposal)["fields"]}))
     }
 
+    /// How many op-gate challenges are open (tests).
+    pub fn dm_open_challenges(&self) -> usize {
+        self.dm.op_challenges.len()
+    }
+
     /// `#throttlePassphrase()`.
     fn dm_throttle(&self) -> R<()> {
         let now = now_ms();
