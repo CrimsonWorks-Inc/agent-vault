@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 627 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **469 not yet ported**.
+Totals: 1207 JS tests: 648 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **448 not yet ported**.
 
 ## Mutation check
 
@@ -68,34 +68,34 @@ the vault on every call instead of caching an audit handle.
 | connectors-health.test.js | no profile carries a built-in SPKI pin | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
 | connectors-health.test.js | header arrays and a Headers-like get() are read the same way | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
 | connectors-health.test.js | V-H2: an ISO expiry with an offset is a real calendar date, shifted by the offset | `ported_connectors_health::provider_health_dates_rates_scopes_and_offsets_are_strict_with_ordinary_controls` |
-| connectors-pinning.test.js | spkiOf is the SHA-256 of the SubjectPublicKeyInfo openssl emits | not yet ported |
-| connectors-pinning.test.js | a trusted chain with a leaf, intermediate or root pin is sent, and the response comes back | not yet ported |
-| connectors-pinning.test.js | a trusted chain with a mismatched pin sends nothing and rejects AV_PIN_MISMATCH | not yet ported |
-| connectors-pinning.test.js | a rotated leaf still matches a backup pin on the intermediate | not yet ported |
-| connectors-pinning.test.js | only non-leaf pins on a chain the trust store does not accept: refused with Node's code, and nothing is sent | not yet ported |
-| connectors-pinning.test.js | V-L1: an exact leaf pin stands in for CA trust, for a self-signed leaf and an untrusted chain | not yet ported |
-| connectors-pinning.test.js | V-L2: a pinned self-signed leaf for another host name is refused, and nothing is sent | not yet ported |
-| connectors-pinning.test.js | V-L3: a self-signed leaf whose pin is not on the list is refused, and nothing is sent | not yet ported |
+| connectors-pinning.test.js | spkiOf is the SHA-256 of the SubjectPublicKeyInfo openssl emits | `ported_connectors_pinning::spki_hash_matches_independent_key_der_and_host_header_identity_table` |
+| connectors-pinning.test.js | a trusted chain with a leaf, intermediate or root pin is sent, and the response comes back | `ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
+| connectors-pinning.test.js | a trusted chain with a mismatched pin sends nothing and rejects AV_PIN_MISMATCH | `ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
+| connectors-pinning.test.js | a rotated leaf still matches a backup pin on the intermediate | `ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
+| connectors-pinning.test.js | only non-leaf pins on a chain the trust store does not accept: refused with Node's code, and nothing is sent | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
+| connectors-pinning.test.js | V-L1: an exact leaf pin stands in for CA trust, for a self-signed leaf and an untrusted chain | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http; ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates; ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
+| connectors-pinning.test.js | V-L2: a pinned self-signed leaf for another host name is refused, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
+| connectors-pinning.test.js | V-L3: a self-signed leaf whose pin is not on the list is refused, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
 | connectors-pinning.test.js | V-L4: a leaf copying the pinned intermediate's key cannot finish a handshake, and the handshake leaf is the one checked | not yet ported |
-| connectors-pinning.test.js | V-L5: a pinned self-signed leaf out of date is refused with AV_PIN_MISMATCH, and nothing is sent | not yet ported |
-| connectors-pinning.test.js | a pinned, trusted certificate for another host name is refused, and nothing is sent | not yet ported |
-| connectors-pinning.test.js | V-P1: a forged leaf plus the real intermediate does not satisfy an intermediate pin | not yet ported |
-| connectors-pinning.test.js | V-P2: a forged leaf plus the real intermediate and root does not satisfy a root pin | not yet ported |
-| connectors-pinning.test.js | V-P4: an unrelated leaf with the real intermediate appended does not satisfy an intermediate pin | not yet ported |
+| connectors-pinning.test.js | V-L5: a pinned self-signed leaf out of date is refused with AV_PIN_MISMATCH, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
+| connectors-pinning.test.js | a pinned, trusted certificate for another host name is refused, and nothing is sent | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
+| connectors-pinning.test.js | V-P1: a forged leaf plus the real intermediate does not satisfy an intermediate pin | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
+| connectors-pinning.test.js | V-P2: a forged leaf plus the real intermediate and root does not satisfy a root pin | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
+| connectors-pinning.test.js | V-P4: an unrelated leaf with the real intermediate appended does not satisfy an intermediate pin | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
 | connectors-pinning.test.js | verifiedChainPins counts an issuer only when its key signed the certificate below it | not yet ported |
 | connectors-pinning.test.js | V-P5: pins that are not a list of pins are refused before a connection, never read as no pins | `tests::guards::hardening_a_malformed_pin_list_is_refused_before_connecting_and_plaintext_with_pins_is_refused` |
 | connectors-pinning.test.js | V-P6: a list with a malformed entry is refused before a connection | `tests::guards::hardening_a_malformed_pin_list_is_refused_before_connecting_and_plaintext_with_pins_is_refused` |
-| connectors-pinning.test.js | V-P7 and V-P9: each pinned request makes its own handshake, and a redirect is returned, not followed | not yet ported |
-| connectors-pinning.test.js | no pins (null, undefined, []) keeps Node verification unchanged | not yet ported |
-| connectors-pinning.test.js | pins on an http URL are refused before a connection, with reason plaintext | not yet ported |
-| connectors-pinning.test.js | fetchChainPins returns the presented chain and sends no request | not yet ported |
+| connectors-pinning.test.js | V-P7 and V-P9: each pinned request makes its own handshake, and a redirect is returned, not followed | `ported_connectors_pinning::fresh_tls_handshake_per_request_and_redirect_is_returned_without_following` |
+| connectors-pinning.test.js | no pins (null, undefined, []) keeps Node verification unchanged | `ported_connectors_pinning::absent_or_empty_pins_preserve_plain_http_method_path_body_and_response; ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http; ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates; ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
+| connectors-pinning.test.js | pins on an http URL are refused before a connection, with reason plaintext | `ported_connectors_pinning::malformed_pin_tables_and_plaintext_pins_never_connect_with_valid_tls_control` |
+| connectors-pinning.test.js | fetchChainPins returns the presented chain and sends no request | `ported_connectors_pinning::fetch_chain_returns_leaf_and_intermediate_and_never_sends_http` |
 | connectors-pinning.test.js | chainPins de-duplicates and stops when the issuer points at itself | not yet ported |
-| connectors-pinning.test.js | profiles ship no built-in pins | not yet ported |
-| connectors-pinning.test.js | F-1: a Host header the certificate names does not let a leaf, intermediate or root pin accept a server that does not name the URL host | not yet ported |
+| connectors-pinning.test.js | profiles ship no built-in pins | `ported_connectors_health::provider_health_declared_headers_only_typed_repeats_and_no_embedded_profile_pins` |
+| connectors-pinning.test.js | F-1: a Host header the certificate names does not let a leaf, intermediate or root pin accept a server that does not name the URL host | `ported_connectors_pinning::host_named_by_foreign_certificate_never_overrides_url_identity` |
 | connectors-pinning.test.js | F-1: the TLS server name is the URL host, and a Host header naming another host is refused before a connection, pinned or not | not yet ported |
 | connectors-pinning.test.js | F-1: a Host header with another port, no port, another case of another name, or a list is refused | not yet ported |
-| connectors-pinning.test.js | F-1: hostHeaderMatches allows only the URL host, any case, with or without the scheme's default port | not yet ported |
-| connectors-pinning.test.js | F-1 controls: a matching or absent Host header is delivered with and without pins | not yet ported |
+| connectors-pinning.test.js | F-1: hostHeaderMatches allows only the URL host, any case, with or without the scheme's default port | `ported_connectors_pinning::spki_hash_matches_independent_key_der_and_host_header_identity_table` |
+| connectors-pinning.test.js | F-1 controls: a matching or absent Host header is delivered with and without pins | `ported_connectors_pinning::matching_or_absent_host_is_sent_and_sni_is_only_the_url_dns_name` |
 | connectors-pinning.test.js | Round 5 F-1: a getter or a Proxy cannot pass the Host check and then put another host on the wire | not yet ported |
 | connectors-pinning.test.js | Round 5 F-1: headers that are not names with string values are refused before a connection | not yet ported |
 | connectors-pinning.test.js | Round 5 F-2: an IPv6 URL connects, the certificate is checked against the IP SAN, and pins apply | not yet ported |
