@@ -590,3 +590,195 @@ fn read_filters_by_kind_session_since_and_request_and_keeps_the_newest() {
     assert_eq!(two.len(), 2);
     assert_eq!(two[1].seq, all.last().unwrap().seq);
 }
+
+// ------------------- fix-control-audit and audit-content, store-level parts
+
+fn audit_fixture() -> Fx {
+    let mut fx = fresh();
+    for i in 0..5 {
+        fx.vault
+            .audit_mut()
+            .unwrap()
+            .write("test.event", json!({ "n": i }).as_object().unwrap().clone())
+            .unwrap();
+    }
+    fx.vault.lock().unwrap();
+    fx
+}
+
+fn reopen(fx: &Fx) -> Vault {
+    let mut v = Vault::open(fx.dir.path()).unwrap();
+    v.unlock_with(&UnlockMaterial::default()).unwrap();
+    v
+}
+
+#[test]
+fn an_untouched_log_reopens_and_verifies_clean() {
+    let fx = audit_fixture();
+    let v = reopen(&fx);
+    assert!(v.audit().unwrap().verify().unwrap().ok);
+}
+
+#[test]
+fn a_brand_new_vault_verifies_clean() {
+    let fx = fresh();
+    let r = fx.vault.audit().unwrap().verify().unwrap();
+    assert!(r.ok, "{:?}", r.reason);
+    assert_eq!(r.note, None);
+}
+
+#[test]
+fn emptying_the_log_is_not_a_fresh_start() {
+    // "deleting the log is not a fresh start": the table emptied, the anchor
+    // left in place.
+    let fx = audit_fixture();
+    unprotect(&fx.vault);
+    exec(&fx.vault, "DELETE FROM audit", &[]);
+    let v = reopen(&fx);
+    let t = v.audit().unwrap().truncation().cloned().unwrap();
+    assert_eq!(t.found_seq, 0);
+    assert!(t.expected_seq > 0);
+    assert!(!v.audit().unwrap().verify().unwrap().ok);
+}
+
+#[test]
+fn emptying_the_log_and_deleting_its_anchor_together_is_not_a_fresh_start() {
+    let fx = audit_fixture();
+    unprotect(&fx.vault);
+    exec(&fx.vault, "DELETE FROM audit", &[]);
+    std::fs::remove_file(fx.dir.path().join("vault.db.head")).unwrap();
+    let v = reopen(&fx);
+    let m = v.audit().unwrap().anchor_missing().cloned().unwrap();
+    assert_eq!((m.found_seq, m.was_anchored), (0, true));
+    assert!(!v.audit().unwrap().verify().unwrap().ok);
+}
+
+#[test]
+fn a_log_emptied_while_the_vault_is_open_is_reported_not_passed() {
+    let mut fx = fresh();
+    busy(&mut fx);
+    unprotect(&fx.vault);
+    exec(&fx.vault, "DELETE FROM audit", &[]);
+    let r = fx.vault.audit().unwrap().verify().unwrap();
+    assert!(!r.ok);
+    assert!(r.reason.unwrap().contains("removed from the end"));
+}
+
+#[test]
+fn a_float_in_caller_fields_is_recorded_not_thrown_after_the_fact() {
+    let mut fx = fresh();
+    let rec = fx
+        .vault
+        .audit_mut()
+        .unwrap()
+        .write("test.float", json!({ "reason": 1.5, "nested": [2.25, 3], "whole": 4.0 }).as_object().unwrap().clone())
+        .unwrap();
+    assert_eq!(rec.fields["reason"], json!("1.5"));
+    assert_eq!(rec.fields["nested"], json!(["2.25", 3]));
+    assert_eq!(rec.fields["whole"], json!(4));
+    assert!(fx.vault.audit().unwrap().verify().unwrap().ok);
+}
+
+#[test]
+fn ordinary_records_checkpoints_included_are_all_recognised_as_records() {
+    let mut fx = fresh();
+    for i in 0..1005 {
+        fx.vault
+            .audit_mut()
+            .unwrap()
+            .write("test.event", json!({ "n": i }).as_object().unwrap().clone())
+            .unwrap();
+    }
+    assert_eq!(records(&fx.vault, "checkpoint").len(), 1);
+    fx.vault.lock().unwrap();
+    let v = reopen(&fx);
+    let a = v.audit().unwrap();
+    assert!(a.corruption().is_none());
+    assert!(a.verify().unwrap().ok);
+}
+
+#[test]
+fn a_record_shaped_wrongly_is_unreadable_even_when_it_parses() {
+    // isRecord: parsing is not enough; a hash that is not 64 hex characters
+    // is not a record.
+    let mut fx = fresh();
+    busy(&mut fx);
+    fx.vault.lock().unwrap();
+    unprotect(&fx.vault);
+    exec(
+        &fx.vault,
+        "UPDATE audit SET record = '{\"seq\":2,\"ts\":\"x\",\"kind\":\"k\",\"prev_hash\":\"zz\",\"hash\":\"zz\"}' WHERE seq = 2",
+        &[],
+    );
+    let v = reopen(&fx);
+    assert_eq!(v.audit().unwrap().corruption().map(|c| c.lines.clone()), Some(vec![2]));
+}
+
+#[test]
+fn the_chain_verifies_and_editing_a_record_breaks_it() {
+    let mut fx = fresh();
+    busy(&mut fx);
+    assert!(fx.vault.audit().unwrap().verify().unwrap().ok);
+    unprotect(&fx.vault);
+    let row = log_rows(&fx.vault).into_iter().find(|r| r.seq == 3).unwrap();
+    let mut edited = serde_json::to_value(&row).unwrap();
+    edited["kind"] = json!("nothing.to.see");
+    exec(&fx.vault, "UPDATE audit SET record = ?1 WHERE seq = 3", &[&edited.to_string()]);
+    let r = fx.vault.audit().unwrap().verify().unwrap();
+    assert!(!r.ok);
+    assert_eq!(r.broken_at, Some(3));
+}
+
+#[test]
+fn truncating_and_then_deleting_the_anchor_does_not_launder_the_truncation() {
+    let mut fx = fresh();
+    for i in 0..10 {
+        fx.vault.audit_mut().unwrap().write("test.event", json!({ "n": i }).as_object().unwrap().clone()).unwrap();
+    }
+    assert!(fx.vault.audit().unwrap().verify().unwrap().ok);
+    let mut v = fx.vault;
+    for round in 1..=3 {
+        unprotect_if_needed(&v);
+        let max: i64 = v.conn().query_row("SELECT max(seq) FROM audit", [], |r| r.get(0)).unwrap();
+        exec(&v, "DELETE FROM audit WHERE seq > ?1", &[&(max - 3)]);
+        let _ = std::fs::remove_file(fx.dir.path().join("vault.db.head"));
+        drop(v);
+        v = Vault::open(fx.dir.path()).unwrap();
+        v.unlock_with(&UnlockMaterial::default()).unwrap();
+        let r = v.audit().unwrap().verify().unwrap();
+        assert!(!r.ok, "round {round}: the truncation was laundered");
+        let reason = r.reason.unwrap();
+        assert!(reason.contains("anchor was removed") || reason.contains("removed from the end"), "{reason}");
+    }
+}
+
+fn unprotect_if_needed(v: &Vault) {
+    let n: i64 = v
+        .conn()
+        .query_row("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'audit_no_%'", [], |r| r.get(0))
+        .unwrap();
+    if n > 0 {
+        unprotect(v);
+    }
+}
+
+#[test]
+fn a_vault_upgraded_from_a_build_without_anchors_is_not_accused_of_tampering() {
+    let mut fx = fresh();
+    for i in 0..4 {
+        fx.vault.audit_mut().unwrap().write("test.event", json!({ "n": i }).as_object().unwrap().clone()).unwrap();
+    }
+    // Exactly what a pre-anchor build left behind: a log, no anchor, no stamp.
+    exec(&fx.vault, "DELETE FROM kv WHERE key = 'audit_anchored'", &[]);
+    std::fs::remove_file(fx.dir.path().join("vault.db.head")).unwrap();
+    let upgraded = reopen(&fx);
+    let r = upgraded.audit().unwrap().verify().unwrap();
+    assert!(r.ok, "an upgrade must not read as tampering: {:?}", r.reason);
+    assert!(r.unanchored_before.is_some());
+    assert!(r.note.unwrap().contains("nothing proves how many records preceded"));
+    assert!(!records(&upgraded, "audit.anchor_missing").is_empty());
+    drop(upgraded);
+    std::fs::remove_file(fx.dir.path().join("vault.db.head")).unwrap();
+    let after = reopen(&fx);
+    assert!(!after.audit().unwrap().verify().unwrap().ok, "once anchored, a later removal must be reported");
+}
