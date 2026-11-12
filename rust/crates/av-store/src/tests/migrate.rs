@@ -634,3 +634,38 @@ fn migrate_never_writes_vault_db_in_place_the_finished_file_is_renamed() {
     assert!(js.dir.join("vault.db").exists());
     assert!(!temp.exists());
 }
+
+#[test]
+fn daemon_socket_candidates_include_the_linux_install_and_av_run_dir() {
+    use std::ffi::OsStr;
+    let linux = daemon_socket_candidates(Path::new("/var/lib/agent-vault"), None);
+    assert!(
+        linux
+            .iter()
+            .any(|path| path == Path::new("/run/agent-vault/control.sock")),
+        "{linux:?}"
+    );
+    let dev = daemon_socket_candidates(Path::new("/tmp/vault"), None);
+    assert!(
+        !dev.iter()
+            .any(|path| path == Path::new("/run/agent-vault/control.sock")),
+        "{dev:?}"
+    );
+    let custom = daemon_socket_candidates(Path::new("/tmp/vault"), Some(OsStr::new("/tmp/run")));
+    assert!(
+        custom
+            .iter()
+            .any(|path| path == Path::new("/tmp/run/control.sock")),
+        "{custom:?}"
+    );
+    let empty = daemon_socket_candidates(Path::new("/tmp/vault"), Some(OsStr::new("")));
+    assert_eq!(empty.len(), dev.len(), "{empty:?}");
+}
+
+#[test]
+fn a_garbage_vault_db_is_not_a_completed_migration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("vault.db");
+    std::fs::write(&db, b"not a database").unwrap();
+    assert!(!is_completed_migration(&db));
+}

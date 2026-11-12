@@ -7,6 +7,7 @@
 //! `src/store/vault.js`, `src/store/crypto.js` and `src/store/audit.js`.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use av_core::secret::{ExposeSecret, Key32, SecretString};
@@ -159,17 +160,44 @@ pub fn preflight(opts: &MigrateOptions) -> Result<(), MigrateError> {
 }
 
 /// Whether a JS daemon is serving the vault at `dir` (its control socket
-/// answers). No JS source; mirrors how `src/cli/index.js` finds the socket.
+/// answers). No JS source; mirrors how `src/cli/index.js` finds the socket,
+/// plus the Linux system socket and `AV_RUN_DIR`.
 pub fn js_daemon_running(dir: &Path) -> bool {
-    // A dev vault keeps its socket in the vault dir; the installed one keeps
-    // it in `<root>/run` beside `<root>/vault`.
+    js_daemon_running_with(dir, std::env::var_os("AV_RUN_DIR").as_deref())
+}
+
+/// [`js_daemon_running`] with an explicit `AV_RUN_DIR`, so a test can name a
+/// socket without changing the process environment.
+pub fn js_daemon_running_with(dir: &Path, av_run_dir: Option<&OsStr>) -> bool {
+    daemon_socket_candidates(dir, av_run_dir)
+        .iter()
+        .any(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
+}
+
+/// Every control socket a migrate of `dir` must treat as the live daemon.
+/// A dev vault keeps its socket in the vault dir; the macOS install keeps it
+/// in `<root>/run` beside `<root>/vault`; the Linux install keeps the vault
+/// at `/var/lib/agent-vault` and the socket at `/run/agent-vault/control.sock`.
+/// `AV_RUN_DIR` is the directory a daemon was started with.
+pub fn daemon_socket_candidates(dir: &Path, av_run_dir: Option<&OsStr>) -> Vec<PathBuf> {
     let mut candidates = vec![dir.join("control.sock")];
     if let Some(root) = dir.parent() {
         candidates.push(root.join("run").join("control.sock"));
     }
+    if dir == Path::new("/var/lib/agent-vault") {
+        candidates.push(PathBuf::from("/run/agent-vault/control.sock"));
+    }
+    if let Some(run) = av_run_dir.filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(run).join("control.sock"));
+    }
     candidates
-        .iter()
-        .any(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
+}
+
+/// Whether `path` is a finished migration: it opens read-only, passes
+/// `quick_check`, has this build's schema, and its audit log holds
+/// `vault.migrated`. Anything else that merely exists is not migrated.
+pub fn is_completed_migration(path: &Path) -> bool {
+    completed_migration(path)
 }
 
 fn broken(at: impl Into<String>, reason: impl Into<String>) -> MigrateError {
