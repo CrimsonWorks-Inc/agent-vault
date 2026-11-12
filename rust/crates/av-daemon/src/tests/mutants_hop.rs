@@ -351,3 +351,87 @@ async fn a_pinned_request_refusal_is_a_refunded_policy_denial() {
     assert_eq!(e.extra.rule.as_deref(), Some("host_mismatch"));
     assert_eq!(used(&w).await, before, "the use was refunded");
 }
+
+/// integrate2-seams.test.js:287, 'a grant layer with no limit is bounded by
+/// the session layer, hops charged': each hop is checked against the budget
+/// the request and the earlier hops already spent, so a session budget of 3
+/// with a grant that names no limit makes 3 upstream requests, not
+/// `redirects.max`.
+#[tokio::test(flavor = "multi_thread")]
+async fn redirect_hops_stop_at_the_session_budget_the_request_already_spent() {
+    use av_store::vault::{CreateGrantOptions, CreateSessionOptions, IssueOptions};
+    let mut w = World::seeded(json!({})).await;
+    w.up.answer(Box::new(|_| {
+        let mut x = json_response(302, &json!({}));
+        x.headers.push(("location".into(), "/next".into()));
+        Ok(x)
+    }));
+    let sid = w.session_id.clone();
+    let (token, ph, gid) = w
+        .shared
+        .run(move |c| {
+            let seeded = c
+                .vault
+                .grants()
+                .unwrap()
+                .into_iter()
+                .find(|g| g.session_id == sid)
+                .unwrap();
+            let mut policy = serde_json::to_value(&seeded.policy).unwrap();
+            policy["budget"] = json!({"unit": "requests"});
+            policy["redirects"] = json!({"max": 5});
+            policy["approval"] = json!("auto");
+            let s = c
+                .vault
+                .create_session(CreateSessionOptions {
+                    policy: serde_json::from_value(
+                        json!({"budget": {"unit": "requests", "limit": 3}}),
+                    )
+                    .unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let g = c
+                .vault
+                .create_grant(CreateGrantOptions {
+                    session_id: s.session.id,
+                    credential_id: seeded.credential_id.clone(),
+                    policy: serde_json::from_value(policy).unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let p = c
+                .vault
+                .issue_placeholder(IssueOptions {
+                    grant_id: g.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+            use av_core::secret::ExposeSecret;
+            (s.token.expose_secret().to_string(), p.placeholder, g.id)
+        })
+        .await
+        .unwrap();
+    w.token = token;
+    let r = w
+        .send(
+            "GET",
+            "/start",
+            vec![("authorization".into(), format!("Bearer {ph}"))],
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 302, "{:?}", r.error);
+    assert_eq!(r.header("av-redirect-stopped"), Some("budget"));
+    assert_eq!(
+        w.up.hits.lock().unwrap().len(),
+        3,
+        "the request and two hops"
+    );
+    let used = w
+        .shared
+        .run(move |c| c.vault.grant(&gid).unwrap().unwrap().budget_used)
+        .await
+        .unwrap();
+    assert_eq!(used, 3);
+}

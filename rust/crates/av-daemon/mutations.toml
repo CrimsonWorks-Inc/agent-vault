@@ -2908,3 +2908,12 @@ name = 'a daemon started by hand may leave a core file'
 file = "src/lib.rs"
 from = '''    if let Err(e) = peercred::disable_core_dumps() {'''
 to = '''    if let Err(e) = Ok::<(), std::io::Error>(()) {'''
+
+# integrate2-seams.test.js:287: a hop is checked against the grant as it is
+# now, with the request's own use and earlier hops charged.
+
+[[mutation]]
+name = 'a redirect hop checks the budget on the copy taken before the request was charged'
+file = "src/pipeline.rs"
+from = '''            if !live.is_some_and(|g| self.pl_budget(&g, effective).is_ok()) {'''
+to = '''            if !live.is_some_and(|_| self.pl_budget(&route.grant, effective).is_ok()) {'''

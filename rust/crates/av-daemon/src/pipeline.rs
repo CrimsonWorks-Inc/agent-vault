@@ -3029,8 +3029,14 @@ impl Core {
                 }
             }
         }
-        if reason.is_none() && self.pl_budget(&route.grant, effective).is_err() {
-            reason = Some("budget");
+        // The grant as it is now: the request's own use and every hop so far
+        // were charged to the stored record, not to the route's copy (JS
+        // reads the live object here).
+        if reason.is_none() {
+            let live = self.vault.grant(&route.grant.id).ok().flatten();
+            if !live.is_some_and(|g| self.pl_budget(&g, effective).is_ok()) {
+                reason = Some("budget");
+            }
         }
         if reason.is_none() && self.pl_rate(&route.grant, effective, false).is_err() {
             reason = Some("rate");
