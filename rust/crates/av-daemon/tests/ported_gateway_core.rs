@@ -9476,3 +9476,423 @@ async fn widening_batch_consent_binds_exact_items_and_verdicts_and_handover_is_c
         }
     }).await.expect("batch signature binding timed out");
 }
+
+const INVARIANT_SECRETS: [&str; 3] = [
+    "ghp_INVARIANTGRANTED00112233445566778899",
+    "xoxb-9999-INVARIANTBYSTANDERVALUE00",
+    "contraseña-INVARIANT-über-0123456789",
+];
+#[derive(Clone, Debug)]
+struct InvariantShape {
+    kind: u8,
+    inline: u8,
+    body_encoding: u8,
+    limited: bool,
+    path: u8,
+}
+
+fn invariant_encoding(marker: &str, encoding: u8) -> String {
+    use base64::Engine;
+    match encoding {
+        0 => marker.into(),
+        1 => marker.replace('.', "%2E"),
+        2 => base64::engine::general_purpose::STANDARD.encode(marker),
+        3 => marker
+            .chars()
+            .map(|c| format!("\\u{:04x}", c as u32))
+            .collect(),
+        4 | 5 => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(marker);
+            let width = if encoding == 4 { 64 } else { 76 };
+            encoded
+                .as_bytes()
+                .chunks(width)
+                .map(|c| std::str::from_utf8(c).unwrap())
+                .collect::<Vec<_>>()
+                .join(if encoding == 4 { "\n" } else { "\r\n" })
+        }
+        _ => unreachable!(),
+    }
+}
+
+async fn invariant_gateway(
+    port: u16,
+    path: &str,
+    method: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, Vec<u8>) {
+    // Like Node's request helper, a client-side URI refusal yields no wire
+    // bytes and no credential; the ordinary control in every case still runs.
+    if path.parse::<hyper::Uri>().is_err() {
+        return (0, vec![]);
+    }
+    let (status, _, bytes) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        loopback_http(port, method, path, headers, body),
+    )
+    .await
+    .expect("invariant gateway stopped responding");
+    (status, bytes)
+}
+
+async fn check_invariant_sequence(shapes: &[InvariantShape]) {
+    use av_core::secret::ExposeSecret;
+    use av_store::vault::{CreateGrantOptions, CreateSessionOptions, IssueOptions, NewCredential};
+    use base64::Engine;
+    use tokio::io::AsyncWriteExt;
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_port = upstream.local_addr().unwrap().port();
+    let wire = Arc::new(Mutex::new(Vec::<(String, String, Vec<u8>)>::new()));
+    let recorded = wire.clone();
+    let peer = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let (headers, body) = read_wire_request(&mut socket).await;
+            let path = headers
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_string();
+            recorded
+                .lock()
+                .unwrap()
+                .push((path.clone(), headers.clone(), body.clone()));
+            // The real hostile peer echoes the entire request in three views,
+            // plus bystander values the request did not involve.
+            let echo=serde_json::to_string(&json!({"url":path,"headers":headers,"body":String::from_utf8_lossy(&body),"bystander":INVARIANT_SECRETS[1],"accented":INVARIANT_SECRETS[2]})).unwrap();
+            let reply = format!(
+                "{}\n{}\n{}",
+                echo,
+                base64::engine::general_purpose::STANDARD.encode(&echo),
+                encode(&echo, Layer::Percent)
+            );
+            let head=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",reply.len());
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    let mut granted = None;
+    for (slug, host, field, value, site) in [
+        (
+            "prod",
+            format!("127.0.0.1:{up_port}"),
+            "token",
+            INVARIANT_SECRETS[0],
+            "header:authorization:Bearer",
+        ),
+        (
+            "other",
+            "slack.test".into(),
+            "token",
+            INVARIANT_SECRETS[1],
+            "header:authorization:Bearer",
+        ),
+        (
+            "accented",
+            "example.test".into(),
+            "password",
+            INVARIANT_SECRETS[2],
+            "basic:pass",
+        ),
+    ] {
+        let credential = vault
+            .add_credential(NewCredential {
+                slug: slug.into(),
+                kind: "http".into(),
+                connector: serde_json::from_value(
+                    json!({"host":host,"scheme":if slug=="prod" {"http"}else{"https"}}),
+                )
+                .unwrap(),
+                fields: vec![(field.into(), value.to_string().into())],
+                sites: std::collections::BTreeMap::from([(field.into(), vec![site.into()])]),
+            })
+            .unwrap();
+        if slug == "prod" {
+            granted = Some(credential.id);
+        }
+    }
+    let session = vault
+        .create_session(CreateSessionOptions::default())
+        .unwrap();
+    let token = session.token.expose_secret().to_string();
+    let grant=vault.create_grant(CreateGrantOptions{session_id:session.session.id,credential_id:granted.unwrap(),policy:serde_json::from_value(json!({"hosts":["127.0.0.1"],"methods":["GET","POST"],"paths":["/allowed/**"],"budget":{"unit":"requests","limit":100000},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+    let marker = vault
+        .issue_placeholder(IssueOptions {
+            grant_id: grant.id.clone(),
+            ..Default::default()
+        })
+        .unwrap()
+        .placeholder;
+    let limited = vault
+        .issue_placeholder(IssueOptions {
+            grant_id: grant.id,
+            uses: Some(3),
+            ..Default::default()
+        })
+        .unwrap();
+    let limited_id = limited.row.id;
+    let shared = Shared::new(vault);
+    let daemon = Daemon::new(
+        shared.clone(),
+        DaemonOptions {
+            port: 0,
+            socket_path: Some(dir.path().join("invariants.sock")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    daemon.start().await.unwrap();
+    let gateway = daemon.gateway_port().unwrap();
+    let headers = |p: &str| {
+        vec![
+            ("authorization".into(), format!("Bearer {p}")),
+            ("av-session".into(), token.clone()),
+        ]
+    };
+    let assert_private = |bytes: &[u8], label: &str| {
+        let utf8 = String::from_utf8_lossy(bytes);
+        let latin1 = bytes.iter().map(|b| char::from(*b)).collect::<String>();
+        for secret in INVARIANT_SECRETS {
+            assert!(!utf8.contains(secret), "{label}: secret in UTF-8 response");
+            assert!(
+                !latin1.contains(secret),
+                "{label}: secret in Latin-1 response"
+            );
+        }
+    };
+    let (first, bytes) = invariant_gateway(
+        gateway,
+        "/p/prod/allowed/limited-control",
+        "GET",
+        headers(&limited.placeholder),
+        vec![],
+    )
+    .await;
+    assert_eq!(first, 200);
+    assert_private(&bytes, "limited control");
+    let mut allowed = 0;
+    for (i, shape) in shapes.iter().enumerate() {
+        // An actual ordinary request in every generated row prevents an
+        // all-deny implementation from satisfying any invariant.
+        let (status, bytes) = invariant_gateway(
+            gateway,
+            "/p/prod/allowed/ordinary-control",
+            "GET",
+            headers(&marker),
+            vec![],
+        )
+        .await;
+        assert_eq!(status, 200, "row {i} ordinary control");
+        allowed += 1;
+        assert_private(&bytes, &format!("row {i} control"));
+        let p = if shape.limited {
+            &limited.placeholder
+        } else {
+            &marker
+        };
+        let carried = invariant_encoding(p, shape.inline);
+        let body_marker = invariant_encoding(p, shape.body_encoding);
+        let mut path = match shape.path % 3 {
+            0 => "/p/prod/allowed/a",
+            1 => "/p/prod/allowed/b/c",
+            _ => "/p/prod/allowed/deep/er/still",
+        }
+        .to_string();
+        let mut h = headers(p);
+        let mut method = "GET";
+        let mut body = Vec::new();
+        match shape.kind {
+            0 => {}
+            1 => path = format!("/p/prod/allowed/{carried}"),
+            2 => h.push(("x-note".into(), carried)),
+            3 => h.push((
+                format!(
+                    "x-{}",
+                    p.chars()
+                        .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '-'
+                        })
+                        .collect::<String>()
+                ),
+                "1".into(),
+            )),
+            4 => path = format!("/p/prod/allowed/a?{carried}=1"),
+            5 => path = format!("/p/prod/allowed/a?note={carried}"),
+            6..=8 => {
+                method = "POST";
+                h.push(("content-type".into(), "application/json".into()));
+                body = match shape.kind {
+                    6 => json!({"note":body_marker}).to_string(),
+                    7 => format!(
+                        "{{\"k\":{},\"k\":\"harmless\"}}",
+                        serde_json::to_string(&body_marker).unwrap()
+                    ),
+                    _ => json!({body_marker:"v"}).to_string(),
+                }
+                .into_bytes();
+            }
+            9 => {
+                method = "POST";
+                h.push((
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ));
+                body = format!("f={}", encode(&body_marker, Layer::Percent)).into_bytes();
+            }
+            10 => {
+                method = "POST";
+                h.push(("content-type".into(), "text/plain".into()));
+                body = format!("here: {body_marker}").into_bytes();
+            }
+            11 => path = "/p/prod/forbidden/a".into(),
+            12 => method = "DELETE",
+            13 => path = format!("/t/http/127.0.0.1:{up_port}/allowed/a"),
+            14 => path = "/p/other/allowed/a".into(),
+            15 => h.retain(|(k, _)| k != "av-session"),
+            16 => {
+                h.iter_mut().find(|(k, _)| k == "authorization").unwrap().1 =
+                    "Bearer av1.notreal.x_y.aaaaaaaaaaaaaaaaaaaaaaaaaa.zzzzzz".into()
+            }
+            _ => unreachable!(),
+        }
+        let (status, bytes) = invariant_gateway(gateway, &path, method, h, body).await;
+        if status == 200 {
+            allowed += 1;
+        }
+        assert_private(&bytes, &format!("row {i} {shape:?}"));
+    }
+    assert!(allowed > 50, "fixture must exercise ordinary traffic");
+    for _ in 0..4 {
+        let (_, bytes) = invariant_gateway(
+            gateway,
+            "/p/prod/allowed/final-limited",
+            "GET",
+            headers(&limited.placeholder),
+            vec![],
+        )
+        .await;
+        assert_private(&bytes, "limited final attempts");
+    }
+    for (path, headers, body) in wire.lock().unwrap().iter() {
+        assert!(
+            path.starts_with("/allowed/"),
+            "upstream received a path outside the grant"
+        );
+        let sent = format!("{path}\n{headers}\n{}", String::from_utf8_lossy(body));
+        assert!(
+            headers.lines().any(|l| l
+                .split_once(':')
+                .is_some_and(|(k, v)| k.eq_ignore_ascii_case("host")
+                    && v.trim() == format!("127.0.0.1:{up_port}"))),
+            "credential sent to a different authority"
+        );
+        assert!(headers.lines().any(|l| l
+            .split_once(':')
+            .is_some_and(|(k, v)| k.eq_ignore_ascii_case("authorization")
+                && v.trim() == format!("Bearer {}", INVARIANT_SECRETS[0]))));
+        for secret in &INVARIANT_SECRETS[1..] {
+            assert!(
+                !sent.contains(secret),
+                "bystander credential reached upstream"
+            );
+        }
+        for cap in [&marker, &limited.placeholder, &token] {
+            assert!(!sent.contains(cap), "daemon capability reached upstream");
+        }
+        assert!(!path.contains(INVARIANT_SECRETS[0]));
+        assert!(!String::from_utf8_lossy(body).contains(INVARIANT_SECRETS[0]));
+    }
+    shared
+        .run(move |core| {
+            let row = core
+                .vault
+                .list_placeholders(None)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == limited_id)
+                .unwrap();
+            assert_eq!(row.max_uses, 3);
+            assert!(row.uses <= row.max_uses);
+            if row.uses == 3 {
+                assert_eq!(row.state, av_store::model::PlaceholderState::Dead);
+            }
+            let audit = core.vault.audit().unwrap();
+            let verified = audit.verify().unwrap();
+            assert!(verified.ok, "audit chain: {verified:?}");
+            assert!(
+                verified.count > 1000,
+                "expected a busy log, got {}",
+                verified.count
+            );
+            let raw = serde_json::to_string(
+                &audit
+                    .read(&av_store::audit::ReadFilter {
+                        limit: usize::MAX,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            for secret in INVARIANT_SECRETS {
+                assert!(!raw.contains(secret), "credential reached audit log");
+            }
+            for cap in [&marker, &limited.placeholder, &token] {
+                assert!(!raw.contains(cap), "daemon capability reached audit log");
+            }
+        })
+        .await
+        .unwrap();
+    daemon.stop().await;
+    peer.abort();
+    let _ = peer.await;
+}
+
+#[test]
+fn invariants_generated_real_daemon_sequences_preserve_all_five_claims_for_2400_random_requests() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngSeed, TestRunner};
+    let shape = (0u8..17, 0u8..4, 0u8..6, 0u8..20, 0u8..3).prop_map(
+        |(kind, inline, body_encoding, limited, path)| InvariantShape {
+            kind,
+            inline,
+            body_encoding,
+            limited: limited < 3,
+            path,
+        },
+    );
+    let sequences = proptest::collection::vec(shape, 600);
+    for seed in [20260921, 7, 31337, 999983] {
+        let mut runner = TestRunner::new(Config {
+            cases: 1,
+            rng_seed: RngSeed::Fixed(seed),
+            max_shrink_iters: 0,
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(&sequences, |rows| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(180),
+                        check_invariant_sequence(&rows),
+                    )
+                    .await
+                    .expect("invariant sequence timed out");
+                });
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("invariants seed {seed}: {e}"));
+    }
+}
