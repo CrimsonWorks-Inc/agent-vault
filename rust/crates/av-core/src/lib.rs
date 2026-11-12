@@ -7,6 +7,7 @@ pub mod base32;
 pub mod canon;
 pub mod detect;
 pub mod errors;
+pub mod jsre;
 pub mod model_usage;
 pub mod operation;
 pub mod payload;

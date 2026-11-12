@@ -448,10 +448,10 @@ pub fn extract_health(profile: Option<&Profile>, headers: &[(String, String)]) -
 
 fn parse_expiry(raw: &str) -> Option<String> {
     let s = raw.trim();
-    let iso=regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2}))?$").ok()?;
+    let iso=crate::jsre::compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2}))?$").ok()?;
     let github =
-        regex::Regex::new(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) UTC$").ok()?;
-    let rfc = regex::Regex::new(
+        crate::jsre::compile(r"^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) UTC$").ok()?;
+    let rfc = crate::jsre::compile(
         r"^(?:[A-Za-z]{3}, )?(\d{1,2}) ([A-Za-z]{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$",
     )
     .ok()?;

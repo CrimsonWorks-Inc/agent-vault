@@ -171,7 +171,7 @@ pub fn detect_all(text: &str) -> Vec<DetectHit> {
         push(&unescaped, HitEncoding::JsonEscape);
     }
     let mut variants = vec![text.to_owned(), pct1, unescaped];
-    let re = regex::Regex::new(r"\\[nrtbf]|\s+").expect("fixed pattern");
+    let re = crate::jsre::compile(r"\\[nrtbf]|\s+").expect("fixed pattern");
     for v in variants.clone() {
         let folded = re.replace_all(&v, "").into_owned();
         if folded != v {

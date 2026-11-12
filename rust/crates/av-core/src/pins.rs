@@ -36,7 +36,7 @@ pub fn pin_list_state(pins: Option<&serde_json::Value>) -> PinListState {
     if pins.len() > MAX_PINS {
         return PinListState::Invalid;
     }
-    let re = regex::Regex::new(PIN_PATTERN).expect("pin pattern");
+    let re = crate::jsre::compile(PIN_PATTERN).expect("pin pattern");
     if pins
         .iter()
         .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))

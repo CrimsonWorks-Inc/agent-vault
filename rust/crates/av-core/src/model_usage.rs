@@ -70,7 +70,7 @@ pub struct Price {
 pub fn price_of(kind: &str, model: Option<&str>) -> Option<Price> {
     let model = model?;
     let rows = PRICES.iter().find(|(k, _)| *k == kind)?.1;
-    let re = regex::Regex::new(r"^(?:\d{8}|\d{4}-\d{2}-\d{2})$").expect("snapshot");
+    let re = crate::jsre::compile(r"^(?:\d{8}|\d{4}-\d{2}-\d{2})$").expect("snapshot");
     rows.iter()
         .filter(|(prefix, _, _)| {
             model == *prefix
@@ -128,7 +128,7 @@ pub fn meter_request(kind: &str, input: &MeterInput<'_>) -> Result<Meter> {
     };
     let verb = input.method.unwrap_or("").to_uppercase();
     let path = input.path.unwrap_or("").split('?').next().unwrap_or("");
-    let re = regex::Regex::new(
+    let re = crate::jsre::compile(
         r"^/v1(?:beta)?/models/([^/:]+):(generateContent|streamGenerateContent|countTokens)$",
     )
     .expect("Google endpoint");
@@ -168,7 +168,7 @@ pub fn meter_request(kind: &str, input: &MeterInput<'_>) -> Result<Meter> {
         )
     };
     let ct = input.content_type.ok_or_else(unreadable)?;
-    if !regex::Regex::new(r"(?i)^application/(?:json|[\w.+-]+\+json)(?:\s*;|\s*$)")
+    if !crate::jsre::compile(r"(?i)^application/(?:json|[\w.+-]+\+json)(?:\s*;|\s*$)")
         .expect("JSON content type")
         .is_match(ct)
     {

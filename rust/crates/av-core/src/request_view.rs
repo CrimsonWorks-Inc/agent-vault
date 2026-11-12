@@ -260,12 +260,12 @@ pub fn request_view<'a>(input: &RequestInput<'a>) -> RequestView<'a> {
         if media_type == "application/x-www-form-urlencoded" {
             read(both_readings(text));
         } else if media_type == "multipart/form-data" {
-            let re = regex::Regex::new("(?i)content-disposition:").expect("disposition");
-            let end_re = regex::Regex::new(r"\r?\n\r?\n").expect("end");
-            let fold = regex::Regex::new(r";[ \t]*\r?\n|\r?\n[ \t]+").expect("fold");
-            let name = regex::Regex::new(r#"(?i);\s*name\*?\s*=\s*(?:"([^"]*)"|([^;]*))"#)
+            let re = crate::jsre::compile("(?i)content-disposition:").expect("disposition");
+            let end_re = crate::jsre::compile(r"\r?\n\r?\n").expect("end");
+            let fold = crate::jsre::compile(r";[ \t]*\r?\n|\r?\n[ \t]+").expect("fold");
+            let name = crate::jsre::compile(r#"(?i);\s*name\*?\s*=\s*(?:"([^"]*)"|([^;]*))"#)
                 .expect("part name");
-            let value_end = regex::Regex::new(r"\r?\n--").expect("delimiter");
+            let value_end = crate::jsre::compile(r"\r?\n--").expect("delimiter");
             for m in re.find_iter(text) {
                 let rest = &text[m.end()..];
                 let end = end_re.find(rest);

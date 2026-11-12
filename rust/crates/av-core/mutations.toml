@@ -193,8 +193,8 @@ test = "js_scrub_encoding_and_nested_vectors"
 [[mutation]]
 name = "a path whose escape was itself encoded is sent instead of refused"
 file = "src/policy.rs"
-from = "if regex::Regex::new(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
-to = "if false && regex::Regex::new(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
+from = "if crate::jsre::compile(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
+to = "if false && crate::jsre::compile(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
 test = "js_policy_reference"
 
 [[mutation]]
@@ -446,7 +446,7 @@ test = "js_request_view_vectors"
 name = "a folded multipart Content-Disposition is read up to its first line break"
 file = "src/request_view.rs"
 from = "let disposition = fold.replace_all("
-to = "let disposition = regex::Regex::new(r\"\\b\\B\").unwrap().replace_all("
+to = "let disposition = crate::jsre::compile(r\"\\b\\B\").unwrap().replace_all("
 test = "js_request_view_vectors"
 
 [[mutation]]
@@ -560,3 +560,24 @@ file = "src/detect.rs"
 from = "let mut s = s.split('=').next().unwrap_or(\"\").to_owned();"
 to = "let mut s = s.trim_end_matches('=').to_owned();"
 test = "js_detector_vectors"
+
+[[mutation]]
+name = "JavaScript detector whitespace keeps FEFF and excludes NEL"
+file = "src/detect.rs"
+from = "crate::jsre::compile(r\"\\\\[nrtbf]|\\s+\")"
+to = "regex::Regex::new(r\"\\\\[nrtbf]|\\s+\")"
+test = "js_detector_feff_nel"
+
+[[mutation]]
+name = "JavaScript multipart disposition whitespace exposes the override"
+file = "src/request_view.rs"
+from = "crate::jsre::compile(r#\"(?i);\\s*name\\*?\\s*=\\s*(?:\"([^\"]*)\"|([^;]*))\"#)"
+to = "regex::Regex::new(r#\"(?i);\\s*name\\*?\\s*=\\s*(?:\"([^\"]*)\"|([^;]*))\"#)"
+test = "js_multipart_feff_nel"
+
+[[mutation]]
+name = "JavaScript model content types require ASCII words and JS whitespace"
+file = "src/model_usage.rs"
+from = "crate::jsre::compile(r\"(?i)^application/(?:json|[\\w.+-]+\\+json)(?:\\s*;|\\s*$)\")"
+to = "regex::Regex::new(r\"(?i)^application/(?:json|[\\w.+-]+\\+json)(?:\\s*;|\\s*$)\")"
+test = "js_model_content_types"

@@ -36,7 +36,7 @@ fn mint_roundtrip_and_longest_label() {
 }
 #[test]
 fn transport_safe_and_scanner_pattern() {
-    let re = regex::Regex::new(ph::SCANNER_PATTERN).unwrap();
+    let re = av_core::jsre::compile(ph::SCANNER_PATTERN).unwrap();
     for _ in 0..50 {
         let p = minted("test-fake", "token");
         assert!(p

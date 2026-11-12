@@ -636,7 +636,7 @@ fn json_string_spans(text: &str) -> (JsonSpans, Vec<Literal>) {
     (p.spans, p.literals)
 }
 fn locate_request(req: &ProxyRequest) -> LocateResult {
-    let scheme_re = regex::Regex::new(r"([A-Za-z][A-Za-z0-9-]*)$").expect("scheme");
+    let scheme_re = crate::jsre::compile(r"([A-Za-z][A-Za-z0-9-]*)$").expect("scheme");
     let mut occurrences = Vec::new();
     add_hits(
         &mut occurrences,

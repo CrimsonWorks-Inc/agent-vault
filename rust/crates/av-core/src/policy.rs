@@ -662,11 +662,11 @@ pub fn normalize_path(path: &str) -> Result<String> {
     let raw = if path.is_empty() { "/" } else { path };
     let p = strict_percent_decode(raw)
         .ok_or_else(|| policy_deny("path contains an invalid percent-escape", None, None))?;
-    let sep = regex::Regex::new(r"(?i)%2f|%5c|\\").expect("fixed regex");
+    let sep = crate::jsre::compile(r"(?i)%2f|%5c|\\").expect("fixed regex");
     if sep.is_match(raw) || sep.is_match(&p) {
         return Err(policy_deny("path contains an encoded slash or a backslash",Some("path_ambiguous_separator"),Some("Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.")));
     }
-    if regex::Regex::new(r"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})")
+    if crate::jsre::compile(r"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})")
         .expect("fixed regex")
         .is_match(&p)
     {
@@ -958,9 +958,14 @@ pub fn needs_approval(policy: &Policy, query: &ApprovalQuery<'_>) -> bool {
     match &policy.approval {
         None | Some(Checked::Valid(Approval::Auto)) => false,
         Some(Checked::Valid(Approval::FirstUse)) => query.first_use,
-        Some(Checked::Valid(Approval::OnWrite)) => {
-            !SAFE_METHODS.contains(&query.method.unwrap_or("GET").to_uppercase().as_str())
-        }
+        Some(Checked::Valid(Approval::OnWrite)) => !SAFE_METHODS.contains(
+            &query
+                .method
+                .filter(|m| !m.is_empty())
+                .unwrap_or("GET")
+                .to_uppercase()
+                .as_str(),
+        ),
         _ => true,
     }
 }

@@ -376,7 +376,7 @@ pub fn validate_payload(set: &serde_json::Value) -> Vec<Problem> {
         }
     }
     if let Some(g) = o.get("graphql") {
-        let name = regex::Regex::new(r"^[_A-Za-z][_0-9A-Za-z]*$").expect("name regex");
+        let name = crate::jsre::compile(r"^[_A-Za-z][_0-9A-Za-z]*$").expect("name regex");
         if !g.as_object().is_some_and(|g| {
             g.keys()
                 .all(|k| ["operations", "deny_fields"].contains(&k.as_str()))
@@ -576,9 +576,10 @@ impl StrictParser<'_> {
         if c == b'"' {
             return self.string().map(V::String);
         }
-        let re =
-            regex::Regex::new(r"^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)")
-                .expect("JSON scalar");
+        let re = crate::jsre::compile(
+            r"^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)",
+        )
+        .expect("JSON scalar");
         let m = re
             .find(&self.text[self.i..])
             .ok_or_else(|| payload_fail("payload_unparseable"))?;
@@ -756,7 +757,7 @@ fn graphql_scan(document: &str, rules: &GraphqlRules) -> Result<()> {
     }
     let mut tokens = Vec::new();
     let mut i = 0;
-    let token=regex::Regex::new(r"^(?:[_A-Za-z][_0-9A-Za-z]*|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\.\.|[!$():=@\[\]{|}])").expect("GraphQL token");
+    let token=crate::jsre::compile(r"^(?:[_A-Za-z][_0-9A-Za-z]*|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|\.\.\.|[!$():=@\[\]{|}])").expect("GraphQL token");
     while i < document.len() {
         let c = document[i..].chars().next().unwrap();
         if c.is_whitespace() || c == ',' || c == '\u{feff}' {
@@ -917,7 +918,7 @@ fn element(p: &crate::request_view::QueryParam, key: &str) -> bool {
     if p.raw_name == key {
         return true;
     }
-    let normalized = regex::Regex::new("(?i)%5b|%5d")
+    let normalized = crate::jsre::compile("(?i)%5b|%5d")
         .expect("brackets")
         .replace_all(&p.raw_name, |c: &regex::Captures<'_>| {
             if c[0].eq_ignore_ascii_case("%5b") {

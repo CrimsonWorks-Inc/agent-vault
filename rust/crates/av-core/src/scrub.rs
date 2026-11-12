@@ -538,7 +538,7 @@ impl Scrubber {
         out = next;
         redactions += count;
         for p in DERIVED_PATTERNS {
-            let re = regex::Regex::new(p.pattern).expect("derived pattern");
+            let re = crate::jsre::compile(p.pattern).expect("derived pattern");
             let spans: Vec<_> = re
                 .find_iter(&out)
                 .filter(|m| p.name == "private-key" || boundary(&out, m.start()))
@@ -647,7 +647,7 @@ impl ScrubStream<'_> {
             self.held = combined;
             return String::new();
         }
-        let re = regex::Regex::new(DERIVED_START_PATTERN).expect("derived start");
+        let re = crate::jsre::compile(DERIVED_START_PATTERN).expect("derived start");
         for m in re.find_iter(&combined) {
             if m.start() >= cut {
                 break;
@@ -740,7 +740,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
     if chars.iter().any(|c| (*c as u32) < 32 || *c == '\u{7f}') {
         return Err(scrub_bad("control characters are not allowed"));
     }
-    let quantifier_re = regex::Regex::new(r"^\{(\d{1,3})(?:,(\d{0,3}))?\}").expect("quantifier");
+    let quantifier_re = crate::jsre::compile(r"^\{(\d{1,3})(?:,(\d{0,3}))?\}").expect("quantifier");
     let mut i = 0;
     let mut branches = 0;
     let mut max_len = 0;
@@ -890,37 +890,8 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
             return Err(scrub_bad("a branch is empty"));
         }
     }
-    // JS character classes are ASCII for \d and \w; keep that property.
-    let mut normalized = String::new();
-    let mut chars = source.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            normalized.push(c);
-            continue;
-        }
-        let e = chars.next().expect("validated escape");
-        let class = match e {
-            'd' => Some("[0-9]"),
-            'D' => Some("[^0-9]"),
-            'w' => Some("[A-Za-z0-9_]"),
-            'W' => Some("[^A-Za-z0-9_]"),
-            's' => Some(
-                r"[\x09-\x0d\x20\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
-            ),
-            'S' => Some(
-                r"[^\x09-\x0d\x20\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
-            ),
-            _ => None,
-        };
-        if let Some(class) = class {
-            normalized.push_str(class);
-        } else {
-            normalized.push('\\');
-            normalized.push(e);
-        }
-    }
     let regex =
-        regex::Regex::new(&normalized).map_err(|_| scrub_bad("it is not a valid expression"))?;
+        crate::jsre::compile(source).map_err(|_| scrub_bad("it is not a valid expression"))?;
     for line in std::iter::once("").chain(SCRUB_PATTERN_CORPUS.iter().copied()) {
         if regex.find_iter(line).any(|m| boundary(line, m.start())) {
             return Err(scrub_bad("it matches ordinary text"));
@@ -1132,18 +1103,18 @@ fn collect(scrubber: &Scrubber, text: &str) -> (Vec<ScrubSpan>, bool) {
         let mut nested_views = 0;
         let mut nested_bytes = 0;
         let regexes = [
-            regex::Regex::new(r#"\\u[dD][89aAbB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\["\\/bfnrt]"#).expect("JSON"),
-            regex::Regex::new(r"%[0-9a-fA-F]{2}").expect("percent"),
-            regex::Regex::new(&format!(
+            crate::jsre::compile(r#"\\u[dD][89aAbB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\["\\/bfnrt]"#).expect("JSON"),
+            crate::jsre::compile(r"%[0-9a-fA-F]{2}").expect("percent"),
+            crate::jsre::compile(&format!(
                 r"[A-Za-z0-9+/=_-]{{{},}}",
                 scrubber.b64_min.min(usize::MAX / 2)
             ))
-            .unwrap_or_else(|_| regex::Regex::new(r"\b\B").unwrap()),
-            regex::Regex::new(&format!(
+            .unwrap_or_else(|_| crate::jsre::compile(r"\b\B").unwrap()),
+            crate::jsre::compile(&format!(
                 r"[0-9a-fA-F]{{{},}}",
                 scrubber.hex_min.min(usize::MAX / 2)
             ))
-            .unwrap_or_else(|_| regex::Regex::new(r"\b\B").unwrap()),
+            .unwrap_or_else(|_| crate::jsre::compile(r"\b\B").unwrap()),
         ];
         while let Some((view, depth, used)) = queue.pop_front() {
             if depth >= 1 && used != 4 && used != 8 {
@@ -1203,7 +1174,7 @@ fn collect(scrubber: &Scrubber, text: &str) -> (Vec<ScrubSpan>, bool) {
     }
     // Wrapped runs use an iterative scanner: one fixed-cost walk per break,
     // without recursive repeated groups or rescanning prior lines.
-    let breaks = regex::Regex::new(LINE_BREAK_PATTERN).expect("line breaks");
+    let breaks = crate::jsre::compile(LINE_BREAK_PATTERN).expect("line breaks");
     let blob = |b: u8| b.is_ascii_alphanumeric() || b"+/=_-".contains(&b);
     let mut runs = Vec::new();
     let mut current: Option<(usize, usize)> = None;

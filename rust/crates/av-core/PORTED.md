@@ -860,3 +860,20 @@ The Rust tests use fixed obviously fake credentials. `tests/fixtures/*-vectors.m
 | `test/security/widening.test.js` | reordering a signed batch does not change what it authorises | covered by conformance (daemon/store/CLI/UI behavior outside av-core) |
 
 Inventory: 850 named JS tests in 64 files. Multiple Rust names on a row jointly cover its pure-core assertions; a shared differential suite intentionally contains multiple JS cases.
+
+## Additional review differential regressions
+
+These supplement the JS test-name mapping with probes generated directly from
+read-only reference functions (`tests/fixtures/regex-review-vectors.mjs`):
+
+| Reference behavior | Rust test |
+|---|---|
+| detectAll FEFF/NEL wrapping, newline and ordinary prose controls | `js_detector_feff_nel_and_prose_controls` |
+| requestView multipart FEFF/NEL dispositions and ordinary title controls | `js_multipart_feff_nel_and_ordinary_controls` |
+| meterRequest JS whitespace and ASCII word content types | `js_model_content_types_ascii_word_and_whitespace_controls` |
+| JSON/GraphQL numeric tokens, expiry dates and model snapshot digits | `js_arabic_indic_digits_and_ascii_controls` |
+| needsApproval empty method and serialized toProblem field order | `js_empty_on_write_method_and_problem_wire_order` |
+| canonicalize/hash/hmac/requestHash and WebAuthn operation ordering/digests | `js_insertion_order_keeps_canonical_hashes_and_operation_digests_stable` |
+| Live regeneration of the reference probes | `review_vectors_regenerate_from_javascript` |
+| Shared regex class translation, escaped slashes, BMP legacy case folding | `javascript_classes_inside_and_outside_brackets`, `legacy_case_folding_does_not_introduce_unicode_ascii_equivalents` |
+| Every av-core regex uses the shared JS compiler | `every_core_regex_uses_javascript_compiler` |
