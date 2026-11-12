@@ -70,9 +70,7 @@ fn diagnose_and_find() {
     let b = minted("pg-prod", "password").text;
     assert!(ph::diagnose(&a.replace("av1.", "av2.")).contains("does not start"));
     assert!(ph::diagnose(&(a.clone() + "zz")).contains("expected groups of 12/26/6"));
-    assert!(
-        ph::diagnose(&a.rsplit_once('.').unwrap().0).contains("expected 5 dot-separated groups")
-    );
+    assert!(ph::diagnose(a.rsplit_once('.').unwrap().0).contains("expected 5 dot-separated groups"));
     assert_eq!(
         ph::find_all(&format!("Bearer {a}\nav1.notreal\npg={b};"))
             .iter()

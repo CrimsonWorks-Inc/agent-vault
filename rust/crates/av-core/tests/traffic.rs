@@ -111,7 +111,7 @@ fn encoded_locations_refuse_and_raw_controls_match() {
         loc.encoding = encoding;
         assert!(!matches_site(&loc, &site));
     }
-    assert!(unsubstituted(&req, &[hit.parsed.nonce.clone()]).is_some());
+    assert!(unsubstituted(&req, std::slice::from_ref(&hit.parsed.nonce)).is_some());
     let out = apply(
         &req,
         &hit.location,
