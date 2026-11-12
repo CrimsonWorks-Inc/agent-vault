@@ -18,7 +18,7 @@ use av_core::placeholder::ParsedPlaceholder;
 use av_core::policy::{BudgetLimit, Policy};
 use av_core::secret::{ExposeSecret, Key32, SecretBytes, SecretString};
 use av_core::{deny, DenyExtra, ErrorCode};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use zeroize::Zeroizing;
@@ -33,10 +33,11 @@ use crate::ids;
 use crate::mlock::LockedKey;
 use crate::model::{
     dead_reason, CredentialField, CredentialRecord, FactorClass, FactorState, GrantCounters,
-    GrantRecord, GrantState, HealthRecord, HealthSource, HealthStatus, ListenerRecord, ListenerTls,
-    NotifyDetail, NotifyRecord, PlaceholderRow, PlaceholderState, PresenceFactor, PresenceKey,
-    QuarantineBy, QuarantineRecord, RetiredValue, ScrubPattern, SessionRecord,
-    SessionRequestRecord, SessionState, Settings, TemplateRecord, VmkWrap, WorkspaceRecord,
+    GrantRecord, GrantRuntime, GrantState, HealthRecord, HealthSource, HealthStatus,
+    ListenerRecord, ListenerTls, NotifyDetail, NotifyRecord, PlaceholderRow, PlaceholderState,
+    PresenceFactor, PresenceKey, QuarantineBy, QuarantineRecord, RetiredValue, ScrubPattern,
+    SessionRecord, SessionRequestRecord, SessionState, Settings, TemplateRecord, VmkWrap,
+    WorkspaceRecord,
 };
 use crate::rows;
 use crate::util;
@@ -813,6 +814,24 @@ pub struct RestoreEntries {
     pub credentials: Vec<PlannedCredential>,
     /// Templates (a taken name is skipped).
     pub templates: Vec<BackupTemplate>,
+    /// When set, `backup.restored` is written inside the same transaction as
+    /// the credentials it records (so a restore that committed is never
+    /// reported as failed, and a failed one records nothing).
+    pub summary: Option<RestoreSummary>,
+}
+
+/// The parts of the `backup.restored` record that
+/// [`Vault::restore_entries`] cannot compute itself. Ports the fields of
+/// `this.audit?.write('backup.restored', …)` in `restoreBackup` in
+/// `src/store/backup.js`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RestoreSummary {
+    /// Slugs skipped as conflicts.
+    pub skipped: Vec<String>,
+    /// The renames (`[{from, to}]`), as serialized.
+    pub renamed: Value,
+    /// SHA-256 of the bundle.
+    pub bundle_sha256: String,
 }
 
 /// Templates restored and skipped. Ports `templates` in the return value of
@@ -2502,22 +2521,22 @@ impl Vault {
             audit: None,
         };
         let now = util::now_iso();
-        v.read(|c| {
-            rows::wraps_replace(c, std::slice::from_ref(&wrap), &now)?;
+        v.install(&vmk)?;
+        let factor = class_name(opts.factor);
+        // The first wrap, its factor and `vault.created` commit together,
+        // and the WAL is checkpointed: the wrap is key material.
+        v.run(|t| {
+            rows::wraps_replace(t.c, std::slice::from_ref(&wrap), &now)?;
             rows::factors_replace(
-                c,
+                t.c,
                 &[PresenceFactor {
                     class: opts.factor,
                     enrolled_at: now.clone(),
                 }],
             )?;
-            rows::kv_set(c, "created_at", &Value::from(now.clone()))?;
-            rows::kv_set(c, "locked", &Value::Bool(false))?;
-            Ok(())
-        })?;
-        v.install(&vmk)?;
-        let factor = class_name(opts.factor);
-        v.run(|t| {
+            rows::kv_set(t.c, "created_at", &Value::from(now.clone()))?;
+            rows::kv_set(t.c, "locked", &Value::Bool(false))?;
+            t.checkpoint = true;
             t.audit_required(
                 "vault.created",
                 json!({ "factor": factor, "schema_version": SCHEMA_VERSION }),
@@ -2808,6 +2827,8 @@ impl Vault {
             if let Some(mut k) = rows::webauthn_get(t.c)? {
                 k.sign_count = sign_count;
                 rows::webauthn_put(t.c, Some(&k))?;
+                // A change to the WebAuthn factor row: no old page stays.
+                t.checkpoint = true;
             }
             Ok(())
         })
@@ -3984,6 +4005,17 @@ impl Vault {
                     json!({ "name": tpl.name, "version": tpl.version, "template_hash": tpl.hash }),
                 )?;
             }
+            if let Some(sum) = &entries.summary {
+                t.audit_required(
+                    "backup.restored",
+                    json!({
+                        "restored": staged.iter().map(|c| c.slug.clone()).collect::<Vec<_>>(),
+                        "skipped": sum.skipped,
+                        "renamed": sum.renamed,
+                        "bundle_sha256": sum.bundle_sha256,
+                    }),
+                )?;
+            }
             Ok(RestoreEntriesResult {
                 restored: staged.iter().map(|c| c.slug.clone()).collect(),
                 templates: TemplateRestore {
@@ -4391,6 +4423,30 @@ impl Vault {
     /// `src/daemon/*.js`.
     pub fn grant(&self, grant_id: &str) -> Result<Option<GrantRecord>> {
         self.read(|c| rows::grant_get(c, grant_id))
+    }
+
+    /// A grant's runtime state (`quota_state` and `spend`, as the JS pipeline
+    /// keeps them on the grant object); `None` when there is no such grant,
+    /// and `None` fields are the JS defaults (a fresh window, zero spend). No
+    /// JS method: replaces reading `grant.quota_state` / `grant.spend` in
+    /// `src/daemon/pipeline.js`.
+    pub fn grant_runtime(&self, grant_id: &str) -> Result<Option<GrantRuntime>> {
+        self.read(|c| rows::grant_runtime_get(c, grant_id))
+    }
+
+    /// Replace a grant's runtime state, in one transaction. Refuses an
+    /// unknown grant (AV_NOT_FOUND). Not checkpointed: these are counters,
+    /// not key material (the JS saves them with `durable: false`). No JS
+    /// method: replaces `grant.quota_state = …` / `grant.spend = …` followed
+    /// by `this.vault.save({ durable: false })` in `src/daemon/pipeline.js`.
+    pub fn set_grant_runtime(&mut self, grant_id: &str, rt: &GrantRuntime) -> Result<()> {
+        self.run(|t| {
+            if rows::grant_runtime_set(t.c, grant_id, rt)? {
+                Ok(())
+            } else {
+                Err(plain(ErrorCode::NotFound, format!("no grant {grant_id}")))
+            }
+        })
     }
 
     /// Every grant. No JS method: replaces `Object.values(vault.db.grants)`
@@ -4982,12 +5038,25 @@ fn rows_state<T: Serialize>(s: &T) -> String {
 }
 
 /// `PRAGMA wal_checkpoint(TRUNCATE)`: no old page survives in the WAL.
+/// A busy checkpoint (another reader or writer kept it from finishing) is
+/// an error: the old pages might still be in the WAL.
 pub(crate) fn checkpoint_truncate(c: &Connection) -> Result<()> {
-    c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(()),
-            e => Err(e),
-        })?;
+    let busy = c
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()?;
+    checkpoint_outcome(busy.unwrap_or(0))
+}
+
+/// The first column of `PRAGMA wal_checkpoint`: 0 is done, anything else is
+/// busy.
+pub(crate) fn checkpoint_outcome(busy: i64) -> Result<()> {
+    if busy != 0 {
+        return Err(Error::Invariant(
+            "the WAL checkpoint was busy; old pages may remain in the WAL".into(),
+        ));
+    }
     Ok(())
 }
 

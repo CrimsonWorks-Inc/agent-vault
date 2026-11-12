@@ -210,7 +210,12 @@ CREATE TABLE grants (
     state         TEXT NOT NULL CHECK (state IN ('active', 'expired', 'revoked')),
     end_reason    TEXT,
     created_at    TEXT NOT NULL,
-    expires_at    TEXT
+    expires_at    TEXT,
+    -- Runtime state the JS pipeline keeps on the grant (grant.quota_state and
+    -- grant.spend in src/daemon/pipeline.js), as the JSON it wrote; NULL is
+    -- the JS default (a fresh window, zero spend).
+    quota_state   TEXT CHECK (quota_state IS NULL OR json_valid(quota_state)),
+    spend         TEXT CHECK (spend IS NULL OR json_valid(spend))
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX grants_session ON grants (session_id);
 CREATE INDEX grants_credential ON grants (credential_id);

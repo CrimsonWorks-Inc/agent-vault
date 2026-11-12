@@ -381,6 +381,32 @@ fn a_second_run_is_a_no_op() {
         preflight(&opts(&js.dir, &js.dir, false)),
         Err(MigrateError::AlreadyMigrated(_))
     ));
+    // A completed, valid vault.db: the success report, flagged, exit-0 no-op.
+    let again = migrate(
+        &opts(&js.dir, &js.dir, false),
+        read_legacy(&js.dir).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        again.already_migrated,
+        "a second run was not reported as done"
+    );
+    assert_eq!(again.written, None);
+    assert!(again.counts.is_empty(), "a no-op reported work");
+    assert_eq!(
+        serde_json::to_value(&again).unwrap()["already_migrated"],
+        json!(true)
+    );
+    assert_eq!(listing(&js.dir), before, "a second run changed something");
+}
+
+#[test]
+fn a_vault_db_that_is_not_a_finished_migration_stays_an_error() {
+    // Half-written: bytes that are not a database.
+    let js = js_vault("none");
+    std::fs::write(js.dir.join("vault.db"), b"SQLite format 3\0 torn").unwrap();
+    let before = listing(&js.dir);
     assert!(matches!(
         migrate(
             &opts(&js.dir, &js.dir, false),
@@ -389,7 +415,91 @@ fn a_second_run_is_a_no_op() {
         ),
         Err(MigrateError::AlreadyMigrated(_))
     ));
-    assert_eq!(listing(&js.dir), before, "a second run changed something");
+    assert_eq!(listing(&js.dir), before);
+    // A real database, but not one a migration finished (no vault.migrated).
+    let to = js._tmp.path().join("fresh");
+    let created = Vault::create(&to, CreateOptions::default()).unwrap();
+    drop(created);
+    let before = listing(&to);
+    assert!(matches!(
+        migrate(
+            &opts(&js.dir, &to, false),
+            read_legacy(&js.dir).unwrap(),
+            None
+        ),
+        Err(MigrateError::AlreadyMigrated(_))
+    ));
+    assert_eq!(listing(&to), before);
+}
+
+#[test]
+fn migrate_refuses_while_the_js_daemon_runs_against_from_and_writes_nothing() {
+    let js = js_vault("none");
+    let _daemon = std::os::unix::net::UnixListener::bind(js.dir.join("control.sock")).unwrap();
+    let before = listing(&js.dir);
+    match migrate(
+        &opts(&js.dir, &js.dir, false),
+        read_legacy(&js.dir).unwrap(),
+        None,
+    ) {
+        Err(MigrateError::DaemonRunning { next, .. }) => assert!(next.contains("stop")),
+        other => panic!("migrated beside a running daemon: {other:?}"),
+    }
+    assert_eq!(
+        listing(&js.dir),
+        before,
+        "a refused migration wrote something"
+    );
+    // Control: once the daemon is gone, the same migration runs.
+    drop(_daemon);
+    std::fs::remove_file(js.dir.join("control.sock")).unwrap();
+    let r = migrate(
+        &opts(&js.dir, &js.dir, false),
+        read_legacy(&js.dir).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(!r.already_migrated);
+    assert!(js.dir.join("vault.db").exists());
+}
+
+#[test]
+fn migrate_keeps_each_grants_quota_state_and_spend_byte_identical() {
+    let js = js_vault("none");
+    let grant_id = str_of(&js.out, "grant_id");
+    let legacy = read_legacy(&js.dir).unwrap();
+    // The policy limits and counters are the control: they always came along.
+    let control = legacy.document.grants[grant_id].clone();
+    migrate(&opts(&js.dir, &js.dir, false), legacy, None).unwrap();
+    let mut v = Vault::open(&js.dir).unwrap();
+    v.unlock(None).unwrap();
+    let rt = v
+        .grant_runtime(grant_id)
+        .unwrap()
+        .expect("the grant migrated");
+    assert_eq!(
+        serde_json::to_string(rt.quota_state.as_ref().expect("quota_state was dropped")).unwrap(),
+        str_of(&js.out, "quota_state_text"),
+    );
+    assert_eq!(
+        serde_json::to_string(rt.spend.as_ref().expect("spend was dropped")).unwrap(),
+        str_of(&js.out, "spend_text"),
+    );
+    assert!(rt.spend.as_ref().unwrap()["reserved"]
+        .get("rq_fixture_kept")
+        .is_some());
+    let g = v.grant(grant_id).unwrap().unwrap();
+    assert_eq!(g.policy, control.policy);
+    assert_eq!(
+        (g.budget_used, g.counters),
+        (control.budget_used, control.counters)
+    );
+    // A grant the JS never charged keeps the JS default.
+    let other = v
+        .grant_runtime(str_of(&js.out, "gh_grant_id"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(other, crate::model::GrantRuntime::default());
 }
 
 #[test]

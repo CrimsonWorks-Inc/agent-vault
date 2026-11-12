@@ -264,9 +264,9 @@ Run them with `cd rust && cargo test -p av-store`.
 
 | JS test | Rust |
 |---|---|
-| across thousands of random requests, no credential ever reaches the agent | covered by conformance and av-daemon (it drives the gateway); the store-level half is `tests::invariants::*` |
-| the granted credential reached only the host its grant allows, and nothing else did | covered by conformance and av-daemon (gateway upstream traffic) |
-| no placeholder and no session token was ever forwarded upstream | covered by conformance and av-daemon (gateway upstream traffic) |
+| across thousands of random requests, no credential ever reaches the agent | av-daemon: a gateway fuzz, which the store cannot run (it forwards nothing); not in `conformance/`. The store-level half is `tests::invariants::*` |
+| the granted credential reached only the host its grant allows, and nothing else did | av-daemon: a gateway fuzz over upstream traffic; not in `conformance/` |
+| no placeholder and no session token was ever forwarded upstream | av-daemon: a gateway fuzz over upstream traffic; not in `conformance/` |
 | a placeholder was never spent more times than it had uses | `tests::invariants::a_placeholder_was_never_spent_more_times_than_it_had_uses` |
 | nothing sensitive reached the audit log, and its chain still verifies | `tests::invariants::nothing_sensitive_reached_the_audit_log_and_its_chain_still_verifies` |
 

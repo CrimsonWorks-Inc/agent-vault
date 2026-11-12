@@ -5,7 +5,7 @@
 //   node make-js-vault.mjs <repo src dir> <vault dir> <none|passphrase> <out.json>
 
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 
 const [, , src, dir, factor, out] = process.argv
 const { Vault } = await import(`file://${src}/store/vault.js`)
@@ -71,6 +71,13 @@ v.db.kv.session_requests = [{
   created_at: new Date().toISOString(), decided_at: null,
 }]
 v.db.kv.ui_origins = ['http://127.0.0.1:7777']
+// Runtime state the JS pipeline keeps on a grant (src/daemon/pipeline.js
+// #quota and #checkSpend): a quota window part-used and a spend ledger with
+// one in-flight reservation.
+const QUOTA_STATE = { window_ms: 86_400_000, start: 1_700_000_000_000, count: 7, prev: 2 }
+const SPEND = { tokens_used: 40, usd_micros_used: 9, reserved: { rq_fixture_kept: { tokens: 12, usd_micros: 3, at: 1_700_000_000_500 } } }
+v.db.grants[grant.id].quota_state = QUOTA_STATE
+v.db.grants[grant.id].spend = SPEND
 v.save()
 const witness = v.audit.checkpoint()
 const { bundle } = await exportBackup(v, { recoveryPassphrase: RECOVERY })
@@ -80,4 +87,7 @@ writeFileSync(out, JSON.stringify({
   token, session_id: session.id, ended_session_id: ended.session.id, grant_id: grant.id,
   placeholder, row_id: row.id, gh_placeholder: ghPh.placeholder, presence,
   witness, bundle, head: v.audit.head, seq: v.audit.seq, workspace_id: ws.id,
+  gh_grant_id: ghGrant.id,
+  quota_state_text: JSON.stringify(JSON.parse(readFileSync(`${dir}/vault.json`, 'utf8')).grants[grant.id].quota_state),
+  spend_text: JSON.stringify(JSON.parse(readFileSync(`${dir}/vault.json`, 'utf8')).grants[grant.id].spend),
 }, null, 1))
