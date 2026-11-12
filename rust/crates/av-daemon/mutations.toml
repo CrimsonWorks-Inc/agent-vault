@@ -1399,3 +1399,675 @@ name = "U3 fix4: the page's old kind read passes its own limit to the daemon"
 file = "src/ui/server.rs"
 from = '''"/v1/audit?limit={AUDIT_BATCH}&kind={}",'''
 to = '''"/v1/audit?limit={lim_s}&kind={}",'''
+
+# ---------------------------------------------------- src/daemon/server.js
+
+[[mutation]]
+name = 'the MCP session is read from shared state again'
+file = "src/server.rs"
+from = '''.handle(m, session.clone(), Some(token.clone()), listener.clone())'''
+to = '''.handle(m, None, None, { let _ = (&session, &token); listener.clone() })'''
+
+[[mutation]]
+name = 'the listener never reaches the pipeline'
+file = "src/server.rs"
+from = '''                body: if req.body.is_empty() {
+                    None
+                } else {
+                    Some(req.body)
+                },
+                listener,'''
+to = '''                body: if req.body.is_empty() {
+                    None
+                } else {
+                    Some(req.body)
+                },
+                listener: { let _ = listener; None },'''
+
+[[mutation]]
+name = 'an agent can approve its own session request'
+file = "src/server/routes.rs"
+from = '''self.gate_session("session request approval", operation, &elevated, presence).await?;'''
+to = '''let _ = (operation, elevated, presence);'''
+
+[[mutation]]
+name = 'an authenticator-only vault reports its socket as ungated'
+file = "src/server/routes.rs"
+from = '''                    if core.vault.presence_key().v()?.is_some() {
+                        return Ok(Some(json!({
+                            "granted": false, "ungated": false,'''
+to = '''                    if false && core.vault.presence_key().v()?.is_some() {
+                        return Ok(Some(json!({
+                            "granted": false, "ungated": false,'''
+
+# NOT APPLICABLE: 'an uncaught error ends the daemon'. The JS installs
+# guardProcess, a process-wide uncaughtException/unhandledRejection handler.
+# Here every connection and request runs in its own tokio task; a panic ends
+# that task only, and there is no process-wide handler to remove. The same
+# holds for 'daemon.uncaught keeps the fault message' (no such record exists)
+# and 'a fault is recorded by its message (C28)' (error_class has no caller
+# that records a fault).
+
+[[mutation]]
+name = 'the shared window can change presence factors'
+file = "src/server.rs"
+from = '''        let p = presence.cloned().unwrap_or(Value::Null);
+        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+to = '''        if now_ms() < self.dm.presence_grace_until {
+            return Ok(Fresh::Done);
+        }
+        let p = presence.cloned().unwrap_or(Value::Null);
+        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+
+[[mutation]]
+name = 'what the window admits is not recorded'
+file = "src/server.rs"
+from = '''            self.audit_opt("presence.window_used", json!({"op": op}));'''
+to = '''            let _ = op;'''
+
+[[mutation]]
+name = 'a fresh-presence change goes through on a vault with no factor'
+file = "src/server.rs"
+from = '''        if factors.is_empty() {
+            return Err(dr(C::PresenceRequired, format!("{op} needs a human factor, and none is enrolled"), "factor_required")'''
+to = '''        if factors.is_empty() {
+            return Ok(Fresh::Done);
+        }
+        if factors.is_empty() {
+            return Err(dr(C::PresenceRequired, format!("{op} needs a human factor, and none is enrolled"), "factor_required")'''
+
+[[mutation]]
+name = 'listen rm leaves pre-handshake TLS sockets connected'
+file = "src/listen.rs"
+from = '''            let mut revoked = stop_rx.clone();
+            conns.spawn(async move {'''
+to = '''            let mut revoked = stop_rx.clone();
+            let _ = &mut revoked;
+            let (tx_never, rx_never) = tokio::sync::watch::channel(false);
+            std::mem::forget(tx_never);
+            revoked = rx_never;
+            conns.spawn(async {});
+            tokio::spawn(async move {'''
+
+[[mutation]]
+name = 'the daemon asks for a tap before refusing Touch ID unlock without a passphrase'
+file = "src/server/routes.rs"
+from = '''                        if !remove {
+                            core.vault.require_recovery_factor().v()?;
+                        }'''
+to = '''                        if false && !remove {
+                            core.vault.require_recovery_factor().v()?;
+                        }'''
+
+[[mutation]]
+name = 'the single decide route takes any truthy verdict'
+file = "src/server/routes.rs"
+from = '''            "POST /v1/session-requests/decide" => {
+                if !field(&input, "granted")?.is_some_and(Value::is_boolean) {'''
+to = '''            "POST /v1/session-requests/decide" => {
+                if false && !field(&input, "granted")?.is_some_and(Value::is_boolean) {'''
+
+[[mutation]]
+name = 'the fresh presence gate accepts the shared passphrase window'
+file = "src/server.rs"
+from = '''    ) -> R<Fresh> {
+        let p = presence.cloned().unwrap_or(Value::Null);'''
+to = '''    ) -> R<Fresh> {
+        if now_ms() < self.dm.presence_grace_until {
+            return Ok(Fresh::Done);
+        }
+        let p = presence.cloned().unwrap_or(Value::Null);'''
+
+[[mutation]]
+name = 'approving a session request into auto with writes needs only the window'
+file = "src/server/routes.rs"
+from = '''let elevated = if granted { elevation_of(&final_) } else { Vec::new() };'''
+to = '''let elevated: Vec<String> = { let _ = granted; Vec::new() };'''
+
+[[mutation]]
+name = 'a bulk decision with an elevated item needs only the window'
+file = "src/server/routes.rs"
+from = '''let elevated = if elevated { vec!["approval_auto_writes".to_string()] } else { Vec::new() };'''
+to = '''let elevated: Vec<String> = { let _ = elevated; Vec::new() };'''
+
+[[mutation]]
+name = 'a session request may carry an owner-only field'
+file = "src/server.rs"
+from = '''        if !owned.is_empty() {
+            return Err(dr(C::PolicyDenied, format!("a session request cannot carry {}", owned.join(" or ")), "owner_only_field")
+                .hinted("Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason."));'''
+to = '''        if false && !owned.is_empty() {
+            return Err(dr(C::PolicyDenied, format!("a session request cannot carry {}", owned.join(" or ")), "owner_only_field")
+                .hinted("Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason."));'''
+
+[[mutation]]
+name = 'an unknown approval mode is stored instead of refused'
+file = "src/server.rs"
+from = '''            if spec.get("approval").is_some_and(|a| {
+                !a.is_null() && !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s))
+            }) {'''
+to = '''            if false && spec.get("approval").is_some_and(|a| {
+                !a.is_null() && !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s))
+            }) {'''
+
+[[mutation]]
+name = 'the placeholder batch is issued with no human'
+file = "src/server/routes.rs"
+from = '''                batch_shape(&input)?;
+                let presence = field(&input, "presence")?.cloned();
+                self.require_human("placeholder issue", op?, presence).await?;'''
+to = '''                batch_shape(&input)?;
+                let presence = field(&input, "presence")?.cloned();
+                let _ = (op, presence);'''
+
+[[mutation]]
+name = 'ttl_hours is not required to be a positive number'
+file = "src/server.rs"
+from = '''            if !as_finite(h).is_some_and(|x| x > 0.0) {
+                return Err(ttl("ttl_hours must be a positive number of hours"));'''
+to = '''            if false && !as_finite(h).is_some_and(|x| x > 0.0) {
+                return Err(ttl("ttl_hours must be a positive number of hours"));'''
+
+[[mutation]]
+name = 'the daemon does not hand a session its elevation'
+file = "src/server.rs"
+from = '''                elevated: plan.elevated.clone(),'''
+to = '''                elevated: Vec::new(),'''
+
+[[mutation]]
+name = 'a session for a quarantined credential is planned and gated'
+file = "src/server.rs"
+from = '''            if cred.quarantine.is_some() && !saving_template {'''
+to = '''            if false && cred.quarantine.is_some() && !saving_template {'''
+
+[[mutation]]
+name = 'a session can be planned for a quarantined credential'
+file = "src/server.rs"
+from = '''            if cred.quarantine.is_some() && !saving_template {
+                return Err(quarantined(&cred.slug));
+            }'''
+to = '''            let _ = saving_template;'''
+
+[[mutation]]
+name = 'discovery checks liveness but not whether the session is usable on this listener'
+file = "src/server.rs"
+from = '''core.vault.assert_session_usable(Some(&session), l.as_ref(), Default::default()).v()?;'''
+to = '''{ let _ = &l; core.vault.assert_session_live(Some(&session)).v()?; }'''
+
+[[mutation]]
+name = 'the MCP endpoint checks liveness but not whether the session is usable on this listener'
+file = "src/server.rs"
+from = '''                core.vault
+                    .assert_session_usable(
+                        Some(&s),
+                        lc.as_ref(),
+                        av_store::vault::UsableOptions {
+                            peek: true,
+                            record: true,
+                        },
+                    )
+                    .ok()'''
+to = '''                { let _ = &lc; core.vault.assert_session_live(Some(&s)) }
+                    .ok()'''
+
+[[mutation]]
+name = 'a budget of 0 reaches the presence gate before it is refused (C17)'
+file = "src/server.rs"
+from = '''            if budget == Some(Some(0)) {'''
+to = '''            if false && budget == Some(Some(0)) {'''
+
+[[mutation]]
+name = 'a grant lifetime is accepted and never given to the store (F18)'
+file = "src/server.rs"
+from = '''                        policy: g.policy.clone(),
+                        ttl_ms: g.ttl_ms,'''
+to = '''                        policy: g.policy.clone(),
+                        ttl_ms: None,'''
+
+[[mutation]]
+name = 'a session request is opened without being built first, so one that could never be created reaches a human'
+file = "src/server.rs"
+from = '''        self.dm_plan_session(&request_spec(&proposal), false, false)?;'''
+to = '''        let _ = request_spec(&proposal);'''
+
+[[mutation]]
+name = 'a template create is not bound to the hash the human looked at (F17)'
+file = "src/server.rs"
+from = '''        if input.get("template_hash").and_then(Value::as_str) != Some(t.hash.as_str()) {'''
+to = '''        if false && input.get("template_hash").and_then(Value::as_str) != Some(t.hash.as_str()) {'''
+
+[[mutation]]
+name = "a template create's signed operation binds the name but not template_hash (F17)"
+file = "src/server.rs"
+from = '''            "POST /v1/sessions" => of("session.create", input),'''
+to = '''            "POST /v1/sessions" => of("session.create", &if input.get("template").is_some() { json!({"template": input["template"]}) } else { input.clone() }),'''
+
+[[mutation]]
+name = 'a session request from a template is resolved again at approval, not snapshotted (F17)'
+file = "src/server.rs"
+from = '''        let mut spec = request_spec(&final_);'''
+to = '''        let mut spec = match final_.get("template").and_then(Value::as_str) { Some(t) => json!({"template": t, "template_hash": self.vault.get_template(t).ok().flatten().map(|x| x.hash)}), None => request_spec(&final_) };'''
+
+[[mutation]]
+name = 'a narrowing that names nothing does nothing silently (F15)'
+file = "src/server/routes.rs"
+from = '''    if fields.is_empty() && session_ttl.is_none() && grant_ttl.is_none() {'''
+to = '''    if false && fields.is_empty() && session_ttl.is_none() && grant_ttl.is_none() {'''
+
+[[mutation]]
+name = 'a narrowing that turns redirects on is only refused after the session was shortened (F15)'
+file = "src/server/routes.rs"
+from = '''    if narrow.contains_key("redirects") && narrow["redirects"] != json!(0) {'''
+to = '''    if false && narrow.contains_key("redirects") && narrow["redirects"] != json!(0) {'''
+
+[[mutation]]
+name = 'a narrowing silently ignores a field it cannot narrow (F15)'
+file = "src/server/routes.rs"
+from = '''    if let Some(k) = narrow.keys().find(|k| !allowed.contains(&k.as_str())) {'''
+to = '''    if let Some(k) = narrow.keys().find(|k| false && !allowed.contains(&k.as_str())) {'''
+
+[[mutation]]
+name = 'rotation keeps the held approvals a human gave against the old key (F7)'
+file = "src/server/routes.rs"
+from = '''    let invalidated = core.pl_deny_approvals(
+        &ApprovalFilter {
+            credential_id: Some(cred.id),
+            ..Default::default()
+        },
+        "credential_rotated",
+    )?;'''
+to = '''    let invalidated = { let _ = cred.id; 0usize };'''
+
+[[mutation]]
+name = 'a rotation retire window is read by coercion'
+file = "src/server/routes.rs"
+from = '''        if !as_integer(h).is_some_and(|n| (0..=168).contains(&n)) {'''
+to = '''        if false && !as_integer(h).is_some_and(|n| (0..=168).contains(&n)) {'''
+
+[[mutation]]
+name = 'a scrub pattern is stored without being compiled (F4)'
+file = "src/server/routes.rs"
+from = '''                let compiled = av_core::scrub::compile_scrub_pattern(&pattern)?;'''
+to = '''                let compiled = av_core::scrub::compile_scrub_pattern("(?!)")?;'''
+
+[[mutation]]
+name = 'cred rotate runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred rotate", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred scrub add runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred scrub add", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred scrub remove runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred scrub remove", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred expiry runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred expiry", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred pins runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred pins", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred pins remove runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred pins remove", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred release runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred release", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'template save runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("template save", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'backup restore runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("backup restore", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'notify set runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("notify set", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'backup export accepts the window instead of a fresh proof (F8)'
+file = "src/server/routes.rs"
+from = '''self.require_fresh("backup export", op?.unwrap_or(Value::Null), presence).await?;'''
+to = '''self.require_human("backup export", op?, presence).await?;'''
+
+[[mutation]]
+name = 'a wrong recovery passphrase on inspect is not counted (F8)'
+file = "src/server/routes.rs"
+from = '''                        if rule_of(&e) == Some("backup_auth") {
+                            core.dm_record_attempt(false);'''
+to = '''                        if false && rule_of(&e) == Some("backup_auth") {
+                            core.dm_record_attempt(false);'''
+
+[[mutation]]
+name = 'a right recovery passphrase on inspect clears the vault passphrase throttle (F8)'
+file = "src/server/routes.rs"
+from = '''core.audit("backup.inspected",'''
+to = '''core.dm_record_attempt(true); core.audit("backup.inspected",'''
+
+[[mutation]]
+name = 'POST /v1/tripwires {enabled:false} is open (F16)'
+file = "src/server/routes.rs"
+from = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"] == Value::Bool(true);'''
+to = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"].is_boolean();'''
+
+[[mutation]]
+name = "POST /v1/tripwires reads enabled by truthiness, so 'true' and 1 are open (C20)"
+file = "src/server/routes.rs"
+from = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"] == Value::Bool(true);'''
+to = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && crate::util::truthy(&body["enabled"]);'''
+
+[[mutation]]
+name = 'tripwire changes other than enabling run with no human (F16)'
+file = "src/server/routes.rs"
+from = '''                if !enable_only {
+                    self.require_human("tripwires set", op?, presence).await?;'''
+to = '''                if false && !enable_only {
+                    self.require_human("tripwires set", op?, presence).await?;'''
+
+[[mutation]]
+name = 'panic is never told about session requests (C1)'
+file = "src/pipeline.rs"
+from = '''        let session_requests = match self.dm_deny_pending_session_requests("panic") {'''
+to = '''        let session_requests = match Ok::<usize, VaultError>(0) {'''
+
+[[mutation]]
+name = 'a panic that locks leaves the passphrase window open'
+file = "src/server/routes.rs"
+from = '''                        if r["locked"] == Value::Bool(true) {
+                            core.dm.presence_grace_until = 0;
+                        }'''
+to = ''''''
+
+[[mutation]]
+name = "panic reads lock by truthiness, so 'true' panics without locking"
+file = "src/server/routes.rs"
+from = '''                if lock.as_ref().is_some_and(|l| !l.is_boolean()) {
+                    return Err(dr(C::PolicyDenied, "lock is true or false", "policy_invalid"));'''
+to = '''                if false && lock.as_ref().is_some_and(|l| !l.is_boolean()) {
+                    return Err(dr(C::PolicyDenied, "lock is true or false", "policy_invalid"));'''
+
+[[mutation]]
+name = 'an agent-written quarantine reason is stored with its placeholder and secret in it (F16)'
+file = "src/server/routes.rs"
+from = '''                            Some(r) => Some(core.vault.untrusted_text(r, 200).v()?),'''
+to = '''                            Some(r) => Some(r.to_string()),'''
+
+[[mutation]]
+name = 'the gateway preflight route ignores the listener it arrived on (C18)'
+file = "src/server.rs"
+from = '''            asked.headers.push(("av-session".into(), token));
+            asked.listener = listener;'''
+to = '''            asked.headers.push(("av-session".into(), token));
+            asked.listener = { let _ = listener; None };'''
+
+[[mutation]]
+name = 'a probe refusal (a pin mismatch) is answered as an internal error (F12)'
+file = "src/connectors/probe.rs"
+from = '''            return Err(dr(
+                C::PinMismatch,
+                scrub_text(&e.message, &mut scrubber),
+                rule,
+            ));'''
+to = '''            let _ = rule;
+            return Err(crate::err::internal(scrub_text(&e.message, &mut scrubber)));'''
+
+[[mutation]]
+name = 'a grant lifetime given twice in a narrowing is taken from one place silently (C22)'
+file = "src/server/routes.rs"
+from = '''    if input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
+to = '''    if false && input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
+
+[[mutation]]
+name = "the control API hands back an approval's cached upstream response"
+file = "src/pipeline.rs"
+from = '''        m.insert("preview".into(), self.preview.clone());'''
+to = '''        m.insert("preview".into(), self.preview.clone());
+        if let Some(r) = &self.result { m.insert("result".into(), Value::from(String::from_utf8_lossy(&r.body).into_owned())); }'''
+
+[[mutation]]
+name = 'the presence route stores whatever record it is sent'
+file = "../av-store/src/vault.rs"
+from = '''    if !ok_id {
+        return Err(presence_refusal(
+            "credentialId is not a WebAuthn credential id",'''
+to = '''    if false && !ok_id {
+        return Err(presence_refusal(
+            "credentialId is not a WebAuthn credential id",'''
+
+[[mutation]]
+name = 'the daemon approves a session request whose overrides name a key it does not apply'
+file = "src/server/routes.rs"
+from = '''                if let Some(problem) = overrides_problem(input.get("overrides")) {
+                    return Err(dr(C::PolicyDenied, problem, "session_overrides"));
+                }
+                let i2 = input.clone();'''
+to = '''                let i2 = input.clone();'''
+
+[[mutation]]
+name = 'a bulk decision drops a session override key it does not apply'
+file = "src/server/routes.rs"
+from = '''                        overrides_problem(dd.get("overrides"))
+                    } else if'''
+to = '''                        None
+                    } else if'''
+
+[[mutation]]
+name = 'a bulk decision drops the narrowing sent with a held request'
+file = "src/server/routes.rs"
+from = '''                    } else if dd.get("overrides").is_some_and(|o| o.as_object().is_some_and(|m| !m.is_empty()) || (!o.is_null() && !o.is_object() && crate::util::truthy(o) && o.is_array() && !o.as_array().is_some_and(Vec::is_empty))) {'''
+to = '''                    } else if false {'''
+
+[[mutation]]
+name = 'the session_request.approved record holds the granted values, not their names (C25)'
+file = "src/server.rs"
+from = '''        rec["granted"] = shape["fields"].clone();'''
+to = '''        rec["granted"] = final_.clone();'''
+
+[[mutation]]
+name = 'the session_request.approved record holds the values a human narrowed to, not their names (C25)'
+file = "src/server.rs"
+from = '''        rec["narrowed"] = json!(narrowed);'''
+to = '''        rec["narrowed"] = json!(narrowed.iter().map(|f| final_.get(f).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>());'''
+
+[[mutation]]
+name = 'a decided session-request record holds the proposal, not its field names (C25)'
+file = "src/server.rs"
+from = '''"proposed": shape_of(&record.proposal)["fields"]}),'''
+to = '''"proposed": record.proposal}),'''
+
+[[mutation]]
+name = "a human denial quotes the proposal's summary (C25)"
+file = "src/server.rs"
+from = '''            shape["actor"] = "human".into();
+            self.audit_opt("session_request.denied", shape);'''
+to = '''            shape["actor"] = "human".into();
+            shape["summary"] = record.summary.clone().into();
+            self.audit_opt("session_request.denied", shape);'''
+
+[[mutation]]
+name = "a panic denial quotes the proposal's summary (C25)"
+file = "src/server.rs"
+from = '''            shape["reason"] = reason.into();
+            self.audit("session_request.denied", shape)?;'''
+to = '''            shape["reason"] = reason.into();
+            shape["summary"] = record.summary.clone().into();
+            self.audit("session_request.denied", shape)?;'''
+
+[[mutation]]
+name = 'the session made from a request is not marked as one, so session.created records its end (C25 addendum)'
+file = "src/server.rs"
+from = '''                template_version: from.as_ref().map(|t| t.1),
+                requested,'''
+to = '''                template_version: from.as_ref().map(|t| t.1),
+                requested: { let _ = requested; false },'''
+
+[[mutation]]
+name = 'the grant made from a request is not marked as one, so grant.created records its end (C25 addendum)'
+file = "src/server.rs"
+from = '''                        ttl_ms: g.ttl_ms,
+                        requested,'''
+to = '''                        ttl_ms: g.ttl_ms,
+                        requested: false,'''
+
+[[mutation]]
+name = 'an approval does not say its session comes from a request (C25 addendum)'
+file = "src/server.rs"
+from = '''self.dm_make_session(&plan, template_of(&record.proposal), true)?;'''
+to = '''self.dm_make_session(&plan, template_of(&record.proposal), false)?;'''
+
+[[mutation]]
+name = 'decide-many counts any session-request id as one the daemon minted (r4 F2)'
+file = "src/server.rs"
+from = '''            return self.sr_get(&id).is_some();'''
+to = '''            return { let _ = self.sr_get(&id); true };'''
+
+[[mutation]]
+name = 'decide-many counts any held-request id as one the daemon minted (r4 F2)'
+file = "src/server.rs"
+from = '''        self.pl_has_approval(&id)
+    }'''
+to = '''        { let _ = self.pl_has_approval(&id); true }
+    }'''
+
+[[mutation]]
+name = 'listen.bind_failed records the bind error message (C28)'
+file = "src/server.rs"
+from = '''                    let code = e.0.clone();'''
+to = '''                    let code = e.1.clone();'''
+
+[[mutation]]
+name = 'r6 B1: rules never saved are null, which `tripwire show` cannot list'
+file = "src/server/routes.rs"
+from = '''"rules": if saved { t["rules"].clone() } else { defaults.clone() }, "rules_saved": saved,'''
+to = '''"rules": if saved { t["rules"].clone() } else { Value::Null }, "rules_saved": saved,'''
+
+[[mutation]]
+name = 'r6 B2: the preflight route ignores assume_placeholder'
+file = "src/server.rs"
+from = '''            listener: None,
+        },
+        input.get("assume_placeholder") == Some(&Value::Bool(true)),'''
+to = '''            listener: None,
+        },
+        false,'''
+
+[[mutation]]
+name = 'r6 B2: the preflight route assumes a placeholder for a caller that did not ask'
+file = "src/server.rs"
+from = '''            listener: None,
+        },
+        input.get("assume_placeholder") == Some(&Value::Bool(true)),'''
+to = '''            listener: None,
+        },
+        input.get("assume_placeholder") != Some(&Value::Bool(false)),'''
+
+[[mutation]]
+name = 'r6 B2: assume_placeholder is not checked to be a boolean'
+file = "src/server.rs"
+from = '''    if input
+        .get("assume_placeholder")
+        .is_some_and(|q| !q.is_boolean())
+    {
+        return Err(refuse("assume_placeholder is true or false"));
+    }'''
+to = ''''''
+
+[[mutation]]
+name = 'U3 daemon: kind is filtered after the limit, not before'
+file = "src/server/routes.rs"
+from = '''        let n = limit_raw.as_deref().map_or(30, |l| l.parse().unwrap_or(30));
+        let start = all.len().saturating_sub(n);
+        return Ok(Value::Array(all[start..].to_vec()));'''
+to = '''        let n = limit_raw.as_deref().map_or(30, |l| l.parse().unwrap_or(30));
+        let _ = all;
+        return Ok(Value::Array(of_kind(read(n)?)));'''
+
+[[mutation]]
+name = 'U3 daemon: a paged read ignores kind'
+file = "src/server/routes.rs"
+from = '''    let rows: Vec<Value> = all
+        .into_iter()'''
+to = '''    let _ = all;
+    let rows: Vec<Value> = read(usize::MAX)?
+        .into_iter()'''
+
+[[mutation]]
+name = 'U3 daemon: before= is ignored, so the log cannot be walked'
+file = "src/server/routes.rs"
+from = '''            .filter(|r| r["seq"].as_u64().unwrap_or(0) < at)'''
+to = '''            .filter(|_| true)'''
+
+[[mutation]]
+name = 'U3 daemon: a paged read takes more than 500 rows'
+file = "src/server/routes.rs"
+from = '''            && l.parse::<usize>().is_ok_and(|n| n <= AUDIT_PAGE_MAX);'''
+to = '''            && l.parse::<usize>().is_ok();'''
+
+[[mutation]]
+name = 'U3 fix4: a kind-filtered tail takes any limit'
+file = "src/server/routes.rs"
+from = '''    let limit_raw = p("limit");
+    if let Some(l) = &limit_raw {'''
+to = '''    let limit_raw = p("limit");
+    if let Some(l) = limit_raw.as_ref().filter(|_| before.is_some() || after.is_some()) {'''
+
+[[mutation]]
+name = 'U3 fix4: the unfiltered tail is held to the new bound'
+file = "src/server/routes.rs"
+from = '''    if before.is_none() && after.is_none() && kind.is_none() {'''
+to = '''    if false && before.is_none() && after.is_none() && kind.is_none() {'''
+
+[[mutation]]
+name = 'a placeholder batch resolves a quarantined credential'
+file = "src/server/routes.rs"
+from = '''        if cred.quarantine.is_some() {
+            return Err(quarantined(&cred.slug));
+        }
+        let grant = grants'''
+to = '''        if false && cred.quarantine.is_some() {
+            return Err(quarantined(&cred.slug));
+        }
+        let grant = grants'''
+
+[[mutation]]
+name = 'a session body is converted inline, so its rate, quota, routes and payload rules are dropped'
+file = "src/server.rs"
+from = '''            let pol = policy::grant_policy_from_input(
+                spec,'''
+to = '''            let inline: Value = {
+                let mut s = Map::new();
+                for k in ["cred", "hosts", "methods", "paths", "budget", "approval"] {
+                    if let Some(v) = spec.get(k) {
+                        s.insert(k.into(), v.clone());
+                    }
+                }
+                Value::Object(s)
+            };
+            let pol = policy::grant_policy_from_input(
+                &inline,'''
