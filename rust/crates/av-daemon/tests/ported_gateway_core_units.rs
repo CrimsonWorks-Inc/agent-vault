@@ -505,3 +505,160 @@ fn repeated_header_values_keep_order_in_request_hash_but_header_names_do_not() {
         hash(&[("B".into(), "2".into()), ("a".into(), "1".into())])
     );
 }
+
+// gateway-w2-policy.test.js: effective policies retain all ancestor sets.
+fn intersect_all(layers: &[Value]) -> policy::Policy {
+    let layers = layers
+        .iter()
+        .cloned()
+        .map(|v| serde_json::from_value::<policy::Policy>(v).unwrap())
+        .collect::<Vec<_>>();
+    policy::intersect(&layers.iter().map(Some).collect::<Vec<_>>())
+}
+fn route_check(
+    p: &policy::Policy,
+    method: &str,
+    path: &str,
+) -> av_core::errors::Result<policy::HttpDecision> {
+    policy::evaluate_http(
+        p,
+        &policy::HttpTarget {
+            method: Some(method),
+            host: "api.example.test",
+            path,
+        },
+    )
+}
+fn route_denied(p: &policy::Policy, method: &str, path: &str, rule: &str) {
+    let e = route_check(p, method, path).unwrap_err();
+    assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
+    assert_eq!(e.extra.rule.as_deref(), Some(rule));
+}
+#[test]
+fn route_pairs_bind_methods_to_paths_and_every_inherited_set_applies() {
+    let parent = json!({"routes":[{"methods":["GET"],"paths":["/repos/**"]},{"methods":["POST"],"paths":["/repos/*/issues"]}]});
+    let effective = intersect_all(std::slice::from_ref(&parent));
+    assert_eq!(
+        route_check(&effective, "GET", "/repos/o/pulls")
+            .unwrap()
+            .route_rule,
+        Some(0)
+    );
+    assert_eq!(
+        route_check(&effective, "POST", "/repos/o/issues")
+            .unwrap()
+            .route_rule,
+        Some(1)
+    );
+    route_denied(&effective, "POST", "/repos/o/pulls", "routes");
+    let child = intersect_all(&[
+        parent.clone(),
+        json!({"routes":[{"methods":["POST"],"paths":["/repos/**"]}]}),
+    ]);
+    route_denied(&child, "POST", "/repos/o/pulls", "routes");
+    route_denied(&child, "GET", "/repos/o/pulls", "routes");
+    route_check(&child, "POST", "/repos/o/issues").unwrap();
+    route_denied(
+        &intersect_all(&[json!({"routes":[]})]),
+        "GET",
+        "/",
+        "routes",
+    );
+    route_check(&intersect_all(&[json!({})]), "POST", "/").unwrap();
+    route_denied(
+        &intersect_all(&[parent, json!({"deny_paths":["/repos/o/issues"]})]),
+        "POST",
+        "/repos/o/issues",
+        "deny_paths:0",
+    );
+}
+#[test]
+fn reused_effective_route_and_payload_sets_retain_every_ancestor_constraint() {
+    let first = intersect_all(&[
+        json!({"routes":[{"methods":["GET"],"paths":["/a/**"]}],"payload":{"query":{"first":{"required":true}}}}),
+        json!({"routes":[{"methods":["GET"],"paths":["/a/b"]}],"payload":{"query":{"second":{"absent":true}}}}),
+    ]);
+    let first_json = serde_json::to_value(&first).unwrap();
+    let reused = intersect_all(&[
+        first_json.clone(),
+        json!({"methods":["GET","POST"],"paths":["/**"]}),
+    ]);
+    let reused_json = serde_json::to_value(&reused).unwrap();
+    assert!(reused_json.get("routes").is_none());
+    assert!(reused_json.get("payload").is_none());
+    assert_eq!(reused_json["payload_sets"], first_json["payload_sets"]);
+    assert_eq!(reused_json["route_sets"], first_json["route_sets"]);
+    assert_eq!(reused_json["payload_sets"].as_array().unwrap().len(), 2);
+    route_check(&reused, "GET", "/a/b").unwrap();
+    route_denied(&reused, "GET", "/a/c", "routes");
+}
+#[test]
+fn malformed_stored_route_payload_and_unknown_approval_modes_fail_closed() {
+    for layer in [
+        json!({"route_sets":[null]}),
+        json!({"payload_sets":[{"json":{"/x":{"min":null}}}]}),
+    ] {
+        assert!(!policy::validate_json(&layer, &Default::default()).is_empty());
+        let p = serde_json::from_value(layer).unwrap();
+        let e = route_check(&p, "GET", "/").unwrap_err();
+        assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
+        assert!(e.extra.rule.unwrap().ends_with("_invalid"));
+    }
+    for modes in [["unknown", "auto"], ["auto", "unknown"]] {
+        let p = intersect_all(&[json!({"approval":modes[0]}), json!({"approval":modes[1]})]);
+        assert!(policy::needs_approval(
+            &p,
+            &policy::ApprovalQuery {
+                method: Some("GET"),
+                first_use: false
+            }
+        ));
+    }
+}
+#[test]
+fn grant_creation_rejects_coercion_and_host_escape_but_allows_zero_limits() {
+    let opts = policy::GrantPolicyOptions {
+        ceiling: policy::GrantCeiling::Hosts(vec!["api.example.test".into()]),
+        defaults: true,
+        profile: None,
+    };
+    for spec in [
+        json!({"budget":"5.5"}),
+        json!({"max_concurrent":1.5}),
+        json!({"quota":{"count":1,"window":"week"}}),
+        json!({"spend_tokens":null}),
+    ] {
+        assert_eq!(
+            policy::grant_policy_from_input(&spec, &opts)
+                .unwrap_err()
+                .extra
+                .rule
+                .as_deref(),
+            Some("policy_invalid")
+        );
+    }
+    assert_eq!(
+        policy::grant_policy_from_input(&json!({"hosts":["evil.test"]}), &opts)
+            .unwrap_err()
+            .extra
+            .rule
+            .as_deref(),
+        Some("credential_host")
+    );
+    let valid = policy::grant_policy_from_input(
+        &json!({"budget":0,"spend_tokens":0,"spend_usd":0,"redirects":0}),
+        &opts,
+    )
+    .unwrap();
+    let v = serde_json::to_value(&valid).unwrap();
+    assert_eq!(v["budget"]["limit"], 0);
+    assert_eq!(v["spend"], json!({"tokens":0,"usd_micros":0}));
+    assert!(policy::validate(&valid, &Default::default()).is_empty());
+    let p = serde_json::from_value(
+        json!({"routes":[{"methods":["POST"],"paths":["/**"]}],"budget":{"limit":1}}),
+    )
+    .unwrap();
+    assert!(policy::lint(&p, &Default::default())
+        .iter()
+        .any(|p| p.rule == "routes" && serde_json::to_value(&p.level).unwrap() == "warn"));
+}

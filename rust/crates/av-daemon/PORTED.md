@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 161 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **820 not yet ported**.
+Totals: 1090 JS tests: 171 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **810 not yet ported**.
 
 ## Mutation check
 
@@ -567,12 +567,12 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-model.test.js | OpenAI and Google SSE final usage survives chunks without usage and repeated totals | tests/ported_gateway_model.rs::cumulative_sse_usage_never_decreases_or_double_charges_and_survives_empty_chunks |
 | gateway-w2-model.test.js | missing usage charges the full reservation; actual usage may exceed it | tests/ported_gateway_model.rs::missing_or_unreadable_usage_charges_full_reservation_but_actual_usage_can_exceed_it |
 | gateway-w2-model.test.js | Gemini thinking tokens are charged as output, and a thoughts-only reply still settles | tests/ported_gateway_model.rs::buffered_provider_usage_includes_cache_and_thinking_tokens_and_rejects_partial_counts |
-| gateway-w2-payload.test.js | JSON constraints are strict, additive and pointer-aware | not yet ported |
-| gateway-w2-payload.test.js | JSON parser rejects duplicate decoded names, malformed input and excess depth | not yet ported |
-| gateway-w2-payload.test.js | form/query refuse ambiguity and enforce strict names | not yet ported |
-| gateway-w2-payload.test.js | payload validation rejects unknown keys and all malformed constraints | not yet ported |
-| gateway-w2-payload.test.js | GraphQL parses full operations, fragments, arguments and strings | not yet ported |
-| gateway-w2-payload.test.js | GraphQL request classification checks batches and persisted queries | not yet ported |
+| gateway-w2-payload.test.js | JSON constraints are strict, additive and pointer-aware | tests/ported_gateway_payload.rs::json_constraints_are_strict_additive_and_pointer_aware |
+| gateway-w2-payload.test.js | JSON parser rejects duplicate decoded names, malformed input and excess depth | tests/ported_gateway_payload.rs::strict_json_refuses_decoded_duplicate_names_malformed_input_and_excess_depth |
+| gateway-w2-payload.test.js | form/query refuse ambiguity and enforce strict names | tests/ported_gateway_payload.rs::form_query_ambiguity_strict_names_and_body_size_are_enforced |
+| gateway-w2-payload.test.js | payload validation rejects unknown keys and all malformed constraints | tests/ported_gateway_payload.rs::payload_validation_refuses_unknown_keys_and_malformed_constraints |
+| gateway-w2-payload.test.js | GraphQL parses full operations, fragments, arguments and strings | tests/ported_gateway_payload.rs::graphql_parser_checks_full_operations_fragments_arguments_and_strings |
+| gateway-w2-payload.test.js | GraphQL request classification checks batches and persisted queries | tests/ported_gateway_payload.rs::graphql_request_classification_checks_batches_persisted_queries_and_decoded_duplicates |
 | gateway-w2-pipeline.test.js | rate allows capacity, limits pending requests, and never spends a refused use | not yet ported |
 | gateway-w2-pipeline.test.js | malformed limits and persisted counters fail closed without an upstream | not yet ported |
 | gateway-w2-pipeline.test.js | quota charges one per call, survives restart and rollback, refunds pre-connect errors | not yet ported |
@@ -634,10 +634,10 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | a name that starts with punctuation is refused on every path, and a hop to it is not followed | not yet ported |
 | gateway-w2-pipeline.test.js | ordinary traffic that opens a name with $ or a JSON key with $ or @ is sent | not yet ported |
 | gateway-w2-pipeline.test.js | a repeated list name is sent under unrelated rules, and a rule on its base checks every entry | not yet ported |
-| gateway-w2-policy.test.js | route pairs bind methods to their own paths and every inherited set applies | not yet ported |
-| gateway-w2-policy.test.js | stored effective route and payload policies retain all ancestor constraints | not yet ported |
-| gateway-w2-policy.test.js | malformed stored route and payload constraints refuse before reaching upstream | not yet ported |
-| gateway-w2-policy.test.js | creation refuses coercion, supports zero limits, and cannot escape credential hosts | not yet ported |
+| gateway-w2-policy.test.js | route pairs bind methods to their own paths and every inherited set applies | tests/ported_gateway_core_units.rs::route_pairs_bind_methods_to_paths_and_every_inherited_set_applies |
+| gateway-w2-policy.test.js | stored effective route and payload policies retain all ancestor constraints | tests/ported_gateway_core_units.rs::reused_effective_route_and_payload_sets_retain_every_ancestor_constraint |
+| gateway-w2-policy.test.js | malformed stored route and payload constraints refuse before reaching upstream | tests/ported_gateway_core_units.rs::malformed_stored_route_payload_and_unknown_approval_modes_fail_closed |
+| gateway-w2-policy.test.js | creation refuses coercion, supports zero limits, and cannot escape credential hosts | tests/ported_gateway_core_units.rs::grant_creation_rejects_coercion_and_host_escape_but_allows_zero_limits |
 | gateway-w2-scrub.test.js | restricted scrub grammar refuses dangerous or broad expressions | not yet ported |
 | gateway-w2-scrub.test.js | extra patterns are additive to stored secret and derived protections | not yet ported |
 | gateway-w2-scrub.test.js | extra patterns survive every stream chunk boundary | not yet ported |
