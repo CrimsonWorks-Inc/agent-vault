@@ -112,7 +112,84 @@ pub struct PendingItem {
 
 /// One decision from a raw route row. Ports `describe` in `src/pending.js`.
 pub fn describe(kind: PendingKind, raw: &Value) -> PendingItem {
-    todo!()
+    let get = |k: &str| raw.get(k).cloned().unwrap_or(Value::Null);
+    let text = |k: &str| match raw.get(k) {
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(v) if truthy(v) => Some(js_string(v)),
+        _ => None,
+    };
+    match kind {
+        PendingKind::Session => PendingItem {
+            id: raw.get("id").map(js_string).unwrap_or_default(),
+            kind,
+            headline: get("summary"),
+            // Whatever the agent typed. Shown, never believed.
+            claim: text("agent_reason_untrusted"),
+            created_at: get("created_at"),
+            caution: Some(SESSION_CAUTION.to_string()),
+            narrowable: SESSION_NARROWABLE.iter().map(|s| s.to_string()).collect(),
+            owner_settable: SESSION_OWNER_SETTABLE.iter().map(|s| s.to_string()).collect(),
+            proposal: Some(match raw.get("proposal") {
+                Some(v) if truthy(v) => v.clone(),
+                _ => Value::Object(Map::new()),
+            }),
+            grant_id: None,
+            preview: None,
+            decide: DecideRoute {
+                path: "/v1/session-requests/decide".into(),
+                id_field: "id".into(),
+            },
+        },
+        PendingKind::Request => PendingItem {
+            id: raw.get("id").map(js_string).unwrap_or_default(),
+            kind,
+            headline: get("summary"),
+            claim: text("reason"),
+            created_at: get("created_at"),
+            caution: None,
+            narrowable: Vec::new(),
+            owner_settable: Vec::new(),
+            proposal: None,
+            grant_id: Some(text("grant_id")),
+            preview: Some(get("preview")),
+            decide: DecideRoute {
+                path: "/v1/approvals".into(),
+                id_field: "id".into(),
+            },
+        },
+    }
+}
+
+/// JS truthiness for a JSON value.
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+/// `String(v)` for a JSON value, as the JS template literals print it.
+fn js_string(v: &Value) -> String {
+    match v {
+        Value::Null => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => i.to_string(),
+            (_, Some(u), _) => u.to_string(),
+            (_, _, Some(f)) if f.fract() == 0.0 && f.abs() < 1e21 => format!("{f:.0}"),
+            (_, _, Some(f)) => f.to_string(),
+            _ => n.to_string(),
+        },
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().map(|x| match x {
+            Value::Null => String::new(),
+            other => js_string(other),
+        }).collect::<Vec<_>>().join(","),
+        Value::Object(_) => "[object Object]".into(),
+    }
 }
 
 /// Everything waiting, oldest first. `get(path)` is the caller's transport;
@@ -123,14 +200,33 @@ pub fn fetch_pending<F>(get: F) -> Vec<PendingItem>
 where
     F: FnMut(&str) -> Option<Vec<Value>>,
 {
-    todo!()
+    let mut get = get;
+    let rows = SOURCES
+        .iter()
+        .map(|source| (source.kind, get(source.path).unwrap_or_default()))
+        .collect();
+    collect_pending(rows)
 }
 
 /// Describe already-fetched rows per kind and sort oldest first. No JS
 /// function: the body of `fetchPending` in `src/pending.js` without the
 /// transport.
 pub fn collect_pending(rows: Vec<(PendingKind, Vec<Value>)>) -> Vec<PendingItem> {
-    todo!()
+    let mut out: Vec<PendingItem> = rows
+        .iter()
+        .flat_map(|(kind, raws)| raws.iter().map(|raw| describe(*kind, raw)))
+        .collect();
+    // Oldest first: the thing waiting longest is the one to answer.
+    out.sort_by(|a, b| sort_key(&a.created_at).cmp(&sort_key(&b.created_at)));
+    out
+}
+
+/// `String(created_at)`, the JS sort key (`undefined` when absent).
+fn sort_key(v: &Value) -> String {
+    match v {
+        Value::Null => "undefined".into(),
+        other => js_string(other),
+    }
 }
 
 /// The control call that answers one decision. Ports the return value of
@@ -151,7 +247,16 @@ pub fn decision(
     granted: bool,
     overrides: Option<&Map<String, Value>>,
 ) -> DecisionCall {
-    todo!()
+    let mut body = Map::new();
+    body.insert(item.decide.id_field.clone(), Value::from(item.id.clone()));
+    body.insert("granted".into(), Value::Bool(granted));
+    if let Some(o) = overrides.filter(|o| !o.is_empty()) {
+        body.insert("overrides".into(), Value::Object(o.clone()));
+    }
+    DecisionCall {
+        path: item.decide.path.clone(),
+        body: Value::Object(body),
+    }
 }
 
 /// The keys `parse_overrides` reads. Ports `OVERRIDE_KEYS` in
@@ -252,7 +357,168 @@ pub struct Overrides {
 /// key or an unusable value is an error naming the field. Ports
 /// `parseOverrides` in `src/pending.js`.
 pub fn parse_overrides(args: &Map<String, Value>) -> Result<Overrides, OverrideError> {
-    todo!()
+    let fail = |field: &str, why: String| OverrideError {
+        field: field.to_string(),
+        why,
+    };
+    for k in args.keys() {
+        if !OVERRIDE_KEYS.contains(&k.as_str()) {
+            return Err(fail(k, "not a narrowing an approval applies".into()));
+        }
+    }
+    // Split on commas and trimmed, as every surface reads them.
+    let list = |v: &Value| -> Vec<String> {
+        let items: Vec<String> = match v {
+            Value::Array(a) => a.iter().map(js_string).collect(),
+            other => js_string(other).split(',').map(str::to_string).collect(),
+        };
+        items
+            .into_iter()
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
+    let given = |v: Option<&Value>| match v {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(_) => true,
+    };
+    // A number, or a string that reads as one; anything else is refused.
+    let num = |field: &str, v: &Value| -> Result<f64, OverrideError> {
+        let n = match v {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),
+            _ => None,
+        };
+        match n {
+            Some(n) if n.is_finite() => Ok(n),
+            _ => Err(fail(field, format!("not a number: {v}"))),
+        }
+    };
+    let json = |field: &str, v: &Value| -> Result<Value, OverrideError> {
+        let Value::String(s) = v else {
+            return Ok(v.clone());
+        };
+        let parsed: Value =
+            serde_json::from_str(s).map_err(|_| fail(field, "not valid JSON".into()))?;
+        if !(parsed.is_object() || parsed.is_array()) {
+            return Err(fail(field, "must be a JSON object or list".into()));
+        }
+        Ok(parsed)
+    };
+    let route_of = |v: &Value| -> Value {
+        let s = js_string(v);
+        match s.find(':') {
+            Some(at) if at > 0 => {
+                let methods: Vec<Value> = s[..at]
+                    .split(',')
+                    .map(|m| m.trim().to_uppercase())
+                    .filter(|m| !m.is_empty())
+                    .map(Value::from)
+                    .collect();
+                serde_json::json!({ "methods": methods, "paths": [s[at + 1..].trim()] })
+            }
+            _ => Value::from(s),
+        }
+    };
+    let shape = |v: &Value| match v {
+        Value::String(s) => Value::from(s.trim()),
+        other => other.clone(),
+    };
+    let pick = |names: &[&str]| -> Option<Value> {
+        names
+            .iter()
+            .map(|n| args.get(*n))
+            .find(|v| given(*v))
+            .flatten()
+            .cloned()
+    };
+
+    let mut out = Overrides::default();
+    if let Some(v) = args.get("methods").filter(|v| truthy(v)) {
+        out.methods = Some(list(v).into_iter().map(|m| m.to_uppercase()).collect());
+    }
+    if let Some(v) = args.get("paths").filter(|v| truthy(v)) {
+        out.paths = Some(list(v));
+    }
+    if let Some(v) = args.get("budget").filter(|v| given(Some(v))) {
+        out.budget = Some(num("budget", v)?);
+    }
+    if let Some(v) = args.get("uses").filter(|v| given(Some(v))) {
+        out.uses = Some(num("uses", v)?);
+    }
+    if let Some(v) = pick(&["ttl_minutes", "ttl-minutes"]) {
+        out.ttl_minutes = Some(num("ttl_minutes", &v)?);
+    }
+    if let Some(v) = pick(&["grant_ttl_minutes", "grant-ttl", "grant_ttl"]) {
+        out.grant_ttl_minutes = Some(num("grant_ttl_minutes", &v)?);
+    }
+    if let Some(v) = pick(&["max_concurrent", "concurrency"]) {
+        out.max_concurrent = Some(num("max_concurrent", &v)?);
+    }
+    if let Some(v) = args.get("redirects").filter(|v| given(Some(v))) {
+        out.redirects = Some(num("redirects", v)?);
+    }
+    if let Some(v) = pick(&["spend_tokens", "spend-tokens"]) {
+        out.spend_tokens = Some(num("spend_tokens", &v)?);
+    }
+    if let Some(v) = pick(&["spend_usd", "spend-usd"]) {
+        out.spend_usd = Some(num("spend_usd", &v)?);
+    }
+    if let Some(v) = args.get("rate").filter(|v| given(Some(v))) {
+        out.rate = Some(shape(v));
+    }
+    if let Some(v) = args.get("quota").filter(|v| given(Some(v))) {
+        out.quota = Some(shape(v));
+    }
+    if let Some(v) = args.get("routes").filter(|v| given(Some(v))) {
+        out.routes = Some(json("routes", v)?);
+    } else if let Some(v) = args.get("route").filter(|v| given(Some(v))) {
+        let items: Vec<Value> = match v {
+            Value::Array(a) => a.iter().map(route_of).collect(),
+            other => vec![route_of(other)],
+        };
+        out.routes = Some(Value::Array(items));
+    }
+    if let Some(v) = args.get("payload").filter(|v| given(Some(v))) {
+        out.payload = Some(json("payload", v)?);
+    }
+    if let Some(Value::String(a)) = args.get("approval") {
+        if !a.is_empty() {
+            out.approval = Some(a.clone());
+        }
+    }
+    match args.get("infinite") {
+        Some(Value::Bool(true)) => out.infinite = Some(true),
+        Some(Value::String(s)) if s == "true" => out.infinite = Some(true),
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// `Number(s)` for a trimmed, non-empty string: decimal (with exponent),
+/// `0x`/`0o`/`0b` integers, and `Infinity`; anything else is not a number.
+fn js_parse_number(s: &str) -> Option<f64> {
+    let radix = |p: &str, r: u32| u64::from_str_radix(p, r).ok().map(|n| n as f64);
+    if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return radix(h, 16);
+    }
+    if let Some(o) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")) {
+        return radix(o, 8);
+    }
+    if let Some(b) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        return radix(b, 2);
+    }
+    match s {
+        "Infinity" | "+Infinity" => return Some(f64::INFINITY),
+        "-Infinity" => return Some(f64::NEG_INFINITY),
+        _ => {}
+    }
+    // Rust also reads "inf" and "nan", which JS does not.
+    if s.bytes().any(|c| c.is_ascii_alphabetic() && c != b'e' && c != b'E') {
+        return None;
+    }
+    s.parse::<f64>().ok()
 }
 
 /// Record an approved session where local clients look: calls `remember`
@@ -262,13 +528,54 @@ pub fn collect_approved<F>(item: &PendingItem, answered: &Value, remember: F) ->
 where
     F: FnOnce(&Value),
 {
-    todo!()
+    if item.kind != PendingKind::Session {
+        return None;
+    }
+    let got = answered.get("session")?;
+    if !got.get("token").is_some_and(truthy) {
+        return None;
+    }
+    remember(got);
+    Some(got.clone())
 }
 
 /// What a human granted, in their own words (`session for <cred> · …`).
 /// Takes the raw grant summary. Ports `describeGranted` in `src/pending.js`.
 pub fn describe_granted(granted: &Value) -> String {
-    todo!()
+    let field = |k: &str| granted.get(k).filter(|v| truthy(v));
+    let cred = granted
+        .get("cred")
+        .map(js_string)
+        .unwrap_or_else(|| "undefined".into());
+    let mut bits = vec![format!("session for {cred}")];
+    let join = |v: &Value, sep: &str| match v {
+        Value::Array(a) => a.iter().map(js_string).collect::<Vec<_>>().join(sep),
+        other => js_string(other),
+    };
+    if let Some(m) = field("methods") {
+        bits.push(join(m, ","));
+    }
+    if let Some(p) = field("paths") {
+        bits.push(join(p, " "));
+    }
+    if let Some(b) = field("budget") {
+        bits.push(format!("{} requests", js_string(b)));
+    }
+    if let Some(u) = field("uses") {
+        bits.push(format!("{}-use placeholder", js_string(u)));
+    }
+    if let Some(a) = field("approval") {
+        bits.push(format!("approval {}", js_string(a)));
+    }
+    if let Some(t) = field("grant_ttl_minutes") {
+        bits.push(format!("grant ends after {} min", js_string(t)));
+    }
+    if granted.get("infinite") == Some(&Value::Bool(true)) {
+        bits.push("never expires".into());
+    } else if let Some(t) = field("ttl_minutes") {
+        bits.push(format!("lasts {} min", js_string(t)));
+    }
+    bits.join(" · ")
 }
 
 /// Most decisions one act of presence may answer. Ports
@@ -282,5 +589,48 @@ pub const DECISION_KEYS: [&str; 4] = ["id", "kind", "granted", "overrides"];
 /// signature binds the bytes as sent. Ports `checkDecisions` in
 /// `src/pending.js`.
 pub fn check_decisions(raw: &Value) -> Option<String> {
-    todo!()
+    let Value::Array(list) = raw else {
+        return Some("decisions must be a list".into());
+    };
+    if list.is_empty() {
+        return Some("nothing was selected".into());
+    }
+    if list.len() > MAX_BULK_DECISIONS {
+        return Some(format!(
+            "too many at once ({}); {MAX_BULK_DECISIONS} is the most a person can actually read",
+            list.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for d in list {
+        let Value::Object(d) = d else {
+            return Some("each decision must be an object".into());
+        };
+        for k in d.keys() {
+            if !DECISION_KEYS.contains(&k.as_str()) {
+                return Some(format!("a decision cannot carry {}", Value::from(k.clone())));
+            }
+        }
+        let id = match d.get("id") {
+            Some(Value::String(s)) if !s.is_empty() => s.clone(),
+            _ => return Some("each decision needs an id".into()),
+        };
+        let kind_ok = matches!(d.get("kind"), Some(Value::String(k)) if k == "request" || k == "session");
+        if !kind_ok {
+            let shown = d.get("kind").map(|k| k.to_string()).unwrap_or_else(|| "undefined".into());
+            return Some(format!("unknown kind {shown}"));
+        }
+        if !matches!(d.get("granted"), Some(Value::Bool(_))) {
+            return Some(format!("the verdict for {id} must be true or false"));
+        }
+        if let Some(o) = d.get("overrides") {
+            if !o.is_object() {
+                return Some(format!("the narrowing for {id} must be an object"));
+            }
+        }
+        if !seen.insert(id.clone()) {
+            return Some(format!("{id} appears twice, with no way to say which verdict wins"));
+        }
+    }
+    None
 }

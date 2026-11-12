@@ -162,12 +162,15 @@ CREATE TABLE pins (
     credential_id TEXT NOT NULL REFERENCES credentials (id) ON DELETE CASCADE,
     host          TEXT NOT NULL,
     spki          TEXT NOT NULL,                   -- sha256/<base64 of 32 bytes>
+    position      INTEGER NOT NULL DEFAULT 0,      -- order in the JS list
     PRIMARY KEY (credential_id, host, spki)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE sessions (
     id               TEXT PRIMARY KEY NOT NULL,
-    workspace_id     TEXT REFERENCES workspaces (id),
+    -- No foreign key: the JS stores whatever workspace id the caller gave,
+    -- and migrate must copy such sessions as they are.
+    workspace_id     TEXT,
     label            TEXT NOT NULL,
     token_hash       TEXT NOT NULL UNIQUE,
     policy           TEXT NOT NULL CHECK (json_valid(policy)),
@@ -221,7 +224,7 @@ CREATE TABLE placeholders (
     sid           TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
     nonce_hash    TEXT NOT NULL UNIQUE,
     uses          INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
-    max_uses      INTEGER NOT NULL CHECK (max_uses >= 1),
+    max_uses      INTEGER NOT NULL CHECK (max_uses >= 0),
     state         TEXT NOT NULL CHECK (state IN ('active', 'dead')),
     dead_reason   TEXT,
     replaces_id   TEXT,

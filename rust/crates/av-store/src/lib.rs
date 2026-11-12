@@ -22,5 +22,7 @@ pub mod migrate;
 pub mod mlock;
 pub mod model;
 pub mod pending;
+mod rows;
 pub mod schema;
+mod util;
 pub mod vault;
