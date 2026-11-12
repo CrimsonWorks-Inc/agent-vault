@@ -25,7 +25,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 890 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **140 not yet ported**.
+Totals: 1207 JS tests: 918 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **112 not yet ported**.
 
 ## Mutation check
 
@@ -52,8 +52,8 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 |---|---|---|
 | approval-verdict.test.js | only true or false decides on the approvals route, and anything else decides nothing | `ported_gateway_core::approval_verdict_nonbooleans_never_settle_even_with_window_or_matching_signature` |
 | approval-verdict.test.js | a signature cannot carry a verdict that is not a boolean either | `ported_gateway_core::approval_verdict_nonbooleans_never_settle_even_with_window_or_matching_signature` |
-| approval-verdict.test.js | the web UI refuses a verdict that is not a boolean, before it spends a signature | not yet ported |
-| approval-verdict.test.js | the web UI no longer turns a string "false" into an approved session | not yet ported |
+| approval-verdict.test.js | the web UI refuses a verdict that is not a boolean, before it spends a signature | `ported_gateway_core::ui_invalid_verdicts_never_spend_a_signature_or_settle_pending_and_real_denials_work` |
+| approval-verdict.test.js | the web UI no longer turns a string "false" into an approved session | `ported_gateway_core::ui_invalid_verdicts_never_spend_a_signature_or_settle_pending_and_real_denials_work` |
 | approval-verdict.test.js | the shared decision builder will not coerce a verdict | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | bridge.test.js | the bridge answers over stdio with the session on disk | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | bridge.test.js | a session that ends mid-flight is replaced without restarting the client | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
@@ -319,17 +319,17 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-ui-rotate.test.js | with nothing registered there is nothing to enrol | not yet ported |
 | control-ui-rotate.test.js | a signature for the replacement is refused when it covers a different record | not yet ported |
 | control-ui-rotate.test.js | a first enrolment still cannot be made this way | not yet ported |
-| control-ui-routes.test.js | every wave-3 change is gated, and exactly the daemon-gated ones are re-verified (A.6) | not yet ported |
-| control-ui-routes.test.js | without a signature, no change reaches the daemon | not yet ported |
-| control-ui-routes.test.js | a signature over a different request is refused | not yet ported |
-| control-ui-routes.test.js | a signature with another op name is refused, even over the same fields | not yet ported |
-| control-ui-routes.test.js | with its own signature, each change reaches its route, carrying what the daemon re-verifies | not yet ported |
-| control-ui-routes.test.js | a rotation value is bound by digest, never in clear | not yet ported |
-| control-ui-routes.test.js | the probe takes a credential name and nothing that could steer it | not yet ported |
-| control-ui-routes.test.js | quarantine needs no fingerprint, and passes on the name and the reason only | not yet ported |
-| control-ui-routes.test.js | panic needs no fingerprint, and only a real true locks | not yet ported |
-| control-ui-routes.test.js | the read routes reach the routes the contract names | not yet ported |
-| control-ui-routes.test.js | the audit view can ask for one kind of record, and gets only that kind | not yet ported |
+| control-ui-routes.test.js | every wave-3 change is gated, and exactly the daemon-gated ones are re-verified (A.6) | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | without a signature, no change reaches the daemon | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | a signature over a different request is refused | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | a signature with another op name is refused, even over the same fields | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | with its own signature, each change reaches its route, carrying what the daemon re-verifies | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | a rotation value is bound by digest, never in clear | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
+| control-ui-routes.test.js | the probe takes a credential name and nothing that could steer it | `ported_gateway_core::ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering` |
+| control-ui-routes.test.js | quarantine needs no fingerprint, and passes on the name and the reason only | `ported_gateway_core::ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering` |
+| control-ui-routes.test.js | panic needs no fingerprint, and only a real true locks | `ported_gateway_core::ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering` |
+| control-ui-routes.test.js | the read routes reach the routes the contract names | `ported_gateway_core::ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering` |
+| control-ui-routes.test.js | the audit view can ask for one kind of record, and gets only that kind | `ported_gateway_core::ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering` |
 | control-ui-webauthn.test.js | every secret-bearing field is bound by digest, never in clear | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | control-ui-webauthn.test.js | a string digests exactly as it always did | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | control-ui-webauthn.test.js | two different bundles give two different operations | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
@@ -446,7 +446,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-session-requests.test.js | settled requests age out of memory | `ported_gateway_core::fix_session_requests_only_pending_count_toward_cap_and_old_settled_items_are_reclaimed_after_restart` |
 | fix-control-session-requests.test.js | tokenless MCP initialize cannot grow the session map or the audit log without bound | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
 | fix-control-session-requests.test.js | issuing a placeholder with no live session says so, not TypeError | `ported_gateway_core::fix_session_requests_placeholder_without_live_session_reports_problem_and_selects_only_live_candidate` |
-| fix-control-session-requests.test.js | the web page never sees the token, single or batch | not yet ported |
+| fix-control-session-requests.test.js | the web page never sees the token, single or batch | `ported_gateway_core::ui_session_request_single_and_batch_record_for_local_clients_without_returning_tokens` |
 | fix-control-session-requests.test.js | anonymous MCP open and close cycles write nothing to the audit log | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
 | fix-control-session-requests.test.js | an authenticated client's MCP session is recorded when it opens and when it closes | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
 | fix-control-store.test.js | the no-wider check itself refuses a result that dropped a constraint | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -472,8 +472,8 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-webauthn.test.js | a request field named op cannot replace the route op | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | fix-control-webauthn.test.js | a supplied digest cannot replace the one computed from the secret | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | fix-control-webauthn.test.js | an ordinary request still binds every field, and the secret only by digest | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
-| fix-control-webauthn.test.js | a signature for a narrow session cannot issue a placeholder | not yet ported |
-| fix-control-webauthn.test.js | a signature over the real placeholder request still works | not yet ported |
+| fix-control-webauthn.test.js | a signature for a narrow session cannot issue a placeholder | `ported_gateway_core::signed_placeholder_issue_cannot_borrow_a_narrow_session_signature_but_the_real_operation_works` |
+| fix-control-webauthn.test.js | a signature over the real placeholder request still works | `ported_gateway_core::signed_placeholder_issue_cannot_borrow_a_narrow_session_signature_but_the_real_operation_works` |
 | gateway-approvals.test.js | an approval that already ran cannot be denied, and the deny hands back nothing | tests/ported_gateway_core.rs::consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays |
 | gateway-approvals.test.js | granting an approval that already ran does not arm it again | tests/ported_gateway_core.rs::consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays |
 | gateway-approvals.test.js | a granted approval cannot be flipped to denied before it is sent | tests/ported_gateway_core.rs::granted_approval_cannot_flip_and_pending_decisions_return_no_cached_result |
@@ -851,9 +851,9 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | integrate3-fix1.test.js | D2 (round 3): a run of hyphens, underscores or spaces is one separator, so pass--phrase, pass__phrase and "pass phrase" are withheld | `ported_gateway_core::ui_guard_passphrase_spellings_and_separator_runs_are_withheld_at_every_depth` |
 | integrate3-gates.test.js | C19: the page, webauthn.js and so the daemon digest every secret-bearing key the same way | not yet ported |
 | integrate3-gates.test.js | every gated UI route: the operation the page signs is the one the UI server and the real daemon rebuild | not yet ported |
-| integrate3-gates.test.js | C22(4): a pin removal signed without spki, or for another spki, is refused by the UI and by the daemon | not yet ported |
-| integrate3-gates.test.js | C19 end to end: a backup bundle is bound by its canonical digest when the daemon restores it | not yet ported |
-| integrate3-gates.test.js | C19 end to end: a webhook URL is bound by digest, and the page signs what the daemon checks | not yet ported |
+| integrate3-gates.test.js | C22(4): a pin removal signed without spki, or for another spki, is refused by the UI and by the daemon | `ported_gateway_core::integration_c22_pin_removal_binds_explicit_null_or_exact_spki_at_both_ui_and_daemon` |
+| integrate3-gates.test.js | C19 end to end: a backup bundle is bound by its canonical digest when the daemon restores it | `ported_gateway_core::integration_c19_backup_restore_binds_canonical_bundle_digest_and_refuses_a_different_bundle` |
+| integrate3-gates.test.js | C19 end to end: a webhook URL is bound by digest, and the page signs what the daemon checks | `ported_gateway_core::integration_c19_webhook_configuration_binds_url_digest_and_never_logs_the_secret_path` |
 | integrate3-narrowing.test.js | the page reads every narrowing with the module's parser, and keeps no second one | not yet ported |
 | integrate3-narrowing.test.js | the CLI and the page sign the same operation for the same narrowing, field by field | not yet ported |
 | integrate3-narrowing.test.js | through the UI server, each narrowing signed by the page is approved by the real daemon, and kept | not yet ported |
@@ -1127,15 +1127,15 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | revocation.test.js | locking the vault refuses everything, and unlocking restores it | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
 | revocation.test.js | an expired session is refused even with a live placeholder | `ported_gateway_core::expired_session_stops_a_previously_working_placeholder_whose_own_expiry_remains_live` |
 | revocation.test.js | a revoked placeholder coming back is treated as hostile, not as a mistake | `ported_gateway_core::revocation_session_kills_all_placeholders_and_token_and_replays_have_distinct_audit_events` |
-| serving.test.js | a listener naming the control surface on a network address is refused outright | not yet ported |
-| serving.test.js | a listener naming the database surface on a network address is refused | not yet ported |
-| serving.test.js | the refusal is audited so a misconfiguration is loud, not silent | not yet ported |
-| serving.test.js | the same surfaces are allowed on a loopback or unix address | not yet ported |
-| serving.test.js | gateway and mcp surfaces may be bound to a network address | not yet ported |
-| serving.test.js | loopback detection covers the forms an operator actually types | not yet ported |
-| serving.test.js | removing a listener is allowed without ceremony: reducing reach is always safe | not yet ported |
-| serving.test.js | the control socket is created with mode 0600 and no network address | not yet ported |
-| serving.test.js | the vault directory is 0700 so another local user cannot read it | not yet ported |
+| serving.test.js | a listener naming the control surface on a network address is refused outright | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | a listener naming the database surface on a network address is refused | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | the refusal is audited so a misconfiguration is loud, not silent | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | the same surfaces are allowed on a loopback or unix address | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | gateway and mcp surfaces may be bound to a network address | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | loopback detection covers the forms an operator actually types | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | removing a listener is allowed without ceremony: reducing reach is always safe | `ported_gateway_core::serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces` |
+| serving.test.js | the control socket is created with mode 0600 and no network address | `ported_gateway_core::serving_control_socket_is_private_and_default_gateway_has_no_tcp_control_surface` |
+| serving.test.js | the vault directory is 0700 so another local user cannot read it | `ported_gateway_core::serving_new_vault_directory_is_private_before_any_daemon_runs` |
 | session-requests.test.js | asking for a session creates nothing at all | `tests::control::session_requests_create_nothing_until_a_human_answers_and_only_the_asker_collects` |
 | session-requests.test.js | an agent cannot answer its own request | `tests::mutants::hardening_every_answer_a_human_gives_needs_the_human` |
 | session-requests.test.js | a human approving gets a working session, collected exactly once | `tests::control::session_requests_create_nothing_until_a_human_answers_and_only_the_asker_collects` |

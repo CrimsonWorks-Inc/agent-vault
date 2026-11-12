@@ -20008,6 +20008,7 @@ struct UiContractFixture {
     replies: Arc<Mutex<std::collections::HashMap<String, (u16, Value)>>>,
     calls: Arc<Mutex<Vec<(String, Value)>>>,
     peer: tokio::task::JoinHandle<()>,
+    queries: Arc<Mutex<Vec<(String, String)>>>,
     token: String,
     ph: String,
 }
@@ -20018,23 +20019,31 @@ impl UiContractFixture {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let replies: Arc<Mutex<std::collections::HashMap<String, (u16, Value)>>> = Arc::default();
         let calls: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let queries: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+        let captured_queries = queries.clone();
         let responses = replies.clone();
         let observed = calls.clone();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let peer = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                let captured_queries = captured_queries.clone();
                 let responses = responses.clone();
                 let observed = observed.clone();
                 let counter = counter.clone();
                 tokio::spawn(async move {
                     let svc = hyper::service::service_fn(
                         move |req: hyper::Request<hyper::body::Incoming>| {
+                            let captured_queries = captured_queries.clone();
                             let responses = responses.clone();
                             let observed = observed.clone();
                             let counter = counter.clone();
                             async move {
                                 use base64::Engine;
                                 let key = format!("{} {}", req.method(), req.uri().path());
+                                captured_queries
+                                    .lock()
+                                    .unwrap()
+                                    .push((key.clone(), req.uri().query().unwrap_or("").into()));
                                 let bytes = req.into_body().collect().await.unwrap().to_bytes();
                                 let body =
                                     serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
@@ -20133,6 +20142,7 @@ impl UiContractFixture {
             replies,
             calls,
             peer,
+            queries,
             token,
             ph,
         }
@@ -20405,4 +20415,462 @@ fn ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrit
         .unwrap(),
         json!({"op":"cred.add","slug":"s","kind":"http","value_sha256":sha("v")})
     );
+}
+
+#[tokio::test]
+async fn ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(50),async{
+ use av_daemon::ui::server::{GATED,DAEMON_VERIFIED};
+ let u=UiContractFixture::new(60000).await;
+ let changes=vec![
+ ("POST","sessions/narrow","session.narrow",false,json!({"sid":"s_1","narrow":{"methods":["GET","HEAD"]}}),None),
+ ("POST","credentials/rotate","cred.rotate",true,json!({"slug":"demo","value":"test-fake-rotated-value-0011223344556677","mode":"keep","retire_hours":24}),None),
+ ("POST","credentials/scrub","cred.scrub_add",true,json!({"slug":"demo","pattern":"acme_[A-Za-z0-9]{20}","sample":"token acme_abcdefghijklmnopqrst"}),None),
+ ("DELETE","credentials/scrub?slug=demo&id=sp_01","cred.scrub_remove",true,json!({}),Some(json!({"slug":"demo","id":"sp_01"}))),
+ ("POST","credentials/expiry","cred.expiry_set",true,json!({"slug":"demo","expires_at":"2027-01-31T00:00:00.000Z"}),None),
+ ("POST","credentials/release","cred.release",true,json!({"slug":"demo"}),None),
+ ("POST","tripwires","tripwires.set",true,json!({"enabled":false}),None),
+ ("POST","templates","template.save",true,json!({"name":"gh-read","spec":{"cred":"demo","methods":["GET"],"spend_usd":1.5}}),None),
+ ("DELETE","templates?name=gh-read","template.delete",false,json!({}),Some(json!({"name":"gh-read"}))),
+ ];
+ for(method,path,op,verified,body,bind)in changes{let route=path.split('?').next().unwrap();let key=format!("{method} {route}");let target=format!("{method} /v1/{route}");assert!(GATED.contains(&key.as_str()));assert_eq!(DAEMON_VERIFIED.contains(&key.as_str()),verified);let bound=bind.as_ref().unwrap_or(&body);let count=||u.calls.lock().unwrap().iter().filter(|(k,_)|k==&target).count();let n=count();assert_eq!(u.api(method,path,body.clone()).await.0,401,"{key}");assert_eq!(count(),n);
+ let mut other=bound.clone();let first=other.as_object().unwrap().keys().next().unwrap().clone();other[&first]=json!(format!("{}-other",other[&first]));let mut swapped=body.clone();swapped["presence"]=u.proof(op,&other).await;assert_eq!(u.api(method,path,swapped).await.0,409,"{key}");assert_eq!(count(),n);
+ let proof=u.proof(op,bound).await;let mut valid=body.clone();valid["presence"]=proof.clone();let(s,v)=u.api(method,path,valid).await;assert_eq!(s,200,"{key}: {v}");let got=u.calls.lock().unwrap().iter().rev().find(|(k,_)|k==&target).unwrap().1.clone();if verified{assert_eq!(got["presence"],proof,"{key}");}else{assert!(got.get("presence").is_none(),"{key}");}let forwarded=if bind.is_some(){let q=u.queries.lock().unwrap().iter().rev().find(|(k,_)|k==&target).unwrap().1.clone();let map:serde_json::Map<String,Value>=url::form_urlencoded::parse(q.as_bytes()).map(|(k,v)|(k.into_owned(),Value::String(v.into_owned()))).collect();Value::Object(map)}else{got};assert_eq!(av_daemon::util::operation_for(op,&forwarded).unwrap(),av_daemon::util::operation_for(op,bound).unwrap(),"{key}");}
+ for key in ["POST credentials/test","POST credentials/quarantine","POST panic"]{assert!(!GATED.contains(&key));assert!(!DAEMON_VERIFIED.contains(&key));}
+ let mut b=json!({"slug":"demo"});b["presence"]=u.proof("cred.quarantine",&b).await;assert_eq!(u.api("POST","credentials/release",b).await.0,409);let op=av_daemon::util::operation_for("cred.rotate",&json!({"slug":"demo","value":"test-fake-rotated-value-0011223344556677"})).unwrap();assert!(!op.to_string().contains("test-fake-rotated"));assert_eq!(op["value_sha256"].as_str().unwrap().len(),64);assert!(op["value_sha256"].as_str().unwrap().bytes().all(|b|b.is_ascii_hexdigit()&&!b.is_ascii_uppercase()));assert_eq!(u.api("GET","tripwires",json!({})).await.0,200);u.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn ui_open_route_whitelists_and_read_queries_audit_filter_do_not_allow_agent_steering() {
+    tokio::time::timeout(std::time::Duration::from_secs(35),async{
+ let u=UiContractFixture::new(60000).await;let last=|target:&str|u.calls.lock().unwrap().iter().rev().find(|(k,_)|k==target).unwrap().1.clone();
+ for(body,expected)in[(json!({"slug":"demo","path":"/admin","method":"DELETE","body":"x"}),json!({"slug":"demo"})),(json!({"all":true}),json!({"all":true})),(json!({"all":"true","slug":"demo"}),json!({"slug":"demo"}))]{assert_eq!(u.api("POST","credentials/test",body).await.0,200);assert_eq!(last("POST /v1/credentials/test"),expected);}
+ assert_eq!(u.api("POST","credentials/quarantine",json!({"slug":"demo","reason":"odd traffic","by":"tripwire"})).await.0,200);assert_eq!(last("POST /v1/credentials/quarantine"),json!({"slug":"demo","reason":"odd traffic"}));
+ for(body,expected)in[(json!({"lock":true,"reason":"agent went wild"}),json!({"lock":true,"reason":"agent went wild"})),(json!({}),json!({"lock":false}))]{assert_eq!(u.api("POST","panic",body).await.0,200);assert_eq!(last("POST /v1/panic"),expected);}for lock in [json!("false"),json!("true"),json!(1),Value::Null]{let n=u.calls.lock().unwrap().iter().filter(|(k,_)|k=="POST /v1/panic").count();assert_eq!(u.api("POST","panic",json!({"lock":lock})).await.0,400);assert_eq!(u.calls.lock().unwrap().iter().filter(|(k,_)|k=="POST /v1/panic").count(),n);}
+ for(path,target,expected)in[("sessions/detail?sid=s_1","/v1/sessions/detail",json!({"sid":"s_1"})),("report/access","/v1/report/access",json!({"since":"7d"})),("report/access?since=24h","/v1/report/access",json!({"since":"24h"})),("tripwires","/v1/tripwires",json!({})),("templates","/v1/templates",json!({})),("templates?name=gh-read","/v1/templates",json!({"name":"gh-read"})),("notify","/v1/notify",json!({})),("audit/checkpoint","/v1/audit/checkpoint",json!({}))]{assert_eq!(u.api("GET",path,json!({})).await.0,200,"{path}");let key=format!("GET {target}");let q=u.queries.lock().unwrap().iter().rev().find(|(k,_)|k==&key).unwrap().1.clone();let query:serde_json::Map<String,Value>=url::form_urlencoded::parse(q.as_bytes()).map(|(k,v)|(k.into_owned(),Value::String(v.into_owned()))).collect();assert_eq!(Value::Object(query),expected,"{path}");}
+ u.set("GET /v1/audit",200,json!([{"seq":1,"kind":"session.created"},{"seq":2,"kind":"tripwire.fired","rule_id":"replay"},{"seq":3,"kind":"request.denied"},{"seq":4,"kind":"tripwire.fired","rule_id":"deny_paths"}]));let(s,v)=u.api("GET","audit?kind=tripwire.fired&limit=5",json!({})).await;assert_eq!(s,200,"{v}");assert_eq!(v.as_array().unwrap().iter().map(|r|r["seq"].clone()).collect::<Vec<_>>(),vec![json!(2),json!(4)]);assert_eq!(u.api("GET","audit?limit=5",json!({})).await.1.as_array().unwrap().len(),4);assert_eq!(u.api("GET","audit?kind=../../v1/credentials",json!({})).await.0,400);u.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn serving_refuses_network_control_database_atomically_audits_and_allows_only_networkable_surfaces(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        f.shared
+            .run(|c| {
+                use av_store::vault::{is_loopback_spec, NewListener};
+                let before = c.vault.list_listeners().unwrap().len();
+                for (id, address, surfaces) in [
+                    ("bad-control", "eth0:7411", vec!["gateway", "control"]),
+                    ("bad-db", "10.0.0.5:7411", vec!["l4"]),
+                    ("bad-audited", "tailscale0:7411", vec!["control"]),
+                ] {
+                    let e = c
+                        .vault
+                        .add_listener(NewListener {
+                            id: id.into(),
+                            address: address.into(),
+                            surfaces: surfaces.iter().map(|s| (*s).into()).collect(),
+                            ..Default::default()
+                        })
+                        .unwrap_err();
+                    let v = e.as_vault().unwrap();
+                    assert_eq!(v.code.as_str(), "AV_REMOTE_FORBIDDEN");
+                    if id == "bad-control" {
+                        assert!(v.detail.contains("control"));
+                    }
+                    assert_eq!(c.vault.list_listeners().unwrap().len(), before);
+                }
+                let local = c
+                    .vault
+                    .add_listener(NewListener {
+                        id: "local-extra".into(),
+                        address: "unix:/tmp/fake-av-extra.sock".into(),
+                        surfaces: vec!["control".into(), "l4".into()],
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(local.id, "local-extra");
+                let network = c
+                    .vault
+                    .add_listener(NewListener {
+                        id: "tailnet".into(),
+                        address: "tailscale0:7411".into(),
+                        surfaces: vec!["gateway".into(), "mcp".into()],
+                        client_auth: Some("bearer".into()),
+                        allow_cidr: vec!["100.64.0.0/10".into()],
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(network.surfaces, vec!["gateway", "mcp"]);
+                assert_eq!(network.client_auth.as_deref(), Some("bearer"));
+                for ok in [
+                    "unix:/run/av.sock",
+                    "127.0.0.1:7411",
+                    "[::1]:7411",
+                    "localhost:7411",
+                ] {
+                    assert!(is_loopback_spec(ok), "{ok}");
+                }
+                for bad in [
+                    "0.0.0.0:7411",
+                    "eth0:7411",
+                    "10.0.0.5:7411",
+                    "tailscale0:7411",
+                ] {
+                    assert!(!is_loopback_spec(bad), "{bad}");
+                }
+                c.vault.remove_listener("tailnet").unwrap();
+                assert!(!c
+                    .vault
+                    .list_listeners()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.id == "tailnet"));
+            })
+            .await
+            .unwrap();
+        let rows = audit_records(&f).await;
+        for kind in ["listen.refused", "listen.removed"] {
+            assert!(rows.iter().any(|r| r["kind"] == kind), "{kind}");
+        }
+        assert!(!serde_json::to_string(&rows).unwrap().contains(SECRET));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn serving_control_socket_is_private_and_default_gateway_has_no_tcp_control_surface() {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let socket = f._dir.path().join("control.sock");
+        assert_eq!(
+            std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(f._dir.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(DaemonOptions::default().host, "127.0.0.1");
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/listeners", json!({}))
+                .await
+                .0,
+            200
+        );
+        let (s, _, b) = loopback_http_host(
+            f.daemon.gateway_port().unwrap(),
+            "127.0.0.1",
+            "GET",
+            "/v1/listeners",
+            vec![("authorization".into(), format!("Bearer {}", f.token))],
+            vec![],
+        )
+        .await;
+        assert_eq!(s, 404);
+        assert!(!String::from_utf8_lossy(&b).contains(SECRET));
+        let local = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        if local.connect("192.0.2.1:9").is_ok() {
+            let address = local.local_addr().unwrap().ip();
+            if !address.is_loopback() && !address.is_unspecified() {
+                assert!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        tokio::net::TcpStream::connect((address, f.daemon.gateway_port().unwrap()))
+                    )
+                    .await
+                    .is_ok_and(|r| r.is_err()),
+                    "gateway unexpectedly accepts a non-loopback connection"
+                );
+            }
+        }
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_invalid_verdicts_never_spend_a_signature_or_settle_pending_and_real_denials_work() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let w = WidenFixture::new().await;
+        let gid = w.f.grant_id.clone();
+        w.f.shared
+            .run(move |c| {
+                c.vault
+                    .narrow_grant(&gid, &json!({"approval":"on-write"}))
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let hold =
+            w.f.send(
+                "POST",
+                "/held-ui-verdict",
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                Some("fake request body".into()),
+            )
+            .await;
+        let id = held_id(&hold);
+        let not_verdict = [
+            Some(Value::Null),
+            Some(json!(0)),
+            Some(json!(1)),
+            Some(json!("false")),
+            Some(json!("true")),
+            Some(json!("no")),
+            None,
+        ];
+        for granted in &not_verdict {
+            let mut b = json!({"id":id});
+            if let Some(g) = granted {
+                b["granted"] = g.clone();
+            }
+            b["presence"] = w.proof("approval.approve", &b).await;
+            let (s, v) = w.api("POST", "approvals", b).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["detail"]["rule"], "bulk_decision");
+        }
+        assert!(w
+            .f
+            .daemon
+            .pipeline()
+            .pending_approvals()
+            .await
+            .iter()
+            .any(|r| r["id"] == id));
+        assert!(w.f.up.hits.lock().unwrap().is_empty());
+        let b = json!({"id":id,"granted":false});
+        let proof = w.proof("approval.deny", &b).await;
+        let (s, v) = w
+            .api(
+                "POST",
+                "approvals",
+                json!({"id":id,"granted":false,"presence":proof}),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        assert!(!w
+            .f
+            .daemon
+            .pipeline()
+            .pending_approvals()
+            .await
+            .iter()
+            .any(|r| r["id"] == id));
+        let (s, asked) = w
+            .ctl(
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","methods":["GET"],"reason":"job"}),
+            )
+            .await;
+        assert_eq!(s, 200, "{asked}");
+        let id = asked["id"].clone();
+        let before = w.ctl("GET", "/v1/sessions", json!({})).await.1;
+        for granted in &not_verdict {
+            let proof = w
+                .proof("session_request.decide", &json!({"id":id,"granted":true}))
+                .await;
+            let mut b = json!({"id":id,"presence":proof});
+            if let Some(g) = granted {
+                b["granted"] = g.clone();
+            }
+            let (s, v) = w.api("POST", "session-requests/decide", b).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["detail"]["rule"], "bulk_decision");
+        }
+        assert_eq!(w.ctl("GET", "/v1/sessions", json!({})).await.1, before);
+        let (s, pending) = w.ctl("GET", "/v1/session-requests", json!({})).await;
+        assert_eq!(s, 200);
+        assert!(pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == id && r["state"] == "pending"));
+        let proof = w
+            .proof("session_request.decide", &json!({"id":id,"granted":false}))
+            .await;
+        assert_eq!(
+            w.api(
+                "POST",
+                "session-requests/decide",
+                json!({"id":id,"granted":false,"presence":proof})
+            )
+            .await
+            .0,
+            200
+        );
+        assert_eq!(
+            w.f.send(
+                "GET",
+                "/ordinary",
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                None
+            )
+            .await
+            .status,
+            200
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_session_request_single_and_batch_record_for_local_clients_without_returning_tokens() {
+    tokio::time::timeout(std::time::Duration::from_secs(40),async{
+ let w=WidenFixture::new().await;for batch in [false,true]{let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":[if batch{"/ui-two"}else{"/ui-one"}],"reason":"read a fake resource"})).await;assert_eq!(s,200,"{asked}");let id=asked["id"].clone();let (path,mut b,op)=if batch{("pending/decide-many",json!({"decisions":[{"id":id,"kind":"session","granted":true}]}),"pending.decide_many")}else{("session-requests/decide",json!({"id":id,"granted":true}),"session_request.decide")};b["presence"]=w.proof(op,&b).await;let(s,v)=w.api("POST",path,b).await;assert_eq!(s,200,"{v}");assert!(!v.to_string().contains("avs1."));assert!(!v.to_string().contains("av1."));assert!(!v.to_string().contains(SECRET));if batch{assert_eq!(v["recorded"],id);}else{assert!(v["recorded"]["session_id"].is_string());}}
+ assert_eq!(w.f.send("GET","/ordinary",vec![("authorization".into(),format!("Bearer {}",w.f.ph))],None).await.status,200);w.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn signed_placeholder_issue_cannot_borrow_a_narrow_session_signature_but_the_real_operation_works(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(35),async{
+ let w=WidenFixture::new().await;let fields=json!({"cred":"demo","methods":["GET"],"paths":["/only"]});let proof=w.proof("session.create",&fields).await;let before=w.f.shared.run(|c|c.vault.list_placeholders(None).unwrap().len()).await.unwrap();let(s,v)=w.ctl("POST","/v1/placeholders",json!({"cred":"demo","methods":["GET"],"paths":["/only"],"op":"session.create","presence":proof})).await;assert_ne!(s,200,"{v}");assert!(v["placeholder"].is_null());assert_eq!(w.f.shared.run(|c|c.vault.list_placeholders(None).unwrap().len()).await.unwrap(),before);let b=json!({"cred":"demo"});let proof=w.proof("placeholder.issue",&b).await;let(s,v)=w.ctl("POST","/v1/placeholders",json!({"cred":"demo","presence":proof})).await;assert_eq!(s,200,"{v}");assert!(v["placeholder"].as_str().unwrap().starts_with("av1."));assert_eq!(w.f.send("GET","/ordinary",vec![("authorization".into(),format!("Bearer {}",w.f.ph))],None).await.status,200);w.stop().await;
+ }).await.unwrap();
+}
+#[test]
+fn serving_new_vault_directory_is_private_before_any_daemon_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(!vault.locked());
+    vault.lock().unwrap();
+}
+#[tokio::test]
+async fn integration_c22_pin_removal_binds_explicit_null_or_exact_spki_at_both_ui_and_daemon() {
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        let w = WidenFixture::new().await;
+        let pins = vec![
+            format!("sha256/{}=", "A".repeat(43)),
+            format!("sha256/{}=", "B".repeat(43)),
+        ];
+        let expected = pins.clone();
+        w.f.shared
+            .run(move |c| c.vault.set_pins("demo", "api.example.test", &pins).unwrap())
+            .await
+            .unwrap();
+        let url = "credentials/pins?slug=demo&host=api.example.test";
+        for params in [
+            json!({"slug":"demo","host":"api.example.test"}),
+            json!({"slug":"demo","host":"api.example.test","spki":expected[0]}),
+        ] {
+            let proof = w.proof("cred.pins_remove", &params).await;
+            assert_eq!(w.api("DELETE", url, json!({"presence":proof})).await.0, 409);
+            let proof = w.proof("cred.pins_remove", &params).await;
+            let (s, v) = w
+                .ctl("DELETE", &format!("/v1/{url}"), json!({"presence":proof}))
+                .await;
+            assert_eq!(s, 401, "{v}");
+            assert_eq!(v["code"], "AV_PRESENCE_REQUIRED");
+            assert_eq!(
+                w.f.shared
+                    .run(|c| serde_json::to_value(
+                        c.vault.find_credential("demo").unwrap().unwrap()
+                    )
+                    .unwrap()["pins"]["api.example.test"]
+                        .clone())
+                    .await
+                    .unwrap(),
+                json!(expected)
+            );
+        }
+        let proof = w
+            .proof(
+                "cred.pins_remove",
+                &json!({"slug":"demo","host":"api.example.test","spki":null}),
+            )
+            .await;
+        let (s, v) = w.api("DELETE", url, json!({"presence":proof})).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            w.f.send(
+                "GET",
+                "/ordinary",
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                None
+            )
+            .await
+            .status,
+            200
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integration_c19_backup_restore_binds_canonical_bundle_digest_and_refuses_a_different_bundle(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let w=WidenFixture::new().await;let recovery="test fake integration recovery words";let proof=w.proof("backup.export",&json!({"recovery_passphrase":recovery})).await;let(s,exported)=w.ctl("POST","/v1/backup/export",json!({"recovery_passphrase":recovery,"presence":proof})).await;assert_eq!(s,200,"{exported}");let bundle=exported.get("bundle").unwrap_or(&exported).clone();assert!(bundle.is_object());let mut other=bundle.clone();other["integration_fixture"]=json!("not this one");let proof=w.proof("backup.restore",&json!({"bundle":other,"recovery_passphrase":recovery,"on_conflict":"rename"})).await;let(s,v)=w.ctl("POST","/v1/backup/restore",json!({"bundle":bundle,"recovery_passphrase":recovery,"on_conflict":"rename","presence":proof})).await;assert_eq!(s,401,"{v}");assert_eq!(v["code"],"AV_PRESENCE_REQUIRED");let reversed:serde_json::Map<String,Value>=bundle.as_object().unwrap().iter().rev().map(|(k,v)|(k.clone(),v.clone())).collect();let proof=w.proof("backup.restore",&json!({"bundle":reversed,"recovery_passphrase":recovery,"on_conflict":"rename"})).await;let(s,v)=w.ctl("POST","/v1/backup/restore",json!({"bundle":bundle,"recovery_passphrase":recovery,"on_conflict":"rename","presence":proof})).await;assert_eq!(s,200,"{v}");assert!(!v.to_string().contains(SECRET));assert!(!serde_json::to_string(&audit_records(&w.f).await).unwrap().contains(recovery));assert_eq!(w.f.send("GET","/ordinary",vec![("authorization".into(),format!("Bearer {}",w.f.ph))],None).await.status,200);w.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn integration_c19_webhook_configuration_binds_url_digest_and_never_logs_the_secret_path() {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let w = WidenFixture::new().await;
+        let url = "https://hooks.example.test/services/test-fake-secret";
+        let params = json!({"webhook_url":url,"detail":"minimal"});
+        let proof = w
+            .proof(
+                "notify.set",
+                &json!({"webhook_url":"https://hooks.example.test/other","detail":"minimal"}),
+            )
+            .await;
+        let (s, v) = w
+            .ctl(
+                "POST",
+                "/v1/notify",
+                json!({"webhook_url":url,"detail":"minimal","presence":proof}),
+            )
+            .await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["code"], "AV_PRESENCE_REQUIRED");
+        let op = av_daemon::util::operation_for("notify.set", &params).unwrap();
+        assert!(!op.to_string().contains("test-fake-secret"));
+        let proof = w.proof("notify.set", &params).await;
+        let (s, v) = w
+            .ctl(
+                "POST",
+                "/v1/notify",
+                json!({"webhook_url":url,"detail":"minimal","presence":proof}),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        assert!(!v.to_string().contains("test-fake-secret"));
+        assert!(!serde_json::to_string(&audit_records(&w.f).await)
+            .unwrap()
+            .contains("test-fake-secret"));
+        assert_eq!(
+            w.f.send(
+                "GET",
+                "/ordinary",
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                None
+            )
+            .await
+            .status,
+            200
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
 }
