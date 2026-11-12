@@ -638,11 +638,8 @@ impl Daemon {
                 let added = self.shared.run(move |core| core.vault.add_scrub_pattern(&slug, &pattern).v()).await??;
                 let mut out = serde_json::to_value(added).unwrap_or(Value::Null);
                 if let Some(sample) = input.get("sample").and_then(Value::as_str) {
-                    let mut matches = 0u64;
-                    let redacted = compiled.regex.replace_all(sample, |_: &regex::Captures<'_>| {
-                        matches += 1;
-                        "[[av:derived]]".to_string()
-                    });
+                    let matches = compiled.regex.find_iter(sample).count() as u64;
+                    let redacted = compiled.regex.replace_all(sample, "[[av:derived]]").into_owned();
                     out["sample"] = json!({"redacted": redacted, "matches": matches});
                 }
                 Ok((200, out))
@@ -974,9 +971,13 @@ impl Daemon {
                     .shared
                     .run(move |core| -> R<Value> {
                         let log = core.vault.audit_mut().ok_or_else(|| d(C::Locked, "the audit log is encrypted; unlock the vault to verify it"))?;
+                        // Not a list (or too long) is refused here: the store
+                        // takes a slice, so the JS check of the raw value is the
+                        // caller's.
+                        let max = av_store::audit::MAX_WITNESS_CHECKPOINTS;
                         let list: Vec<Value> = match &cps {
-                            Some(Value::Array(a)) => a.clone(),
-                            _ => Vec::new(),
+                            Some(Value::Array(a)) if a.len() <= max => a.clone(),
+                            _ => return Err(dr(C::PolicyDenied, format!("checkpoints must be a list of at most {max}"), "audit_range")),
                         };
                         Ok(json!(log.verify_witness(&list).v()?))
                     })

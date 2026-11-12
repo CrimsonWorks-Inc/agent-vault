@@ -428,7 +428,7 @@ impl UiServer {
                             let s3 = s2.clone();
                             async move { Ok::<_, std::convert::Infallible>(s3.handle(req).await) }
                         });
-                        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
+                        let _ = hyper::server::conn::http1::Builder::new().half_close(true).serve_connection(TokioIo::new(stream), svc).await;
                     });
                 }
             });

@@ -783,3 +783,68 @@ fn set_run(runs: &mut Vec<(String, Vec<Slot>)>, key: String, chosen: Vec<Slot>) 
         runs.push((key, chosen));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use av_core::scrub::{ScrubEntry, ScrubberOptions};
+
+    const SECRET: &str = "test-secret-conform-0123456789abcdef";
+
+    fn scrubber() -> Scrubber {
+        Scrubber::new(
+            &[ScrubEntry { secret: av_core::secret::SecretString::from(SECRET.to_string()), label: "demo".into(), replacement: None, always: true }],
+            &ScrubberOptions::default(),
+        )
+        .unwrap()
+    }
+
+    fn drive(chunks: &[&str]) -> (String, Vec<String>, bool) {
+        let mut input: Vec<Input> = chunks.iter().map(|c| Input::Chunk(c.as_bytes().to_vec())).collect();
+        input.push(Input::End);
+        let mut it = input.into_iter();
+        let mut out = Vec::new();
+        let mut cuts = Vec::new();
+        let complete = run(scrubber(), scrubber(), usize::MAX, || it.next().unwrap_or(Input::End), |f| {
+            out.extend(f);
+            true
+        }, |r| cuts.push(r.to_string()));
+        (String::from_utf8_lossy(&out).into_owned(), cuts, complete)
+    }
+
+    #[test]
+    fn hardening_a_secret_split_across_events_cuts_the_stream_and_ordinary_events_survive() {
+        let (a, b) = SECRET.split_at(16);
+        let (text, cuts, complete) = drive(&["data: ordinary-traffic-control\n\n", "data: lookalike\n\n", &format!("data: {a}\n\n"), &format!("data: {b}\n\n"), "data: after-cut-marker\n\n"]);
+        assert!(text.contains("ordinary-traffic-control"), "{text}");
+        assert!(text.contains("lookalike"), "{text}");
+        assert!(!text.contains("after-cut-marker"), "{text}");
+        assert!(text.contains("AV_UNSCANNABLE"), "{text}");
+        assert!(!text.contains(SECRET));
+        assert_eq!(cuts, vec!["credential_split_across_events"]);
+        assert!(!complete);
+        // Control: an ordinary stream goes through whole.
+        let (text, cuts, complete) = drive(&["data: one\n\n", "data: two\n\n"]);
+        assert_eq!(text, "data: one\n\ndata: two\n\n");
+        assert!(cuts.is_empty() && complete);
+    }
+
+    #[test]
+    fn hardening_a_secret_split_across_json_fields_cuts_the_stream() {
+        let (a, b) = SECRET.split_at(10);
+        let (text, cuts, _) = drive(&[
+            &format!("data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"text\":\"{a}\"}}}}\n\n"),
+            "data: {\"type\":\"ping\",\"meta\":\"content_block_delta\"}\n\n",
+            &format!("data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"text\":\"{b}\"}}}}\n\n"),
+        ]);
+        assert!(!text.contains(b) || !text.contains(a));
+        assert_eq!(cuts, vec!["credential_split_across_events"]);
+    }
+
+    #[test]
+    fn crlf_framing_is_split_too() {
+        let (text, _, complete) = drive(&["data: one\r\n\r\ndata: tw", "o\r\n\r\n"]);
+        assert_eq!(text, "data: one\n\ndata: two\n\n");
+        assert!(complete);
+    }
+}

@@ -63,6 +63,7 @@ where
     async move {
         let _ = hyper::server::conn::http1::Builder::new()
             .keep_alive(true)
+            .half_close(true)
             .serve_connection(TokioIo::new(io), service_fn(svc))
             .await;
     }

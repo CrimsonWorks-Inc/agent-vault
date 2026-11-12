@@ -153,9 +153,7 @@ pub fn audit_encoding(e: &str) -> Value {
     }
 }
 
-fn session_token_re() -> regex::Regex {
-    av_core::jsre::compile(SESSION_TOKEN).expect("token pattern")
-}
+
 
 // ------------------------------------------------------------ the request
 
@@ -1905,7 +1903,7 @@ impl Core {
         }
 
         // Forward.
-        let token_re = session_token_re();
+        let token_re = av_core::jsre::compile(SESSION_TOKEN).expect("token pattern");
         let mut headers: Vec<(String, Vec<String>)> = Vec::new();
         for (n, v) in &outgoing.headers {
             let lower = n.to_lowercase();
@@ -2760,7 +2758,6 @@ impl Pipeline {
             let mut failed = false;
             let mut partial = String::new();
             let kind = sp_kind.clone();
-            let error_line = av_core::jsre::compile(r"(?m)^event: error$").expect("error line");
             let complete = crate::sse::run(
                 kit.framing,
                 kit.check,
@@ -2773,7 +2770,8 @@ impl Pipeline {
                             while let Some(b) = partial.find("\n\n") {
                                 let event = partial[..b].to_string();
                                 partial = partial[b + 2..].to_string();
-                                if error_line.is_match(&event) {
+                                // `/^event: error$/m`: any line of the event.
+                                if event.split('\n').any(|l| l == "event: error") {
                                     failed = true;
                                 }
                                 let data: Vec<&str> = event.split('\n').filter(|l| l.starts_with("data:")).map(|l| l[5..].strip_prefix(' ').unwrap_or(&l[5..])).collect();
