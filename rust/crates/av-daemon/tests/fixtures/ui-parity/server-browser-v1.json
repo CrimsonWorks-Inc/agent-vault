@@ -1,0 +1,1212 @@
+{
+  "description": "Obviously fake public inputs. Rust server and unchanged JS browser/CLI builders must agree with these fixed outputs.",
+  "digested": [
+    "bundle",
+    "prf_secret",
+    "recovery_passphrase",
+    "value",
+    "webhook_url"
+  ],
+  "override_keys": [
+    "approval",
+    "budget",
+    "concurrency",
+    "grant-ttl",
+    "grant_ttl",
+    "grant_ttl_minutes",
+    "infinite",
+    "max_concurrent",
+    "methods",
+    "paths",
+    "payload",
+    "quota",
+    "rate",
+    "redirects",
+    "route",
+    "routes",
+    "spend-tokens",
+    "spend-usd",
+    "spend_tokens",
+    "spend_usd",
+    "ttl-minutes",
+    "ttl_minutes",
+    "uses"
+  ],
+  "operations": [
+    {
+      "name": "digest value \"test-fake-value\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": "test-fake-value"
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "e96bee65f95d3e730b0f643b33c97624eebbefff2e6d724f14ade8763bc94b11",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value \"\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": ""
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value \"true\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": "true"
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value 42",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": 42
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value true",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": true
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value null",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": null
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value [\"a\",{\"b\":1}]",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": [
+          "a",
+          {
+            "b": 1
+          }
+        ]
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "3d6f51e1fd2489c7f062f0347a710fa6a5f238bdd8c8bf55741236400da86492",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest value {\"version\":1,\"kdf\":{\"n\":16384,\"salt\":\"c2FsdA\"},\"sealed\":\"Zm9v\",\"credentials\":[{\"slug\":\"demo\",\"n\":1}]}",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "value": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        }
+      },
+      "expected": {
+        "slug": "demo",
+        "value_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret \"test-fake-value\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": "test-fake-value"
+      },
+      "expected": {
+        "prf_secret_sha256": "e96bee65f95d3e730b0f643b33c97624eebbefff2e6d724f14ade8763bc94b11",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret \"\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": ""
+      },
+      "expected": {
+        "prf_secret_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret \"true\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": "true"
+      },
+      "expected": {
+        "prf_secret_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret 42",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": 42
+      },
+      "expected": {
+        "prf_secret_sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret true",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": true
+      },
+      "expected": {
+        "prf_secret_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret null",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": null
+      },
+      "expected": {
+        "prf_secret_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret [\"a\",{\"b\":1}]",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": [
+          "a",
+          {
+            "b": 1
+          }
+        ]
+      },
+      "expected": {
+        "prf_secret_sha256": "3d6f51e1fd2489c7f062f0347a710fa6a5f238bdd8c8bf55741236400da86492",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest prf_secret {\"version\":1,\"kdf\":{\"n\":16384,\"salt\":\"c2FsdA\"},\"sealed\":\"Zm9v\",\"credentials\":[{\"slug\":\"demo\",\"n\":1}]}",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "prf_secret": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        }
+      },
+      "expected": {
+        "prf_secret_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase \"test-fake-value\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": "test-fake-value"
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "e96bee65f95d3e730b0f643b33c97624eebbefff2e6d724f14ade8763bc94b11",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase \"\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": ""
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase \"true\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": "true"
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase 42",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": 42
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase true",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": true
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase null",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": null
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase [\"a\",{\"b\":1}]",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": [
+          "a",
+          {
+            "b": 1
+          }
+        ]
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "3d6f51e1fd2489c7f062f0347a710fa6a5f238bdd8c8bf55741236400da86492",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest recovery_passphrase {\"version\":1,\"kdf\":{\"n\":16384,\"salt\":\"c2FsdA\"},\"sealed\":\"Zm9v\",\"credentials\":[{\"slug\":\"demo\",\"n\":1}]}",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "recovery_passphrase": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        }
+      },
+      "expected": {
+        "recovery_passphrase_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle \"test-fake-value\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": "test-fake-value"
+      },
+      "expected": {
+        "bundle_sha256": "e96bee65f95d3e730b0f643b33c97624eebbefff2e6d724f14ade8763bc94b11",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle \"\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": ""
+      },
+      "expected": {
+        "bundle_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle \"true\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": "true"
+      },
+      "expected": {
+        "bundle_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle 42",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": 42
+      },
+      "expected": {
+        "bundle_sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle true",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": true
+      },
+      "expected": {
+        "bundle_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle null",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": null
+      },
+      "expected": {
+        "bundle_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle [\"a\",{\"b\":1}]",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": [
+          "a",
+          {
+            "b": 1
+          }
+        ]
+      },
+      "expected": {
+        "bundle_sha256": "3d6f51e1fd2489c7f062f0347a710fa6a5f238bdd8c8bf55741236400da86492",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest bundle {\"version\":1,\"kdf\":{\"n\":16384,\"salt\":\"c2FsdA\"},\"sealed\":\"Zm9v\",\"credentials\":[{\"slug\":\"demo\",\"n\":1}]}",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "bundle": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        }
+      },
+      "expected": {
+        "bundle_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "slug": "demo",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url \"test-fake-value\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": "test-fake-value"
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "e96bee65f95d3e730b0f643b33c97624eebbefff2e6d724f14ade8763bc94b11",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url \"\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": ""
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url \"true\"",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": "true"
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url 42",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": 42
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url true",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": true
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url null",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": null
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url [\"a\",{\"b\":1}]",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": [
+          "a",
+          {
+            "b": 1
+          }
+        ]
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "3d6f51e1fd2489c7f062f0347a710fa6a5f238bdd8c8bf55741236400da86492",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "digest webhook_url {\"version\":1,\"kdf\":{\"n\":16384,\"salt\":\"c2FsdA\"},\"sealed\":\"Zm9v\",\"credentials\":[{\"slug\":\"demo\",\"n\":1}]}",
+      "op": "cred.test_op",
+      "params": {
+        "slug": "demo",
+        "webhook_url": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        }
+      },
+      "expected": {
+        "slug": "demo",
+        "webhook_url_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "op": "cred.test_op"
+      }
+    },
+    {
+      "name": "cred.rotate",
+      "op": "cred.rotate",
+      "params": {
+        "slug": "demo",
+        "value": "test-fake-new-value",
+        "mode": "keep",
+        "retire_hours": 24
+      },
+      "expected": {
+        "mode": "keep",
+        "retire_hours": 24,
+        "slug": "demo",
+        "value_sha256": "eff2c0548c8da66dfc3902cfc35d1606bed8a7e45f19118d9fafbf9e322fb8c4",
+        "op": "cred.rotate"
+      }
+    },
+    {
+      "name": "backup.restore",
+      "op": "backup.restore",
+      "params": {
+        "bundle": {
+          "version": 1,
+          "kdf": {
+            "n": 16384,
+            "salt": "c2FsdA"
+          },
+          "sealed": "Zm9v",
+          "credentials": [
+            {
+              "slug": "demo",
+              "n": 1
+            }
+          ]
+        },
+        "recovery_passphrase": "test fake recovery words",
+        "on_conflict": "rename"
+      },
+      "expected": {
+        "bundle_sha256": "111bde972cf1e52d42bdea55c8def1639d9a3ec4621e638bed5bf24bd2718754",
+        "on_conflict": "rename",
+        "recovery_passphrase_sha256": "2a3b0a0d29a424b4a7aa45f32e5e3270d009934ef5b16a3910fe678dc44aee44",
+        "op": "backup.restore"
+      }
+    },
+    {
+      "name": "notify.set",
+      "op": "notify.set",
+      "params": {
+        "webhook_url": "https://hooks.example/fake-secret",
+        "detail": "minimal"
+      },
+      "expected": {
+        "detail": "minimal",
+        "webhook_url_sha256": "d6754777367fc2a89c08ac853ddc2506913397c5aeb4acc1935bb8853c3b9745",
+        "op": "notify.set"
+      }
+    },
+    {
+      "name": "template.save",
+      "op": "template.save",
+      "params": {
+        "name": "t",
+        "spec": {
+          "cred": "demo",
+          "spend_usd": 1.25,
+          "methods": [
+            "GET"
+          ]
+        }
+      },
+      "expected": {
+        "name": "t",
+        "spec": {
+          "cred": "demo",
+          "spend_usd": 1.25,
+          "methods": [
+            "GET"
+          ]
+        },
+        "op": "template.save"
+      }
+    },
+    {
+      "name": "session.narrow",
+      "op": "session.narrow",
+      "params": {
+        "sid": "s",
+        "narrow": {
+          "methods": [
+            "GET",
+            "HEAD"
+          ]
+        },
+        "presence": {
+          "challengeId": "x"
+        }
+      },
+      "expected": {
+        "narrow": {
+          "methods": [
+            "GET",
+            "HEAD"
+          ]
+        },
+        "sid": "s",
+        "op": "session.narrow"
+      }
+    }
+  ],
+  "overrides": [
+    {
+      "name": "narrowing 0",
+      "raw": {
+        "methods": "get,head"
+      },
+      "expected": {
+        "methods": [
+          "GET",
+          "HEAD"
+        ]
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "methods": [
+          "GET",
+          "HEAD"
+        ],
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 1",
+      "raw": {
+        "paths": "/repos/**,/user"
+      },
+      "expected": {
+        "paths": [
+          "/repos/**",
+          "/user"
+        ]
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "paths": [
+          "/repos/**",
+          "/user"
+        ],
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 2",
+      "raw": {
+        "budget": "5"
+      },
+      "expected": {
+        "budget": 5
+      },
+      "operation": {
+        "budget": 5,
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 3",
+      "raw": {
+        "uses": "2"
+      },
+      "expected": {
+        "uses": 2
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "uses": 2,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 4",
+      "raw": {
+        "ttl_minutes": "30"
+      },
+      "expected": {
+        "ttl_minutes": 30
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "ttl_minutes": 30,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 5",
+      "raw": {
+        "grant_ttl_minutes": "10"
+      },
+      "expected": {
+        "grant_ttl_minutes": 10
+      },
+      "operation": {
+        "grant_ttl_minutes": 10,
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 6",
+      "raw": {
+        "max_concurrent": "2"
+      },
+      "expected": {
+        "max_concurrent": 2
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "max_concurrent": 2,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 7",
+      "raw": {
+        "redirects": "1"
+      },
+      "expected": {
+        "redirects": 1
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "redirects": 1,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 8",
+      "raw": {
+        "spend_tokens": "1000"
+      },
+      "expected": {
+        "spend_tokens": 1000
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "spend_tokens": 1000,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 9",
+      "raw": {
+        "spend_usd": "0.5"
+      },
+      "expected": {
+        "spend_usd": 0.5
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "spend_usd": 0.5,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 10",
+      "raw": {
+        "rate": "60/min"
+      },
+      "expected": {
+        "rate": "60/min"
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "rate": "60/min",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 11",
+      "raw": {
+        "quota": "1000/day"
+      },
+      "expected": {
+        "quota": "1000/day"
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "quota": "1000/day",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 12",
+      "raw": {
+        "routes": "[{\"methods\":[\"GET\"],\"paths\":[\"/repos/**\"]}]"
+      },
+      "expected": {
+        "routes": [
+          {
+            "methods": [
+              "GET"
+            ],
+            "paths": [
+              "/repos/**"
+            ]
+          }
+        ]
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "routes": [
+          {
+            "methods": [
+              "GET"
+            ],
+            "paths": [
+              "/repos/**"
+            ]
+          }
+        ],
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 13",
+      "raw": {
+        "payload": "{\"json\":{\"/amount\":{\"max\":100}}}"
+      },
+      "expected": {
+        "payload": {
+          "json": {
+            "/amount": {
+              "max": 100
+            }
+          }
+        }
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "payload": {
+          "json": {
+            "/amount": {
+              "max": 100
+            }
+          }
+        },
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 14",
+      "raw": {
+        "route": "get,head:/repos/**"
+      },
+      "expected": {
+        "routes": [
+          {
+            "methods": [
+              "GET",
+              "HEAD"
+            ],
+            "paths": [
+              "/repos/**"
+            ]
+          }
+        ]
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "routes": [
+          {
+            "methods": [
+              "GET",
+              "HEAD"
+            ],
+            "paths": [
+              "/repos/**"
+            ]
+          }
+        ],
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 15",
+      "raw": {
+        "approval": "on-write"
+      },
+      "expected": {
+        "approval": "on-write"
+      },
+      "operation": {
+        "approval": "on-write",
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 16",
+      "raw": {
+        "methods": "GET",
+        "budget": "3",
+        "rate": "10/min",
+        "max_concurrent": "1",
+        "ttl_minutes": "15"
+      },
+      "expected": {
+        "methods": [
+          "GET"
+        ],
+        "budget": 3,
+        "ttl_minutes": 15,
+        "max_concurrent": 1,
+        "rate": "10/min"
+      },
+      "operation": {
+        "budget": 3,
+        "granted": true,
+        "id": "sr_x",
+        "max_concurrent": 1,
+        "methods": [
+          "GET"
+        ],
+        "rate": "10/min",
+        "ttl_minutes": 15,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 17",
+      "raw": {
+        "approval": "auto"
+      },
+      "expected": {
+        "approval": "auto"
+      },
+      "operation": {
+        "approval": "auto",
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 18",
+      "raw": {
+        "infinite": true
+      },
+      "expected": {
+        "infinite": true
+      },
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "infinite": true,
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 19",
+      "raw": {
+        "approval": "each",
+        "methods": "get,post",
+        "infinite": true
+      },
+      "expected": {
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "approval": "each",
+        "infinite": true
+      },
+      "operation": {
+        "approval": "each",
+        "granted": true,
+        "id": "sr_x",
+        "infinite": true,
+        "methods": [
+          "GET",
+          "POST"
+        ],
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 20",
+      "raw": {
+        "approval": ""
+      },
+      "expected": {},
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "narrowing 21",
+      "raw": {
+        "infinite": false
+      },
+      "expected": {},
+      "operation": {
+        "granted": true,
+        "id": "sr_x",
+        "op": "session_request.decide"
+      }
+    },
+    {
+      "name": "fix-control-page combined narrowing",
+      "raw": {
+        "methods": "get",
+        "paths": "/user,/user/repos",
+        "budget": "10"
+      },
+      "expected": {
+        "methods": [
+          "GET"
+        ],
+        "paths": [
+          "/user",
+          "/user/repos"
+        ],
+        "budget": 10
+      },
+      "operation": {
+        "budget": 10,
+        "granted": true,
+        "id": "sr_x",
+        "methods": [
+          "GET"
+        ],
+        "paths": [
+          "/user",
+          "/user/repos"
+        ],
+        "op": "session_request.decide"
+      }
+    }
+  ],
+  "cleaners": [
+    {
+      "name": "bidi and separators",
+      "input": "a‪b‫c‬d‭e‮f⁦g⁧h⁨i⁩j k l",
+      "headline": "abcdefghij k l",
+      "terminal": "abcdefghijkl",
+      "page_line": "abcdefghij k l"
+    }
+  ]
+}
