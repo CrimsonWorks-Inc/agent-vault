@@ -140,10 +140,19 @@ async fn session_requests_create_nothing_until_a_human_answers_and_only_the_aske
         )
         .await;
     assert_eq!(s, 200, "{asked}");
+    assert_eq!(asked["state"], "pending");
     let id = asked["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("sr_"), "{id}");
     let secret = asked["collect_secret"].as_str().unwrap().to_string();
     let (_, list) = w.control("GET", "/v1/sessions", json!({})).await;
     assert_eq!(list.as_array().unwrap().len(), 1, "asking made no session");
+    // Asking is not getting: no token is handed out without a human.
+    assert!(
+        asked.get("token").is_none(),
+        "a token was handed out without a human: {asked}"
+    );
+    assert!(!asked.to_string().contains("avs1."), "{asked}");
+    assert_eq!(asked["agent_reason_untrusted"], "need it");
     let (s, v) = w
         .control(
             "GET",

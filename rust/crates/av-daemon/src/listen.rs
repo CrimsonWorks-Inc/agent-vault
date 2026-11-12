@@ -94,13 +94,15 @@ impl<IO: tokio::io::AsyncRead + Unpin + Send> ConnWatch for std::sync::Mutex<Con
             if c.ended {
                 return std::task::Poll::Ready(());
             }
-            if c.stash.len() >= STASH_LIMIT {
-                return std::task::Poll::Pending;
-            }
+            // A full stash still reads, so the end of input behind it is
+            // seen (and a waker is registered). Bytes past the limit fail
+            // closed: they are discarded and the client counts as gone.
+            let full = c.stash.len() >= STASH_LIMIT;
             let mut chunk = [0u8; 4096];
             let mut buf = tokio::io::ReadBuf::new(&mut chunk);
             match std::pin::Pin::new(&mut c.io).poll_read(cx, &mut buf) {
                 std::task::Poll::Ready(Ok(())) if buf.filled().is_empty() => c.ended = true,
+                std::task::Poll::Ready(Ok(())) if full => c.ended = true,
                 std::task::Poll::Ready(Ok(())) => {
                     let got = buf.filled().to_vec();
                     c.stash.extend_from_slice(&got);

@@ -110,6 +110,9 @@ async fn hardening_a_reflected_secret_in_a_header_name_or_value_is_dropped_or_re
     w.up.answer(Box::new(move |_| {
         let mut r = json_response(200, &json!({"ok": true}));
         r.headers.push((hexname.clone(), "1".into()));
+        // Node lowercases names, so this is how a reflected secret arrives.
+        r.headers
+            .push((format!("x-echo-{}", SECRET.to_lowercase()), "1".into()));
         r.headers.push(("x-echo".into(), SECRET.into()));
         r.headers.push(("x-plain".into(), "ordinary".into()));
         r.headers.push(("av-decision".into(), "forged".into()));
@@ -121,6 +124,11 @@ async fn hardening_a_reflected_secret_in_a_header_name_or_value_is_dropped_or_re
     assert!(!leaks(&all), "{all}");
     assert_eq!(r.header("x-plain"), Some("ordinary"));
     assert_eq!(r.header("av-decision"), Some("allow"));
+    let redacted: u64 = r
+        .header("av-redacted")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(redacted >= 2, "av-redacted {redacted}: {all}");
 }
 
 fn sse(events: &[&str]) -> UpstreamResponse {

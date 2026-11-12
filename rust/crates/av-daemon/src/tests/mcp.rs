@@ -39,6 +39,28 @@ async fn the_handshake_and_the_ungated_tools_work_without_a_session() {
     let init = w.daemon.mcp.handle(json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}), None, None, None).await.unwrap();
     assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
     assert_eq!(init["result"]["instructions"], crate::mcp::INSTRUCTIONS);
+    assert_eq!(init["result"]["serverInfo"]["name"], "agent-vault");
+    // Over HTTP the transport also issues a session id.
+    let r = w
+        .daemon
+        .on_gateway(
+            crate::server::Incoming {
+                method: "POST".into(),
+                target: "/mcp".into(),
+                headers: vec![("host".into(), "127.0.0.1".into())],
+                body: crate::util::js_stringify(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})).into_bytes(),
+            },
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    assert!(
+        r.headers()
+            .get("mcp-session-id")
+            .is_some_and(|v| !v.is_empty()),
+        "a transport session id is issued"
+    );
     let list = w
         .daemon
         .mcp

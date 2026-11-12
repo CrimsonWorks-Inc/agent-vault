@@ -3008,3 +3008,22 @@ name = 'a narrowing sent as a list is read as no narrowing'
 file = "src/ui/server.rs"
 from = '''        Some(Value::Array(a)) if !a.is_empty() => index_keys(a.len()),'''
 to = '''        Some(Value::Array(a)) if a.is_empty() => index_keys(a.len()),'''
+
+# review-daemon-1 blocking 1: a full read-ahead stash hid the client's
+# half-close (Notifier.subscribe res.on('close'); MCP GET event stream).
+
+[[mutation]]
+name = 'a full read-ahead stash stops reading, so a half-close behind it never frees the watcher'
+file = "src/listen.rs"
+from = '''            let full = c.stash.len() >= STASH_LIMIT;'''
+to = '''            if c.stash.len() >= STASH_LIMIT {
+                return std::task::Poll::Pending;
+            }
+            let full = false;'''
+
+[[mutation]]
+name = 'bytes past a full read-ahead stash are stashed and the watcher keeps its slot'
+file = "src/listen.rs"
+from = '''                std::task::Poll::Ready(Ok(())) if full => c.ended = true,'''
+to = '''                std::task::Poll::Ready(Ok(())) if full && false => c.ended = true,'''
+

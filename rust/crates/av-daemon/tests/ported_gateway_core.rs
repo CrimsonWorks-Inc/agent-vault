@@ -22885,6 +22885,9 @@ fn ui_elevated_session_routes_are_both_locally_gated_and_daemon_verified_and_hea
     assert_eq!(av_daemon::notify::clean_headline(hostile), "abcdefghij k l");
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/ui-parity/server-browser-v1.json")).unwrap();
+    // Only `headline` has a cleaner in this crate. `terminal` (the CLI's
+    // cleanText) and `page_line` (the page's cleanLine) stay with the
+    // retained JS browser and CLI checks on this fixture (PORTED.md).
     for c in fixture["cleaners"].as_array().unwrap() {
         assert_eq!(
             av_daemon::notify::clean_headline(c["input"].as_str().unwrap()),
