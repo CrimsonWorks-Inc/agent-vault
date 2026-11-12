@@ -1168,7 +1168,7 @@ mod tests {
     #[test]
     fn a_long_second_half_is_searched_whole() {
         let (a, b) = halves();
-        let long = format!("{b}{}", "f".repeat(800));
+        let long = format!("{b}{}", "f".repeat(20_000));
         cut(
             "path run",
             vec![

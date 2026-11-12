@@ -119,3 +119,416 @@ async fn explain_denial_sentences_are_bounded_in_count_and_age() {
         "not past its hour"
     );
 }
+
+fn approval_id(r: &crate::pipeline::GatewayResponse) -> String {
+    let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+    v["approval_id"].as_str().unwrap_or("").to_string()
+}
+
+/// A credential `two` whose one field may sit in the `x-key` header or the
+/// JSON body's `/token`, and a session over it: `(token, placeholder, grant)`.
+async fn two_sites(w: &World, session: Value) -> (String, String, String) {
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "two", "kind": "http", "host": "two.example.test", "value": "two-secret-0123456789abcdef", "sites": ["header:x-key", "json:/token"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let mut spec = json!({"cred": "two", "label": "two", "methods": ["GET", "POST"], "paths": ["/**"], "ttl_hours": 1});
+    for (k, x) in session.as_object().unwrap() {
+        spec[k] = x.clone();
+    }
+    let (s, v) = w.control("POST", "/v1/sessions", spec).await;
+    assert_eq!(s, 200, "{v}");
+    (
+        v["token"].as_str().unwrap().into(),
+        v["placeholder"].as_str().unwrap().into(),
+        v["grant_id"].as_str().unwrap().into(),
+    )
+}
+
+async fn send_two(
+    w: &World,
+    token: &str,
+    header: &str,
+    body_token: &str,
+) -> crate::pipeline::GatewayResponse {
+    send_two_as(w, "POST", token, header, body_token).await
+}
+
+async fn send_two_as(
+    w: &World,
+    method: &str,
+    token: &str,
+    header: &str,
+    body_token: &str,
+) -> crate::pipeline::GatewayResponse {
+    w.daemon
+        .pipeline
+        .handle(crate::pipeline::GatewayRequest {
+            method: method.into(),
+            path: "/p/two/x".into(),
+            query: String::new(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token.into()),
+                ("content-type".into(), "application/json".into()),
+                ("x-key".into(), header.into()),
+            ],
+            body: Some(crate::util::js_stringify(&json!({"token": body_token})).into_bytes()),
+            listener: None,
+        })
+        .await
+}
+
+/// "a request carrying the hash marker's text literally collides with one
+/// carrying the placeholder".
+#[tokio::test(flavor = "multi_thread")]
+async fn literal_marker_text_cannot_make_two_requests_hash_alike() {
+    let w = World::seeded(json!({})).await;
+    let (token, ph, grant) = two_sites(&w, json!({"approval": "each"})).await;
+    let marker = format!("<av:{grant}:token>");
+    let a = send_two(&w, &token, &ph, &marker).await;
+    assert_eq!(a.status, 202);
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/approvals",
+            json!({"id": approval_id(&a), "granted": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let b = send_two(&w, &token, &marker, &ph).await;
+    assert_eq!(b.status, 202, "B is not the request the human approved");
+    assert_eq!(w.up.count(), 0);
+}
+
+/// 'a pre-connect failure refunds only the last placeholder'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_connect_failure_refunds_every_placeholder_it_spent() {
+    let w = World::seeded(json!({})).await;
+    let (token, _, _) = two_sites(&w, json!({})).await;
+    let sid = w
+        .shared
+        .run({
+            let t = token.clone();
+            move |c| c.vault.session_by_token(&t).unwrap().unwrap().id
+        })
+        .await
+        .unwrap();
+    let mut ps = Vec::new();
+    for _ in 0..2 {
+        let (s, v) = w
+            .control(
+                "POST",
+                "/v1/placeholders",
+                json!({"cred": "two", "sid": sid, "uses": 1}),
+            )
+            .await;
+        assert_eq!(s, 200, "{v}");
+        ps.push(v["placeholder"].as_str().unwrap().to_string());
+    }
+    let (p1, p2) = (ps[0].clone(), ps[1].clone());
+    w.up.answer(Box::new(|_| {
+        Err(UpstreamError::new(
+            "ECONNREFUSED",
+            "connect ECONNREFUSED 127.0.0.1:1",
+        ))
+    }));
+    let r = send_two_as(&w, "GET", &token, &p1, &p2).await;
+    assert!(r.status >= 500, "{}", r.status);
+    let live = w
+        .shared
+        .run(move |c| {
+            c.vault
+                .list_placeholders(Some(&sid))
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.state == av_store::model::PlaceholderState::Active)
+                .count()
+        })
+        .await
+        .unwrap();
+    assert_eq!(live, 3, "both one-use placeholders were refunded");
+}
+
+/// 'a method-override header escapes the approval rule'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_method_override_to_a_write_is_held_for_a_human() {
+    let w = World::seeded(json!({})).await;
+    let mut h = auth(&w);
+    h.push(("x-http-method-override".into(), "POST".into()));
+    let r = w.send("GET", "/x", h, None).await;
+    assert_eq!(r.status, 202, "on-write holds an override to POST");
+    assert_eq!(w.up.count(), 0);
+}
+
+/// 'a spent approval with nothing to replay holds its resend forever'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streamed_approval_once_run_starts_a_new_question() {
+    let w = World::seeded(json!({"approval": "each"})).await;
+    w.up.answer(Box::new(|_| {
+        Ok(UpstreamResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: Body::chunks(vec![Ok(b"data: one\n\n".to_vec())]),
+        })
+    }));
+    let first = w.get("/s").await;
+    assert_eq!(first.status, 202);
+    let id = approval_id(&first);
+    let (s, v) = w
+        .control("POST", "/v1/approvals", json!({"id": id, "granted": true}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, _, _) = body_of(w.get("/s").await).await;
+    assert_eq!(s, 200);
+    let again = w.get("/s").await;
+    assert_eq!(again.status, 202);
+    assert_ne!(approval_id(&again), id, "a new question, not the spent one");
+}
+
+/// 'a case-folded secret in a response header name reaches the agent'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_response_header_named_by_the_secret_in_any_case_is_dropped() {
+    let w = World::seeded(json!({})).await;
+    w.up.answer(Box::new(|_| {
+        let mut r = json_response(200, &json!({}));
+        r.headers.push((SECRET.to_uppercase(), "1".into()));
+        Ok(r)
+    }));
+    let r = w.get("/x").await;
+    assert_eq!(r.status, 200);
+    assert!(
+        !r.headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(SECRET)),
+        "{:?}",
+        r.headers
+    );
+}
+
+/// "an event stream's source is piped without its errors".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_stream_that_fails_part_way_is_cut() {
+    let w = World::seeded(json!({})).await;
+    w.up.answer(Box::new(|_| {
+        Ok(UpstreamResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: Body::chunks(vec![Ok(b"data: one\n\n".to_vec()), Err("reset".into())]),
+        })
+    }));
+    let (s, body, _) = body_of(w.get("/s").await).await;
+    assert_eq!(s, 200);
+    assert!(
+        body.contains("AV_UNSCANNABLE"),
+        "the failure is said: {body}"
+    );
+}
+
+/// 'a forged placeholder touches the session it names'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_placeholder_is_refused_as_malformed() {
+    let w = World::seeded(json!({})).await;
+    let mut forged = w.placeholder.clone();
+    let last = forged.pop().unwrap();
+    forged.push(if last == 'a' { 'b' } else { 'a' });
+    let r = w
+        .daemon
+        .pipeline
+        .handle(crate::pipeline::GatewayRequest {
+            method: "GET".into(),
+            path: "/p/demo/user".into(),
+            query: String::new(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("authorization".into(), format!("Bearer {forged}")),
+            ],
+            body: None,
+            listener: None,
+        })
+        .await;
+    assert_eq!(
+        r.error.map(|e| e.code),
+        Some(crate::err::C::PhMalformed),
+        "refused on its checksum before anything is looked up"
+    );
+}
+
+/// '/t/https/ to an http credential goes out in the clear'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_t_https_route_to_an_http_credential_goes_out_over_https() {
+    let w = World::bare().await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "plain", "kind": "http", "host": "plain.example.test", "scheme": "http", "value": SECRET, "sites": ["header:authorization:Bearer"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "plain", "methods": ["GET"], "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let r = w
+        .daemon
+        .pipeline
+        .handle(crate::pipeline::GatewayRequest {
+            method: "GET".into(),
+            path: "/t/https/plain.example.test/x".into(),
+            query: String::new(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), v["token"].as_str().unwrap().into()),
+                (
+                    "authorization".into(),
+                    format!("Bearer {}", v["placeholder"].as_str().unwrap()),
+                ),
+            ],
+            body: None,
+            listener: None,
+        })
+        .await;
+    assert_eq!(r.status, 200, "{:?}", r.error);
+    let url = w.up.hits.lock().unwrap()[0].url.clone();
+    assert!(url.starts_with("https://plain.example.test/"), "{url}");
+}
+
+/// Repeated request headers go upstream as separate field lines, in order,
+/// with only the declared copy substituted. Also holds 'a repeated header
+/// reaches pinnedRequest as a list and the request is refused'.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_request_headers_go_upstream_as_separate_lines_in_order() {
+    let w = World::seeded(json!({})).await;
+    let h = vec![
+        ("x-note".to_string(), "first".to_string()),
+        (
+            "authorization".to_string(),
+            format!("Bearer {}", w.placeholder),
+        ),
+        ("x-note".to_string(), "second".to_string()),
+        ("accept".to_string(), "text/plain".to_string()),
+        ("x-note".to_string(), "third".to_string()),
+    ];
+    let r = w.send("GET", "/user", h, None).await;
+    assert_eq!(r.status, 200, "{:?}", r.error);
+    let hit = w.up.hits.lock().unwrap()[0].clone();
+    let notes: Vec<&str> = hit
+        .headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("x-note"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(notes, vec!["first", "second", "third"]);
+    assert_eq!(
+        w.up.last_auth().as_deref(),
+        Some(format!("Bearer {SECRET}").as_str())
+    );
+    assert!(!crate::util::js_stringify(&json!(hit.headers)).contains(&w.placeholder));
+}
+
+/// 'the placeholder in a Basic header is not made stable for the request
+/// hash' and 'a Basic header that does not encode back to itself shares an
+/// approval with one that does'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_basic_header_hashes_by_its_decoded_pair_written_strictly() {
+    let w = World::bare().await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "bas", "kind": "http", "host": "bas.example.test", "value": SECRET, "sites": ["basic:pass"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "bas", "methods": ["GET", "POST"], "approval": "each", "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let fresh = || {
+        let (w, sid) = (&w, sid.clone());
+        async move {
+            let (s, v) = w
+                .control(
+                    "POST",
+                    "/v1/placeholders",
+                    json!({"cred": "bas", "sid": sid}),
+                )
+                .await;
+            assert_eq!(s, 200, "{v}");
+            v["placeholder"].as_str().unwrap().to_string()
+        }
+    };
+    let send = |header: String| {
+        let (w, token) = (&w, token.clone());
+        async move {
+            w.daemon
+                .pipeline
+                .handle(crate::pipeline::GatewayRequest {
+                    method: "POST".into(),
+                    path: "/p/bas/x".into(),
+                    query: String::new(),
+                    headers: vec![
+                        ("host".into(), "127.0.0.1".into()),
+                        ("av-session".into(), token),
+                        ("authorization".into(), header),
+                    ],
+                    body: None,
+                    listener: None,
+                })
+                .await
+        }
+    };
+    // A user whose pair base64-encodes with padding.
+    let ph1 = fresh().await;
+    let user = ["user", "users", "userss"]
+        .into_iter()
+        .find(|u| crate::util::b64(format!("{u}:{ph1}").as_bytes()).ends_with('='))
+        .unwrap();
+    let basic = |ph: &str| {
+        format!(
+            "Basic {}",
+            crate::util::b64(format!("{user}:{ph}").as_bytes())
+        )
+    };
+    let a = send(basic(&ph1)).await;
+    assert_eq!(a.status, 202);
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/approvals",
+            json!({"id": approval_id(&a), "granted": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // The unpadded spelling with a fresh placeholder is another request.
+    let ph2 = fresh().await;
+    let unpadded = basic(&ph2).trim_end_matches('=').to_string();
+    assert_eq!(
+        send(unpadded).await.status,
+        202,
+        "unpadded is not the approved request"
+    );
+    // The same pair with a fresh placeholder is the approved request.
+    let ph3 = fresh().await;
+    let r = send(basic(&ph3)).await;
+    assert_eq!(
+        r.status, 200,
+        "renewing the placeholder keeps the approval: {:?}",
+        r.error
+    );
+}

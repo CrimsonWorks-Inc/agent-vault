@@ -2548,11 +2548,10 @@ impl Core {
             if token_re.is_match(v) {
                 continue;
             }
-            if let Some(e) = headers.iter_mut().find(|(k, _)| k.to_lowercase() == lower) {
-                e.1.push(v.clone());
-            } else {
-                headers.push((n.clone(), vec![v.clone()]));
-            }
+            // Each field line goes upstream as its own line, in the order
+            // it arrived; repeats are never joined, so the upstream reads
+            // exactly the lines that were checked and substituted.
+            headers.push((n.clone(), vec![v.clone()]));
         }
         let authority = match &route.port {
             Some(p) => format!("{}:{p}", decision.host),
@@ -2616,20 +2615,12 @@ fn put_header(headers: &mut Vec<(String, Vec<String>)>, name: &str, value: Strin
     headers.push((name.to_string(), vec![value]));
 }
 
-/// `defaultUpstream`'s folding: a list header as one line.
+/// Every field line, in order: a header given more than once is sent as
+/// that many lines, never joined.
 fn lines(headers: &[(String, Vec<String>)]) -> Vec<(String, String)> {
     headers
         .iter()
-        .map(|(n, v)| {
-            (
-                n.clone(),
-                v.join(if n.eq_ignore_ascii_case("cookie") {
-                    "; "
-                } else {
-                    ", "
-                }),
-            )
-        })
+        .flat_map(|(n, v)| v.iter().map(move |x| (n.clone(), x.clone())))
         .collect()
 }
 

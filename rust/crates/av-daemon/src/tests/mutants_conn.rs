@@ -400,3 +400,34 @@ async fn a_probe_pin_mismatch_is_answered_as_one() {
     assert_eq!(e.code, crate::err::C::PinMismatch, "{e:?}");
     assert_eq!(e.extra.rule.as_deref(), Some("spki_pin"));
 }
+
+/// 'a repeated header reaches pinnedRequest as a list and the request is
+/// refused': each line of a repeated header is written as its own line.
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_request_writes_a_repeated_header_as_separate_lines() {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let got: Got = Arc::default();
+    let g = got.clone();
+    tokio::spawn(async move {
+        if let Ok((tcp, _)) = l.accept().await {
+            answer(tcp, g).await;
+        }
+    });
+    let r = pinned_request(req(
+        format!("http://127.0.0.1:{port}/x"),
+        vec![
+            ("x-dup".into(), "a".into()),
+            ("x-other".into(), "b".into()),
+            ("x-dup".into(), "c".into()),
+        ],
+        Pins::None,
+    ))
+    .await
+    .expect("sent");
+    assert_eq!(r.status, 200);
+    let text = String::from_utf8_lossy(&got.lock().unwrap()).to_lowercase();
+    let a = text.find("x-dup: a\r\n").expect("first line");
+    let c = text.find("x-dup: c\r\n").expect("second line");
+    assert!(a < c, "{text}");
+}
