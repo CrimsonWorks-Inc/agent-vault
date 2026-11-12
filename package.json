@@ -49,7 +49,8 @@
     "demo": "node demo/demo.js",
     "daemon": "node bin/agent-vault.js daemon",
     "ui": "node bin/agent-vault.js ui",
-    "test:mutation": "node test/mutation-check.js"
+    "test:mutation": "node test/mutation-check.js",
+    "conformance": "node --test conformance/*.test.js"
   },
   "dependencies": {},
   "devDependencies": {
