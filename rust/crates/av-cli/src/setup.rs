@@ -1124,14 +1124,16 @@ fn binary_inside(app: &Path) -> bool {
     canonical_prefix(&exe).starts_with(canonical_prefix(app))
 }
 
-/// Hint for a self-install refusal. "Pass --from" is only right when the
-/// caller has not already passed it. Running the installed copy is a
-/// different problem from `--from` naming that copy.
+/// Hint for a self-install refusal. `--from` naming the installed app is
+/// that problem even when this process is the root-owned installer, so the
+/// hint matches the checkout installer's. "Not the installed copy" is only
+/// the no-`--from` case. "Pass --from" is only right when the caller has
+/// not already passed it and is not already inside `app`.
 fn self_install_die(from_passed: bool, running_inside: bool) -> Die {
-    let hint = if running_inside {
-        "Run the installer from your checkout, not the installed copy."
-    } else if from_passed {
+    let hint = if from_passed {
         "--from names the installed app; point it at your checkout."
+    } else if running_inside {
+        "Run the installer from your checkout, not the installed copy."
     } else {
         "Pass --from <path to your checkout> so there is something new to install."
     };

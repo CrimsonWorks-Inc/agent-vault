@@ -18,14 +18,17 @@ test asserts the same property, or `not applicable, because ...`.
 - `agent-vault setup --print-only` prints `sudo <agent-vault-setup> install
   --from <checkout>` with no `node` and no `.js`.
 - Upgrade probes the installed installer for `value('from')` (JS) or `--from`
-  (Rust binary) via `installer_supports_from`, and says the copy is too old
-  to upgrade itself when neither marker is present. It does not spawn `sudo`.
-  A Rust installer inside `<root>/app/bin` is not used even when it contains
-  `--from`: running it trips `binary_inside`, so `upgrade --print-only` names
-  the checkout's `rust/target/release/agent-vault-setup` and `--from` the
-  checkout. `install_app` copies those release binaries, not the directory of
-  `current_exe`. When `--from` was already passed, the refusal says to run
-  the installer from the checkout, not "Pass --from".
+  (Rust binary) via `installer_supports_from`. When the marker is present,
+  `upgrade` names that root-owned installer, even though it lives in
+  `app/bin`. It does not spawn `sudo`. When the marker is absent, it names
+  the checkout's `rust/target/release/agent-vault-setup` if that file exists.
+  If it does not, upgrade does not name a missing path or the debug installer
+  beside the CLI; it says `cargo build --release first`. `install_app` copies
+  those release binaries, not the directory of `current_exe`. When `--from`
+  names the installed app, the refusal says `--from names the installed app;
+  point it at your checkout.`, including when the process is the root-owned
+  installer. With no `--from`, running that copy still says to run the
+  installer from the checkout, not the installed copy.
 - `foo://u:p w@h st` (non-special scheme, space in the host) is an accepted
   safe difference. JS `new URL` throws, so `urlHasPassword` keeps the value.
   Rust encodes the space and then sees a password, so `exec` drops it.
@@ -147,7 +150,7 @@ test asserts the same property, or `not applicable, because ...`.
 | `test/security/installer.test.js` install refuses a path chain that is writable by anyone but root | `probe_dry_run_checks_the_root_chain_so_the_row_is_testable` (`AGENT_VAULT_SETUP_DRY_ROOT` under a user temp dir, install --dry-run, exit 1, "root must not execute from it") |
 | `test/security/installer.test.js` the installer refuses to install its own directory over itself | `self_install_and_systemd_restart_and_from_probe` |
 | `test/security/installer.test.js` --from selects the checkout to install | `installer_refuses_a_symlinked_checkout_and_plans_a_clean_one` |
-| `test/security/installer.test.js` an installer predating --from cannot be used to upgrade itself | `self_install_and_systemd_restart_and_from_probe` and `upgrade_print_only_names_an_installer_and_source_install_app_accepts` (the root-owned installer is printed when it supports `--from`; a copy that does not falls back to the checkout release installer) |
+| `test/security/installer.test.js` an installer predating --from cannot be used to upgrade itself | `self_install_and_systemd_restart_and_from_probe` and `upgrade_print_only_names_an_installer_and_source_install_app_accepts` (the root-owned installer is printed when it supports `--from`; a copy that does not falls back to the checkout release installer when that file exists, and otherwise says `cargo build --release first`) |
 | `test/security/installer.test.js` the service load waits out the teardown race rather than failing on it | not applicable, because `bootstrap_launchd` is the root path and these tests do not call launchctl |
 | `test/security/installer.test.js` a failed service load prints the command that recovers it | not applicable, because the recovery text is printed only after a root `launchctl` failure, which these tests do not provoke |
 | `test/security/installer.test.js` the installer verifies the socket appeared instead of assuming | not applicable, because the socket wait is the root bootstrap path |

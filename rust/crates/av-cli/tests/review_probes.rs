@@ -264,25 +264,42 @@ fn probe_from_that_names_the_installed_app() {
     let root = tmp.path().join("root");
     let app = root.join("app");
     std::fs::create_dir_all(&app).unwrap();
-    let out = Command::new(cargo_bin("agent-vault-setup"))
-        .args(["install", "--dry-run", "--from"])
-        .arg(&app)
-        .env("AGENT_VAULT_SETUP_DRY_ROOT", &root)
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(!out.status.success(), "{stdout}{stderr}");
-    assert!(
-        stderr.contains("--from names the installed app"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("Pass --from"), "{stderr}");
-    assert!(
-        !stderr.contains("not the installed copy"),
-        "the hint blames the installer, but this process is the checkout's: {stderr}"
-    );
-    assert!(!stdout.contains("mkdir"), "{stdout}");
+
+    let check = |bin: &std::path::Path| {
+        let out = Command::new(bin)
+            .args(["install", "--dry-run", "--from"])
+            .arg(&app)
+            .env("AGENT_VAULT_SETUP_DRY_ROOT", &root)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!out.status.success(), "{bin:?}\n{stdout}{stderr}");
+        assert!(
+            stderr.contains("--from names the installed app"),
+            "{bin:?}\n{stderr}"
+        );
+        assert!(!stderr.contains("Pass --from"), "{stderr}");
+        assert!(
+            !stderr.contains("not the installed copy"),
+            "the hint blames the installer: {bin:?}\n{stderr}"
+        );
+        assert!(!stdout.contains("mkdir"), "{stdout}");
+    };
+
+    // The checkout installer is not the installed copy.
+    check(&cargo_bin("agent-vault-setup"));
+
+    // The root-owned installer lives in app/bin. --from still names the app,
+    // so the hint is the same one.
+    let bin_dir = app.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let installed = bin_dir.join("agent-vault-setup");
+    std::fs::copy(cargo_bin("agent-vault-setup"), &installed).unwrap();
+    let mut perms = std::fs::metadata(&installed).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&installed, perms).unwrap();
+    check(&installed);
 }
 
 #[test]

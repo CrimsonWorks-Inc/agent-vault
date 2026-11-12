@@ -639,9 +639,39 @@ test = "upgrade_bootstraps_from_the_checkout_release_installer"
 [[mutation]]
 name = "a checkout walk that lands on app is treated as a checkout"
 file = "src/commands.rs"
-from = '                if dir.file_name().is_some_and(|name| name == "app") {'
+from = "                if is_installed_app(dir) {"
 to = "                if false {"
 test = "checkout_root_refuses_the_installed_app"
+
+[[mutation]]
+name = "any directory named app is treated as the installed app"
+file = "src/commands.rs"
+from = '''    crate::setup::canonical_prefix(dir)
+        == crate::setup::canonical_prefix(&PathBuf::from(SYSTEM_ROOT).join("app"))'''
+to = '''    dir.file_name().is_some_and(|name| name == "app")'''
+test = "checkout_root_refuses_the_installed_app"
+
+[[mutation]]
+name = "upgrade names a release installer that was not built"
+file = "src/commands.rs"
+from = '''    Err(err_next(
+        "the release installer is not built.",
+        Exit::Usage,
+        "cargo build --release first",
+    ))'''
+to = '''    Ok((release, false))'''
+test = "upgrade_does_not_name_a_missing_release_installer"
+
+[[mutation]]
+name = "the root-owned installer blames itself when --from names the app"
+file = "src/setup.rs"
+from = '''    let hint = if from_passed {
+        "--from names the installed app; point it at your checkout."
+    } else if running_inside {'''
+to = '''    let hint = if running_inside {
+        "Run the installer from your checkout, not the installed copy."
+    } else if from_passed {'''
+test = "probe_from_that_names_the_installed_app"
 
 [[mutation]]
 name = "an installer inside app is refused even when --from is a checkout"

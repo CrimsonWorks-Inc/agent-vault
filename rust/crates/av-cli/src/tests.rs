@@ -381,15 +381,17 @@ fn self_install_and_systemd_restart_and_from_probe() {
     assert!(crate::commands::installer_supports_from(
         b"install --from /tmp"
     ));
-    let (path, root) = crate::commands::choose_upgrade_installer(
+    let err = crate::commands::choose_upgrade_installer(
         std::path::Path::new("/no/such/installer"),
         std::path::Path::new("/checkout/agent-vault-setup"),
         std::path::Path::new("/checkout"),
-    );
-    assert!(!root);
-    assert_eq!(
-        path,
-        std::path::PathBuf::from("/checkout/agent-vault-setup")
+    )
+    .unwrap_err();
+    assert_eq!(err.next.as_deref(), Some("cargo build --release first"));
+    assert!(
+        !err.message.contains("agent-vault-setup"),
+        "a missing installer was named: {}",
+        err.message
     );
 }
 
@@ -412,7 +414,8 @@ fn upgrade_print_only_names_an_installer_and_source_install_app_accepts() {
     let release = checkout.join("rust/target/release/agent-vault-setup");
     std::fs::write(&release, b"checkout-setup").unwrap();
     let (cmd, installer, using_root) =
-        crate::commands::format_upgrade_command(&root_owned, &release, &checkout);
+        crate::commands::format_upgrade_command(&root_owned, &release, &checkout)
+            .expect("root-owned installer");
     assert!(
         using_root,
         "the root-owned installer was not selected: {cmd}"
@@ -448,29 +451,105 @@ fn upgrade_bootstraps_from_the_checkout_release_installer() {
     std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
     std::fs::write(&debug, b"debug").unwrap();
     let (path, using_root) =
-        crate::commands::choose_upgrade_installer(&root_owned, &debug, &checkout);
+        crate::commands::choose_upgrade_installer(&root_owned, &debug, &checkout)
+            .expect("release installer");
     assert!(!using_root, "a too-old install was treated as root-owned");
     assert_eq!(path, release);
 }
 
 #[test]
+fn upgrade_does_not_name_a_missing_release_installer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_owned = tmp.path().join("app/bin/agent-vault-setup");
+    std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
+    std::fs::write(&root_owned, b"old installer without the flag").unwrap();
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    let release = checkout.join("rust/target/release/agent-vault-setup");
+    let missing =
+        crate::commands::choose_upgrade_installer(&root_owned, &root_owned, &checkout).unwrap_err();
+    let missing_text = format!(
+        "{} {}",
+        missing.message,
+        missing.next.clone().unwrap_or_default()
+    );
+    assert!(
+        missing_text.contains("cargo build --release first"),
+        "{missing_text}"
+    );
+    assert!(
+        !missing_text.contains(&release.display().to_string()),
+        "a release path that is not on disk was named: {missing_text}"
+    );
+
+    let debug = checkout.join("rust/target/debug/agent-vault-setup");
+    std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
+    std::fs::write(&debug, b"debug").unwrap();
+    let debug_err =
+        crate::commands::choose_upgrade_installer(&root_owned, &debug, &checkout).unwrap_err();
+    let debug_text = format!(
+        "{} {}",
+        debug_err.message,
+        debug_err.next.clone().unwrap_or_default()
+    );
+    assert!(
+        debug_text.contains("cargo build --release first"),
+        "{debug_text}"
+    );
+    assert!(
+        !debug_text.contains(&debug.display().to_string()),
+        "the debug installer was named: {debug_text}"
+    );
+    assert!(
+        !debug_text.contains("target/release"),
+        "a missing release installer was named: {debug_text}"
+    );
+}
+
+#[test]
 fn checkout_root_refuses_the_installed_app() {
     let tmp = tempfile::tempdir().unwrap();
-    let app = tmp.path().join("app");
-    std::fs::create_dir_all(app.join("src")).unwrap();
-    std::fs::create_dir_all(app.join("bin")).unwrap();
-    std::fs::write(app.join("package.json"), "{}").unwrap();
-    let err = crate::commands::resolve_checkout_root(&[app.join("bin")]).unwrap_err();
-    let text = err.to_string();
+    // A checkout whose directory is named app is still a checkout.
+    let named = tmp.path().join("named").join("app");
+    std::fs::create_dir_all(named.join("src")).unwrap();
+    std::fs::create_dir_all(named.join("bin")).unwrap();
+    std::fs::write(named.join("package.json"), "{}").unwrap();
+    let found = crate::commands::resolve_checkout_root(&[named.join("bin")]).unwrap();
+    assert_eq!(found, named);
+    assert!(!crate::commands::is_installed_app(&named));
+
+    // The real installed app, both spellings. This only stats that tree.
+    let via_var = std::path::PathBuf::from("/var/db/agent-vault/app");
+    let via_private = std::path::PathBuf::from("/private/var/db/agent-vault/app");
     assert!(
-        text.contains("run agent-vault upgrade from your checkout"),
-        "{text}"
+        crate::commands::is_installed_app(&via_var),
+        "the /var spelling was not the installed app"
     );
+    assert!(
+        crate::commands::is_installed_app(&via_private),
+        "the /private/var spelling was not the installed app"
+    );
+    assert_eq!(
+        crate::setup::canonical_prefix(&via_var),
+        crate::setup::canonical_prefix(&via_private)
+    );
+    for start in [via_var.join("bin"), via_private.join("bin")] {
+        let err = crate::commands::resolve_checkout_root(std::slice::from_ref(&start)).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("run agent-vault upgrade from your checkout"),
+            "{start:?}: {text}"
+        );
+    }
+
+    // The installed app is skipped, so a later start is the checkout.
     let checkout = tmp.path().join("checkout");
     std::fs::create_dir_all(checkout.join("src")).unwrap();
     std::fs::create_dir_all(checkout.join("bin")).unwrap();
     std::fs::write(checkout.join("package.json"), "{}").unwrap();
-    let found = crate::commands::resolve_checkout_root(&[checkout.join("src")]).unwrap();
+    let found =
+        crate::commands::resolve_checkout_root(&[via_var.join("bin"), checkout.join("src")])
+            .unwrap();
     assert_eq!(found, checkout);
 }
 

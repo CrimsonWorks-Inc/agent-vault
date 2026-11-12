@@ -103,9 +103,13 @@ fn checkout_root() -> Result<PathBuf, CliError> {
 }
 
 /// Walk `starts` upward for a directory that has `package.json`, `src` and
-/// `bin`. The installed tree has those too: it is the directory named `app`.
-/// Landing on it would print `app/rust/target/release`, which is not there.
+/// `bin`. The installed tree has those too. It is `<SYSTEM_ROOT>/app`,
+/// canonicalized, so `/var` and `/private/var` are the same directory. A
+/// checkout whose own directory is named `app` is not that tree. Landing
+/// on the installed app is skipped so a later start can still be a checkout.
+/// The error is only when every start lands there.
 pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliError> {
+    let mut saw_installed = false;
     for start in starts {
         let mut dir = start.as_path();
         loop {
@@ -113,12 +117,9 @@ pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliEr
                 && dir.join("src").is_dir()
                 && dir.join("bin").is_dir()
             {
-                if dir.file_name().is_some_and(|name| name == "app") {
-                    return Err(err_next(
-                        "run agent-vault upgrade from your checkout.",
-                        Exit::Usage,
-                        "This directory is the installed app, not a checkout.",
-                    ));
+                if is_installed_app(dir) {
+                    saw_installed = true;
+                    break;
                 }
                 return Ok(dir.to_path_buf());
             }
@@ -129,7 +130,22 @@ pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliEr
             dir = parent;
         }
     }
+    if saw_installed {
+        return Err(err_next(
+            "run agent-vault upgrade from your checkout.",
+            Exit::Usage,
+            "This directory is the installed app, not a checkout.",
+        ));
+    }
     Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// True when `dir` is the installed app, `<SYSTEM_ROOT>/app`. The comparison
+/// is canonical, so the `/var` and `/private/var` spellings match. A checkout
+/// that happens to be named `app` does not.
+pub(crate) fn is_installed_app(dir: &Path) -> bool {
+    crate::setup::canonical_prefix(dir)
+        == crate::setup::canonical_prefix(&PathBuf::from(SYSTEM_ROOT).join("app"))
 }
 
 fn setup_bin() -> PathBuf {
@@ -621,7 +637,7 @@ pub async fn upgrade(ctx: &Context, args: &UpgradeArgs) -> Outcome {
     let checkout = checkout_root()?;
     let root_owned = PathBuf::from(SYSTEM_ROOT).join("app/bin/agent-vault-setup");
     let (cmd, installer, using_root) =
-        format_upgrade_command(&root_owned, &checkout_installer, &checkout);
+        format_upgrade_command(&root_owned, &checkout_installer, &checkout)?;
     if boolean_flag(args.print_only.then_some(""), "print-only")? || ctx.json {
         ctx.out(Some(&cmd), &json!({ "command": cmd }));
         return Ok(0);
@@ -694,26 +710,30 @@ pub(crate) fn installer_runs_inside_app(path: &Path) -> bool {
 /// Prefer the root-owned installer when it understands `--from`. An agent
 /// cannot edit that binary. The checkout's release installer is only the
 /// bootstrap, for an installed copy that is missing or too old to take
-/// `--from`. A debug binary next to the CLI is not that installer: it would
-/// copy whatever is in `rust/target/release`, which may be stale.
+/// `--from`, and only when that file exists. A debug binary next to the CLI
+/// is not that installer, and a release path that is not on disk is not
+/// named either: both say to build the release first.
 pub(crate) fn choose_upgrade_installer(
     root_owned: &Path,
-    checkout_installer: &Path,
+    _checkout_installer: &Path,
     checkout_root: &Path,
-) -> (PathBuf, bool) {
+) -> Result<(PathBuf, bool), CliError> {
     if let Ok(bytes) = std::fs::read(root_owned) {
         if installer_supports_from(&bytes) {
-            return (root_owned.to_path_buf(), true);
+            return Ok((root_owned.to_path_buf(), true));
         }
     }
     let release = checkout_root.join("rust/target/release/agent-vault-setup");
     if release.is_file() && !installer_runs_inside_app(&release) {
-        return (release, false);
+        return Ok((release, false));
     }
-    if installer_runs_inside_app(checkout_installer) && !installer_runs_inside_app(&release) {
-        return (release, false);
-    }
-    (checkout_installer.to_path_buf(), false)
+    // `_checkout_installer` is the binary beside the CLI. It may be a debug
+    // build, or this same missing release path. Neither is printable.
+    Err(err_next(
+        "the release installer is not built.",
+        Exit::Usage,
+        "cargo build --release first",
+    ))
 }
 
 /// The line `upgrade --print-only` prints, the installer it names, and
@@ -722,15 +742,15 @@ pub(crate) fn format_upgrade_command(
     root_owned: &Path,
     checkout_installer: &Path,
     checkout_root: &Path,
-) -> (String, PathBuf, bool) {
+) -> Result<(String, PathBuf, bool), CliError> {
     let (installer, using_root) =
-        choose_upgrade_installer(root_owned, checkout_installer, checkout_root);
+        choose_upgrade_installer(root_owned, checkout_installer, checkout_root)?;
     let cmd = format!(
         "sudo {} install --from {}",
         installer.display(),
         checkout_root.display()
     );
-    (cmd, installer, using_root)
+    Ok((cmd, installer, using_root))
 }
 
 /// Ports `COMMANDS.quickstart`.
