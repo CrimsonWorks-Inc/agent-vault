@@ -13,33 +13,33 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 use crate::ui::server::{UiServer, UiServerOptions, STRICT_CSP};
 
-struct Ui {
-    _sock: tempfile::TempDir,
-    _w: World,
-    _dist: tempfile::TempDir,
-    ui: UiServer,
-    cookie: Option<String>,
+pub(super) struct Ui {
+    pub(super) _sock: tempfile::TempDir,
+    pub(super) _w: World,
+    pub(super) _dist: tempfile::TempDir,
+    pub(super) ui: UiServer,
+    pub(super) cookie: Option<String>,
 }
 
-struct Reply {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: String,
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) headers: Vec<(String, String)>,
+    pub(super) body: String,
 }
 
 impl Reply {
-    fn header(&self, n: &str) -> Option<&str> {
+    pub(super) fn header(&self, n: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(k, _)| k == n)
             .map(|(_, v)| v.as_str())
     }
-    fn json(&self) -> Value {
+    pub(super) fn json(&self) -> Value {
         serde_json::from_str(&self.body).unwrap_or(Value::Null)
     }
 }
 
-async fn raw(port: u16, head: &str, body: &str) -> Reply {
+pub(super) async fn raw(port: u16, head: &str, body: &str) -> Reply {
     let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
@@ -76,7 +76,7 @@ async fn raw(port: u16, head: &str, body: &str) -> Reply {
     }
 }
 
-fn dist(dir: &Path) {
+pub(super) fn dist(dir: &Path) {
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(
         dir.join("index.html"),
@@ -90,7 +90,7 @@ fn dist(dir: &Path) {
 }
 
 impl Ui {
-    async fn start() -> Ui {
+    pub(super) async fn start() -> Ui {
         let sockdir = tempfile::Builder::new()
             .prefix("avd")
             .tempdir_in("/tmp")
@@ -125,11 +125,11 @@ impl Ui {
         }
     }
 
-    fn port(&self) -> u16 {
+    pub(super) fn port(&self) -> u16 {
         self.ui.bound_port()
     }
 
-    async fn get(&self, path: &str, extra: &str) -> Reply {
+    pub(super) async fn get(&self, path: &str, extra: &str) -> Reply {
         let cookie = self
             .cookie
             .as_ref()
@@ -146,7 +146,7 @@ impl Ui {
         .await
     }
 
-    async fn api(&self, method: &str, route: &str, body: Value) -> Reply {
+    pub(super) async fn api(&self, method: &str, route: &str, body: Value) -> Reply {
         let cookie = self
             .cookie
             .as_ref()
@@ -156,7 +156,7 @@ impl Ui {
         raw(self.port(), &format!("{method} /api/{route} HTTP/1.1\r\nHost: localhost:{}\r\nX-AV-UI: 1\r\nContent-Type: application/json\r\n{cookie}", self.port()), &b).await
     }
 
-    async fn claim(&mut self) {
+    pub(super) async fn claim(&mut self) {
         let token = self.ui.url().split("?t=").nth(1).unwrap().to_string();
         let r = self.get(&format!("/?t={token}"), "").await;
         assert_eq!(r.status, 302);

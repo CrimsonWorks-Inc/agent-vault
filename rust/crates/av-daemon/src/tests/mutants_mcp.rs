@@ -154,6 +154,13 @@ async fn a_caller_with_no_session_gets_no_sentence() {
         .await;
     assert_eq!(r.status, 401);
     let rid = r.request_id.clone().expect("a request id");
-    let e = call_on(&w, "vault_explain_denial", json!({"request_id": rid}), None, None).await;
+    let e = call_on(
+        &w,
+        "vault_explain_denial",
+        json!({"request_id": rid}),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(e["detail"], Value::Null, "{e}");
 }

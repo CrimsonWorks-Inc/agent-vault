@@ -952,6 +952,12 @@ impl UiServer {
         }
     }
 
+    /// The operation the page must sign for `key` (tests).
+    #[cfg(test)]
+    pub(crate) fn operation_of(key: &str, query: &str, body: &Value) -> Option<Value> {
+        Self::operation_for(key, query, body).ok()
+    }
+
     /// `#operationFor(key, url, body)`.
     fn operation_for(key: &str, query: &str, body: &Value) -> Result<Value, UiErr> {
         let of = |op: &str, p: &Value| crate::util::operation_for(op, p).map_err(UiErr::from);

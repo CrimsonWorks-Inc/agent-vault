@@ -263,7 +263,10 @@ async fn the_probe_reads_its_destination_and_pins_as_the_js_does() {
             .unwrap_or_else(|| panic!("{host:?} is not a host"));
         assert_eq!(e.extra.rule.as_deref(), Some("credential_host"), "{host:?}");
     }
-    let c = with(json!({"host": "api.github.com", "scheme": "file"}), json!({}));
+    let c = with(
+        json!({"host": "api.github.com", "scheme": "file"}),
+        json!({}),
+    );
     let e = crate::connectors::probe::prepare_for_test(&c, secret)
         .err()
         .expect("file is not a scheme a probe uses");
@@ -286,7 +289,10 @@ struct Odd {
 }
 
 impl Upstream for Odd {
-    fn send(&self, _req: UpstreamRequest) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
+    fn send(
+        &self,
+        _req: UpstreamRequest,
+    ) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
         Box::pin(async move {
             let (tx, rx) = tokio::sync::mpsc::channel(4);
             match self.mode {
@@ -300,9 +306,9 @@ impl Upstream for Odd {
                     return Ok(json_response(200, &json!({})));
                 }
                 "endless" => {
-                    tokio::spawn(async move {
-                        while tx.send(Ok(vec![b'x'; 8192])).await.is_ok() {}
-                    });
+                    tokio::spawn(
+                        async move { while tx.send(Ok(vec![b'x'; 8192])).await.is_ok() {} },
+                    );
                 }
                 _ => {
                     // Never ends and never sends.
@@ -344,7 +350,11 @@ async fn a_probe_stops_reading_past_the_drain_bound() {
     let t = Instant::now();
     let r = crate::connectors::probe::run_probe(&w.shared, "gh".into(), Some(up)).await;
     assert!(r.is_ok(), "{r:?}");
-    assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 /// 'a probe body that never ends holds the probe open'.

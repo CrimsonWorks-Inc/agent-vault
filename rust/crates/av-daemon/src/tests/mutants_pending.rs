@@ -56,7 +56,10 @@ fn routes_and_payload_may_be_typed_as_json_text_and_bad_text_is_refused() {
 /// 'a rate or quota narrowing is stringified and not trimmed (C23)'.
 #[test]
 fn a_rate_is_trimmed_and_an_object_stays_an_object() {
-    let o = parse_overrides(&args(json!({"rate": " 5/minute ", "quota": {"count": 2, "window": "hour"}}))).unwrap();
+    let o = parse_overrides(&args(
+        json!({"rate": " 5/minute ", "quota": {"count": 2, "window": "hour"}}),
+    ))
+    .unwrap();
     assert_eq!(o.rate, Some(json!("5/minute")));
     assert_eq!(o.quota, Some(json!({"count": 2, "window": "hour"})));
 }

@@ -591,6 +591,45 @@ pub(crate) mod testkit {
             serde_json::json!({"credentialId": self.id, "publicKeySpki": self.spki(), "signCount": 0, "enrolledAt": "2026-01-01T00:00:00.000Z"})
         }
 
+        /// A `none` attestation registering this key over `challenge` from
+        /// `origin`: `{attestationObject, clientDataJSON}`.
+        pub fn attestation(&self, challenge: &[u8], origin: &str) -> Value {
+            let client = serde_json::json!({"type": "webauthn.create", "challenge": b64url(challenge), "origin": origin});
+            let client = crate::util::js_stringify(&client).into_bytes();
+            // The SPKI of a P-256 key ends with the point: 04 || x || y.
+            let spki = crate::util::b64_lenient(&self.spki());
+            let (x, y) = (
+                &spki[spki.len() - 64..spki.len() - 32],
+                &spki[spki.len() - 32..],
+            );
+            let id = crate::util::b64url_lenient(&self.id);
+            // COSE_Key {1: 2, 3: -7, -1: 1, -2: x, -3: y}
+            let mut cose = vec![0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20];
+            cose.extend_from_slice(x);
+            cose.extend_from_slice(&[0x22, 0x58, 0x20]);
+            cose.extend_from_slice(y);
+            let mut auth = sha256(b"localhost").to_vec();
+            auth.push(0x45); // UP, UV, AT
+            auth.extend_from_slice(&0u32.to_be_bytes());
+            auth.extend_from_slice(&[0u8; 16]);
+            auth.extend_from_slice(&(id.len() as u16).to_be_bytes());
+            auth.extend_from_slice(&id);
+            auth.extend_from_slice(&cose);
+            // {"fmt": "none", "attStmt": {}, "authData": auth}
+            let mut att = vec![0xa3, 0x63];
+            att.extend_from_slice(b"fmt");
+            att.push(0x64);
+            att.extend_from_slice(b"none");
+            att.push(0x67);
+            att.extend_from_slice(b"attStmt");
+            att.push(0xa0);
+            att.push(0x68);
+            att.extend_from_slice(b"authData");
+            att.extend_from_slice(&[0x59, (auth.len() >> 8) as u8, auth.len() as u8]);
+            att.extend_from_slice(&auth);
+            serde_json::json!({"attestationObject": b64url(&att), "clientDataJSON": b64url(&client)})
+        }
+
         /// An assertion over `challenge` from `origin`.
         pub fn assert(&mut self, challenge: &[u8], origin: &str) -> Value {
             let client = serde_json::json!({"type": "webauthn.get", "challenge": b64url(challenge), "origin": origin});
@@ -749,9 +788,17 @@ mod tests {
     #[test]
     fn the_operation_binds_secret_fields_by_digest_and_reserves_op() {
         let m = |v: Value| v.as_object().unwrap().clone();
-        for bad in [serde_json::json!({"op": "other"}), serde_json::json!({"value_sha256": "00"}), serde_json::json!({"x_sha256": 1})] {
+        for bad in [
+            serde_json::json!({"op": "other"}),
+            serde_json::json!({"value_sha256": "00"}),
+            serde_json::json!({"x_sha256": 1}),
+        ] {
             let e = operation_for("cred.add", &m(bad.clone())).unwrap_err();
-            assert_eq!(e.extra.rule.as_deref(), Some("reserved_operation_field"), "{bad}");
+            assert_eq!(
+                e.extra.rule.as_deref(),
+                Some("reserved_operation_field"),
+                "{bad}"
+            );
         }
         let secrets = serde_json::json!({
             "value": "v-secret-1", "prf_secret": "p-secret-2", "recovery_passphrase": "r-secret-3",
@@ -765,8 +812,19 @@ mod tests {
         for k in DIGESTED {
             assert!(op.contains_key(&format!("{k}_sha256")), "{k}");
         }
-        let a = operation_for("x", &m(serde_json::json!({"bundle": {"v": 1, "data": "aaa"}}))).unwrap();
-        let b = operation_for("x", &m(serde_json::json!({"bundle": {"v": 1, "data": "bbb"}}))).unwrap();
-        assert_ne!(a["bundle_sha256"], b["bundle_sha256"], "two bundles, two digests");
+        let a = operation_for(
+            "x",
+            &m(serde_json::json!({"bundle": {"v": 1, "data": "aaa"}})),
+        )
+        .unwrap();
+        let b = operation_for(
+            "x",
+            &m(serde_json::json!({"bundle": {"v": 1, "data": "bbb"}})),
+        )
+        .unwrap();
+        assert_ne!(
+            a["bundle_sha256"], b["bundle_sha256"],
+            "two bundles, two digests"
+        );
     }
 }
