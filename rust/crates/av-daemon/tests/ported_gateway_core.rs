@@ -14082,10 +14082,12 @@ async fn session_request_human_hints_and_all_daemon_error_string_commands_exist_
         let strings = av_core::jsre::compile(r#""(?:\\.|[^"\\])*""#).unwrap();
         let command = av_core::jsre::compile(r"\bagent-vault [a-z][a-z-]*").unwrap();
         let mut files = Vec::new();
-        walk(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut files,
-        );
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        for package in ["av-core", "av-store", "av-daemon", "av-cli"] {
+            walk(&crates_dir.join(package).join("src"), &mut files);
+        }
         for file in files {
             let src = std::fs::read_to_string(&file).unwrap();
             for (line, source) in src
