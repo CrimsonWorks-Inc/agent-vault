@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 333 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **647 not yet ported**.
+Totals: 1090 JS tests: 339 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **641 not yet ported**.
 
 ## Mutation check
 
@@ -995,12 +995,12 @@ the vault on every call instead of caching an audit handle.
 | response.test.js | a secret cannot escape through an internal error message | `ported_gateway_core::response_error_detail_cannot_disclose_stored_secret_and_keeps_useful_context` |
 | response.test.js | a token stream that merely mentions a repository is not cut | `ported_gateway_core::response_repository_prose_is_byte_exact_and_never_cut_or_redacted` |
 | response.test.js | a secret split across two SSE events is caught | `tests::gateway::hardening_a_secret_split_across_sse_events_cuts_the_stream` |
-| revocation.test.js | revoking a session kills every placeholder it ever issued | not yet ported |
-| revocation.test.js | revoking one grant does not disturb another session | not yet ported |
-| revocation.test.js | deleting a credential stops every grant that used it | not yet ported |
-| revocation.test.js | locking the vault refuses everything, and unlocking restores it | not yet ported |
-| revocation.test.js | an expired session is refused even with a live placeholder | not yet ported |
-| revocation.test.js | a revoked placeholder coming back is treated as hostile, not as a mistake | not yet ported |
+| revocation.test.js | revoking a session kills every placeholder it ever issued | `ported_gateway_core::revocation_session_kills_all_placeholders_and_token_and_replays_have_distinct_audit_events` |
+| revocation.test.js | revoking one grant does not disturb another session | `ported_gateway_core::revocation_is_precise_across_sessions_but_credential_deletion_stops_every_dependent_grant` |
+| revocation.test.js | deleting a credential stops every grant that used it | `ported_gateway_core::revocation_is_precise_across_sessions_but_credential_deletion_stops_every_dependent_grant` |
+| revocation.test.js | locking the vault refuses everything, and unlocking restores it | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
+| revocation.test.js | an expired session is refused even with a live placeholder | `ported_gateway_core::expired_session_stops_a_previously_working_placeholder_whose_own_expiry_remains_live` |
+| revocation.test.js | a revoked placeholder coming back is treated as hostile, not as a mistake | `ported_gateway_core::revocation_session_kills_all_placeholders_and_token_and_replays_have_distinct_audit_events` |
 | serving.test.js | a listener naming the control surface on a network address is refused outright | not yet ported |
 | serving.test.js | a listener naming the database surface on a network address is refused | not yet ported |
 | serving.test.js | the refusal is audited so a misconfiguration is loud, not silent | not yet ported |

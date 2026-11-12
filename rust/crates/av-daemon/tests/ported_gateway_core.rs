@@ -8995,3 +8995,274 @@ async fn response_transport_chunk_split_does_not_reveal_secret_and_ordinary_fram
     assert_eq!(ordinary.body, control.as_bytes());
     f.clean(&ordinary).await;
 }
+
+#[tokio::test]
+async fn revocation_session_kills_all_placeholders_and_token_and_replays_have_distinct_audit_events(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let second = f.mint(None).await;
+        for marker in [&f.ph, &second] {
+            let response = f
+                .send(
+                    "GET",
+                    "/ordinary",
+                    vec![("x-key".into(), marker.clone())],
+                    None,
+                )
+                .await;
+            assert_eq!(response.status, 200);
+            f.clean(&response).await;
+        }
+        let token = f.token.clone();
+        f.shared
+            .run(move |core| {
+                let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+                core.vault.revoke_session(&sid, "test revocation").unwrap();
+            })
+            .await
+            .unwrap();
+        for marker in [&f.ph, &second] {
+            let mut req = gateway_input(&f, "GET", "/ordinary", "", None, None);
+            req.headers.retain(|(k, _)| k != "av-session");
+            req.headers
+                .iter_mut()
+                .find(|(k, _)| k == "x-key")
+                .unwrap()
+                .1 = marker.clone();
+            let response = f.daemon.pipeline().handle(req).await;
+            assert_ne!(response.status, 200);
+            let code = response.error.as_ref().unwrap().code.as_str();
+            assert!(
+                code == "AV_SESSION_REVOKED"
+                    || code == "AV_SESSION_REQUIRED"
+                    || code.starts_with("AV_PH_")
+            );
+            f.clean(&response).await;
+        }
+        let mut req = gateway_input(&f, "GET", "/ordinary", "", None, None);
+        req.headers
+            .retain(|(k, _)| k != "x-key" && k != "av-session");
+        req.headers
+            .push(("authorization".into(), format!("Bearer {}", f.token)));
+        let response = f.daemon.pipeline().handle(req).await;
+        assert_ne!(response.status, 200);
+        assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+        f.clean(&response).await;
+        let replay = Fixture::new(&["header:x-key"]).await;
+        let once = replay.mint(Some(1)).await;
+        let send = || {
+            replay.send(
+                "GET",
+                "/ordinary",
+                vec![("x-key".into(), once.clone())],
+                None,
+            )
+        };
+        let first = send().await;
+        assert_eq!(first.status, 200);
+        replay.clean(&first).await;
+        let second = send().await;
+        assert_ne!(second.status, 200);
+        assert!(second
+            .error
+            .as_ref()
+            .unwrap()
+            .code
+            .as_str()
+            .starts_with("AV_PH_"));
+        assert_eq!(replay.up.hits.lock().unwrap().len(), 1);
+        replay.clean(&second).await;
+        assert!(audit_records(&replay)
+            .await
+            .iter()
+            .any(|r| r["kind"].as_str().is_some_and(|kind| [
+                "placeholder.exhausted",
+                "placeholder.replay",
+                "placeholder.stale"
+            ]
+            .iter()
+            .any(|prefix| kind.starts_with(prefix)))));
+    })
+    .await
+    .expect("revocation regression timed out");
+}
+
+async fn second_revocation_capability(
+    f: &Fixture,
+    same_credential: bool,
+) -> (GatewayRequest, String) {
+    use av_core::secret::ExposeSecret;
+    use av_store::vault::{CreateGrantOptions, IssueOptions, NewCredential};
+    let (token, marker, gid, slug) = f
+        .shared
+        .run(move |core| {
+            let credential = if same_credential {
+                core.vault.find_credential("demo").unwrap().unwrap()
+            } else {
+                let added = core
+                    .vault
+                    .add_credential(NewCredential {
+                        slug: "other-revocation".into(),
+                        kind: "http".into(),
+                        connector: serde_json::from_value(json!({"host":"api.example.test"}))
+                            .unwrap(),
+                        fields: vec![("token".into(), SECRET.to_string().into())],
+                        sites: std::collections::BTreeMap::from([(
+                            "token".into(),
+                            vec!["header:x-key".into()],
+                        )]),
+                    })
+                    .unwrap();
+                core.vault.credential(&added.id).unwrap().unwrap()
+            };
+            let session = core.vault.create_session(Default::default()).unwrap();
+            let grant = core
+                .vault
+                .create_grant(CreateGrantOptions {
+                    session_id: session.session.id,
+                    credential_id: credential.id,
+                    policy: serde_json::from_value(seeded_policy()).unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let marker = core
+                .vault
+                .issue_placeholder(IssueOptions {
+                    grant_id: grant.id.clone(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .placeholder;
+            (
+                session.token.expose_secret().to_string(),
+                marker,
+                grant.id,
+                credential.slug,
+            )
+        })
+        .await
+        .unwrap();
+    (
+        GatewayRequest {
+            method: "GET".into(),
+            path: format!("/p/{slug}/ordinary"),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token),
+                ("x-key".into(), marker),
+            ],
+            ..Default::default()
+        },
+        gid,
+    )
+}
+
+#[tokio::test]
+async fn revocation_is_precise_across_sessions_but_credential_deletion_stops_every_dependent_grant()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for delete in [false, true] {
+            let f = Fixture::new(&["header:x-key"]).await;
+            let (other, other_grant) = second_revocation_capability(&f, delete).await;
+            let first = f.get().await;
+            assert_eq!(first.status, 200);
+            f.clean(&first).await;
+            let second = f.daemon.pipeline().handle(other.clone()).await;
+            assert_eq!(second.status, 200);
+            f.clean(&second).await;
+            let gid = f.grant_id.clone();
+            f.shared
+                .run(move |core| {
+                    if delete {
+                        core.vault.delete_credential("demo").unwrap();
+                    } else {
+                        core.vault.revoke_grant(&gid, "test revocation").unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+            let first = f.get().await;
+            assert_ne!(first.status, 200);
+            f.clean(&first).await;
+            let second = f.daemon.pipeline().handle(other).await;
+            assert_eq!(second.status == 200, !delete);
+            f.clean(&second).await;
+            assert_eq!(f.up.hits.lock().unwrap().len(), if delete { 2 } else { 3 });
+            f.shared
+                .run(move |core| {
+                    let other = core.vault.grant(&other_grant).unwrap().unwrap();
+                    assert_eq!(other.state == av_store::model::GrantState::Active, !delete);
+                })
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("grant and credential revocation timed out");
+}
+
+#[tokio::test]
+async fn expired_session_stops_a_previously_working_placeholder_whose_own_expiry_remains_live() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = SeededGateway::new(json!({}), json!({}));
+        let ordinary = f.pipeline.handle(f.request.clone()).await;
+        assert_eq!(ordinary.status, 200);
+        f.clean(&ordinary).await;
+        let before = f.snapshot().await;
+        let expiry = before["placeholders"][0]["expires_at"].clone();
+        let SeededGateway {
+            _dir,
+            shared,
+            pipeline,
+            upstream,
+            request,
+            sid,
+            gid: _,
+        } = f;
+        drop(pipeline);
+        drop(shared);
+        let past = (time::OffsetDateTime::now_utc() - time::Duration::seconds(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        ported_common::seed_session_expiry(_dir.path(), &sid, &past);
+        let mut reopened = av_store::vault::Vault::open(_dir.path()).unwrap();
+        reopened.unlock(None).unwrap();
+        let row = reopened.list_placeholders(Some(&sid)).unwrap().remove(0);
+        assert_eq!(serde_json::to_value(row.expires_at).unwrap(), expiry);
+        assert_eq!(row.state, av_store::model::PlaceholderState::Active);
+        let shared = Shared::new(reopened);
+        let pipeline = av_daemon::pipeline::Pipeline::new(
+            shared.clone(),
+            PipelineOptions {
+                upstream: Some(upstream.clone()),
+                ..Default::default()
+            },
+        );
+        let response = pipeline.handle(request).await;
+        assert_ne!(response.status, 200);
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_SESSION_EXPIRED"
+        );
+        assert_eq!(upstream.hits.lock().unwrap().len(), 1);
+        assert!(!String::from_utf8_lossy(&response.body).contains(SECRET));
+        shared
+            .run(|core| {
+                assert!(!serde_json::to_string(
+                    &core
+                        .vault
+                        .audit()
+                        .unwrap()
+                        .read(&Default::default())
+                        .unwrap()
+                )
+                .unwrap()
+                .contains(SECRET))
+            })
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("session expiry regression timed out");
+}
