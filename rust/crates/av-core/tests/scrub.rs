@@ -92,7 +92,8 @@ fn streaming_every_encoding_all_chunk_sizes() {
 #[test]
 fn pathological_pattern_and_ordinary_controls() {
     assert!(compile_scrub_pattern("abc[^Q]{0,256}[^Q]{256}Q").is_err());
-    let p = compile_scrub_pattern("abc[^Q]{0,256}Q").unwrap();
+    assert!(compile_scrub_pattern("abc[^Q]{0,256}Q").is_err());
+    let p = compile_scrub_pattern("abc[A-PR-Za-z ]{0,256}Q").unwrap();
     let start = std::time::Instant::now();
     assert!(!p.regex.is_match(&" abc".repeat(16384)));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));

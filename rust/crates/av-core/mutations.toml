@@ -95,7 +95,7 @@ test = "pathological_pattern_and_ordinary_controls"
 [[mutation]]
 name = "the request hash sorts the values of a repeated header"
 file = "src/canon.rs"
-from = "headers.sort_by(|a, b| a.0.cmp(&b.0));"
+from = "headers.sort_by_key(|(name, _)| name.encode_utf16().collect::<Vec<_>>());"
 to = "headers.sort();"
 test = "canonical_hash_binds"
 
@@ -581,3 +581,38 @@ file = "src/model_usage.rs"
 from = "crate::jsre::compile(r\"(?i)^application/(?:json|[\\w.+-]+\\+json)(?:\\s*;|\\s*$)\")"
 to = "regex::Regex::new(r\"(?i)^application/(?:json|[\\w.+-]+\\+json)(?:\\s*;|\\s*$)\")"
 test = "js_model_content_types"
+
+[[mutation]]
+name = "dot retains JavaScript line terminator exclusions"
+file = "src/jsre.rs"
+from = "out.push_str(r\"[^\\n\\r\\x{2028}\\x{2029}]\");"
+to = "out.push('.');"
+test = "js_dot_classes_and_flag_refusals"
+
+[[mutation]]
+name = "JavaScript class ampersands and tildes remain literal"
+file = "src/jsre.rs"
+from = "} else if bracket && matches!(c, '&' | '~') {"
+to = "} else if false && bracket && matches!(c, '&' | '~') {"
+test = "js_dot_classes_and_flag_refusals"
+
+[[mutation]]
+name = "request hash credentials use UTF16 ordering"
+file = "src/canon.rs"
+from = "credentials.sort_by_key(|s| s.encode_utf16().collect::<Vec<_>>());"
+to = "credentials.sort();"
+test = "js_request_hash_utf16"
+
+[[mutation]]
+name = "request hash header names use UTF16 ordering"
+file = "src/canon.rs"
+from = "headers.sort_by_key(|(name, _)| name.encode_utf16().collect::<Vec<_>>());"
+to = "headers.sort_by(|a, b| a.0.cmp(&b.0));"
+test = "js_request_hash_utf16"
+
+[[mutation]]
+name = "nonleading inline flags refuse before Unicode folding"
+file = "src/jsre.rs"
+from = "} else if !bracket\n            && c == '('"
+to = "} else if false && !bracket\n            && c == '('"
+test = "js_dot_classes_and_flag_refusals"
