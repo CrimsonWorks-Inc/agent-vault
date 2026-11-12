@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 485 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **612 not yet ported**.
+Totals: 1207 JS tests: 491 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **606 not yet ported**.
 
 ## Mutation check
 
@@ -127,12 +127,12 @@ the vault on every call instead of caching an audit handle.
 | control-api-c18.test.js | MCP vault_describe_access: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
 | control-api-c18.test.js | MCP vault_preflight: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
 | control-api-c18.test.js | a refused peek records nothing and changes nothing | not yet ported |
-| control-api-containment.test.js | panic is open, revokes every session including infinite ones, and denies everything waiting (C1) | not yet ported |
-| control-api-containment.test.js | panic with lock locks the vault and closes the passphrase window; panicking a locked vault revokes nothing | not yet ported |
-| control-api-containment.test.js | panic reads its inputs strictly | not yet ported |
-| control-api-containment.test.js | tripwires: on is open, everything else needs a human (C20) | not yet ported |
-| control-api-containment.test.js | a tripwire turned on through the route revokes a replaying session before its answer returns | not yet ported |
-| control-api-containment.test.js | with tripwires off, the same replay revokes nothing | not yet ported |
+| control-api-containment.test.js | panic is open, revokes every session including infinite ones, and denies everything waiting (C1) | `ported_gateway_core::control_containment_panic_is_open_and_revokes_finite_infinite_and_waiting_work` |
+| control-api-containment.test.js | panic with lock locks the vault and closes the passphrase window; panicking a locked vault revokes nothing | `ported_gateway_core::control_containment_invalid_panic_changes_nothing_and_panic_lock_closes_the_window` |
+| control-api-containment.test.js | panic reads its inputs strictly | `ported_gateway_core::control_containment_invalid_panic_changes_nothing_and_panic_lock_closes_the_window` |
+| control-api-containment.test.js | tripwires: on is open, everything else needs a human (C20) | `ported_gateway_core::control_containment_only_exact_tripwire_enable_is_open_and_invalid_changes_store_nothing` |
+| control-api-containment.test.js | a tripwire turned on through the route revokes a replaying session before its answer returns | `ported_gateway_core::control_containment_route_enabled_replay_revokes_before_response_but_disabled_control_keeps_session` |
+| control-api-containment.test.js | with tripwires off, the same replay revokes nothing | `ported_gateway_core::control_containment_route_enabled_replay_revokes_before_response_but_disabled_control_keeps_session` |
 | control-api-credentials.test.js | rotating needs a human; once rotated, the next request carries the new value | `ported_gateway_core::control_credentials_rotation_requires_presence_and_new_value_reaches_only_declared_site` |
 | control-api-credentials.test.js | rotating denies the held requests a human approved against the old key | `ported_gateway_core::control_credentials_rotation_denies_held_approvals_and_invalid_shapes_change_nothing` |
 | control-api-credentials.test.js | a rotation it cannot read is refused, and changes nothing | `ported_gateway_core::control_credentials_rotation_denies_held_approvals_and_invalid_shapes_change_nothing` |

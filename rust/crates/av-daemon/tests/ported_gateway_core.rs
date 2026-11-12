@@ -10556,3 +10556,174 @@ async fn control_credentials_probe_throttle_is_per_credential_and_all_reports_ea
     .await
     .expect("probe throttling timed out");
 }
+
+#[tokio::test]
+async fn control_containment_panic_is_open_and_revokes_finite_infinite_and_waiting_work() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use av_core::secret::ExposeSecret;
+        use av_store::vault::{CreateSessionOptions,CreateGrantOptions,IssueOptions};
+        let f=approval_fixture("each",&["header:x-key"]).await;credential_factor(&f).await;
+        let gid=f.grant_id.clone();let extras=f.shared.run(move|c| {
+            let cred=c.vault.grant(&gid).unwrap().unwrap().credential_id;
+            [false,true].into_iter().map(|infinite| {
+                let session=c.vault.create_session(CreateSessionOptions{infinite,..Default::default()}).unwrap();
+                let grant=c.vault.create_grant(CreateGrantOptions{session_id:session.session.id,credential_id:cred.clone(),policy:serde_json::from_value(json!({"hosts":["api.example.test"],"paths":["/**"],"methods":["GET"],"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+                let ph=c.vault.issue_placeholder(IssueOptions{grant_id:grant.id,..Default::default()}).unwrap();(session.token.expose_secret().to_string(),ph.placeholder)
+            }).collect::<Vec<_>>()
+        }).await.unwrap();
+        let request=|token:&str,ph:&str|GatewayRequest{method:"GET".into(),path:"/p/demo/x".into(),headers:vec![("host".into(),"127.0.0.1".into()),("av-session".into(),token.into()),("x-key".into(),ph.into())],..Default::default()};
+        let ordinary=f.daemon.pipeline().handle(request(&extras[0].0,&extras[0].1)).await;assert_eq!(ordinary.status,200);f.clean(&ordinary).await;
+        assert_eq!(f.get().await.status,202);let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","reason":"later"})).await;assert_eq!(s,200,"{asked}");
+        let(s,v)=credential_api(&f,"POST","/v1/panic",json!({"reason":"agent went rogue"})).await;assert_eq!(s,200,"{v}");assert_eq!(v,json!({"revoked_sessions":3,"denied_approvals":1,"denied_session_requests":1,"locked":false}));
+        f.shared.run(|c| {assert!(c.vault.sessions().unwrap().iter().all(|s|s.state==av_store::model::SessionState::Revoked));assert!(c.sr_pending().is_empty());}).await.unwrap();assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+        let rows=audit_records(&f).await;assert!(rows.iter().any(|r|r["kind"]=="session_request.denied"&&r["request_id"]==asked["id"]&&r["reason"]=="panic"));let triggered=rows.iter().find(|r|r["kind"]=="panic.triggered").unwrap();assert_eq!(triggered["denied_session_requests"],1);assert_eq!(triggered["reason_untrusted"],"agent went rogue");
+        let before=f.up.hits.lock().unwrap().len();for(token,ph)in extras {assert_ne!(f.daemon.pipeline().handle(request(&token,&ph)).await.status,200);}assert_ne!(f.get().await.status,200);assert_eq!(f.up.hits.lock().unwrap().len(),before);credential_finish(&f).await;
+    }).await.expect("control panic timed out");
+}
+
+#[tokio::test]
+async fn control_containment_invalid_panic_changes_nothing_and_panic_lock_closes_the_window() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        for body in [
+            json!({"lock":"true"}),
+            json!({"lock":1}),
+            json!({"reason":5}),
+            json!({"reason":"x".repeat(201)}),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/panic", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["rule"], "policy_invalid");
+            assert_eq!(f.get().await.status, 200);
+        }
+        f.shared
+            .run(|c| {
+                assert!(!c.vault.locked());
+                assert!(c
+                    .vault
+                    .sessions()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s.state == av_store::model::SessionState::Active));
+            })
+            .await
+            .unwrap();
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/panic", json!({"lock":true})).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["locked"], true);
+        f.shared.run(|c| assert!(c.vault.locked())).await.unwrap();
+        let (s, v) = credential_api(&f, "POST", "/v1/panic", json!({})).await;
+        assert_eq!(s, 423, "{v}");
+        assert_eq!(v["code"], "AV_LOCKED");
+        assert_eq!(v["locked"], true);
+        assert_eq!(v["already"], true);
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                .await
+                .0,
+            200
+        );
+        credential_presence_refused(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/expiry",
+                json!({"slug":"demo","expires_at":null}),
+            )
+            .await,
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("strict panic and lock timed out");
+}
+
+#[tokio::test]
+async fn control_containment_only_exact_tripwire_enable_is_open_and_invalid_changes_store_nothing()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+        let(s,v)=credential_api(&f,"GET","/v1/tripwires",json!({})).await;assert_eq!(s,200,"{v}");assert_eq!(v["enabled"],false);assert_eq!(v["rules_saved"],false);assert_eq!(v["rules"],v["defaults"]);assert!(v["defaults"].as_array().unwrap().iter().any(|r|r["id"]=="replay"));
+        for body in [json!({"enabled":false}),json!({"enabled":"true"}),json!({"enabled":1}),json!({"enabled":true,"extra":1}),json!({"enabled":true,"rules":"defaults"}),json!({"rules":[]}),json!({})] {credential_presence_refused(credential_api(&f,"POST","/v1/tripwires",body).await);}
+        f.shared.run(|c|assert!(c.vault.get_settings().unwrap().get("tripwires").is_none())).await.unwrap();
+        let(s,v)=credential_api(&f,"POST","/v1/tripwires",json!({"enabled":true})).await;assert_eq!(s,200,"{v}");assert_eq!(v["enabled"],true);assert!(v["rules"].as_array().unwrap().iter().any(|r|r["id"]=="replay"));credential_presence_refused(credential_api(&f,"POST","/v1/tripwires",json!({"enabled":false})).await);
+        credential_gate(&f,true).await;let custom=json!([{"id":"mine","codes":["AV_BAD_LOCATION"],"threshold":2,"window_s":60,"action":"revoke_session"}]);assert_eq!(credential_api(&f,"POST","/v1/tripwires",json!({"rules":custom})).await.1,json!({"enabled":true,"rules":custom}));
+        for body in [json!({"rules":[{"id":"X Y","threshold":0}]}),json!({"enabled":"no"})] {assert_eq!(credential_api(&f,"POST","/v1/tripwires",body).await.1["rule"],"tripwire_rule");let(_,v)=credential_api(&f,"GET","/v1/tripwires",json!({})).await;assert_eq!(v["rules"],custom);assert_eq!(v["enabled"],true);}
+        assert_eq!(credential_api(&f,"POST","/v1/tripwires",json!({"enabled":false})).await.1["enabled"],false);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("tripwire settings timed out");
+}
+
+#[tokio::test]
+async fn control_containment_route_enabled_replay_revokes_before_response_but_disabled_control_keeps_session(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for enabled in [false, true] {
+            let f = approval_fixture("on-write", &["header:x-key"]).await;
+            assert_eq!(f.get().await.status, 200);
+            if enabled {
+                assert_eq!(
+                    credential_api(&f, "POST", "/v1/tripwires", json!({"enabled":true}))
+                        .await
+                        .0,
+                    200
+                );
+                assert_eq!(f.write("ordinary held write").await.status, 202);
+            }
+            let gid = f.grant_id.clone();
+            let marker = f
+                .shared
+                .run(move |c| {
+                    let issued = c
+                        .vault
+                        .issue_placeholder(av_store::vault::IssueOptions {
+                            grant_id: gid,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    c.vault.burn_placeholder(&issued.row.id, "spent").unwrap();
+                    issued.placeholder
+                })
+                .await
+                .unwrap();
+            let r = f
+                .send("GET", "/replay", vec![("x-key".into(), marker)], None)
+                .await;
+            assert_eq!(
+                serde_json::from_slice::<Value>(&r.body).unwrap()["code"],
+                "AV_PH_REPLAY"
+            );
+            f.clean(&r).await;
+            let fired = audit_records(&f)
+                .await
+                .iter()
+                .filter(|r| r["kind"] == "tripwire.fired")
+                .count();
+            assert_eq!(fired > 0, enabled);
+            let token = f.token.clone();
+            let state = f
+                .shared
+                .run(move |c| c.vault.session_by_token(&token).unwrap().unwrap().state)
+                .await
+                .unwrap();
+            assert_eq!(
+                state,
+                if enabled {
+                    av_store::model::SessionState::Revoked
+                } else {
+                    av_store::model::SessionState::Active
+                }
+            );
+            if enabled {
+                assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+                assert_ne!(f.get().await.status, 200);
+            } else {
+                assert_eq!(f.get().await.status, 200);
+            }
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .expect("tripwire replay routes timed out");
+}
