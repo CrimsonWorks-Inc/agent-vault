@@ -40,10 +40,9 @@ fn probe_migrate_control_empty_dir_is_not_already_migrated() {
 
 fn release_checkout(tmp: &std::path::Path) -> std::path::PathBuf {
     let checkout = tmp.join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     std::fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
-    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     std::fs::write(
         checkout.join("rust/target/release/agent-vault-daemon"),
         b"daemon",
@@ -306,9 +305,8 @@ fn probe_from_that_names_the_installed_app() {
 fn probe_dry_run_rejects_a_missing_release_before_any_plan() {
     let tmp = tempfile::tempdir().unwrap();
     let checkout = tmp.path().join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(checkout.join("bin")).unwrap();
-    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let out = Command::new(cargo_bin("agent-vault-setup"))
         .args(["install", "--dry-run", "--from"])
         .arg(&checkout)

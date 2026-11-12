@@ -7,10 +7,10 @@
 <p align="center"><strong>Your coding agent never holds a credential.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/test.yml"><img src="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/test.yml/badge.svg" alt="tests"></a>
+  <a href="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/rust.yml"><img src="https://github.com/CrimsonWorks-Inc/agent-vault/actions/workflows/rust.yml/badge.svg" alt="tests"></a>
   <img src="https://img.shields.io/badge/license-Apache%202.0-5468FF" alt="Apache 2.0">
-  <img src="https://img.shields.io/badge/node-%E2%89%A5%2020.10-5468FF" alt="Node 20.10 or newer">
-  <img src="https://img.shields.io/badge/dependencies-0-5468FF" alt="no dependencies">
+  <img src="https://img.shields.io/badge/rust-native-5468FF" alt="Rust">
+  <img src="https://img.shields.io/badge/storage-SQLite-5468FF" alt="SQLite">
 </p>
 
 <p align="center">Free and open source: a gift to the community from <a href="https://iolitelabs.com/agent-vault">ioLite Labs</a>.</p>
@@ -28,32 +28,32 @@ agent                          agent-vault daemon                    upstream
   ◀──────────────────────────────┤                                        │
 ```
 
-This repository is the **M0/M1 working core** of the v1 build spec, and is ready to use for what it implements: the mechanism works end to end, it is tested on Node 20.10 through 24 on Linux and macOS, and everything four independent adversarial reviews found has been fixed with a test behind it — see the [changelog](CHANGELOG.md) for what they found. What is *not* built is listed under [Honest limits](#honest-limits), and the biggest items are the language and storage choices the spec makes differently. Read that section before you point it at a credential that matters.
+agent-vault is written in Rust and keeps its vault in SQLite. The mechanism works end to end on Linux and macOS, and everything the independent adversarial reviews found has been fixed with a test behind it — see the [changelog](CHANGELOG.md). What is *not* built is listed under [Honest limits](#honest-limits). Read that section before you point it at a credential that matters.
+
+It was first written in JavaScript; that implementation is frozen in [`legacy/js`](legacy/js) as the reference the Rust tests compare against, and nothing installs or runs it. Coming from the JavaScript version? [`agent-vault migrate`](rust/README.md#moving-an-existing-vault) moves your vault across with every credential, session and placeholder intact.
 
 ## Try it
 
-Requires Node 20.10 or newer. CI runs the suite on Linux and macOS on Node 20.10, 20, 22 and 24, with the security, property and mutation suites as separate jobs so a failure names what broke. No dependencies to install.
+Build from source with the toolchain pinned in `rust/rust-toolchain.toml` (rustup installs it on first use):
 
 ```bash
-node demo/demo.js
-```
-
-The demo starts a real daemon and a stand-in upstream, then walks through: a successful call, an upstream echoing the token back, a prompt-injection attempt, the same attempt base64-encoded, an attempt to send the placeholder elsewhere, an approval, budget exhaustion, and the audit chain. It ends by confirming the real token reached the upstream and nothing else.
-
-```bash
-npm test          # core and security suites
+cd rust
+cargo build --release      # target/release/agent-vault, agent-vault-daemon, agent-vault-setup
+cargo test --workspace     # unit, security, ported and property tests
 ```
 
 ```bash
-npm run test:mutation
+AV_IMPL=rust AV_REQUIRE_IMPL=1 npm run conformance   # 85 black-box tests against the built binaries
 ```
 
-The changelog records what the four independent reviews found, with the
-reproductions: [CHANGELOG.md](CHANGELOG.md).
+```bash
+cd rust && cargo xtask mutation
+```
 
-The mutation suite checks the tests against themselves by disabling critical
-protections in turn and requiring a test to notice. It also fails when a mutation
-anchor drifts after a refactor, so a moved check cannot quietly escape coverage.
+The mutation check tests the tests: it disables each critical protection in turn
+and requires a test to notice. It also fails when a mutation anchor drifts after a
+refactor, so a moved check cannot quietly escape coverage. [`rust/README.md`](rust/README.md)
+covers the crates, the database and the port's own limits.
 
 ## Use it
 
@@ -82,7 +82,7 @@ agent-vault session create --cred gh,openai-key                           # one 
 After installing, confirm the boundary is real. This should be refused:
 
 ```bash
-cat /var/db/agent-vault/vault/vault.json
+cat /var/db/agent-vault/vault/vault.db
 ```
 
 ### Connect an agent
@@ -476,7 +476,7 @@ agent-vault ui        # prints a single-use link and opens it
 
 Its pages are Overview, Credentials, Sessions, Approvals, Audit, Templates, Containment (panic, tripwires, quarantine), Notifications and Settings (Touch ID, the lock), plus the Docs page that `agent-vault docs` opens directly. Every list pages through the whole set and has a search box, so 300 sessions or the full audit log are a few clicks away rather than cut off at the newest few.
 
-The page is a React app in the ioLite Labs look, light and dark, built from `web/` into `src/ui/dist` and committed. The npm package ships that prebuilt bundle and still has no runtime dependencies; React, Vite and Tailwind are development tools only. The UI server serves the bundle from memory under a strict content security policy (no inline script or style, nothing from another origin), and a search matches only what the page is already allowed to see.
+The page is a React app in the ioLite Labs look, light and dark, built from `web/` into `src/ui/dist` and committed; the daemon embeds that bundle at compile time. React, Vite and Tailwind are development tools only. The UI server serves the bundle from memory under a strict content security policy (no inline script or style, nothing from another origin), and a search matches only what the page is already allowed to see.
 
 The link uses `localhost`, not `127.0.0.1`, and arriving by IP redirects. That is
 not cosmetic: WebAuthn requires the relying party to be a registrable domain, and
@@ -553,20 +553,18 @@ you first enrol is who gets enrolled — and either way it is audited loudly.
 ## Layout
 
 ```
-src/core/         placeholder grammar, detector, substitution, scrubber, policy, canonical hashing
-src/store/        encrypted vault, key hierarchy, hash-chained audit log
-src/daemon/       request pipeline, HTTP gateway, control API, MCP (stdio + Streamable HTTP)
-src/connectors/   built-in profiles (github, slack, anthropic, openai, google-genai, http, postgres)
-src/ui/           the web UI server, WebAuthn verification, and the prebuilt page (src/ui/dist)
-web/              the page's React source (not in the npm package): npm run build:ui writes src/ui/dist
-src/cli/          the command-line app
-bin/              the CLI, the service entry point, and the privileged installer
-test/core/        unit and property tests for the pure core
-test/security/    the attacks an agent would actually try, and what must happen
-demo/             an end-to-end run against a real upstream
+rust/crates/av-core/     placeholder grammar, detector, substitution, scrubber, policy, canonical hashing
+rust/crates/av-store/    the SQLite vault, key hierarchy, hash-chained audit log, backups, migrate
+rust/crates/av-daemon/   request pipeline, HTTP gateway, control API, MCP, the web UI server, connectors
+rust/crates/av-cli/      the command line (agent-vault, av) and the privileged installer (agent-vault-setup)
+rust/xtask/              cargo xtask mutation
+src/ui/dist/             the built page the daemon embeds
+web/                     the page's React source: npm run build:ui writes src/ui/dist
+conformance/             black-box tests run against the built binaries
+legacy/js/               the frozen JavaScript implementation and its tests: the reference, never installed
 ```
 
-`src/core` has no I/O and no platform code. It is the part worth reading first and the part worth fuzzing.
+`av-core` has no I/O and no platform code. It is the part worth reading first and the part worth fuzzing.
 
 Changing the page: edit `web/`, run `npm ci` once, then `npm run build:ui` and commit `src/ui/dist` with the source. `npm test` fails when the committed bundle is not exactly what the source builds. `web/README.md` covers running it against a throwaway vault.
 
@@ -587,7 +585,7 @@ has read every line of this repository. Against that attacker:
   left. Anywhere else is refused before any upstream connection exists.
 - It cannot widen what it holds. Every control-socket operation that creates or
   extends capability sits behind a human factor — a passphrase or an enrolled
-  authenticator. `test/security/control-gate.test.js` walks the whole surface
+  authenticator. `legacy/js/test/security/control-gate.test.js` (ported to Rust) walks the whole surface
   and states which side of that line each route is on.
 - It cannot approve its own held request, borrow another session's grant, or
   mint a placeholder against a credential it was not granted.
@@ -600,10 +598,10 @@ has read every line of this repository. Against that attacker:
 - **A vault with no human factor.** Set neither a passphrase nor an
   authenticator and the control socket is open by design, and audited as
   `control.widening_ungated`. Set a passphrase.
-- **The first `sudo`.** The installer is JavaScript in a directory you own, so
-  the first install runs code an agent could have edited beforehand. After that
-  the root-owned copy is used. It now refuses a source tree containing symlinks,
-  which previously would have made that one-time window permanent.
+- **The first `sudo`.** The first install runs the `agent-vault-setup` you built
+  in a checkout you own, which an agent could have replaced beforehand. After
+  that the root-owned copy is used, and it installs only the release binaries,
+  refusing any that is a symbolic link.
 - **Phishing your touch.** The platform dialog says who is asking, not what
   for. An agent that triggers an action while you expect a different one can
   borrow your fingerprint. The page shows the operation and the log records it:
@@ -645,15 +643,15 @@ you to weigh, rather than a defect. What it does carry is above.
 
 This build is the mechanism, not the hardened deployment. Each gap below is real and none of them is hidden by the code.
 
-**The privileged install is new, and has only ever run on macOS.** `sudo agent-vault-setup.js install` creates the `_agentvault` system user, a root-owned tree, a 0700 vault owned by that user, and a launchd or systemd unit. After it runs, your own account cannot read the vault — the boundary the whole design rests on. `agent-vault doctor` checks it by trying, and on a real install it holds: the vault is owned by the service uid, mode 0700, and every file in it, including the TLS private key, refuses a read from the human's account. It has never been run on Linux. Run it with `--dry-run` first; it prints every change it would make.
+**The privileged install has only ever run on macOS.** `sudo agent-vault-setup install` creates the `_agentvault` system user, a root-owned tree, a 0700 vault owned by that user, and a launchd or systemd unit that runs the Rust daemon. After it runs, your own account cannot read the vault — the boundary the whole design rests on. `agent-vault doctor` checks it by trying. It has never been run as root on Linux. Run it with `--dry-run` first; it prints every change it would make.
 
-**The installer itself is trust-on-first-use.** It is JavaScript in a directory you own, so the first `sudo` runs code an agent could have edited beforehand. The spec's answer is a signed native binary and that is not built.
+**The installer itself is trust-on-first-use.** The first `sudo` runs the `agent-vault-setup` you built in your own checkout, which an agent running as you could have replaced beforehand. Signed release binaries are the answer, and they are not built yet.
 
-`agent-vault setup` runs unprivileged, prints the dry-run plan and the absolute path of the one program root will execute, then asks before spawning sudo. After a successful install it uses the root-owned copy of the installer instead, which an agent cannot edit, so only the very first install carries this risk. Running the whole CLI under sudo is a different and worse thing, and is refused: it would put every code path in the package, and whichever interpreter is first on root's PATH, inside a root process.
+`agent-vault setup` runs unprivileged, prints the dry-run plan and the absolute path of the one program root will execute, then asks before spawning sudo. After a successful install, `agent-vault upgrade` uses the root-owned copy of the installer instead, which an agent cannot edit, and it copies only the release binaries from your checkout into the root-owned tree — so only the very first install carries this risk. Running the whole CLI under sudo is a different and worse thing, and is refused.
 
 **Dev mode has no boundary at all.** `agent-vault setup --dev` keeps the vault in your home directory, where anything running as you can read it. It exists for a quick try and says so loudly.
 
-**The daemon is JavaScript, not Rust.** The spec chose Rust for three reasons this build cannot satisfy: zeroizable memory (V8 strings cannot be wiped), peer-credential syscalls (Node has no public API for `SO_PEERCRED`), and running from a root-owned path with no interpreter the human owns. Everything language-independent, the grammar, the pipeline, the policy semantics, the wire behaviour, is implemented and tested here and ports directly.
+**The page is still JavaScript, in your browser.** The daemon, the CLI and the installer are Rust: key material is zeroized after use, the vault master key is held in `mlock`ed memory, peer credentials come from the socket, and the service runs a root-owned binary with no interpreter you own. The web UI is a React page; the daemon serves the bundle it was built with, and what the page signs is checked by the daemon (`rust/crates/av-daemon/tests/fixtures/ui-parity` pins what the two must agree on).
 
 **Presence on the CLI is a passphrase; in the UI it is hardware.** Either satisfies the gate. Run `agent-vault passphrase set` and every capability-widening action on the control socket — adding or removing a credential, creating a session, issuing a placeholder, approving or denying a held request, binding a listener — requires it, opening a five-minute window so you are not asked on every call. An enrolled authenticator counts too: the daemon mints the challenge and verifies the assertion itself, so a signature collected by the web UI satisfies the socket without the UI being trusted to vouch for it.
 
@@ -677,11 +675,11 @@ Once a vault has a human factor it keeps one. `agent-vault passphrase remove` is
 
 **Scrubbing has a fixed reach.** The response scrubber recognises a secret re-encoded by the schemes it knows — JSON string escapes (`\uXXXX` and the two-character ones), percent-encoding, base64 and base64url, and hex in either case — and peels them in any order up to three nested layers deep, redacting the secret wherever one of those stacks hides it. The peeling is bounded: nested decoding is held to a budget of bytes and of intermediate views, sized so an ordinary response stays well within it, and a response whose nesting cannot be finished inside that budget is refused as `AV_UNSCANNABLE` rather than forwarded part-scanned — a buffered body is discarded, an event stream is cut. It does not claim to reverse what it does not recognise: a secret that was encrypted, run through a custom or unlisted encoding, or nested more than three layers deep is not guaranteed to be caught.
 
-**Crypto substitutions.** ChaCha20-Poly1305 with a 96-bit nonce instead of XChaCha20's 192, and scrypt instead of Argon2id, because Node has neither without a native dependency. Per-field keys keep each key's record count far below the birthday bound, so the nonce size is not a practical problem at this scale, but it is not what the spec specifies.
+**Crypto.** XChaCha20-Poly1305 for every sealed field and Argon2id for the passphrase factor and new backups, as the spec chose. A vault migrated from the JavaScript version keeps its master key, so placeholders and session tokens minted before the migration still verify; its fields are re-sealed on the way in. Backups made by the JavaScript version (ChaCha20-Poly1305, scrypt) still restore.
 
-**The audit log's anchor has two limits.** The head anchor and the stamp in `vault.json` that says "this vault keeps an anchor" catch a truncated or deleted log, but both live in the vault directory. Someone who can write there can save a copy of the anchor and later put it back with the log cut to match (a rollback), or delete the stamp along with the anchor so the vault looks older than anchoring; both verify clean. Binding the stamp cryptographically would mean re-wrapping the vault key, and a rollback needs a high-water mark somewhere the attacker cannot write, which the local anchor alone does not provide. Keep an external witness as described above to detect rollback past its checkpoint. Separately, the log and its anchor are not fsynced on every record — that would cost every proxied request several flushes — so a power cut (not a crash; the anchor is replaced by rename) can leave the anchor ahead of the last line, which reads as truncation.
+**The audit log's anchor has two limits.** The head anchor (`vault.db.head`) and the vault's record that it keeps an anchor catch a truncated or deleted log, but both live in the vault directory. Someone who can write there can save a copy of the anchor and later put it back with the log cut to match (a rollback), or delete the stamp along with the anchor so the vault looks older than anchoring; both verify clean. Binding the stamp cryptographically would mean re-wrapping the vault key, and a rollback needs a high-water mark somewhere the attacker cannot write, which the local anchor alone does not provide. Keep an external witness as described above to detect rollback past its checkpoint. Separately, the log and its anchor are not fsynced on every record — that would cost every proxied request several flushes — so a power cut (not a crash; the anchor is replaced by rename) can leave the anchor ahead of the last line, which reads as truncation.
 
-**Storage is a JSON document, not SQLite.** Same entity model, same invariants, atomic rewrites. Every write rewrites the whole document, so the placeholder ledger is bounded rather than allowed to grow, and the two halves are written differently: key material and credentials are fsynced, the placeholder ledger is not. The rename is atomic either way, so the file is never torn — the most a power cut costs there is one placeholder issuance, which the agent simply asks for again. It will not hold up under concurrent daemons or a large vault.
+**Storage is SQLite.** One transaction per operation, `secure_delete` on, the audit log in an insert-only table written in the same transaction as the change it records. Revoked and expired sessions are pruned after a retention window (`retention_days`, default 30); the audit log keeps their history.
 
 **Not implemented at all:** the Postgres, MySQL, MongoDB, SSH and SMTP connectors, mutual TLS and client certificates for network listeners, CONNECT mode, GitHub App token minting, and request-body streaming — a request body over 16 MiB is refused rather than streamed, because a body that cannot be scanned for placeholders cannot be forwarded. The `stream_bodies` policy field exists and intersects correctly; nothing reads it yet.
 

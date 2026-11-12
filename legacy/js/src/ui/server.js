@@ -1038,7 +1038,9 @@ export class UiServer {
 
 const canonical = webauthn.canonicalOperation
 
-const DIST_DIR = join(HERE, 'dist')
+// The built page lives at the repo's src/ui/dist (the Rust daemon embeds the
+// same files); this frozen reference serves it from there.
+const DIST_DIR = join(HERE, '../../../../src/ui/dist')
 
 // How many rows each step of an audit search reads from the daemon (its most).
 const AUDIT_BATCH = 500

@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { cleanText, cleanLine, clip, wasCleaned, BIDI } from '../src/lib/text.js'
-import { cleanText as cliCleanText } from '../../src/cli/control-commands.js'
+import { cleanText as cliCleanText } from '../../legacy/js/src/cli/control-commands.js'
 
 test('cleanText removes exactly what the CLI removes, over every code point that matters', () => {
   const points = []

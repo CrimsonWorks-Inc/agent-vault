@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { operationFor } from '../../lib/presence.js'
-import { parseOverrides } from '../../../../src/pending.js'
+import { parseOverrides } from '../../../../legacy/js/src/pending.js'
 import { bulkDecisions, bulkOutcome, decisionCall, readNarrowing, typedNarrowing } from './decide.js'
 
 const SESSION = { id: 'sr_1', kind: 'session', narrowable: ['methods', 'budget'], owner_settable: ['approval', 'infinite'] }

@@ -1,15 +1,16 @@
-# The Rust port (rust/PLAN.md). Format, lint with warnings as errors, test,
-# and check dependencies against rust/deny.toml, on Linux and macOS.
-# The toolchain is the one pinned in rust/rust-toolchain.toml.
+# agent-vault (rust/). Format, lint with warnings as errors, test, check
+# dependencies against rust/deny.toml, and run the black-box conformance
+# suite against the built binaries, on Linux and macOS. The toolchain is the
+# one pinned in rust/rust-toolchain.toml. Node is needed for the tests that
+# compare against the frozen JavaScript reference (legacy/js) and for the
+# conformance runner.
 
 name: rust
 
 on:
   push:
-    branches: [main, rust-port]
-    paths: ['rust/**', '.github/workflows/rust.yml']
+    branches: [main]
   pull_request:
-    paths: ['rust/**', '.github/workflows/rust.yml']
 
 permissions:
   contents: read
@@ -41,6 +42,10 @@ jobs:
         with:
           workspaces: rust
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Format
         run: cargo fmt --all --check
 
@@ -49,6 +54,10 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      - name: Conformance (black-box, against the built binaries)
+        working-directory: .
+        run: AV_IMPL=rust AV_REQUIRE_IMPL=1 npm run conformance
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2

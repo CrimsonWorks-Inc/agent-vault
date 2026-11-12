@@ -20,7 +20,7 @@ import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
 import { parseOverrides, OVERRIDE_KEYS } from '../../src/pending.js'
 import { startDaemon, cli, PASSPHRASE } from './fix-control-helpers.js'
-import { decisionCall } from '../../web/src/components/approvals/decide.js'
+import { decisionCall } from '../../../../web/src/components/approvals/decide.js'
 import { pageSigning, startSigned, startCliStub, flagsOf } from './integrate3-helpers.js'
 
 const page = pageSigning()
@@ -67,8 +67,8 @@ test('the page reads every narrowing with the module\'s parser, and keeps no sec
     assert.deepEqual(page.readNarrowing(typed).overrides, parseOverrides(typed), name)
   }
   const { readFileSync } = await import('node:fs')
-  const decide = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
-  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
+  const decide = readFileSync(new URL('../../../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/legacy\/js\/src\/pending\.js'/)
   assert.doesNotMatch(decide, /function parse(Overrides|Narrowing)\(/, 'the page keeps a second parser')
 })
 

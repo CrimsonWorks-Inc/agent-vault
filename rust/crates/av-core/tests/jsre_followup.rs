@@ -76,7 +76,7 @@ fn js_request_hash_utf16_names_credentials_and_ascii_control() {
 fn followup_vectors_regenerate_from_node() {
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../src/core/scrub.js"
+        "/../../../legacy/js/src/core/scrub.js"
     ))
     .exists()
     {

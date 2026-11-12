@@ -1,14 +1,14 @@
 // Read-only reference probes: fake placeholders, no vault or daemon access.
-import {mint} from '../../../../../src/core/placeholder.js';
-import {detectAll} from '../../../../../src/core/detect.js';
-import {requestView} from '../../../../../src/core/request-view.js';
-import {meterRequest,priceOf} from '../../../../../src/core/model-usage.js';
-import {parseStrictJson,scanGraphQL} from '../../../../../src/core/payload.js';
-import {getProfile,extractHealth} from '../../../../../src/connectors/profiles.js';
-import {needsApproval} from '../../../../../src/core/policy.js';
-import {canonicalize,hash,hmac,requestHash} from '../../../../../src/core/canon.js';
-import {canonicalOperation,operationFor,challengeForOperation} from '../../../../../src/ui/webauthn.js';
-import {deny} from '../../../../../src/core/errors.js';
+import {mint} from '../../../../../legacy/js/src/core/placeholder.js';
+import {detectAll} from '../../../../../legacy/js/src/core/detect.js';
+import {requestView} from '../../../../../legacy/js/src/core/request-view.js';
+import {meterRequest,priceOf} from '../../../../../legacy/js/src/core/model-usage.js';
+import {parseStrictJson,scanGraphQL} from '../../../../../legacy/js/src/core/payload.js';
+import {getProfile,extractHealth} from '../../../../../legacy/js/src/connectors/profiles.js';
+import {needsApproval} from '../../../../../legacy/js/src/core/policy.js';
+import {canonicalize,hash,hmac,requestHash} from '../../../../../legacy/js/src/core/canon.js';
+import {canonicalOperation,operationFor,challengeForOperation} from '../../../../../legacy/js/src/ui/webauthn.js';
+import {deny} from '../../../../../legacy/js/src/core/errors.js';
 const ph=mint({kPh:Buffer.alloc(32,42),sid:'0123456789ab',slug:'test-fake',field:'token'}).text;
 const b64=Buffer.from(ph).toString('base64');
 const detect=[b64,...['\n','\ufeff','\u0085'].map(sep=>b64.slice(0,42)+sep+b64.slice(42)),'ordinary\ufeffprose'].map(text=>({text,hits:detectAll(text).map(h=>({text:h.text,encoding:h.encoding}))}));

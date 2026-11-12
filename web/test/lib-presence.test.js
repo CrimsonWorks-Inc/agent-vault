@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import * as page from '../src/lib/presence.js'
-import * as server from '../../src/ui/webauthn.js'
+import * as server from '../../legacy/js/src/ui/webauthn.js'
 
 const SAMPLES = [
   ['cred.add', { slug: 'gh-work', kind: 'github', value: 'sk-test-abc', host: undefined }],

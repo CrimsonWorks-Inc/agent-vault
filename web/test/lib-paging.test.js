@@ -4,7 +4,7 @@ import {
   pageQuery, readEnvelope, firstPage, nextPage, prevPage, showing, recallLimit, rememberLimit,
   clampLimit, fetchAll, fetchPages, PAGE_SIZES, DEFAULT_LIMIT, EnvelopeError, IncompleteListError,
 } from '../src/lib/paging.js'
-import { Cursors, LISTS, pageAnswer, pagingOf } from '../../src/ui/list-paging.js'
+import { Cursors, LISTS, pageAnswer, pagingOf } from '../../legacy/js/src/ui/list-paging.js'
 
 test('every page asks for the envelope with paged=1 and a limit', () => {
   assert.deepEqual(pageQuery({}), { paged: 1, limit: 25 })

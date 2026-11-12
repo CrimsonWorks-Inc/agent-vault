@@ -12,8 +12,8 @@ import { VaultContext } from '../hooks/useVault.js'
 import { PromptProvider } from '../components/ui/PromptProvider.jsx'
 import { PresenceStatus } from '../components/ui/PresenceStatus.jsx'
 import { ToastProvider } from '../components/ui/Toast.jsx'
-import { AUDIT_FIELDS, Cursors, LISTS, pageAnswer, pageList, pagingOf } from '../../../src/ui/list-paging.js'
-import { towardPage } from '../../../src/ui/server.js'
+import { AUDIT_FIELDS, Cursors, LISTS, pageAnswer, pageList, pagingOf } from '../../../legacy/js/src/ui/list-paging.js'
+import { towardPage } from '../../../legacy/js/src/ui/server.js'
 
 /**
  * A fake UI server. `routes` maps "METHOD path" (path without the query) to a

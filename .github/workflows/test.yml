@@ -1,13 +1,13 @@
-# The README claims this runs on Node 20, 22 and 24. Until this file existed
-# that was an assertion rather than a fact — it had only ever been run on one
-# machine on one version.
+# The web UI and the frozen JavaScript reference.
 #
-# The package still has no runtime dependencies. The control page is built
-# with devDependencies (Vite, React, Tailwind, Headless UI) and ships prebuilt
-# in src/ui/dist, so CI installs them from the lockfile (npm ci, exact
-# versions) and npm test checks the committed bundle against a fresh build.
+# agent-vault itself is Rust (see rust.yml). The control page is still built
+# with Vite and React from web/ into src/ui/dist, which the Rust daemon embeds
+# at compile time, so this checks the committed bundle against a fresh build
+# and runs the page's own tests. The JavaScript implementation is frozen in
+# legacy/js as the reference the Rust tests compare against; its suite runs
+# here so the reference itself stays trustworthy.
 
-name: test
+name: ui
 
 on:
   push:
@@ -18,57 +18,23 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        # The floor from package.json engines, the current LTS, and current.
-        node: ['20.10', '20', '22', '24']
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  ui:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
-      - run: node --version
+          node-version: '22'
       - name: Install devDependencies from the lockfile
         run: npm ci
-      - name: Run the suite
+      - name: UI tests and the bundle drift check
         run: npm test
 
-  # The security tests are the ones that encode an attack and its refusal. They
-  # run in the matrix above too; this job exists so a failure here is legible as
-  # "a security property broke" rather than one red cell among eight.
-  security:
+  legacy-reference:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: node --test test/security/*.test.js
-
-  # The property tests generate their own inputs from a fixed seed, so they are
-  # deterministic in CI. This runs them alone so a failure names the seed
-  # without scrolling past three hundred other results.
-  properties:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: node --test test/core/*-fuzz.test.js
-
-  # Removes each critical protection in turn and asserts the suite notices.
-  # A green suite over tests that would pass anyway is the failure mode this
-  # catches.
-  mutation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm run test:mutation
+      - run: npm run test:legacy

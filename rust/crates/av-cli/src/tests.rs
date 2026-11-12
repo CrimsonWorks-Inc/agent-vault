@@ -407,10 +407,9 @@ fn upgrade_print_only_names_an_installer_and_source_install_app_accepts() {
     // directory the installer itself lives in.
     std::fs::write(&root_owned, b"#!/bin/sh\n--from\n").unwrap();
     let checkout = tmp.path().join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     std::fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
-    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let release = checkout.join("rust/target/release/agent-vault-setup");
     std::fs::write(&release, b"checkout-setup").unwrap();
     let (cmd, installer, using_root) =
@@ -464,7 +463,7 @@ fn upgrade_does_not_name_a_missing_release_installer() {
     std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
     std::fs::write(&root_owned, b"old installer without the flag").unwrap();
     let checkout = tmp.path().join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     let release = checkout.join("rust/target/release/agent-vault-setup");
     let missing =
         crate::commands::choose_upgrade_installer(&root_owned, &root_owned, &checkout).unwrap_err();
@@ -511,10 +510,9 @@ fn checkout_root_refuses_the_installed_app() {
     let tmp = tempfile::tempdir().unwrap();
     // A checkout whose directory is named app is still a checkout.
     let named = tmp.path().join("named").join("app");
-    std::fs::create_dir_all(named.join("src")).unwrap();
-    std::fs::create_dir_all(named.join("bin")).unwrap();
-    std::fs::write(named.join("package.json"), "{}").unwrap();
-    let found = crate::commands::resolve_checkout_root(&[named.join("bin")]).unwrap();
+    std::fs::create_dir_all(named.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(named.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
+    let found = crate::commands::resolve_checkout_root(&[named.join("rust")]).unwrap();
     assert_eq!(found, named);
     assert!(!crate::commands::is_installed_app(&named));
 
@@ -544,11 +542,10 @@ fn checkout_root_refuses_the_installed_app() {
 
     // The installed app is skipped, so a later start is the checkout.
     let checkout = tmp.path().join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(checkout.join("bin")).unwrap();
-    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let found =
-        crate::commands::resolve_checkout_root(&[via_var.join("bin"), checkout.join("src")])
+        crate::commands::resolve_checkout_root(&[via_var.join("bin"), checkout.join("rust")])
             .unwrap();
     assert_eq!(found, checkout);
 }
@@ -592,10 +589,9 @@ fn copy_rust_bins_copies_the_checkout_release_not_the_running_binary() {
 fn install_dry_run_records_and_saves_state() {
     let tmp = tempfile::tempdir().unwrap();
     let checkout = tmp.path().join("checkout");
-    std::fs::create_dir_all(checkout.join("src")).unwrap();
-    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     std::fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
-    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     std::fs::write(
         checkout.join("rust/target/release/agent-vault-daemon"),
         b"daemon",

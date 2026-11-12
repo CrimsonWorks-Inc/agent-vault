@@ -7,8 +7,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { parseOverrides } from '../../src/pending.js'
-import { operationFor, canonicalJson } from '../../web/src/lib/presence.js'
-import { readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { operationFor, canonicalJson } from '../../../../web/src/lib/presence.js'
+import { readNarrowing } from '../../../../web/src/components/approvals/decide.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, cli } from './fix-control-helpers.js'
 
 /**

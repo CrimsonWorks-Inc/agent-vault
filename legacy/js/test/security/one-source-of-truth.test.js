@@ -22,6 +22,8 @@ import { Daemon } from '../../src/daemon/server.js'
 import { fetchPending, SOURCES, parseOverrides } from '../../src/pending.js'
 
 const ROOT = new URL('../..', import.meta.url).pathname
+// The repo root: web/ and the built page (src/ui/dist) stayed there.
+const REPO = new URL('../../../..', import.meta.url).pathname
 let dir, vault, daemon, sock
 
 const ctl = (method, path, body) => new Promise((resolve) => {
@@ -84,9 +86,9 @@ test('both interfaces read the same list from the same module', async () => {
 function pageSources() {
   const out = []
   const walk = (dir) => {
-    for (const e of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
+    for (const e of readdirSync(join(REPO, dir), { withFileTypes: true })) {
       const rel = `${dir}/${e.name}`
-      if (e.isDirectory()) { if (e.name !== 'test') walk(rel) } else if (/\.(js|jsx)$/.test(e.name) && !/\.test\.jsx?$|fixtures/.test(e.name)) out.push([rel, readFileSync(join(ROOT, rel), 'utf8')])
+      if (e.isDirectory()) { if (e.name !== 'test') walk(rel) } else if (/\.(js|jsx)$/.test(e.name) && !/\.test\.jsx?$|fixtures/.test(e.name)) out.push([rel, readFileSync(join(REPO, rel), 'utf8')])
     }
   }
   walk('web/src')
@@ -109,7 +111,7 @@ test('the page paints the list and decides nothing about it', async () => {
   }
   // And the count a human sees covers every kind, because a decision that
   // raises no badge is one nobody knows to make.
-  const shell = readFileSync(join(ROOT, 'web/src/App.jsx'), 'utf8')
+  const shell = readFileSync(join(REPO, 'web/src/App.jsx'), 'utf8')
   assert.match(shell, /pendingCount: pending \? pending\.length : 0/, 'the badge must count everything waiting')
 })
 
@@ -176,23 +178,23 @@ test('a lifetime can be narrowed, like every other dimension of a proposal', asy
 // committed src/ui/dist, whose module graph shows where the bundle's
 // parseOverrides came from.
 test('C21: the shipped bundle\'s parseOverrides is src/pending.js\'s, and the server binds with the same function', { timeout: 300_000 }, () => {
-  const r = spawnSync(process.execPath, [join(ROOT, 'web/scripts/bundle-modules.mjs')], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const r = spawnSync(process.execPath, [join(REPO, 'web/scripts/bundle-modules.mjs')], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   assert.equal(r.status, 0, r.stderr)
   const { chunks, diffs } = JSON.parse(r.stdout)
   // The build that was inspected is the page that ships.
   assert.deepEqual(diffs, [], `src/ui/dist is not this build; run npm run build:ui:\n${diffs.join('\n')}`)
   const entry = chunks.find((c) => c.isEntry)
   assert.ok(entry, 'the build has an entry chunk')
-  const html = readFileSync(join(ROOT, 'src/ui/dist/index.html'), 'utf8')
+  const html = readFileSync(join(REPO, 'src/ui/dist/index.html'), 'utf8')
   assert.ok(html.includes(`src="/assets/${entry.file.replace(/^assets\//, '')}"`), 'the page loads that chunk')
   // parseOverrides is rendered into the bundle from src/pending.js, and from
   // nowhere else: no second reader exists in the page.
   const owners = chunks.flatMap((c) => Object.entries(c.modules)).filter(([, m]) => m.exports.includes('parseOverrides')).map(([id]) => id)
-  assert.deepEqual(owners, ['src/pending.js'])
-  assert.ok(entry.modules['src/pending.js'].length > 0, 'src/pending.js was tree-shaken out of the page')
+  assert.deepEqual(owners, ['legacy/js/src/pending.js'])
+  assert.ok(entry.modules['legacy/js/src/pending.js'].length > 0, 'legacy/js/src/pending.js was tree-shaken out of the page')
   assert.ok(entry.modules['web/src/components/approvals/decide.js'], 'the approvals reader is in the page')
-  const decide = readFileSync(join(ROOT, 'web/src/components/approvals/decide.js'), 'utf8')
-  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
+  const decide = readFileSync(join(REPO, 'web/src/components/approvals/decide.js'), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/legacy\/js\/src\/pending\.js'/)
   for (const [file, text] of pageSources()) {
     assert.ok(!/function parse(?:Overrides|Narrowing)\s*\(|parse(?:Overrides|Narrowing)\s*=\s*(?:\(|function)/.test(text), `${file} defines its own narrowing parser`)
   }

@@ -9,7 +9,7 @@
 
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { fetchAll, fetchPages, pageQuery, readEnvelope } from '../../web/src/lib/paging.js'
+import { fetchAll, fetchPages, pageQuery, readEnvelope } from '../../../../web/src/lib/paging.js'
 import { startDaemon, startUi } from './fix-control-helpers.js'
 
 const MANY = 10_001

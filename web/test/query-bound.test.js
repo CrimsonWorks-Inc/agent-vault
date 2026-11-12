@@ -13,10 +13,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { UiServer } from '../../src/ui/server.js'
+import { UiServer } from '../../legacy/js/src/ui/server.js'
 import { queryBound, QUERY_BOUND, operationFor, canonicalJson } from '../src/lib/presence.js'
 import { withQuery, UI_HEADER } from '../src/lib/api.js'
-import * as webauthn from '../../src/ui/webauthn.js'
+import * as webauthn from '../../legacy/js/src/ui/webauthn.js'
 
 let dir, daemon, ui, cookie
 let minted = 0

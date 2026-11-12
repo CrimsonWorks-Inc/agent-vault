@@ -102,25 +102,22 @@ fn checkout_root() -> Result<PathBuf, CliError> {
     resolve_checkout_root(&starts)
 }
 
-/// Walk `starts` upward for a directory that has `package.json`, `src` and
-/// `bin`. The installed tree has those too. It is `<SYSTEM_ROOT>/app`,
-/// canonicalized, so `/var` and `/private/var` are the same directory. A
-/// checkout whose own directory is named `app` is not that tree. Landing
-/// on the installed app is skipped so a later start can still be a checkout.
-/// The error is only when every start lands there.
+/// Walk `starts` upward for a source checkout ([`crate::setup::is_checkout`]:
+/// the Rust workspace at `rust/`). A start inside the installed app,
+/// `<SYSTEM_ROOT>/app` (canonicalized, so `/var` and `/private/var` are the
+/// same directory), is skipped so a later start can still be a checkout; a
+/// checkout whose own directory is named `app` is not that tree. The error
+/// is only when no start finds a checkout and one of them was the app.
 pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliError> {
     let mut saw_installed = false;
     for start in starts {
         let mut dir = start.as_path();
         loop {
-            if dir.join("package.json").is_file()
-                && dir.join("src").is_dir()
-                && dir.join("bin").is_dir()
-            {
-                if is_installed_app(dir) {
-                    saw_installed = true;
-                    break;
-                }
+            if is_installed_app(dir) {
+                saw_installed = true;
+                break;
+            }
+            if crate::setup::is_checkout(dir) {
                 return Ok(dir.to_path_buf());
             }
             let Some(parent) = dir.parent() else { break };

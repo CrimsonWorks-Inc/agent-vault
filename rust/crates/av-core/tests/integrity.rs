@@ -124,7 +124,7 @@ fn live_js_golden_vectors() {
     // The mutation runner copies only rust/; checked-in JS vectors remain tested there.
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../src/core/placeholder.js"
+        "/../../../legacy/js/src/core/placeholder.js"
     ))
     .exists()
     {

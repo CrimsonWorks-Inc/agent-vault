@@ -36,13 +36,13 @@ test('listen add asks for the passphrase like every other gated command', async 
 })
 
 test('the TLS listener port is the same everywhere it is written', () => {
-  const read = (p) => readFileSync(new URL(`../../${p}`, import.meta.url), 'utf8')
+  const read = (p) => readFileSync(new URL(`${/^(web\/|src\/ui\/dist|README\.md|docs\/)/.test(p) ? '../../../../' : '../../'}${p}`, import.meta.url), 'utf8')
   // The page's docs are the React sections, and what ships is the bundle
   // built from them: both are checked, so neither a source nor a stale
   // bundle can name the wrong port.
-  const docs = readdirSync(new URL('../../web/src/components/docs/', import.meta.url))
+  const docs = readdirSync(new URL('../../../../web/src/components/docs/', import.meta.url))
     .filter((f) => /\.jsx?$/.test(f)).map((f) => `web/src/components/docs/${f}`)
-  const bundle = readdirSync(new URL('../../src/ui/dist/assets/', import.meta.url))
+  const bundle = readdirSync(new URL('../../../../src/ui/dist/assets/', import.meta.url))
     .filter((f) => f.endsWith('.js')).map((f) => `src/ui/dist/assets/${f}`)
   assert.ok(docs.length && bundle.length, 'the docs sources and the bundle are where this test looks')
   for (const file of ['README.md', ...docs, 'web/src/pages/Docs.jsx', ...bundle, 'src/cli/index.js']) {
