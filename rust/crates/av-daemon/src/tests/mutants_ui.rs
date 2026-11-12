@@ -462,6 +462,73 @@ async fn an_unreadable_narrowing_is_refused_on_a_denial_too() {
     assert_eq!(r.status, 400, "{}", r.body);
 }
 
+/// integrate3-narrowing.test.js:249: parseOverrides reads Object.keys of
+/// the narrowing, so a string or list (keys "0", "1", ...) or an object
+/// with a numeric key is refused with 400 before any signature, and nothing
+/// is decided; a value with no keys (a number, true, null, []) narrows
+/// nothing and is not refused there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowing_that_is_not_an_object_of_known_keys_is_400_and_decides_nothing() {
+    let mut u = Ui::start().await;
+    u.claim().await;
+    let id =
+        u._w.shared
+            .run(|c| {
+                c.sr_propose(
+                    json!({"cred": "demo", "methods": ["GET"]}),
+                    Some("r".into()),
+                    false,
+                )
+                .unwrap()
+                .0
+                .id
+            })
+            .await
+            .unwrap();
+    for (bad, key) in [
+        (json!("budget=5"), "0"),
+        (json!(["budget"]), "0"),
+        (json!({"0": "x"}), "0"),
+        (json!({"budget": 5, "7": 1}), "7"),
+    ] {
+        for granted in [true, false] {
+            let r = u
+                .api(
+                    "POST",
+                    "session-requests/decide",
+                    json!({"id": id, "granted": granted, "overrides": bad}),
+                )
+                .await;
+            assert_eq!(r.status, 400, "{bad} {granted}: {}", r.body);
+            let v = r.json();
+            assert_eq!(v["code"], "AV_POLICY_DENIED", "{}", r.body);
+            assert_eq!(v["detail"]["rule"], "policy_invalid", "{}", r.body);
+            assert!(
+                r.body
+                    .contains(&format!("the narrowing does not parse: {key}: ")),
+                "{bad}: {}",
+                r.body
+            );
+        }
+    }
+    for none in [json!(5), json!(true), json!(null), json!([]), json!("")] {
+        let r = u
+            .api(
+                "POST",
+                "session-requests/decide",
+                json!({"id": id, "granted": true, "overrides": none}),
+            )
+            .await;
+        assert_ne!(r.status, 400, "{none} has no keys: {}", r.body);
+    }
+    let state =
+        u._w.shared
+            .run(move |c| c.sr_get(&id).unwrap().state)
+            .await
+            .unwrap();
+    assert_eq!(state, "pending", "nothing was decided");
+}
+
 /// 'U3: a paged search matches the answer before towardPage, so q can test
 /// a withheld value' and 'U3: an audit search matches rows before
 /// towardPage'.

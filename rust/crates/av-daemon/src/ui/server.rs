@@ -1903,15 +1903,24 @@ fn obj_of(pairs: &[(&str, Option<Value>)]) -> Value {
 }
 
 /// `parseOverrides(body?.overrides || {})` as the JSON the daemon is sent.
+/// `parseOverrides` reads `Object.keys(args)`: a falsy value is `{}`; a
+/// non-empty string or list has the keys "0", "1", ..., which no narrowing
+/// is, so it is refused naming "0"; a number, `true` or an empty list has
+/// no keys and narrows nothing.
 fn parsed_overrides(raw: Option<&Value>) -> Result<Value, UiErr> {
-    let empty = Map::new();
     let m = match raw.filter(|v| crate::util::truthy(v)) {
         Some(Value::Object(m)) => m.clone(),
-        Some(_) => empty,
-        None => empty,
+        Some(Value::String(s)) if !s.is_empty() => index_keys(s.encode_utf16().count()),
+        Some(Value::Array(a)) if !a.is_empty() => index_keys(a.len()),
+        _ => Map::new(),
     };
     let o = av_store::pending::parse_overrides(&m).map_err(|e| UiErr::new(500, e.to_string()))?;
     Ok(serde_json::to_value(o).unwrap_or(json!({})))
+}
+
+/// The own keys JS sees on a string or array of `n` items: "0".."n-1".
+fn index_keys(n: usize) -> Map<String, Value> {
+    (0..n).map(|i| (i.to_string(), Value::Null)).collect()
 }
 
 fn cookie_from(raw: &str) -> Option<String> {
