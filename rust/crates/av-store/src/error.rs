@@ -48,7 +48,10 @@ impl Error {
     /// The `VaultError` inside, when this is a refusal an agent may see. No
     /// JS source: the JS checks `e instanceof VaultError` / `e.code`.
     pub fn as_vault(&self) -> Option<&VaultError> {
-        todo!()
+        match self {
+            Error::Vault(v) => Some(v),
+            _ => None,
+        }
     }
 }
 

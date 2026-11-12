@@ -15,9 +15,12 @@ use av_core::secret::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::crypto::{Argon2Params, ArgonAlg};
-use crate::error::Result;
+use crate::crypto::{self, Argon2Params, ArgonAlg};
+use crate::error::{Error, Result};
 use crate::vault::{TemplateRestore, Vault};
+use av_core::secret::ExposeSecret;
+use av_core::{deny, DenyExtra, ErrorCode};
+use zeroize::Zeroizing;
 
 /// The bundle's `format`. Ports `BACKUP_FORMAT` in `src/store/backup.js`.
 pub const BACKUP_FORMAT: &str = "agent-vault-backup";
@@ -380,37 +383,345 @@ pub struct RestoreResult {
 
 // ------------------------------------------------------------ functions
 
+fn format_error(why: &str) -> Error {
+    deny(
+        ErrorCode::PolicyDenied,
+        format!("not a usable backup: {why}"),
+        DenyExtra {
+            rule: Some("backup_format".into()),
+            ..Default::default()
+        },
+    )
+    .into()
+}
+
+fn auth_error() -> Error {
+    deny(
+        ErrorCode::PresenceDenied,
+        "the recovery passphrase is wrong, or the bundle was altered",
+        DenyExtra {
+            rule: Some("backup_auth".into()),
+            ..Default::default()
+        },
+    )
+    .into()
+}
+
+fn locked() -> Error {
+    deny(
+        ErrorCode::Locked,
+        "the vault is locked",
+        DenyExtra::default(),
+    )
+    .into()
+}
+
+/// The Argon2id a v2 bundle is sealed under. Tests in this crate use cheap
+/// parameters (a bundle states its own, and restore checks them against
+/// this), so the suite does not spend 256 MiB per export.
+pub(crate) fn backup_kdf_v2() -> Argon2Params {
+    if cfg!(test) {
+        Argon2Params {
+            alg: ArgonAlg::Argon2id,
+            m: 512,
+            t: 1,
+            p: 1,
+        }
+    } else {
+        BACKUP_KDF_V2
+    }
+}
+
+fn aad_of(format: &str, version: u32, created_at: &str) -> String {
+    format!("{format}|{version}|{created_at}")
+}
+
 /// Hex SHA-256 over the bundle's canonical operation form (key order does
 /// not change it). Ports `bundleDigest` in `src/store/backup.js` (needs
 /// av-core's `canonicalOperation` port).
 pub fn bundle_digest(bundle: &Value) -> String {
-    todo!()
+    crypto::sha256_hex(av_core::operation::canonical_operation(bundle).as_bytes())
 }
 
 /// Refuse (rule `recovery_passphrase`) a recovery passphrase under 12
 /// characters. Ports `checkRecovery` in `src/store/backup.js`.
 pub fn check_recovery(recovery_passphrase: &SecretString) -> Result<()> {
-    todo!()
+    if recovery_passphrase.expose_secret().encode_utf16().count() < MIN_RECOVERY {
+        return Err(deny(
+            ErrorCode::PolicyDenied,
+            format!("the recovery passphrase must be at least {MIN_RECOVERY} characters"),
+            DenyExtra {
+                rule: Some("recovery_passphrase".into()),
+                ..Default::default()
+            },
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn b64_of_len(v: Option<&Value>, bytes: Option<usize>) -> bool {
+    v.and_then(Value::as_str)
+        .and_then(crypto::b64_strict)
+        .is_some_and(|b| bytes.is_none_or(|n| b.len() == n))
 }
 
 /// Check an envelope (format, version 1 or 2, size, the fixed KDF of that
 /// version, cipher, nonce length) before any key is derived (rule
 /// `backup_format`). Ports `checkEnvelope` in `src/store/backup.js`.
 pub fn check_envelope(bundle: &Value) -> Result<Bundle> {
-    todo!()
+    check_envelope_with(bundle, &backup_kdf_v2())
+}
+
+/// [`check_envelope`] against a stated v2 KDF: production builds pass
+/// [`BACKUP_KDF_V2`], and a test can check that same production set even
+/// though `cfg(test)` restores use cheaper parameters.
+pub(crate) fn check_envelope_with(bundle: &Value, want: &Argon2Params) -> Result<Bundle> {
+    let Value::Object(b) = bundle else {
+        return Err(format_error("a bundle is a JSON object"));
+    };
+    let version = b.get("version").and_then(Value::as_u64);
+    if b.get("format").and_then(Value::as_str) != Some(BACKUP_FORMAT)
+        || !matches!(version, Some(1) | Some(2))
+    {
+        return Err(format_error(&format!(
+            "expected {BACKUP_FORMAT} version {BACKUP_VERSION} or {BACKUP_VERSION_V2}"
+        )));
+    }
+    if serde_json::to_string(bundle)?.len() > MAX_BUNDLE_BYTES {
+        return Err(format_error("it is over 16 MiB"));
+    }
+    let kdf = b.get("kdf").and_then(Value::as_object);
+    let num = |k: &str| kdf.and_then(|o| o.get(k)).and_then(Value::as_u64);
+    let salt_ok = b64_of_len(kdf.and_then(|o| o.get("salt")), Some(16));
+    let bad_kdf = || format_error("its key derivation is not the one this format uses");
+    let bad_cipher = || format_error("its cipher, nonce or ciphertext is malformed");
+    let created_ok = b.get("created_at").is_some_and(Value::is_string);
+    let ct_ok = b64_of_len(b.get("ct"), None);
+    if version == Some(1) {
+        let kdf_ok = kdf.and_then(|o| o.get("name")).and_then(Value::as_str)
+            == Some(BACKUP_KDF.name)
+            && num("N") == Some(u64::from(BACKUP_KDF.n))
+            && num("r") == Some(u64::from(BACKUP_KDF.r))
+            && num("p") == Some(u64::from(BACKUP_KDF.p))
+            && salt_ok;
+        if !kdf_ok {
+            return Err(bad_kdf());
+        }
+        if b.get("cipher").and_then(Value::as_str) != Some(CIPHER_V1)
+            || !b64_of_len(b.get("nonce"), Some(crypto::V1_NONCE_LEN))
+            || !ct_ok
+            || !created_ok
+        {
+            return Err(bad_cipher());
+        }
+        return Ok(Bundle::V1(
+            serde_json::from_value(bundle.clone()).map_err(|_| bad_cipher())?,
+        ));
+    }
+    let kdf_ok = kdf.and_then(|o| o.get("alg")).and_then(Value::as_str) == Some("argon2id")
+        && num("m") == Some(u64::from(want.m))
+        && num("t") == Some(u64::from(want.t))
+        && num("p") == Some(u64::from(want.p))
+        && salt_ok;
+    if !kdf_ok {
+        return Err(bad_kdf());
+    }
+    if b.get("cipher").and_then(Value::as_str) != Some(CIPHER_V2)
+        || !b64_of_len(b.get("nonce"), Some(crypto::V2_NONCE_LEN))
+        || !ct_ok
+        || !created_ok
+    {
+        return Err(bad_cipher());
+    }
+    Ok(Bundle::V2(
+        serde_json::from_value(bundle.clone()).map_err(|_| bad_cipher())?,
+    ))
+}
+
+fn only_keys(o: &Map<String, Value>, allowed: &[&str]) -> bool {
+    o.keys().all(|k| allowed.contains(&k.as_str()))
 }
 
 /// Check decrypted contents against the closed list (rule `backup_format`).
 /// Ports `checkPlaintext` in `src/store/backup.js`.
 pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
-    todo!()
+    let Value::Object(p) = plain else {
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
+    };
+    let (Some(Value::Array(creds)), Some(Value::Array(templates))) =
+        (p.get("credentials"), p.get("templates"))
+    else {
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
+    };
+    if !only_keys(p, &["credentials", "templates"]) {
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
+    }
+    for c in creds {
+        let Value::Object(c) = c else {
+            return Err(format_error("a credential entry is malformed"));
+        };
+        let slug = c.get("slug").and_then(Value::as_str).unwrap_or("");
+        let fields = c.get("fields").and_then(Value::as_array);
+        let ok = only_keys(c, &CRED_KEYS)
+            && av_core::placeholder::is_valid_slug(slug)
+            && c.get("kind").is_some_and(Value::is_string)
+            && c.get("connector")
+                .is_none_or(|v| v.is_null() || v.is_object())
+            && fields.is_some_and(|f| !f.is_empty());
+        if !ok {
+            return Err(format_error("a credential entry is malformed"));
+        }
+        let fields = fields.expect("checked");
+        for f in fields {
+            let ok = f.as_object().is_some_and(|f| {
+                only_keys(f, &FIELD_KEYS)
+                    && f.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(av_core::placeholder::is_valid_field)
+                    && f.get("value")
+                        .and_then(Value::as_str)
+                        .is_some_and(|v| !v.is_empty())
+                    && f.get("sites").is_none_or(|s| {
+                        s.is_null() || s.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+                    })
+            });
+            if !ok {
+                return Err(format_error(&format!("a field of {slug} is malformed")));
+            }
+        }
+        let mut names: Vec<&str> = fields
+            .iter()
+            .filter_map(|f| f.get("name").and_then(Value::as_str))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        if names.len() != fields.len() {
+            return Err(format_error(&format!("{slug} names a field twice")));
+        }
+        if let Some(sp) = c.get("scrub_patterns").filter(|v| !v.is_null()) {
+            let ok = sp.as_array().is_some_and(|a| {
+                a.iter().all(|p| {
+                    p.as_object().is_some_and(|p| {
+                        only_keys(p, &PATTERN_KEYS) && p.get("source").is_some_and(Value::is_string)
+                    })
+                })
+            });
+            if !ok {
+                return Err(format_error(&format!(
+                    "the scrub patterns of {slug} are malformed"
+                )));
+            }
+        }
+        if let Some(pins) = c.get("pins").filter(|v| !v.is_null()) {
+            let ok = pins.as_object().is_some_and(|o| {
+                o.values()
+                    .all(|l| l.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
+            });
+            if !ok {
+                return Err(format_error(&format!("the pins of {slug} are malformed")));
+            }
+        }
+        if let Some(e) = c.get("expires_at").filter(|v| !v.is_null()) {
+            if !e
+                .as_str()
+                .is_some_and(|s| crate::util::parse_ms(s).is_some())
+            {
+                return Err(format_error(&format!("the expiry of {slug} is malformed")));
+            }
+        }
+        if let Some(q) = c.get("quarantine").filter(|v| !v.is_null()) {
+            if !q.is_object() {
+                return Err(format_error(&format!(
+                    "the quarantine of {slug} is malformed"
+                )));
+            }
+        }
+    }
+    for t in templates {
+        let ok = t.as_object().is_some_and(|t| {
+            only_keys(t, &TEMPLATE_KEYS)
+                && t.get("name").and_then(Value::as_str).is_some_and(|n| {
+                    let b = n.as_bytes();
+                    !b.is_empty()
+                        && b.len() <= 32
+                        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+                        && b.iter()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+                })
+                && t.get("spec").and_then(Value::as_object).is_some_and(|s| {
+                    !["template", "template_hash", "presence"]
+                        .iter()
+                        .any(|k| s.contains_key(*k))
+                        && serde_json::to_string(s).is_ok_and(|j| j.len() <= 16 * 1024)
+                })
+        });
+        if !ok {
+            return Err(format_error("a template entry is malformed"));
+        }
+    }
+    // The shape is the closed list above; anything serde still refuses (an
+    // id that is not text) is malformed too.
+    serde_json::from_value(plain.clone())
+        .map_err(|_| format_error("a credential entry is malformed"))
 }
 
 /// Decrypt and check a bundle; a wrong passphrase and tampering are one
 /// answer (AV_PRESENCE_DENIED, rule `backup_auth`). Key and plaintext are
 /// zeroized. Blocking. Ports `openBundle` in `src/store/backup.js`.
 pub fn open_bundle(bundle: &Value, recovery_passphrase: &SecretString) -> Result<BackupPlaintext> {
-    todo!()
+    let env = check_envelope(bundle)?;
+    check_recovery(recovery_passphrase)?;
+    let bytes = match &env {
+        Bundle::V1(b) => {
+            let salt = crypto::b64_strict(&b.kdf.salt).ok_or_else(|| format_error("bad salt"))?;
+            let key = crypto::scrypt_key(
+                recovery_passphrase,
+                &salt,
+                &crypto::ScryptParams {
+                    log_n: 17,
+                    r: BACKUP_KDF.r,
+                    p: BACKUP_KDF.p,
+                    keylen: 32,
+                    maxmem: MAXMEM,
+                },
+            )?;
+            crypto::open_v1(
+                &key,
+                &crypto::SealedV1 {
+                    ct: b.ct.clone(),
+                    nonce: b.nonce.clone(),
+                },
+                &aad_of(&b.format, b.version, &b.created_at),
+            )
+            .map_err(|_| auth_error())?
+        }
+        Bundle::V2(b) => {
+            let salt = crypto::b64_strict(&b.kdf.salt).ok_or_else(|| format_error("bad salt"))?;
+            let key = crypto::argon2_key(recovery_passphrase, &salt, &b.kdf.params)?;
+            crypto::open(
+                &key,
+                &crypto::SealedV2 {
+                    v: crypto::SEALED_V2,
+                    alg: crypto::V2_ALG.into(),
+                    n: b.nonce.clone(),
+                    c: b.ct.clone(),
+                },
+                &aad_of(&b.format, b.version, &b.created_at),
+            )
+            .map_err(|_| auth_error())?
+        }
+    };
+    let text = Zeroizing::new(bytes.expose_secret().to_vec());
+    let plain: Value =
+        serde_json::from_slice(&text).map_err(|_| format_error("its contents are not JSON"))?;
+    check_plaintext(&plain)
 }
 
 /// Seal every credential and template as a v2 bundle; records
@@ -420,7 +731,68 @@ pub fn export_backup(
     vault: &mut Vault,
     recovery_passphrase: &SecretString,
 ) -> Result<ExportResult> {
-    todo!()
+    check_recovery(recovery_passphrase)?;
+    if vault.locked() {
+        return Err(locked());
+    }
+    let created_at = crate::util::now_iso();
+    let credentials = vault.backup_credentials()?;
+    let templates: Vec<BackupTemplate> = vault
+        .list_templates()?
+        .into_iter()
+        .map(|t| BackupTemplate {
+            name: t.name,
+            spec: t.spec,
+        })
+        .collect();
+    let (n_creds, n_templates) = (credentials.len() as u64, templates.len() as u64);
+    let mut salt = [0u8; 16];
+    crypto::fill_random(&mut salt)?;
+    let params = backup_kdf_v2();
+    let key = crypto::argon2_key(recovery_passphrase, &salt, &params)?;
+    let plain = BackupPlaintext {
+        credentials,
+        templates,
+    };
+    let bytes = Zeroizing::new(serde_json::to_vec(&plain)?);
+    drop(plain);
+    let sealed = crypto::seal(
+        &key,
+        &bytes,
+        &aad_of(BACKUP_FORMAT, BACKUP_VERSION_V2, &created_at),
+    )?;
+    drop(bytes);
+    if vault.locked() {
+        return Err(locked());
+    }
+    let bundle = BundleV2 {
+        format: BACKUP_FORMAT.into(),
+        version: BACKUP_VERSION_V2,
+        created_at: created_at.clone(),
+        kdf: BundleKdfV2 {
+            params,
+            salt: crypto::b64(&salt),
+        },
+        cipher: CIPHER_V2.into(),
+        nonce: sealed.n,
+        ct: sealed.c,
+    };
+    let digest = bundle_digest(&serde_json::to_value(&bundle)?);
+    let audit = vault.audit_mut().ok_or_else(locked)?;
+    let mut f = Map::new();
+    f.insert("credentials".into(), n_creds.into());
+    f.insert("templates".into(), n_templates.into());
+    f.insert("bundle_sha256".into(), digest.clone().into());
+    audit.write("backup.exported", f)?;
+    Ok(ExportResult {
+        bundle,
+        summary: ExportSummary {
+            credentials: n_creds,
+            templates: n_templates,
+            created_at,
+        },
+        bundle_sha256: digest,
+    })
 }
 
 /// What a bundle holds, without its values, touching no vault. Blocking.
@@ -429,13 +801,56 @@ pub fn inspect_backup(
     bundle: &Value,
     recovery_passphrase: &SecretString,
 ) -> Result<BackupInspection> {
-    todo!()
+    let plain = open_bundle(bundle, recovery_passphrase)?;
+    Ok(BackupInspection {
+        created_at: bundle
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        credentials: plain
+            .credentials
+            .iter()
+            .map(|c| InspectedCredential {
+                slug: c.slug.clone(),
+                kind: c.kind.clone(),
+                host: c
+                    .connector
+                    .as_ref()
+                    .and_then(|m| m.get("host"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                fields: c.fields.iter().map(|f| f.name.clone()).collect(),
+                has_scrub_patterns: c.scrub_patterns.as_ref().is_some_and(|p| !p.is_empty()),
+                has_pins: c
+                    .pins
+                    .as_ref()
+                    .is_some_and(|p| p.values().any(|l| !l.is_empty())),
+                expires_at: c.expires_at.clone(),
+                quarantined: c.quarantine.as_ref().is_some_and(|q| !q.is_null()),
+            })
+            .collect(),
+        templates: plain.templates.iter().map(|t| t.name.clone()).collect(),
+    })
 }
 
 /// `<slug>-restored`, then `-restored-2`, ..., trimmed to 24 characters.
 /// Ports `renamed` in `src/store/backup.js`.
 pub fn renamed(slug: &str, taken: &HashSet<String>) -> String {
-    todo!()
+    let mut i = 1u64;
+    loop {
+        let suffix = if i == 1 {
+            "-restored".to_string()
+        } else {
+            format!("-restored-{i}")
+        };
+        let keep = 24usize.saturating_sub(suffix.len()).min(slug.len());
+        let candidate = format!("{}{suffix}", &slug[..keep]);
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+        i += 1;
+    }
 }
 
 /// Put a bundle (v1 or v2) back under the conflict mode, via
@@ -448,5 +863,92 @@ pub fn restore_backup(
     recovery_passphrase: &SecretString,
     on_conflict: ConflictMode,
 ) -> Result<RestoreResult> {
-    todo!()
+    if vault.locked() {
+        return Err(locked());
+    }
+    fn refused(vault: &mut Vault, e: Error) -> Error {
+        if let Some(v) = e.as_vault() {
+            if v.code != ErrorCode::Locked && !vault.locked() {
+                let reason = v
+                    .extra
+                    .rule
+                    .clone()
+                    .unwrap_or_else(|| v.code.as_str().to_string());
+                if let Some(a) = vault.audit_mut() {
+                    let mut f = Map::new();
+                    f.insert("reason".into(), reason.into());
+                    let _ = a.write("backup.refused", f);
+                }
+            }
+        }
+        e
+    }
+    let plain = match open_bundle(bundle, recovery_passphrase) {
+        Ok(p) => p,
+        Err(e) => return Err(refused(vault, e)),
+    };
+    if vault.locked() {
+        return Err(locked());
+    }
+    let mut taken: HashSet<String> = vault
+        .credential_records()?
+        .into_iter()
+        .map(|c| c.slug)
+        .collect();
+    let mut plan = Vec::new();
+    let mut skipped = Vec::new();
+    let mut renames = Vec::new();
+    for c in plain.credentials {
+        let mut slug = c.slug.clone();
+        if taken.contains(&slug) {
+            match on_conflict {
+                ConflictMode::Fail => {
+                    let e = deny(
+                        ErrorCode::PolicyDenied,
+                        format!("a credential named {slug} already exists"),
+                        DenyExtra {
+                            rule: Some("backup_conflict".into()),
+                            ..Default::default()
+                        },
+                    );
+                    return Err(refused(vault, e.into()));
+                }
+                ConflictMode::Skip => {
+                    skipped.push(slug);
+                    continue;
+                }
+                ConflictMode::Rename => {
+                    slug = renamed(&c.slug, &taken);
+                    renames.push(Rename {
+                        from: c.slug.clone(),
+                        to: slug.clone(),
+                    });
+                }
+            }
+        }
+        taken.insert(slug.clone());
+        let from = c.slug.clone();
+        let mut entry = c;
+        entry.slug = slug;
+        plan.push(PlannedCredential { entry, from });
+    }
+    // `backup.restored` is written in the same transaction as the restore.
+    let out = match vault.restore_entries(crate::vault::RestoreEntries {
+        credentials: plan,
+        templates: plain.templates,
+        summary: Some(crate::vault::RestoreSummary {
+            skipped: skipped.clone(),
+            renamed: serde_json::to_value(&renames)?,
+            bundle_sha256: bundle_digest(bundle),
+        }),
+    }) {
+        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };
+    Ok(RestoreResult {
+        restored: out.restored,
+        skipped,
+        renamed: renames,
+        templates: out.templates,
+    })
 }

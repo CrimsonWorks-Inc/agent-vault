@@ -517,6 +517,22 @@ pub struct GrantRecord {
     pub expires_at: Option<String>,
 }
 
+/// A grant's runtime state, which the JS pipeline keeps on the grant object
+/// in `vault.json` beside `policy`: the rolling quota window
+/// (`grant.quota_state`, `{window_ms, start, count, prev}`, set by `#quota`
+/// in `src/daemon/pipeline.js`) and the spend ledger (`grant.spend`,
+/// `{tokens_used, usd_micros_used, reserved: {<request_id>: {tokens,
+/// usd_micros, at}}}`, set by `#checkSpend`, `#settleSpend`, `#refundSpend`
+/// and `#recoverSpend`). Both are kept as the JSON the JS wrote; `None` is
+/// the JS default (a fresh window, zero spend).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GrantRuntime {
+    /// `grant.quota_state`, or `None` before the first charge.
+    pub quota_state: Option<serde_json::Value>,
+    /// `grant.spend`, or `None` before the first reservation.
+    pub spend: Option<serde_json::Value>,
+}
+
 // ----------------------------------------------------------- placeholders
 
 /// A ledger row's state. Ports the `state` values `src/store/vault.js` sets.
@@ -808,6 +824,10 @@ pub struct LegacyDocument {
     /// Grants by id.
     #[serde(default)]
     pub grants: BTreeMap<String, GrantRecord>,
+    /// Each grant's `quota_state` and `spend`, by grant id, read beside
+    /// `grants` (they are siblings of `policy` on the JS grant object).
+    #[serde(skip)]
+    pub grant_runtime: BTreeMap<String, GrantRuntime>,
     /// Placeholder ledger by id.
     #[serde(default)]
     pub placeholders: BTreeMap<String, PlaceholderRow>,

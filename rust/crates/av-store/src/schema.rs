@@ -162,12 +162,15 @@ CREATE TABLE pins (
     credential_id TEXT NOT NULL REFERENCES credentials (id) ON DELETE CASCADE,
     host          TEXT NOT NULL,
     spki          TEXT NOT NULL,                   -- sha256/<base64 of 32 bytes>
+    position      INTEGER NOT NULL DEFAULT 0,      -- order in the JS list
     PRIMARY KEY (credential_id, host, spki)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE sessions (
     id               TEXT PRIMARY KEY NOT NULL,
-    workspace_id     TEXT REFERENCES workspaces (id),
+    -- No foreign key: the JS stores whatever workspace id the caller gave,
+    -- and migrate must copy such sessions as they are.
+    workspace_id     TEXT,
     label            TEXT NOT NULL,
     token_hash       TEXT NOT NULL UNIQUE,
     policy           TEXT NOT NULL CHECK (json_valid(policy)),
@@ -207,7 +210,12 @@ CREATE TABLE grants (
     state         TEXT NOT NULL CHECK (state IN ('active', 'expired', 'revoked')),
     end_reason    TEXT,
     created_at    TEXT NOT NULL,
-    expires_at    TEXT
+    expires_at    TEXT,
+    -- Runtime state the JS pipeline keeps on the grant (grant.quota_state and
+    -- grant.spend in src/daemon/pipeline.js), as the JSON it wrote; NULL is
+    -- the JS default (a fresh window, zero spend).
+    quota_state   TEXT CHECK (quota_state IS NULL OR json_valid(quota_state)),
+    spend         TEXT CHECK (spend IS NULL OR json_valid(spend))
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX grants_session ON grants (session_id);
 CREATE INDEX grants_credential ON grants (credential_id);
@@ -221,7 +229,7 @@ CREATE TABLE placeholders (
     sid           TEXT NOT NULL REFERENCES sessions (id) ON DELETE CASCADE,
     nonce_hash    TEXT NOT NULL UNIQUE,
     uses          INTEGER NOT NULL DEFAULT 0 CHECK (uses >= 0),
-    max_uses      INTEGER NOT NULL CHECK (max_uses >= 1),
+    max_uses      INTEGER NOT NULL CHECK (max_uses >= 0),
     state         TEXT NOT NULL CHECK (state IN ('active', 'dead')),
     dead_reason   TEXT,
     replaces_id   TEXT,
