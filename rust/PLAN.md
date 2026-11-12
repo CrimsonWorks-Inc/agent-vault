@@ -160,6 +160,14 @@ CBOR), `libc` (`mlock`, peer credentials, uid/gid), `clap`, `rpassword`,
 `regex` (only with linear-time guarantees; no backtracking), `url`, `time`,
 `thiserror`, `tracing`. Dev: `proptest`, `tempfile`, `assert_cmd`.
 
+**Regexes use JavaScript semantics.** The `regex` crate's `\s`, `\w`, `\d` and
+`\b` are Unicode; JavaScript's are not (JS `\s` includes U+FEFF and excludes
+U+0085; `\w` is `[A-Za-z0-9_]`; `\d` is `[0-9]`). Every crate compiles every
+pattern through av-core's JavaScript-semantics helper (`av_core::jsre`), never
+`Regex::new` directly, and each crate has a guard test for that. The core
+review found three fail-opens from this (a FEFF-split placeholder undetected,
+a FEFF-hidden method override, a content type metered that JS refuses).
+
 No `unsafe` outside small, commented wrappers for `mlock` and socket peer
 credentials. `#![forbid(unsafe_code)]` everywhere else.
 
