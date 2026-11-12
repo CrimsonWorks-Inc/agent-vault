@@ -634,3 +634,76 @@ fn migrate_never_writes_vault_db_in_place_the_finished_file_is_renamed() {
     assert!(js.dir.join("vault.db").exists());
     assert!(!temp.exists());
 }
+
+/// The JS reader (`#dropTornTail`, `#rows`): a last record with no
+/// terminal newline is a complete record, and migrates as one.
+#[test]
+fn a_last_audit_record_without_its_newline_migrates_as_a_complete_record() {
+    let js = js_vault("none");
+    let path = js.dir.join("audit.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines = text.lines().filter(|l| !l.is_empty()).count() as u64;
+    std::fs::write(&path, text.trim_end_matches('\n')).unwrap();
+    let legacy = read_legacy(&js.dir).unwrap();
+    let report = migrate(&opts(&js.dir, &js.dir, false), legacy, None).unwrap();
+    assert_eq!(
+        report.audit_last_seq,
+        Some(lines),
+        "every record came across"
+    );
+    let mut v = Vault::open(&js.dir).unwrap();
+    v.unlock(None).unwrap();
+    assert!(
+        v.audit().unwrap().verify().unwrap().ok,
+        "the anchor still covers the last record"
+    );
+}
+
+/// A half-written last record (a crash mid-append) is dropped, as JS drops
+/// it, and the records before it migrate; the anchor still decides: a torn
+/// write of a record the anchor already covers is records missing from the
+/// end, and refused.
+#[test]
+fn a_torn_last_audit_record_is_dropped_and_the_anchor_still_holds() {
+    let js = js_vault("none");
+    let path = js.dir.join("audit.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines = text.lines().filter(|l| !l.is_empty()).count() as u64;
+    // A crash after the anchor, mid-way through the next append.
+    std::fs::write(
+        &path,
+        format!("{text}{{\"seq\":{},\"ts\":\"2026-", lines + 1),
+    )
+    .unwrap();
+    let legacy = read_legacy(&js.dir).unwrap();
+    let report = migrate(&opts(&js.dir, &js.dir, false), legacy, None).unwrap();
+    assert_eq!(
+        report.audit_last_seq,
+        Some(lines),
+        "the torn fragment is not a record"
+    );
+    let mut v = Vault::open(&js.dir).unwrap();
+    v.unlock(None).unwrap();
+    assert!(v.audit().unwrap().verify().unwrap().ok);
+
+    // The last anchored record itself torn: the log ends before the anchor.
+    let js = js_vault("none");
+    let path = js.dir.join("audit.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let body = text.trim_end_matches('\n');
+    let cut = body.rfind('\n').map_or(0, |i| i + 1);
+    let last = &body[cut..];
+    std::fs::write(
+        &path,
+        format!("{}{}", &body[..cut], &last[..last.len() / 2]),
+    )
+    .unwrap();
+    let legacy = read_legacy(&js.dir).unwrap();
+    match migrate(&opts(&js.dir, &js.dir, false), legacy, None) {
+        Err(MigrateError::AuditBroken { reason, .. }) => {
+            assert!(reason.contains("removed from the end"), "{reason}")
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(!js.dir.join("vault.db").exists());
+}
