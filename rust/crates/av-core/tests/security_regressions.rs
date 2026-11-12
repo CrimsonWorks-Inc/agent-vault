@@ -482,3 +482,26 @@ fn explicit_null_schema_members_stay_invalid() {
     .unwrap();
     assert!(validate(&ordinary, &Default::default()).is_empty());
 }
+#[test]
+fn js_budget_absent_null_and_intersection_vectors() {
+    let state = |budget: Option<&Checked<Budget>>| match budget_limit(budget) {
+        BudgetLimit::Unlimited => json!({"kind":"unlimited"}),
+        BudgetLimit::Unreadable => json!({"kind":"unreadable"}),
+        BudgetLimit::Limit(n) => json!({"kind":"limit","limit":n}),
+    };
+    let rows: V = serde_json::from_str(include_str!("fixtures/budget-vectors.json")).unwrap();
+    for row in rows.as_array().unwrap() {
+        let budget: Checked<Budget> = serde_json::from_value(row["budget"].clone()).unwrap();
+        assert_eq!(state(Some(&budget)), row["state"], "{row}");
+        for case in row["intersections"].as_array().unwrap() {
+            let layers: Vec<Policy> = serde_json::from_value(case["layers"].clone()).unwrap();
+            let effective = intersect(&layers.iter().map(Some).collect::<Vec<_>>());
+            assert_eq!(state(effective.budget.as_ref()), case["state"], "{case}");
+            assert_eq!(
+                serde_json::to_value(effective.budget).unwrap(),
+                case["budget"],
+                "{case}"
+            );
+        }
+    }
+}
