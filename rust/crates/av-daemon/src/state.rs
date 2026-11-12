@@ -96,12 +96,12 @@ impl Core {
 }
 
 /// An av-store error as the `VaultError` the JS would have thrown: a
-/// refusal as itself, anything else as the `AV_INTERNAL` every JS handler
-/// makes of a plain `Error` (its message carries no secret).
+/// refusal as itself, anything else as the `AV_INTERNAL` fault every JS
+/// handler makes of a plain `Error`, its text kept to stderr.
 pub fn store_err(e: av_store::error::Error) -> VaultError {
     match e {
         av_store::error::Error::Vault(v) => *v,
-        other => deny(ErrorCode::Internal, other.to_string(), DenyExtra::default()),
+        other => crate::err::internal(other.to_string()),
     }
 }
 

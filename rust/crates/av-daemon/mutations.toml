@@ -2955,3 +2955,30 @@ to = '''    fault
         .map(|m| m.to_string())
         .or_else(|| fault.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| PANIC_CLASS.to_string())'''
+
+# Faults that are not refusals answer the generic sentence and are recorded
+# by class (C28, the JS #guard); their text goes to stderr only.
+
+[[mutation]]
+name = 'an internal fault hands its own text (a store error quoting stored data) to the caller'
+file = "src/err.rs"
+from = '''    d(C::Internal, FAULT_DETAIL)'''
+to = '''    d(C::Internal, text)'''
+
+[[mutation]]
+name = 'a store error that is not a refusal is answered with the store text'
+file = "src/state.rs"
+from = '''        other => crate::err::internal(other.to_string()),'''
+to = '''        other => deny(ErrorCode::Internal, other.to_string(), DenyExtra::default()),'''
+
+[[mutation]]
+name = 'a handler that answers a fault leaves no daemon.handler_error record'
+file = "src/server.rs"
+from = '''                if answers_fault(&r) {'''
+to = '''                if false && answers_fault(&r) {'''
+
+[[mutation]]
+name = 'an MCP fault leaves no daemon.handler_error record'
+file = "src/mcp.rs"
+from = '''                if crate::err::is_fault(&e) {'''
+to = '''                if false && crate::err::is_fault(&e) {'''

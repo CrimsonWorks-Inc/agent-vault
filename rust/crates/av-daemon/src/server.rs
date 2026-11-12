@@ -98,6 +98,19 @@ fn narrow_fields() -> Vec<&'static str> {
 /// `errorClass` gives a plain `Error`.
 pub const PANIC_CLASS: &str = "Error";
 
+/// Whether a handler answered with a fault (an [`crate::err::internal`]
+/// error that reached the response), which `#guard` would have caught.
+fn answers_fault(r: &Resp) -> bool {
+    if r.status() != 500 {
+        return false;
+    }
+    let crate::http::AvBody::Full(Some(b)) = r.body() else {
+        return false;
+    };
+    serde_json::from_slice::<Value>(b)
+        .is_ok_and(|v| v["code"] == "AV_INTERNAL" && v["detail"] == crate::err::FAULT_DETAIL)
+}
+
 /// `errorClass(err)` for a panic: its class, never its message (C28).
 fn fault_class(fault: &(dyn std::any::Any + Send)) -> String {
     let _ = fault;
@@ -1098,7 +1111,17 @@ impl Daemon {
         })
         .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                if answers_fault(&r) {
+                    let _ = self
+                        .shared
+                        .run(|core| {
+                            core.audit_opt("daemon.handler_error", json!({"error": PANIC_CLASS}))
+                        })
+                        .await;
+                }
+                r
+            }
             Err(fault) => {
                 let class = fault_class(fault.as_ref());
                 let _ = self

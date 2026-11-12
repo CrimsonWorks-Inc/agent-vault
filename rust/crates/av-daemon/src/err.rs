@@ -63,7 +63,21 @@ pub fn rule_of(e: &VaultError) -> Option<&str> {
     e.extra.rule.as_deref().filter(|s| !s.is_empty())
 }
 
-/// The internal error every JS handler turns a non-`VaultError` into.
+/// What the caller is told about a fault: the JS `#guard` sentence.
+pub const FAULT_DETAIL: &str = "the request could not be handled";
+
+/// The internal error every JS handler turns a non-`VaultError` into. The
+/// text says what went wrong inside (a store error can quote stored data),
+/// so it goes to stderr only, cut at 400 characters as `onProcessFault`
+/// does; the caller and the audit log see the generic sentence and the
+/// class.
 pub fn internal(detail: impl Into<String>) -> VaultError {
-    d(C::Internal, detail)
+    let text: String = detail.into().chars().take(400).collect();
+    eprintln!("agent-vault: handler error: {text}");
+    d(C::Internal, FAULT_DETAIL)
+}
+
+/// Whether `e` is a fault ([`internal`]) rather than a deliberate refusal.
+pub fn is_fault(e: &VaultError) -> bool {
+    e.code == C::Internal && e.detail == FAULT_DETAIL
 }

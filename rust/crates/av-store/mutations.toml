@@ -1002,3 +1002,12 @@ file = "src/vault.rs"
 from = '''    if busy != 0 {'''
 to = '''    if busy < 0 {'''
 test = "tests::review_store_1::"
+
+# A legacy health value of another shape reads as no health; JS lists the
+# credential with the value as it is.
+
+[[mutation]]
+name = 'a wrong-shape stored health value fails every query that lists the credential'
+file = "src/rows.rs"
+from = '''        health: health_opt(r.get(6)?),'''
+to = '''        health: parse_opt(r.get(6)?)?,'''
