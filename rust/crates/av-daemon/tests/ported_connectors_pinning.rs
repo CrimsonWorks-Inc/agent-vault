@@ -844,7 +844,6 @@ impl rcgen::PublicKeyData for PublicOnly {
     }
 }
 #[tokio::test]
-#[ignore = "pending daemon fix: pinning leaf issuer classification"]
 async fn copied_intermediate_public_key_cannot_sign_the_handshake_or_authorize_an_appended_leaf() {
     tokio::time::timeout(Duration::from_secs(40), async {
         let c = chain();

@@ -15308,3 +15308,111 @@ async fn connector_probe_malformed_persisted_pin_entries_fail_before_reading_loc
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn r1_direct_auto_writes_require_fresh_proof_but_ordinary_creates_only_need_window() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async{
+ let f=Fixture::new(&["header:x-key"]).await;let wide=json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"});let before=store_snapshot(&f).await;let(s,no)=credential_api(&f,"POST","/v1/sessions",wide.clone()).await;assert_eq!(s,401,"{no}");assert_eq!(no["code"],"AV_PRESENCE_REQUIRED");assert_eq!(no["rule"],"factor_required");assert_eq!(no["factors"],json!([]));assert!(no["hint"].as_str().unwrap().contains("agent-vault passphrase set"));assert_eq!(store_snapshot(&f).await,before);
+ for b in [json!({"cred":"demo","approval":"auto"}),json!({"cred":"demo","methods":["GET","POST"]})]{assert_eq!(credential_api(&f,"POST","/v1/sessions",b).await.0,200);}
+ credential_factor(&f).await;credential_gate(&f,true).await;let before=store_snapshot(&f).await;let(s,no)=credential_api(&f,"POST","/v1/sessions",wide.clone()).await;assert_eq!(s,401,"{no}");assert_eq!(no["rule"],"fresh_presence");assert_eq!(no["factors"],json!(["passphrase"]));assert_eq!(store_snapshot(&f).await,before);
+ let(s,ro)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","approval":"auto","methods":["GET","HEAD"]})).await;assert_eq!(s,200,"{ro}");assert!(audit_records(&f).await.iter().any(|r|r["kind"]=="presence.window_used"));let(_,listed)=credential_api(&f,"GET","/v1/sessions",json!({})).await;assert_eq!(listed.as_array().unwrap().iter().find(|r|r["id"]==ro["session_id"]).unwrap()["elevated"],json!([]));credential_gate(&f,false).await;let(s,no)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","approval":"auto"})).await;assert_eq!(s,401,"{no}");assert_eq!(no["rule"],"human_presence");
+ let mut with_proof=wide;with_proof["presence"]=json!({"passphrase":WIDEN_PASS});let(s,made)=credential_api(&f,"POST","/v1/sessions",with_proof).await;assert_eq!(s,200,"{made}");let policy=control_session_policy(&f,made["grant_id"].as_str().unwrap()).await;assert_eq!(policy["approval"],"auto");assert_eq!(policy["methods"],json!(["GET","POST"]));let records=audit_records(&f).await;let proof=records.iter().rev().find(|r|r["kind"]=="presence.verified"&&r["fresh"]==true).unwrap();assert_eq!(proof["op"],"session create");assert_eq!(proof["factor"],"passphrase");let(_,listed)=credential_api(&f,"GET","/v1/sessions",json!({})).await;let row=listed.as_array().unwrap().iter().find(|r|r["id"]==made["session_id"]).unwrap();assert_eq!(row["elevated"],json!(["approval_auto_writes"]));assert_eq!(row["infinite"],false);assert_eq!(row["creds"],json!([{"slug":"demo","grant_id":made["grant_id"],"approval":"auto","methods":["GET","POST"]}]));assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,401,"fresh proof must not open a window");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn r1_failed_elevated_passphrase_is_denied_and_counted_in_real_attempt_throttle() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let before=store_snapshot(&f).await;
+ for n in 1..=5{let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","methods":["GET","POST"],"approval":"auto","presence":{"passphrase":"not it at all"}})).await;assert_eq!(s,403,"attempt {n}: {v}");assert_eq!(v["code"],"AV_PRESENCE_DENIED");assert_eq!(v["rule"],"fresh_presence");}
+ assert_eq!(store_snapshot(&f).await,before);let rows=audit_records(&f).await;let record=rows.iter().find(|r|r["kind"]=="presence.throttled").unwrap();assert_eq!(record["consecutive_failures"],5);assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","methods":["POST"],"approval":"auto","presence":{"passphrase":"not it at all"}})).await.0,429);assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn r1_modes_and_malformed_limits_are_refused_before_creating_any_live_session() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;let before=store_snapshot(&f).await;
+ for approval in [json!("each-time"),json!("AUTO"),json!(""),json!(0)]{let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","approval":approval})).await;assert_eq!(s,403,"{v}");assert_eq!(v["code"],"AV_POLICY_DENIED");assert_eq!(v["rule"],"approval");assert_eq!(v["hint"],"approval is one of: each, on-write, first-use, auto");}
+ for body in [json!({"cred":"demo","methods":"POST"}),json!({"cred":"demo","methods":[1]}),json!({"cred":"demo","paths":"/x"}),json!({"cred":"demo","budget":"lots"}),json!({"cred":"demo","budget":-1}),json!({"cred":"demo","uses":0}),json!({"cred":"demo","label":"x".repeat(81)})]{let(s,v)=credential_api(&f,"POST","/v1/sessions",body).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"policy_invalid");}assert_eq!(store_snapshot(&f).await,before);
+ for approval in ["each","on-write","first-use","auto"]{assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","approval":approval})).await.0,200);}
+ let(s,ok)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","methods":["GET"],"paths":["/a/**"],"budget":1,"uses":2,"label":"fine"})).await;assert_eq!(s,200,"{ok}");let before=store_snapshot(&f).await;let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","budget":0})).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"budget");assert_eq!(store_snapshot(&f).await,before);assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn r1_signed_elevated_body_works_and_read_only_signature_cannot_authorize_writes() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let w = WidenFixture::new().await;
+        let wide = json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"});
+        let proof = w.proof("session.create", &wide).await;
+        let mut made = wide.clone();
+        made["presence"] = proof;
+        let (s, v) = w.ctl("POST", "/v1/sessions", made).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(audit_records(&w.f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "presence.verified"
+                && r["fresh"] == true
+                && r["factor"] == "webauthn-platform"));
+        let proof = w
+            .proof(
+                "session.create",
+                &json!({"cred":"demo","methods":["GET"],"approval":"auto"}),
+            )
+            .await;
+        let before = store_snapshot(&w.f).await;
+        let mut swapped = wide;
+        swapped["presence"] = proof;
+        let (s, v) = w.ctl("POST", "/v1/sessions", swapped).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "fresh_presence");
+        assert_eq!(store_snapshot(&w.f).await, before);
+        assert_eq!(
+            w.f.send(
+                "GET",
+                "/ordinary",
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                None
+            )
+            .await
+            .status,
+            200
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+
+async fn r1_ask(f: &Fixture, methods: Value) -> Value {
+    let (s, v) = credential_api(
+        f,
+        "POST",
+        "/v1/session-requests",
+        json!({"cred":"demo","methods":methods,"reason":"job"}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    v["id"].clone()
+}
+#[tokio::test]
+async fn r1_agent_owner_fields_are_rejected_on_control_and_mcp_without_opening_or_auditing() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+ for extra in [json!({"approval":"auto"}),json!({"infinite":true}),json!({"approval":null}),json!({"infinite":false})]{let mut b=json!({"cred":"demo","methods":["POST"],"reason":"x"});for(k,v)in extra.as_object().unwrap(){b[k]=v.clone();}let(s,v)=credential_api(&f,"POST","/v1/session-requests",b).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"owner_only_field");assert!(v["hint"].as_str().unwrap().contains("Only the owner can choose"));}
+ let(error,v)=control_mcp_call(&f,"vault_request_session",json!({"cred":"demo","methods":["POST"],"reason":"x","approval":"auto","infinite":true}),false).await;assert!(error,"{v}");assert_eq!(v["code"],"AV_POLICY_DENIED");assert_eq!(v["rule"],"owner_only_field");assert!(v.get("request_id").is_none());assert!(credential_api(&f,"GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().is_empty());assert!(!audit_records(&f).await.iter().any(|r|r["kind"]=="session_request.opened"));
+ let(s,ordinary)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["POST"],"reason":"x"})).await;assert_eq!(s,200,"{ordinary}");assert!(ordinary["proposal"].get("approval").is_none());
+ let(error,ok)=control_mcp_call(&f,"vault_request_session",json!({"cred":"demo","methods":["POST"],"reason":"different ordinary job"}),false).await;assert!(!error,"{ok}");let(_,rows)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;let record=rows.as_array().unwrap().iter().find(|r|r["id"]==ok["request_id"]).unwrap();for field in ["approval","infinite"]{assert!(record["proposal"].get(field).is_none());}credential_gate(&f,true).await;let(s,approved)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":ok["request_id"],"granted":true})).await;assert_eq!(s,200,"{approved}");assert_eq!(control_session_policy(&f,approved["session"]["grant_id"].as_str().unwrap()).await["approval"],"on-write");assert_eq!(approved["session"]["infinite"],false);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn r1_gateway_mutation_paths_never_create_sessions_even_with_passphrase_in_body() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let before=store_snapshot(&f).await;for path in ["/v1/sessions","/v1/session-requests/decide","/v1/pending/decide-many","/v1/placeholders/batch"]{let(s,_,body)=loopback_http(f.daemon.gateway_port().unwrap(),"POST",path,vec![("content-type".into(),"application/json".into())],json!({"cred":"demo","methods":["GET","POST"],"approval":"auto","infinite":true,"presence":{"passphrase":WIDEN_PASS}}).to_string().into_bytes()).await;assert!([401,404].contains(&s),"{path}: {s} {}",String::from_utf8_lossy(&body));}assert_eq!(store_snapshot(&f).await,before);assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn r1_single_decisions_bind_owner_changes_and_reject_nonboolean_verdicts_before_presence() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let id=r1_ask(&f,json!(["GET","POST"])).await;credential_gate(&f,true).await;let overrides=json!({"approval":"auto","methods":["POST"]});let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":overrides})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"fresh_presence");let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;assert_eq!(pending[0]["state"],"pending");let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":overrides,"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert!(v["session"]["token"].as_str().unwrap().starts_with("avs1."));assert_eq!(control_session_policy(&f,v["session"]["grant_id"].as_str().unwrap()).await["approval"],"auto");let rows=audit_records(&f).await;let row=rows.iter().find(|r|r["kind"]=="session_request.approved"&&r["request_id"]==id).unwrap();for field in ["granted","narrowed"]{assert!(row[field].as_array().unwrap().contains(&json!("approval")));}
+ let id=r1_ask(&f,json!(["GET"])).await;credential_gate(&f,false).await;let before=store_snapshot(&f).await;for window in [false,true]{if window{credential_gate(&f,true).await;}for verdict in [Some(json!("false")),Some(json!(0)),Some(json!(1)),Some(Value::Null),Some(json!("true")),None]{let mut b=json!({"id":id});if let Some(v)=verdict{b["granted"]=v;}let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",b).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"bulk_decision");}}assert_eq!(store_snapshot(&f).await,before);
+ let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":{"approval":"yolo"}})).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"approval");assert_eq!(credential_api(&f,"GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().iter().find(|r|r["id"]==id).unwrap()["state"],"pending");
+ let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":{"approval":"each"}})).await;assert_eq!(s,200,"{v}");assert_eq!(control_session_policy(&f,v["session"]["grant_id"].as_str().unwrap()).await["approval"],"each");let id=r1_ask(&f,json!(["GET"])).await;let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":false,"overrides":{"approval":"auto"}})).await;assert_eq!(s,200,"{v}");assert_eq!(f.shared.run(move|c|c.sr_get(id.as_str().unwrap()).unwrap().state).await.unwrap(),"denied");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn r1_bulk_one_elevated_item_requires_fresh_proof_for_all_and_ordinary_batch_uses_window() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let plain=r1_ask(&f,json!(["GET"])).await;let wide=r1_ask(&f,json!(["GET","POST"])).await;let decisions=json!([{"id":plain,"kind":"session","granted":true},{"id":wide,"kind":"session","granted":true,"overrides":{"approval":"auto"}}]);credential_gate(&f,true).await;let before=store_snapshot(&f).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":decisions})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"fresh_presence");assert_eq!(store_snapshot(&f).await,before);let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;for id in [&plain,&wide]{assert_eq!(pending.as_array().unwrap().iter().find(|r|r["id"]==*id).unwrap()["state"],"pending");}
+ let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":decisions,"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(v["decided"].as_array().unwrap().iter().map(|r|r["outcome"].as_str().unwrap()).collect::<Vec<_>>(),vec!["decided","decided"]);let a=r1_ask(&f,json!(["GET"])).await;let b=r1_ask(&f,json!(["GET"])).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":a,"kind":"session","granted":true},{"id":b,"kind":"session","granted":false,"overrides":{"approval":"auto"}}]})).await;assert_eq!(s,200,"{v}");assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}

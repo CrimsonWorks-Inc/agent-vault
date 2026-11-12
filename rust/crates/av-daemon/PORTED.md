@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 675 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 105 CLI-only, 4 not applicable, **398 not yet ported**.
+Totals: 1207 JS tests: 697 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 110 CLI-only, 4 not applicable, **371 not yet ported**.
 
 ## Mutation check
 
@@ -76,7 +76,7 @@ the vault on every call instead of caching an audit handle.
 | connectors-pinning.test.js | V-L1: an exact leaf pin stands in for CA trust, for a self-signed leaf and an untrusted chain | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http; ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates; ported_connectors_pinning::trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_secret_send` |
 | connectors-pinning.test.js | V-L2: a pinned self-signed leaf for another host name is refused, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
 | connectors-pinning.test.js | V-L3: a self-signed leaf whose pin is not on the list is refused, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
-| connectors-pinning.test.js | V-L4: a leaf copying the pinned intermediate's key cannot finish a handshake, and the handshake leaf is the one checked | not yet ported (production mismatch, fix pending: JS DEPTH_ZERO_SELF_SIGNED_CERT versus Rust UNABLE_TO_VERIFY_LEAF_SIGNATURE; `ported_connectors_pinning::copied_intermediate_public_key_cannot_sign_the_handshake_or_authorize_an_appended_leaf`, temporarily ignored by coordinator instruction) |
+| connectors-pinning.test.js | V-L4: a leaf copying the pinned intermediate's key cannot finish a handshake, and the handshake leaf is the one checked | `ported_connectors_pinning::copied_intermediate_public_key_cannot_sign_the_handshake_or_authorize_an_appended_leaf` |
 | connectors-pinning.test.js | V-L5: a pinned self-signed leaf out of date is refused with AV_PIN_MISMATCH, and nothing is sent | `ported_connectors_pinning::leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_before_http` |
 | connectors-pinning.test.js | a pinned, trusted certificate for another host name is refused, and nothing is sent | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
 | connectors-pinning.test.js | V-P1: a forged leaf plus the real intermediate does not satisfy an intermediate pin | `ported_connectors_pinning::nonleaf_pins_cannot_replace_ca_trust_or_admit_forged_and_unlinked_certificates` |
@@ -1017,32 +1017,32 @@ the vault on every call instead of caching an audit handle.
 | requested-c3.test.js | an approved request records the elevation of what the owner approved | not yet ported |
 | requested-c3.test.js | a bulk decision records each session's own elevation, not the batch's | not yet ported |
 | requested-c3.test.js | an elevation the store does not know is refused, and nothing is written | not yet ported |
-| requested-r1.test.js | elevationOf names auto with a write method, and nothing ordinary | not yet ported |
-| requested-r1.test.js | elevationOf fails closed on anything it cannot read | not yet ported |
-| requested-r1.test.js | elevationOf fails closed on an unreadable list whatever the approval mode | not yet ported |
-| requested-r1.test.js | owner fields are read by one parser, and the CLI parse feeds it | not yet ported |
-| requested-r1.test.js | auto with writes is refused inside an open window without a fresh proof | not yet ported |
-| requested-r1.test.js | auto with writes is created with the passphrase in the request, and audited as fresh | not yet ported |
-| requested-r1.test.js | a wrong passphrase for an elevated session is refused, and counted | not yet ported |
-| requested-r1.test.js | read-only auto is not elevated: the window is enough, and nobody is asked again | not yet ported |
-| requested-r1.test.js | a vault with no factor refuses auto with writes, and still makes ordinary sessions | not yet ported |
-| requested-r1.test.js | an authenticator assertion over the exact body creates an elevated session | not yet ported |
-| requested-r1.test.js | an unknown approval mode is refused, never read as auto | not yet ported |
-| requested-r1.test.js | malformed limits are refused before anything is created | not yet ported |
-| requested-r1.test.js | a session request that names an owner field is refused, not trimmed | not yet ported |
-| requested-r1.test.js | the request store refuses an owner field from any caller | not yet ported |
-| requested-r1.test.js | MCP cannot carry an owner field into a request | `tests::control::hardening_a_session_request_cannot_carry_an_owner_field` |
-| requested-r1.test.js | the gateway has no route that creates a session | not yet ported |
-| requested-r1.test.js | approving a request into auto with writes needs a fresh proof, not the window | not yet ported |
-| requested-r1.test.js | a request approved without owner options stays ordinary, inside the window | not yet ported |
-| requested-r1.test.js | a verdict that is not true or false is refused on the single decide route | not yet ported |
-| requested-r1.test.js | an override with an unknown mode is refused when it is settled | not yet ported |
-| requested-r1.test.js | a bulk decision with one elevated item needs a fresh proof for the whole list | not yet ported |
-| requested-r1.test.js | the CLI refuses a mode it does not know before it calls anything | not yet ported |
-| requested-r1.test.js | the CLI says what to do when auto with writes cannot be proved | not yet ported |
-| requested-r1.test.js | the CLI exits with the refusal code’s own exit status | not yet ported |
-| requested-r1.test.js | approvals offers the owner options, and approve validates them | not yet ported |
-| requested-r1.test.js | the help text documents how to start an auto-approving session | not yet ported |
+| requested-r1.test.js | elevationOf names auto with a write method, and nothing ordinary | `ported_requested::r1_elevation_names_only_auto_writes_and_infinite_with_ordinary_controls` |
+| requested-r1.test.js | elevationOf fails closed on anything it cannot read | `ported_requested::r1_unreadable_specs_and_lists_elevate_independently_of_approval_mode` |
+| requested-r1.test.js | elevationOf fails closed on an unreadable list whatever the approval mode | `ported_requested::r1_unreadable_specs_and_lists_elevate_independently_of_approval_mode` |
+| requested-r1.test.js | owner fields are read by one parser, and the CLI parse feeds it | `ported_requested::r1_owner_options_share_parser_and_direct_request_store_never_accepts_them` |
+| requested-r1.test.js | auto with writes is refused inside an open window without a fresh proof | `ported_gateway_core::r1_direct_auto_writes_require_fresh_proof_but_ordinary_creates_only_need_window` |
+| requested-r1.test.js | auto with writes is created with the passphrase in the request, and audited as fresh | `ported_gateway_core::r1_direct_auto_writes_require_fresh_proof_but_ordinary_creates_only_need_window` |
+| requested-r1.test.js | a wrong passphrase for an elevated session is refused, and counted | `ported_gateway_core::r1_failed_elevated_passphrase_is_denied_and_counted_in_real_attempt_throttle` |
+| requested-r1.test.js | read-only auto is not elevated: the window is enough, and nobody is asked again | `ported_gateway_core::r1_direct_auto_writes_require_fresh_proof_but_ordinary_creates_only_need_window` |
+| requested-r1.test.js | a vault with no factor refuses auto with writes, and still makes ordinary sessions | `ported_gateway_core::r1_direct_auto_writes_require_fresh_proof_but_ordinary_creates_only_need_window` |
+| requested-r1.test.js | an authenticator assertion over the exact body creates an elevated session | `ported_gateway_core::r1_signed_elevated_body_works_and_read_only_signature_cannot_authorize_writes` |
+| requested-r1.test.js | an unknown approval mode is refused, never read as auto | `ported_gateway_core::r1_modes_and_malformed_limits_are_refused_before_creating_any_live_session` |
+| requested-r1.test.js | malformed limits are refused before anything is created | `ported_gateway_core::r1_modes_and_malformed_limits_are_refused_before_creating_any_live_session` |
+| requested-r1.test.js | a session request that names an owner field is refused, not trimmed | `ported_gateway_core::r1_agent_owner_fields_are_rejected_on_control_and_mcp_without_opening_or_auditing` |
+| requested-r1.test.js | the request store refuses an owner field from any caller | `ported_requested::r1_owner_options_share_parser_and_direct_request_store_never_accepts_them` |
+| requested-r1.test.js | MCP cannot carry an owner field into a request | `ported_gateway_core::r1_agent_owner_fields_are_rejected_on_control_and_mcp_without_opening_or_auditing` |
+| requested-r1.test.js | the gateway has no route that creates a session | `ported_gateway_core::r1_gateway_mutation_paths_never_create_sessions_even_with_passphrase_in_body` |
+| requested-r1.test.js | approving a request into auto with writes needs a fresh proof, not the window | `ported_gateway_core::r1_single_decisions_bind_owner_changes_and_reject_nonboolean_verdicts_before_presence` |
+| requested-r1.test.js | a request approved without owner options stays ordinary, inside the window | `ported_gateway_core::r1_single_decisions_bind_owner_changes_and_reject_nonboolean_verdicts_before_presence` |
+| requested-r1.test.js | a verdict that is not true or false is refused on the single decide route | `ported_gateway_core::r1_single_decisions_bind_owner_changes_and_reject_nonboolean_verdicts_before_presence` |
+| requested-r1.test.js | an override with an unknown mode is refused when it is settled | `ported_gateway_core::r1_single_decisions_bind_owner_changes_and_reject_nonboolean_verdicts_before_presence` |
+| requested-r1.test.js | a bulk decision with one elevated item needs a fresh proof for the whole list | `ported_gateway_core::r1_bulk_one_elevated_item_requires_fresh_proof_for_all_and_ordinary_batch_uses_window` |
+| requested-r1.test.js | the CLI refuses a mode it does not know before it calls anything | av-cli |
+| requested-r1.test.js | the CLI says what to do when auto with writes cannot be proved | av-cli |
+| requested-r1.test.js | the CLI exits with the refusal code’s own exit status | av-cli |
+| requested-r1.test.js | approvals offers the owner options, and approve validates them | av-cli |
+| requested-r1.test.js | the help text documents how to start an auto-approving session | av-cli |
 | requested-r2.test.js | a new file is created 0600 even under umask 000, and an existing one is refused | av-cli |
 | requested-r2.test.js | a symlink is never followed, with or without force | av-cli |
 | requested-r2.test.js | force replaces a regular file atomically and leaves it 0600 | av-cli |
