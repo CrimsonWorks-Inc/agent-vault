@@ -105,7 +105,12 @@ port, so the conformance suite stays a pure equivalence check.
   Node.
 - **History pruning**: revoked or expired sessions and their grants are
   deleted after a retention window (default 30 days, setting
-  `retention_days`). The audit log keeps their history.
+  `retention_days`). The audit log keeps their history, and each pruning
+  pass writes one new audit record, `history.pruned`
+  `{sessions, grants, placeholders, retention_days}`.
+- **Audit storage**: audit records live in an insert-only `audit` table in
+  `vault.db`, written in the same transaction as the change they record; the
+  authenticated head anchor stays a separate file, `vault.db.head`.
 - README "Honest limits" is updated to match.
 
 ## Layout and ownership
@@ -193,6 +198,12 @@ credentials. `#![forbid(unsafe_code)]` everywhere else.
   30 s).
 - Backups: restore v1 (scrypt + ChaCha20) and v2; export v2 (Argon2id
   m = 256 MiB, t = 3, p = 1, XChaCha20).
+- Error `next` is **either a string or an object** exactly as the JS sends
+  it (`{cli: [...], mcp: {tool, args?}}`), serialized identically; agents
+  act on it. av-core's error type carries it as such.
+- Tests may use cheaper Argon2id parameters under `cfg(test)` (parameters are
+  stored beside each wrap, so production paths are unchanged), but at least
+  one test derives with the production parameters.
 - Secrets live in `Zeroizing`/`SecretBox` types; nothing that holds a secret
   implements `Debug` or `Display` with its contents. Comparisons of MACs,
   tokens and placeholders use constant-time equality.

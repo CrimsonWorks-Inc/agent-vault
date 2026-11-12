@@ -68,3 +68,14 @@ assert_cmd = "2.2"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# KDFs are deliberately slow; unoptimized they make tests take minutes.
+# Optimizing these packages in dev/test builds changes no behavior.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
