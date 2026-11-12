@@ -159,3 +159,77 @@ proptest! {
     #[test]
     fn secret_never_survives_stream(secret in "test-secret-[a-zA-Z0-9]{8,30}",size in 1usize..80){let entry=[ScrubEntry{secret:secret.clone().into(),label:"fake".into(),replacement:Some("<REDACTED>".into()),always:false}];for encoded in encodings(&secret.clone().into(),8){let text=format!("ordinary {} tail",encoded.expose_secret());let mut scrub=Scrubber::new(&entry,&Default::default()).unwrap();let whole=scrub.scrub(&text).text;let mut stream=scrub.stream();let mut out=String::new();for c in text.as_bytes().chunks(size){out+=&stream.push(std::str::from_utf8(c).unwrap());}out+=&stream.flush();prop_assert!(!out.contains(&secret));prop_assert_eq!(out,whole);}}
 }
+#[test]
+fn stream_cut_regressions_with_ordinary_controls() {
+    let entry = [ScrubEntry {
+        secret: "test-secret-fake/value".to_owned().into(),
+        label: "fake".into(),
+        replacement: Some("<REDACTED>".into()),
+        always: false,
+    }];
+    let escaped = "\\u0074est-secret-fake/value";
+    let token = format!("sk-{}", "a".repeat(200));
+    let unicode = ScrubEntry {
+        secret: "test-café-秘密".to_owned().into(),
+        label: "unicode".into(),
+        replacement: Some("<UNICODE>".into()),
+        always: false,
+    };
+    let latin: String = "test-café-秘密".bytes().map(char::from).collect();
+    for payload in [
+        escaped.to_owned(),
+        "\\u0074est-secret-fake\\/value".into(),
+        token,
+        "test-secret-fake/value".into(),
+        latin,
+    ] {
+        for prefix in [0, 30, 70, 130, 200] {
+            let text = format!("{} {payload} {}", "!".repeat(prefix), "!".repeat(200));
+            let mut s =
+                Scrubber::new(&[entry[0].clone(), unicode.clone()], &Default::default()).unwrap();
+            let whole = s.scrub(&text).text;
+            let chars: Vec<_> = text.chars().collect();
+            let mut stream = s.stream();
+            let mut out = String::new();
+            for chunk in chars.chunks(37) {
+                out += &stream.push(&chunk.iter().collect::<String>());
+            }
+            out += &stream.flush();
+            assert_eq!(out, whole, "prefix={prefix} payload={payload}");
+        }
+    }
+    let ordinary = "ordinary disk-usage_by_repository_over_time";
+    assert_eq!(
+        Scrubber::new(&entry, &Default::default())
+            .unwrap()
+            .scrub(ordinary)
+            .text,
+        ordinary
+    );
+}
+#[test]
+fn stream_extra_pattern_hold_and_cut() {
+    let options = ScrubberOptions {
+        extra_patterns: vec![ExtraPattern {
+            name: "test-extra".into(),
+            source: "abc[A-Z]{250}END".into(),
+        }],
+        ..Default::default()
+    };
+    let token = format!("abc{}END", "A".repeat(250));
+    for prefix in [0, 1, 60, 100, 200, 300] {
+        for chunk_size in [63, 100, 200, 400] {
+            let text = format!("{} {token} {}", "!".repeat(prefix), "!".repeat(700));
+            let mut s = Scrubber::new(&[], &options).unwrap();
+            let whole = s.scrub(&text).text;
+            assert!(whole.contains("[[av:derived]]"));
+            let mut stream = s.stream();
+            let mut out = String::new();
+            for chunk in text.as_bytes().chunks(chunk_size) {
+                out += &stream.push(std::str::from_utf8(chunk).unwrap());
+            }
+            out += &stream.flush();
+            assert_eq!(out, whole, "prefix={prefix} chunk={chunk_size}");
+        }
+    }
+}

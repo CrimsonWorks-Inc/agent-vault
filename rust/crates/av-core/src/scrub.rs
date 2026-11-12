@@ -338,7 +338,6 @@ pub type ScrubSpan = (usize, usize, String);
 
 /// One needle: an encoding of a secret and its replacement. Ports the
 /// `{ needle, replacement }` entries of `src/core/scrub.js`.
-
 #[allow(dead_code)]
 #[derive(Clone)]
 struct Needle {
@@ -348,7 +347,6 @@ struct Needle {
 
 /// The streaming scrubber. Ports `class Scrubber` in `src/core/scrub.js`.
 /// Holds secret material, so it has no `Debug` of its contents.
-
 #[allow(dead_code)]
 pub struct Scrubber {
     /// Recompiled extra patterns (`extraPatterns`).
@@ -609,7 +607,6 @@ impl Scrubber {
 /// [`ScrubStream::flush`] returns the tail. Ports the object returned by
 /// `Scrubber#stream` in `src/core/scrub.js`. The held tail may contain secret
 /// material, so `Debug` is redacted.
-
 #[allow(dead_code)]
 pub struct ScrubStream<'a> {
     scrubber: &'a mut Scrubber,
@@ -735,6 +732,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
     if chars.iter().any(|c| (*c as u32) < 32 || *c == '\u{7f}') {
         return Err(scrub_bad("control characters are not allowed"));
     }
+    let quantifier_re = regex::Regex::new(r"^\{(\d{1,3})(?:,(\d{0,3}))?\}").expect("quantifier");
     let mut i = 0;
     let mut branches = 0;
     let mut max_len = 0;
@@ -817,7 +815,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
                 }
             } else if chars.get(i) == Some(&'{') {
                 let tail: String = chars[i..].iter().collect();
-                let re = regex::Regex::new(r"^\{(\d{1,3})(?:,(\d{0,3}))?\}").expect("quantifier");
+                let re = &quantifier_re;
                 let m = re
                     .captures(&tail)
                     .ok_or_else(|| scrub_bad("a quantifier must be {n} or {n,m}"))?;
@@ -885,9 +883,34 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
         }
     }
     // JS character classes are ASCII for \d and \w; keep that property.
-    let normalized = source
-        .replace(r"\d", "[0-9]")
-        .replace(r"\w", "[A-Za-z0-9_]");
+    let mut normalized = String::new();
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            normalized.push(c);
+            continue;
+        }
+        let e = chars.next().expect("validated escape");
+        let class = match e {
+            'd' => Some("[0-9]"),
+            'D' => Some("[^0-9]"),
+            'w' => Some("[A-Za-z0-9_]"),
+            'W' => Some("[^A-Za-z0-9_]"),
+            's' => Some(
+                r"[\x09-\x0d\x20\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
+            ),
+            'S' => Some(
+                r"[^\x09-\x0d\x20\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}]",
+            ),
+            _ => None,
+        };
+        if let Some(class) = class {
+            normalized.push_str(class);
+        } else {
+            normalized.push('\\');
+            normalized.push(e);
+        }
+    }
     let regex =
         regex::Regex::new(&normalized).map_err(|_| scrub_bad("it is not a valid expression"))?;
     for line in std::iter::once("").chain(SCRUB_PATTERN_CORPUS.iter().copied()) {
@@ -1137,7 +1160,9 @@ fn collect(scrubber: &Scrubber, text: &str) -> (Vec<ScrubSpan>, bool) {
                     2 => decode_b64(s),
                     _ => s
                         .as_bytes()
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|pair| {
                             char::from(
                                 u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap(),

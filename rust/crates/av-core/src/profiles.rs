@@ -467,7 +467,8 @@ fn parse_expiry(raw: &str) -> Option<String> {
                 n(6).unwrap_or(0),
                 c.get(8).map(|m| m.as_str()).unwrap_or("Z").to_owned(),
             )
-        } else if let Some(c) = rfc.captures(s) {
+        } else {
+            let c = rfc.captures(s)?;
             let n = |i: usize| c[i].parse::<i32>().ok();
             (
                 n(3)?,
@@ -478,8 +479,6 @@ fn parse_expiry(raw: &str) -> Option<String> {
                 n(6)?,
                 "Z".into(),
             )
-        } else {
-            return None;
         };
     // Date.UTC treats years 0..99 as 1900..1999, which fails JS's roundtrip.
     if year < 100 {

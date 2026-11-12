@@ -37,7 +37,13 @@ impl HitEncoding {
     /// The JS string, e.g. `"percent-double"`. Ports the `encoding` values in
     /// `src/core/detect.js`.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            Self::Raw => "raw",
+            Self::Percent => "percent",
+            Self::PercentDouble => "percent-double",
+            Self::JsonEscape => "json-escape",
+            Self::Base64 => "base64",
+        }
     }
 }
 
@@ -67,20 +73,64 @@ pub struct Base64Run {
 /// and maps each decoded byte to the char of the same code (latin1), as
 /// `String.fromCharCode` does. Ports `percentDecode` in `src/core/detect.js`.
 pub fn percent_decode(s: &str) -> String {
-    todo!()
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'%' && i + 2 < s.len() {
+            if let Ok(h) = u8::from_str_radix(s.get(i + 1..i + 3).unwrap_or(""), 16) {
+                out.push(char::from(h));
+                i += 3;
+                continue;
+            }
+        }
+        let c = s[i..].chars().next().expect("character");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
 }
 
 /// Undo the JSON string escapes that can hide a placeholder: `\uXXXX` and
 /// `\/`. Ports `jsonUnescape` in `src/core/detect.js`.
 pub fn json_unescape(s: &str) -> String {
-    todo!()
+    let mut units = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with("\\u") && i + 6 <= s.len() {
+            if let Ok(h) = u16::from_str_radix(s.get(i + 2..i + 6).unwrap_or(""), 16) {
+                units.push(h);
+                i += 6;
+                continue;
+            }
+        }
+        let c = s[i..].chars().next().expect("character");
+        let mut b = [0; 2];
+        units.extend_from_slice(c.encode_utf16(&mut b));
+        i += c.len_utf8();
+    }
+    String::from_utf16_lossy(&units).replace("\\/", "/")
 }
 
 /// Every maximal run of base64-ish characters at least `min` long (the JS
 /// default is [`crate::placeholder::B64_MIN_RUN`]). Ports `base64Runs` in
 /// `src/core/detect.js`.
 pub fn base64_runs(s: &str, min: usize) -> Vec<Base64Run> {
-    todo!()
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, b) in s.bytes().chain(std::iter::once(b' ')).enumerate() {
+        let yes = b.is_ascii_alphanumeric() || b"+/=_-".contains(&b);
+        if yes {
+            start.get_or_insert(i);
+        } else if let Some(begin) = start.take() {
+            if i - begin >= min {
+                out.push(Base64Run {
+                    start: begin,
+                    text: s[begin..i].into(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Every placeholder in `text`, in any encoding (raw, percent, double
@@ -88,11 +138,99 @@ pub fn base64_runs(s: &str, min: usize) -> Vec<Base64Run> {
 /// including whitespace-wrapped base64), de-duplicated. Ports `detectAll` in
 /// `src/core/detect.js`.
 pub fn detect_all(text: &str) -> Vec<DetectHit> {
-    todo!()
+    use crate::placeholder::{find_all, B64_MIN_RUN};
+    let mut hits = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |s: &str, encoding: HitEncoding| {
+        for parsed in find_all(s) {
+            let key = (
+                encoding,
+                parsed.text.clone(),
+                if encoding == HitEncoding::Raw {
+                    parsed.offset
+                } else {
+                    0
+                },
+            );
+            if seen.insert(key) {
+                hits.push(DetectHit { parsed, encoding });
+            }
+        }
+    };
+    push(text, HitEncoding::Raw);
+    let pct1 = percent_decode(text);
+    if pct1 != text {
+        push(&pct1, HitEncoding::Percent);
+        let pct2 = percent_decode(&pct1);
+        if pct2 != pct1 {
+            push(&pct2, HitEncoding::PercentDouble);
+        }
+    }
+    let unescaped = json_unescape(text);
+    if unescaped != text {
+        push(&unescaped, HitEncoding::JsonEscape);
+    }
+    let mut variants = vec![text.to_owned(), pct1, unescaped];
+    let re = regex::Regex::new(r"\\[nrtbf]|\s+").expect("fixed pattern");
+    for v in variants.clone() {
+        let folded = re.replace_all(&v, "").into_owned();
+        if folded != v {
+            variants.push(folded);
+        }
+    }
+    let mut unique = std::collections::HashSet::new();
+    for v in variants {
+        if !unique.insert(v.clone()) {
+            continue;
+        }
+        for run in base64_runs(&v, B64_MIN_RUN) {
+            for decoded in base64_decodings(&run.text) {
+                push(&decoded, HitEncoding::Base64);
+            }
+        }
+    }
+    hits
 }
 
 /// True when any encoding other than raw text carried a placeholder. Ports
 /// `hasEncodedHit` in `src/core/detect.js`.
 pub fn has_encoded_hit(hits: &[DetectHit]) -> bool {
-    todo!()
+    hits.iter().any(|h| h.encoding != HitEncoding::Raw)
+}
+
+// Node Buffer base64 decoding is tolerant of padding and unused trailing bits.
+pub(crate) fn base64_decodings(run: &str) -> Vec<String> {
+    use base64::{
+        alphabet,
+        engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
+        Engine,
+    };
+    let engine = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::Indifferent),
+    );
+    let normalized = run.replace('-', "+").replace('_', "/");
+    let mut out = Vec::new();
+    for skip in 0..4 {
+        let Some(s) = normalized.get(skip..) else {
+            continue;
+        };
+        let mut s = s.trim_end_matches('=').to_owned();
+        if s.len() < 8 {
+            continue;
+        }
+        if s.len() % 4 == 1 {
+            s.pop();
+        }
+        s.extend(std::iter::repeat_n('=', (4 - s.len() % 4) % 4));
+        if let Ok(bytes) = engine.decode(&s) {
+            let text: String = bytes.into_iter().map(char::from).collect();
+            if text.contains(crate::placeholder::PREFIX) {
+                out.push(text);
+            }
+        }
+    }
+    out
 }

@@ -1,0 +1,134 @@
+use av_core::{detect::*, request_view::*, sites::*, substitute::*};
+use serde_json::{json, Value as V};
+fn fixture() -> V {
+    serde_json::from_str(include_str!("fixtures/traffic-vectors.json")).unwrap()
+}
+fn request(v: &V) -> ProxyRequest {
+    ProxyRequest {
+        method: v["method"].as_str().unwrap_or("GET").into(),
+        path: v["path"].as_str().unwrap_or("").into(),
+        query: v["query"].as_str().unwrap_or("").into(),
+        headers: serde_json::from_value(v["headers"].clone()).unwrap(),
+        body: v["body"].as_str().map(|s| s.as_bytes().to_vec()),
+    }
+}
+fn serial_req(r: &ProxyRequest) -> V {
+    json!({"method":r.method,"path":r.path,"query":r.query,"headers":r.headers,"body":r.body.as_ref().map(|b|String::from_utf8_lossy(b).into_owned())})
+}
+#[test]
+fn js_detector_vectors() {
+    for c in fixture()["detect"].as_array().unwrap() {
+        let hits = detect_all(c["text"].as_str().unwrap());
+        let actual: Vec<_> = hits
+            .iter()
+            .map(|h| json!({"text":h.parsed.text,"encoding":h.encoding.as_str()}))
+            .collect();
+        assert_eq!(json!(actual), c["hits"], "{c}");
+        assert_eq!(
+            has_encoded_hit(&hits),
+            hits.iter().any(|h| h.encoding != HitEncoding::Raw)
+        );
+    }
+}
+#[test]
+fn js_substitution_vectors() {
+    for c in fixture()["substitute"].as_array().unwrap() {
+        let req = request(&c["req"]);
+        let found = locate(&req);
+        let actual: Vec<_> = found
+            .occurrences
+            .iter()
+            .map(|o| {
+                let mut loc = serde_json::to_value(&o.location).unwrap();
+                if o.location.region == Region::Header
+                    && !loc.as_object().unwrap().contains_key("scheme")
+                {
+                    loc["scheme"] = V::Null;
+                }
+                json!({"text":o.text,"location":loc})
+            })
+            .collect();
+        assert_eq!(json!(actual), c["occurrences"], "{}", c["req"]);
+        for a in c["applied"].as_array().unwrap() {
+            let loc = serde_json::from_value(a["location"].clone()).unwrap();
+            let out = apply(
+                &req,
+                &loc,
+                fixture()["ph"].as_str().unwrap(),
+                &"test-secret-FAKE/+é".to_owned().into(),
+            )
+            .unwrap();
+            assert_eq!(serial_req(&out), a["out"], "{a}");
+        }
+        assert_eq!(serial_req(&req), c["req"]);
+    }
+}
+#[test]
+fn js_request_view_vectors() {
+    for c in fixture()["views"].as_array().unwrap() {
+        let r = request(&c["input"]);
+        let v = request_view(&RequestInput {
+            method: Some(&r.method),
+            query: Some(&r.query),
+            headers: &r.headers,
+            body: r.body.as_deref(),
+            content_type: None,
+        });
+        let params: Vec<_> = v
+            .params
+            .iter()
+            .map(|p| json!({"rawName":p.raw_name,"name":p.name,"value":p.value}))
+            .collect();
+        let actual = json!({"method":v.method,"query":v.query,"params":params,"semicolon":v.semicolon,"unsendable":v.unsendable,"strayName":v.stray_name,"headers":v.headers,"body":v.body.map(|b|String::from_utf8_lossy(b).into_owned()),"contentType":v.content_type,"mediaType":v.media_type,"overrides":{"headers":v.overrides.headers,"fields":v.overrides.fields}});
+        assert_eq!(actual, c["out"], "{c}");
+    }
+    for n in fixture()["names"].as_array().unwrap() {
+        let s = n["name"].as_str().unwrap();
+        assert_eq!(json!(folded_names(s)), n["folded"]);
+        assert_eq!(json!(list_base(s)), n["base"]);
+        assert_eq!(is_override_field(s), n["override"].as_bool().unwrap());
+        assert_eq!(is_stray_key(s), n["strayKey"].as_bool().unwrap());
+        assert_eq!(is_stray_name(s), n["strayName"].as_bool().unwrap());
+    }
+}
+#[test]
+fn encoded_locations_refuse_and_raw_controls_match() {
+    let ph = fixture()["ph"].as_str().unwrap().to_owned();
+    let req = ProxyRequest {
+        headers: vec![("X-Api-Key".into(), ph)],
+        ..Default::default()
+    };
+    let hit = locate(&req).occurrences.remove(0);
+    let site = parse_site("header:x-api-key").unwrap();
+    assert!(matches_site(&hit.location, &site));
+    for encoding in [
+        HitEncoding::Percent,
+        HitEncoding::PercentDouble,
+        HitEncoding::JsonEscape,
+        HitEncoding::Base64,
+    ] {
+        let mut loc = hit.location.clone();
+        loc.encoding = encoding;
+        assert!(!matches_site(&loc, &site));
+    }
+    assert!(unsubstituted(&req, &[hit.parsed.nonce.clone()]).is_some());
+    let out = apply(
+        &req,
+        &hit.location,
+        &hit.text,
+        &"test-secret-fake".to_owned().into(),
+    )
+    .unwrap();
+    assert!(unsubstituted(&out, &[hit.parsed.nonce]).is_none());
+}
+use proptest::prelude::*;
+proptest! {
+ #[test]fn detector_encodings_at_every_alignment(pad in 0usize..20,width in 1usize..80){use base64::Engine;let p=fixture()["ph"].as_str().unwrap().to_owned();let encoded=base64::engine::general_purpose::STANDARD.encode(format!("{}{p}","x".repeat(pad)));let wrapped=encoded.as_bytes().chunks(width).map(|c|std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join("\n");prop_assert!(detect_all(&wrapped).iter().any(|h|h.parsed.text==p&&h.encoding==HitEncoding::Base64));}
+}
+#[test]
+fn detector_pathological_input_linear_bound() {
+    let s = format!("{}{}", "av1.".repeat(20000), "a".repeat(200000));
+    let start = std::time::Instant::now();
+    assert!(detect_all(&s).is_empty());
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+}

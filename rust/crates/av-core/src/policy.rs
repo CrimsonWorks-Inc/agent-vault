@@ -1456,9 +1456,7 @@ fn intersect_raw(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Va
     let min = |a: &V, b: &V| {
         if a.is_null() {
             b.clone()
-        } else if b.is_null() {
-            a.clone()
-        } else if a.as_f64() <= b.as_f64() {
+        } else if b.is_null() || a.as_f64() <= b.as_f64() {
             a.clone()
         } else {
             b.clone()
@@ -1576,7 +1574,8 @@ fn intersect_raw(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Va
             out.insert(key.into(), v);
         }
     }
-    for key in ["max_concurrent"] {
+    {
+        let key = "max_concurrent";
         let v = min(&a[key], &b[key]);
         if !v.is_null() {
             out.insert(key.into(), v);
