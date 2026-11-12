@@ -2493,7 +2493,9 @@ impl Core {
             injected.push(ScrubEntry {
                 secret: SecretString::from(secret.expose_secret().to_string()),
                 label: cred.slug.clone(),
-                replacement: None,
+                // The secret this request injected comes back as the very
+                // placeholder the agent sent, as the JS scrubber does.
+                replacement: Some(s.occ.text.clone()),
                 always: true,
             });
             outgoing = sub::apply(&outgoing, &s.occ.location, &s.occ.text, &secret)?;

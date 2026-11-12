@@ -325,3 +325,80 @@ async fn the_spend_check_counts_what_calls_in_flight_reserved() {
     assert_eq!(r.status, 403, "{:?}", r.error);
     assert_eq!(r.error.and_then(|e| e.extra.rule).as_deref(), Some("spend"));
 }
+
+/// The secret injected into a request, echoed by the upstream, comes back
+/// as the placeholder the agent sent (response.test.js:94, :181, :212);
+/// another stored secret gets the generic marker. Buffered, gzip, and an
+/// event stream with the secret split across chunks.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_echoed_injected_secret_comes_back_as_its_placeholder() {
+    use std::io::Write;
+    let gz = |s: &str| {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(s.as_bytes()).unwrap();
+        e.finish().unwrap()
+    };
+    let w = World::seeded(json!({})).await;
+    let other = "another-stored-secret-0123456789abcdef";
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "other", "kind": "http", "host": "other.example.test", "value": other, "sites": ["header:authorization:Bearer"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let plain = format!("{{\"echo\":\"{SECRET}\",\"other\":\"{other}\"}}");
+    let (a, b) = SECRET.split_at(SECRET.len() / 2);
+    let cases: Vec<(Vec<(String, String)>, Vec<Vec<u8>>)> = vec![
+        (
+            vec![("content-type".into(), "application/json".into())],
+            vec![plain.clone().into_bytes()],
+        ),
+        (
+            vec![
+                ("content-type".into(), "application/json".into()),
+                ("content-encoding".into(), "gzip".into()),
+            ],
+            vec![gz(&format!("{plain}{}", " ".repeat(400)))],
+        ),
+        (
+            vec![("content-type".into(), "text/event-stream".into())],
+            vec![
+                format!("data: {a}").into_bytes(),
+                format!("{b}\n\ndata: {other}\n\n").into_bytes(),
+            ],
+        ),
+        (
+            vec![
+                ("content-type".into(), "text/event-stream".into()),
+                ("content-encoding".into(), "gzip".into()),
+            ],
+            vec![gz(&format!(
+                "data: {SECRET}\n\ndata: {other}\n\n{}",
+                "data: ordinary\n\n".repeat(64)
+            ))],
+        ),
+    ];
+    for (headers, chunks) in cases {
+        let (h, c) = (headers.clone(), chunks.clone());
+        w.up.answer(Box::new(move |_| {
+            Ok(UpstreamResponse {
+                status: 200,
+                headers: h.clone(),
+                body: Body::chunks(c.iter().cloned().map(Ok).collect()),
+            })
+        }));
+        let (s, text, _) = body_of(w.get("/x").await).await;
+        assert_eq!(s, 200, "{headers:?}: {text}");
+        assert!(
+            !leaks(&text) && !text.contains(other),
+            "{headers:?}: {text}"
+        );
+        assert!(text.contains(&w.placeholder), "{headers:?}: {text}");
+        assert!(
+            text.contains("[[av:redacted:other]]"),
+            "{headers:?}: {text}"
+        );
+    }
+}

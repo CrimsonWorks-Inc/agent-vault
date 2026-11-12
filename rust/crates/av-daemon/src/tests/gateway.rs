@@ -31,7 +31,10 @@ async fn ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer
     );
     assert!(!leaks(&text), "{text}");
     assert!(text.contains("ordinary-traffic-control"));
-    assert!(text.contains("[[av:redacted"), "{text}");
+    assert!(
+        text.contains(&format!("Bearer {}", w.placeholder)),
+        "the injected secret comes back as the agent's placeholder: {text}"
+    );
     assert_eq!(r.header("av-decision"), Some("allow"));
     assert!(r.header("av-redacted").is_some());
     let hit = w.up.hits.lock().unwrap()[0].clone();
