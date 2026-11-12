@@ -350,7 +350,8 @@ async fn an_echoed_injected_secret_comes_back_as_its_placeholder() {
     assert_eq!(s, 200, "{v}");
     let plain = format!("{{\"echo\":\"{SECRET}\",\"other\":\"{other}\"}}");
     let (a, b) = SECRET.split_at(SECRET.len() / 2);
-    let cases: Vec<(Vec<(String, String)>, Vec<Vec<u8>>)> = vec![
+    type Case = (Vec<(String, String)>, Vec<Vec<u8>>);
+    let cases: Vec<Case> = vec![
         (
             vec![("content-type".into(), "application/json".into())],
             vec![plain.clone().into_bytes()],
