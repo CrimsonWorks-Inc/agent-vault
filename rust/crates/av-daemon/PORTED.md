@@ -25,7 +25,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 918 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **112 not yet ported**.
+Totals: 1207 JS tests: 970 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **60 not yet ported**.
 
 ## Mutation check
 
@@ -313,12 +313,12 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-ui-page.test.js | advanced limits become GrantSpec fields, and a bad payload is said before signing | frontend: stays with the src/ui JS tests |
 | control-ui-page.test.js | the session form sends spend limits only for a model provider’s credential | frontend: stays with the src/ui JS tests |
 | control-ui-page.test.js | a probe result is text, never markup | frontend: stays with the src/ui JS tests |
-| control-ui-rotate.test.js | the current key can enrol its replacement, and only the replacement works afterwards | not yet ported |
-| control-ui-rotate.test.js | a replacement with no signature, or signed by the new key itself, is refused | not yet ported |
-| control-ui-rotate.test.js | the record enrolled is the one registered here, not one the request names | not yet ported |
-| control-ui-rotate.test.js | with nothing registered there is nothing to enrol | not yet ported |
-| control-ui-rotate.test.js | a signature for the replacement is refused when it covers a different record | not yet ported |
-| control-ui-rotate.test.js | a first enrolment still cannot be made this way | not yet ported |
+| control-ui-rotate.test.js | the current key can enrol its replacement, and only the replacement works afterwards | `ported_gateway_core::ui_rotation_current_key_authorizes_exact_registered_replacement_and_only_new_key_works` |
+| control-ui-rotate.test.js | a replacement with no signature, or signed by the new key itself, is refused | `ported_gateway_core::ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment` |
+| control-ui-rotate.test.js | the record enrolled is the one registered here, not one the request names | `ported_gateway_core::ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment` |
+| control-ui-rotate.test.js | with nothing registered there is nothing to enrol | `ported_gateway_core::ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment` |
+| control-ui-rotate.test.js | a signature for the replacement is refused when it covers a different record | `ported_gateway_core::ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment` |
+| control-ui-rotate.test.js | a first enrolment still cannot be made this way | `ported_gateway_core::ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment` |
 | control-ui-routes.test.js | every wave-3 change is gated, and exactly the daemon-gated ones are re-verified (A.6) | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
 | control-ui-routes.test.js | without a signature, no change reaches the daemon | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
 | control-ui-routes.test.js | a signature over a different request is refused | `ported_gateway_core::ui_route_signature_matrix_rejects_unsigned_swapped_fields_and_wrong_ops_and_forwards_exact_proofs` |
@@ -429,7 +429,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-presence.test.js | removing Touch ID unlock by assertion works; by window it does not | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
 | fix-control-presence.test.js | one window still covers an ordinary multi-step flow, and each step is recorded | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
 | fix-control-presence.test.js | locking closes the window | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
-| fix-control-presence.test.js | the web UI enrolment passes the passphrase through, with no window | not yet ported |
+| fix-control-presence.test.js | the web UI enrolment passes the passphrase through, with no window | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
 | fix-control-presence.test.js | an assertion from a page the caller named is refused | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
 | fix-control-presence.test.js | an assertion from the default UI origin is accepted | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
 | fix-control-presence.test.js | trusting another UI origin needs the owner, and then it works | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
@@ -459,14 +459,14 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-store.test.js | a placeholder with its own ttl still expires on time | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | booting a locked vault does not record an unlock nobody performed | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | booting an unlocked vault still unlocks it | ported in av-store (see rust/crates/av-store/PORTED.md) |
-| fix-control-touchid.test.js | enrolling Touch ID unlock from the UI works with one tap | not yet ported |
-| fix-control-touchid.test.js | a tap over one PRF secret cannot enrol another | not yet ported |
+| fix-control-touchid.test.js | enrolling Touch ID unlock from the UI works with one tap | `ported_gateway_core::ui_touchid_enroll_swap_refusal_remove_and_both_unlock_paths_use_fake_prf_without_biometrics` |
+| fix-control-touchid.test.js | a tap over one PRF secret cannot enrol another | `ported_gateway_core::ui_touchid_enroll_swap_refusal_remove_and_both_unlock_paths_use_fake_prf_without_biometrics` |
 | fix-control-touchid.test.js | the daemon still refuses an enrol that carries no proof at all | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
-| fix-control-touchid.test.js | removing Touch ID unlock from the UI works with one tap | not yet ported |
-| fix-control-touchid.test.js | without a passphrase, Touch ID unlock is refused before the tap, and says what to do | not yet ported |
-| fix-control-touchid.test.js | once a passphrase is set, the same vault enrols Touch ID unlock with one tap, and both open it | not yet ported |
+| fix-control-touchid.test.js | removing Touch ID unlock from the UI works with one tap | `ported_gateway_core::ui_touchid_enroll_swap_refusal_remove_and_both_unlock_paths_use_fake_prf_without_biometrics` |
+| fix-control-touchid.test.js | without a passphrase, Touch ID unlock is refused before the tap, and says what to do | `ported_gateway_core::ui_touchid_missing_recovery_refuses_before_any_tap_and_restoring_passphrase_allows_both_unlock_factors` |
+| fix-control-touchid.test.js | once a passphrase is set, the same vault enrols Touch ID unlock with one tap, and both open it | `ported_gateway_core::ui_touchid_missing_recovery_refuses_before_any_tap_and_restoring_passphrase_allows_both_unlock_factors` |
 | fix-control-touchid.test.js | a vault with no factor at all is refused Touch ID unlock with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
-| fix-control-touchid.test.js | without a passphrase, the presence authenticator rotates by a tap from itself, through the UI | not yet ported |
+| fix-control-touchid.test.js | without a passphrase, the presence authenticator rotates by a tap from itself, through the UI | `ported_gateway_core::ui_presence_key_can_rotate_without_passphrase_but_never_by_an_unsigned_or_windowed_call` |
 | fix-control-touchid.test.js | a first presence enrolment without a passphrase is refused with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
 | fix-control-uicookie.test.js | an authenticated call slides the cookie; an unauthenticated one is not activity | not yet ported |
 | fix-control-webauthn.test.js | a request field named op cannot replace the route op | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
@@ -1176,25 +1176,25 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | ui-audit-paging.test.js | the page: without paged=1 the audit route is unchanged | not yet ported |
 | ui-complete-lists.test.js | fetchAll reads every row of a list longer than 50 pages of 200 | not yet ported |
 | ui-complete-lists.test.js | 32 tripwire rules: the list the page shows pages and searches; the snapshot has all 32 | not yet ported |
-| ui-dist-serving.test.js | the policy is exactly the strict one, with nothing inline allowed | not yet ported |
-| ui-dist-serving.test.js | with a session, / is the built index.html under the strict policy and no-store | not yet ported |
-| ui-dist-serving.test.js | each allowlisted asset is served with its exact type, no-store and the strict policy | not yet ported |
-| ui-dist-serving.test.js | assets need the session cookie, as the page does | not yet ported |
-| ui-dist-serving.test.js | traversal, encoded slashes, backslashes and dot segments are all 404 | not yet ported |
-| ui-dist-serving.test.js | a path is routed only as it arrived: the literal / and literal asset names still work | not yet ported |
-| ui-dist-serving.test.js | literalPath: only a path the parser leaves as it is, with no dot segment or encoded separator | not yet ported |
-| ui-dist-serving.test.js | dotfiles, unlisted types, nested files and symlinks are never served | not yet ported |
-| ui-dist-serving.test.js | only GET serves an asset | not yet ported |
-| ui-dist-serving.test.js | the allowlist is read once at startup and served from memory | not yet ported |
-| ui-dist-serving.test.js | loadDist lists only regular, allowed files directly in assets | not yet ported |
-| ui-dist-serving.test.js | loadDist refuses an assets directory that is a symlink, even to a directory beside dist | not yet ported |
-| ui-dist-serving.test.js | loadDist refuses an index.html that is a symlink, inside or outside dist, and a dangling one | not yet ported |
-| ui-dist-serving.test.js | loadDist refuses a dist directory that is a symlink, and a dist or assets that is not a directory | not yet ported |
-| ui-dist-serving.test.js | a server over a symlinked assets directory does not start, so nothing outside dist is ever served | not yet ported |
-| ui-dist-serving.test.js | the error pages carry the strict policy and nothing inline | not yet ported |
-| ui-dist-serving.test.js | no response the server makes allows unsafe-inline once the bundle is there | not yet ported |
-| ui-dist-serving.test.js | U2: with no dist/index.html the server refuses to start and names npm run build:ui | not yet ported |
-| ui-dist-serving.test.js | U2: the shipped dist is what the server loads by default | not yet ported |
+| ui-dist-serving.test.js | the policy is exactly the strict one, with nothing inline allowed | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | with a session, / is the built index.html under the strict policy and no-store | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | each allowlisted asset is served with its exact type, no-store and the strict policy | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | assets need the session cookie, as the page does | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | traversal, encoded slashes, backslashes and dot segments are all 404 | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | a path is routed only as it arrived: the literal / and literal asset names still work | not yet ported; production mismatch, fix pending: absolute-form target is routed as index; preserved 404 regression `ported_gateway_core::dist_absolute_form_target_is_never_routed_as_literal_index` (temporarily ignored); literal-path controls: `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | literalPath: only a path the parser leaves as it is, with no dot segment or encoded separator | `ported_gateway_core::dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts` |
+| ui-dist-serving.test.js | dotfiles, unlisted types, nested files and symlinks are never served | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | only GET serves an asset | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | the allowlist is read once at startup and served from memory | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | loadDist lists only regular, allowed files directly in assets | `ported_gateway_core::dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts` |
+| ui-dist-serving.test.js | loadDist refuses an assets directory that is a symlink, even to a directory beside dist | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
+| ui-dist-serving.test.js | loadDist refuses an index.html that is a symlink, inside or outside dist, and a dangling one | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
+| ui-dist-serving.test.js | loadDist refuses a dist directory that is a symlink, and a dist or assets that is not a directory | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
+| ui-dist-serving.test.js | a server over a symlinked assets directory does not start, so nothing outside dist is ever served | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
+| ui-dist-serving.test.js | the error pages carry the strict policy and nothing inline | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | no response the server makes allows unsafe-inline once the bundle is there | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | U2: with no dist/index.html the server refuses to start and names npm run build:ui | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
+| ui-dist-serving.test.js | U2: the shipped dist is what the server loads by default | `ported_gateway_core::dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts` |
 | ui-paging.test.js | without paged=1 every list route answers exactly as it always has | not yet ported |
 | ui-paging.test.js | each list pages through every item once, in its documented order, and back | not yet ported |
 | ui-paging.test.js | pending pages newest first, with both kinds of decision | not yet ported |
@@ -1204,27 +1204,27 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | ui-paging.test.js | q is a case-insensitive match over visible fields, and filters before paging | not yet ported |
 | ui-paging.test.js | q never matches a token, a placeholder or a value, even one the daemon leaked | not yet ported |
 | ui-paging.test.js | the cursors in an answer survive the scrub that every answer passes | not yet ported |
-| ui.test.js | the relying party id is a domain, not an IP literal | not yet ported |
-| ui.test.js | arriving by IP is redirected to the domain the authenticator accepts | not yet ported |
-| ui.test.js | the launch link works exactly once | not yet ported |
-| ui.test.js | without the session cookie the API answers nothing | not yet ported |
-| ui.test.js | a cross-origin caller is refused | not yet ported |
-| ui.test.js | a request without the custom header is refused, which stops a form post | not yet ported |
-| ui.test.js | the credential list carries no value, in any field | not yet ported |
-| ui.test.js | there is no endpoint that returns a secret at all | not yet ported |
-| ui.test.js | the docs context describes this install and carries no secret | not yet ported |
-| ui.test.js | the docs page is reachable without changing anything | not yet ported |
-| ui.test.js | before enrollment, every mutating call is refused | not yet ported |
-| ui.test.js | a forged presence payload is refused | not yet ported |
-| ui.test.js | enrollment registers the authenticator | not yet ported |
-| ui.test.js | a second enrollment is refused, so an agent cannot add its own key | not yet ported |
-| ui.test.js | after enrollment, a mutating call still fails without a signature | not yet ported |
-| ui.test.js | a signature for the wrong operation is refused | not yet ported |
-| ui.test.js | a valid signature for the right operation is accepted exactly once | not yet ported |
-| ui.test.js | a session created here reaches the store every local client reads | not yet ported |
-| ui.test.js | the enrollment is recorded in the audit log | not yet ported |
-| ui.test.js | a batch with no signature is refused, like a single decision | not yet ported |
-| ui.test.js | the operation bound for a batch is the list exactly as it was sent | not yet ported |
+| ui.test.js | the relying party id is a domain, not an IP literal | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | arriving by IP is redirected to the domain the authenticator accepts | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | the launch link works exactly once | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | without the session cookie the API answers nothing | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | a cross-origin caller is refused | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | a request without the custom header is refused, which stops a form post | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | the credential list carries no value, in any field | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | there is no endpoint that returns a secret at all | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | the docs context describes this install and carries no secret | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | the docs page is reachable without changing anything | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | before enrollment, every mutating call is refused | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | a forged presence payload is refused | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
+| ui.test.js | enrollment registers the authenticator | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | a second enrollment is refused, so an agent cannot add its own key | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | after enrollment, a mutating call still fails without a signature | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | a signature for the wrong operation is refused | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | a valid signature for the right operation is accepted exactly once | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | a session created here reaches the store every local client reads | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | the enrollment is recorded in the audit log | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | a batch with no signature is refused, like a single decision | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
+| ui.test.js | the operation bound for a batch is the list exactly as it was sent | `ported_gateway_core::ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state` |
 | webauthn.test.js | a registration produces a credential the daemon can store | `ported_webauthn::registration_is_storable_and_registration_without_human_verification_is_refused` |
 | webauthn.test.js | registration without user verification is refused | `ported_webauthn::registration_is_storable_and_registration_without_human_verification_is_refused` |
 | webauthn.test.js | a valid assertion for the issued challenge verifies | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |

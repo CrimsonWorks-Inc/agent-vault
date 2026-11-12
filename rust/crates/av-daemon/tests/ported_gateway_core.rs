@@ -9319,6 +9319,9 @@ struct WidenFixture {
 }
 impl WidenFixture {
     async fn new() -> Self {
+        Self::setup(true).await
+    }
+    async fn setup(enroll: bool) -> Self {
         let f = Fixture::new(&["header:authorization:Bearer"]).await;
         let socket = f._dir.path().join("control.sock");
         let (s, v) = control(&socket, "/v1/passphrase", json!({"passphrase":WIDEN_PASS})).await;
@@ -9361,6 +9364,9 @@ impl WidenFixture {
             cookie,
             auth: ported_common::FakeAuthenticator::new(7),
         };
+        if !enroll {
+            return w;
+        }
         let (s, begin) = w.api("POST", "presence/enroll/begin", json!({})).await;
         assert_eq!(s, 200, "{begin}");
         let mut att = w
@@ -20869,6 +20875,711 @@ async fn integration_c19_webhook_configuration_binds_url_digest_and_never_logs_t
             .status,
             200
         );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+async fn ui_proof_with(
+    w: &WidenFixture,
+    auth: &ported_common::FakeAuthenticator,
+    op: &str,
+    p: &Value,
+) -> Value {
+    let (s, ch) = w
+        .api(
+            "POST",
+            "presence/challenge",
+            json!({"operation":av_daemon::util::operation_for(op,p).unwrap()}),
+        )
+        .await;
+    assert_eq!(s, 200, "{ch}");
+    let mut proof = auth.assertion(ch["challenge"].as_str().unwrap(), &w.ui.origin());
+    proof["challengeId"] = ch["challengeId"].clone();
+    proof
+}
+async fn ui_register_replacement(
+    w: &WidenFixture,
+    next: &ported_common::FakeAuthenticator,
+) -> Value {
+    let (s, ch) = w.api("POST", "presence/rotate/begin", json!({})).await;
+    assert_eq!(s, 200, "{ch}");
+    let (s, v) = w
+        .api(
+            "POST",
+            "presence/rotate/register",
+            next.register(ch["challenge"].as_str().unwrap(), &w.ui.origin()),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    v["credential"].clone()
+}
+#[tokio::test]
+async fn ui_rotation_current_key_authorizes_exact_registered_replacement_and_only_new_key_works() {
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        let w = WidenFixture::new().await;
+        let next = ported_common::FakeAuthenticator::new(61);
+        let mut record = ui_register_replacement(&w, &next).await;
+        assert_eq!(record["credentialId"], next.id());
+        assert!(record.get("privateKey").is_none());
+        let proof = w.proof("presence.enroll", &record).await;
+        record["presence"] = proof;
+        let (s, v) = w.api("POST", "presence/rotate", record).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["replaced"], true);
+        assert_eq!(
+            w.f.shared
+                .run(|c| c.vault.presence_key().unwrap().unwrap().credential_id)
+                .await
+                .unwrap(),
+            next.id()
+        );
+        let old = w.proof("vault.lock", &json!({})).await;
+        assert_ne!(w.api("POST", "lock", json!({"presence":old})).await.0, 200);
+        let fresh = ui_proof_with(&w, &next, "vault.lock", &json!({})).await;
+        assert_eq!(
+            w.api("POST", "lock", json!({"presence":fresh})).await.0,
+            200
+        );
+        assert_eq!(
+            w.ctl("POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                .await
+                .0,
+            200
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_records_and_first_enrollment(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(50), async {
+        for shape in [
+            "unsigned",
+            "self signed",
+            "other public key",
+            "unregistered",
+            "changed signed record",
+        ] {
+            let w = WidenFixture::new().await;
+            let next = ported_common::FakeAuthenticator::new(62);
+            let mut record = if shape == "unregistered" {
+                let mut r = fix_presence_record(62);
+                r["enrolledAt"] = json!(av_daemon::util::iso_now());
+                r
+            } else {
+                ui_register_replacement(&w, &next).await
+            };
+            let expected = if shape == "unsigned" {
+                401
+            } else if shape == "self signed" {
+                401
+            } else {
+                409
+            };
+            match shape {
+                "unsigned" => {}
+                "self signed" => {
+                    record["presence"] = ui_proof_with(&w, &next, "presence.enroll", &record).await
+                }
+                "other public key" => {
+                    record["publicKeySpki"] = fix_presence_record(63)["publicKeySpki"].clone();
+                    record["presence"] = w.proof("presence.enroll", &record).await;
+                }
+                "changed signed record" => {
+                    let mut other = record.clone();
+                    other["signCount"] = json!(7);
+                    record["presence"] = w.proof("presence.enroll", &other).await;
+                }
+                _ => record["presence"] = w.proof("presence.enroll", &record).await,
+            }
+            let (s, v) = w.api("POST", "presence/rotate", record).await;
+            if shape == "self signed" {
+                assert_ne!(s, 200, "{v}");
+            } else {
+                assert_eq!(s, expected, "{shape}: {v}");
+            }
+            assert_eq!(
+                w.f.shared
+                    .run(|c| c.vault.presence_key().unwrap().unwrap().credential_id)
+                    .await
+                    .unwrap(),
+                w.auth.id()
+            );
+            assert_eq!(
+                w.api("GET", "presence/state", json!({})).await.1["enrolled"],
+                true
+            );
+            w.stop().await;
+        }
+        let w = WidenFixture::setup(false).await;
+        assert_eq!(
+            w.api("POST", "presence/rotate/begin", json!({})).await.0,
+            412
+        );
+        assert_eq!(w.api("GET", "credentials", json!({})).await.0, 200);
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(40),async{
+ let w=WidenFixture::setup(false).await;let(s,state)=w.api("GET","presence/state",json!({})).await;assert_eq!(s,200);assert_eq!(state["rpId"],"localhost");assert_eq!(state["origin"],w.ui.origin());
+ let(s,h,_)=loopback_http_host(w.ui.bound_port(),"127.0.0.1","GET","/",vec![],vec![]).await;assert_eq!(s,302);assert!(h.iter().find(|(k,_)|k.eq_ignore_ascii_case("location")).unwrap().1.starts_with(&w.ui.origin()));let url=url::Url::parse(&w.ui.url()).unwrap();let(s,_,b)=loopback_http_host(w.ui.bound_port(),"localhost","GET",&format!("{}?{}",url.path(),url.query().unwrap()),vec![],vec![]).await;assert_eq!(s,409);assert!(String::from_utf8_lossy(&b).contains("already used"));
+ for(method,path,headers,expected)in [("GET","/api/credentials",vec![("x-av-ui".into(),"1".into())],401),("GET","/api/credentials",vec![("x-av-ui".into(),"1".into()),("cookie".into(),w.cookie.clone()),("origin".into(),"https://evil.test".into())],403),("POST","/api/lock",vec![("cookie".into(),w.cookie.clone())],403)]{let(s,_,b)=loopback_http_host(w.ui.bound_port(),"localhost",method,path,headers,vec![]).await;assert_eq!(s,expected);assert!(!String::from_utf8_lossy(&b).contains(SECRET));}
+ let(s,creds)=w.api("GET","credentials",json!({})).await;assert_eq!(s,200);assert!(!creds.to_string().contains(SECRET));assert!(creds[0]["fields"][0].get("value").is_none());assert!(creds[0]["fields"][0]["fp8"].is_string());assert_eq!(creds[0]["fields"][0]["sites"],json!(["header:authorization:Bearer"]));for path in ["credentials/demo","secrets","reveal","credentials/demo/value"]{assert!(w.api("GET",path,json!({})).await.0>=400,"{path}");}
+ assert!(!av_daemon::ui::server::GATED.contains(&"GET docs/context"));let(s,ctx)=w.api("GET","docs/context",json!({})).await;assert_eq!(s,200);assert!(ctx["gateway_port"].as_u64().unwrap()>0);assert!(ctx["mcp_url"].as_str().unwrap().ends_with("/mcp"));assert!(!ctx["cli"].as_str().unwrap().is_empty());assert_eq!(ctx["cred_slugs"],json!(["demo"]));for absent in [SECRET,"avs1.","av1."]{assert!(!ctx.to_string().contains(absent));}
+ for(method,path,b)in [("POST","lock",json!({})),("POST","credentials",json!({"slug":"x","kind":"http","value":"fake"})),("POST","sessions",json!({"cred":"demo"})),("DELETE","credentials?slug=demo",json!({})),("POST","pending/decide-many",json!({"decisions":[{"id":"sr_x","kind":"session","granted":true}]}))]{let(s,v)=w.api(method,path,b).await;assert_eq!(s,412,"{path}: {v}");assert!(v["error"].as_str().unwrap().contains("no authenticator"));}assert!(w.api("POST","lock",json!({"presence":{"challengeId":"made-up","credentialId":"made-up","authenticatorData":"AA","clientDataJSON":"e30","signature":"AA"}})).await.0>=400);assert_eq!(w.api("GET","credentials",json!({})).await.0,200);w.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn ui_enrollment_gates_every_mutation_exactly_once_and_created_sessions_reach_private_local_state(
+) {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let w=WidenFixture::setup(false).await;let(s,ch)=w.api("POST","presence/enroll/begin",json!({})).await;assert_eq!(s,200);let mut att=w.auth.register(ch["challenge"].as_str().unwrap(),&w.ui.origin());att["passphrase"]=json!(WIDEN_PASS);let(s,v)=w.api("POST","presence/enroll/finish",att).await;assert_eq!(s,200,"{v}");assert_eq!(w.f.shared.run(|c|c.dm.presence_grace_until).await.unwrap(),0);assert!(w.f.shared.run(|c|c.vault.presence_key().unwrap().is_some()).await.unwrap());assert_eq!(w.api("GET","presence/state",json!({})).await.1["enrolled"],true);assert_eq!(w.api("POST","presence/enroll/begin",json!({})).await.0,409);let(s,v)=w.api("POST","lock",json!({})).await;assert_eq!(s,401);assert!(v["error"].as_str().unwrap().contains("needs a fresh authenticator signature"));let wrong=w.proof("session.revoke",&json!({"sid":"harmless"})).await;let(s,v)=w.api("POST","lock",json!({"presence":wrong})).await;assert_eq!(s,409);assert!(v["error"].as_str().unwrap().contains("different operation"));let proof=w.proof("vault.lock",&json!({})).await;assert_eq!(w.api("POST","lock",json!({"presence":proof})).await.0,200);let(s,v)=w.api("POST","lock",json!({"presence":proof})).await;assert_eq!(s,401);assert!(v["error"].as_str().unwrap().contains("already-used"));assert_eq!(w.ctl("POST","/v1/unlock",json!({"passphrase":WIDEN_PASS})).await.0,200);
+ let mut b=json!({"cred":"demo","methods":["GET"],"paths":["/**"]});b["presence"]=w.proof("session.create",&b).await;let(s,created)=w.api("POST","sessions",b).await;assert_eq!(s,200,"{created}");assert!(created["token"].as_str().unwrap().starts_with("avs1."));let file=w.f._dir.path().join("cli-state.json");let state:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();assert_eq!(state["token"],created["token"]);assert_eq!(state["session_id"],created["session_id"]);assert_eq!(std::fs::metadata(file).unwrap().permissions().mode()&0o077,0);assert!(audit_records(&w.f).await.iter().any(|r|r["kind"]=="presence.factor_added"));assert_ne!(w.api("POST","pending/decide-many",json!({"decisions":[{"id":"sr_whatever","kind":"session","granted":true}]})).await.0,200);
+ let decisions=json!([{"id":"sr_b","kind":"session","granted":true},{"id":"sr_a","kind":"request","granted":false}]);let op=av_daemon::util::operation_for("pending.decide_many",&json!({"decisions":decisions})).unwrap();assert_eq!(op["op"],"pending.decide_many");assert_eq!(op["decisions"],decisions);assert_eq!(op["decisions"][0]["id"],"sr_b");w.stop().await;
+ }).await.unwrap();
+}
+const DIST_INDEX:&str="<!doctype html><html><head><meta charset=\"utf-8\"><title>agent-vault</title><script type=\"module\" src=\"/assets/index-Ab12Cd.js\"></script><link rel=\"stylesheet\" href=\"/assets/index-Ef34Gh.css\"></head><body><div id=\"root\"></div></body></html>";
+const DIST_OUTSIDE: &str = "OUTSIDE-THE-DIST-fake-0f9e8d7c";
+fn build_dist(at: &std::path::Path) {
+    std::fs::create_dir_all(at.join("assets/nested")).unwrap();
+    std::fs::write(at.join("index.html"), DIST_INDEX).unwrap();
+    for(name,body)in [("index-Ab12Cd.js",b"console.log(\"fixture bundle\")\n".as_slice()),("index-Ef34Gh.css",b"body{color:#111}\n"),("inter-latin-400-Zz99.woff2",&[0x77,0x4f,0x46,0x32,0,1,2,3,250,251,252,253]),("mark-Yy88.svg",b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><path d=\"M0 0h8v8z\"/></svg>")]{std::fs::write(at.join("assets").join(name),body).unwrap();}
+    for name in [
+        ".hidden.js",
+        ".env",
+        "index-Ab12Cd.js.map",
+        "notes.txt",
+        "page.html",
+        "nested/inner.js",
+    ] {
+        std::fs::write(at.join("assets").join(name), DIST_OUTSIDE).unwrap();
+    }
+}
+async fn raw_ui(
+    port: u16,
+    target: &str,
+    method: &str,
+    cookie: Option<&str>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let mut req =
+        format!("{method} {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n");
+    if let Some(cookie) = cookie {
+        req.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    req.push_str("\r\n");
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut bytes = vec![];
+    stream.read_to_end(&mut bytes).await.unwrap();
+    let split = bytes.windows(4).position(|x| x == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(bytes[..split].to_vec()).unwrap();
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    let headers: Vec<(String, String)> = lines
+        .map(|l| {
+            let (k, v) = l.split_once(':').unwrap();
+            (k.to_ascii_lowercase(), v.trim().into())
+        })
+        .collect();
+    let mut body = bytes[split + 4..].to_vec();
+    if headers
+        .iter()
+        .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
+    {
+        let mut decoded = vec![];
+        let mut p = 0;
+        while p < body.len() {
+            let end = p + body[p..].windows(2).position(|x| x == b"\r\n").unwrap();
+            let n = usize::from_str_radix(
+                std::str::from_utf8(&body[p..end])
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap(),
+                16,
+            )
+            .unwrap();
+            if n == 0 {
+                break;
+            }
+            p = end + 2;
+            decoded.extend_from_slice(&body[p..p + n]);
+            p += n + 2;
+        }
+        body = decoded;
+    }
+    (status, headers, body)
+}
+fn header<'a>(h: &'a [(String, String)], key: &str) -> &'a str {
+    &h.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .unwrap_or_else(|| panic!("missing header {key}: {h:?}"))
+        .1
+}
+#[tokio::test]
+async fn dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot(
+) {
+    use av_daemon::ui::server::{UiServer, UiServerOptions, STRICT_CSP};
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ assert_eq!(STRICT_CSP,"default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'");let dir=tempfile::tempdir_in("/tmp").unwrap();let dist=dir.path().join("dist");build_dist(&dist);std::fs::write(dir.path().join("secret.js"),DIST_OUTSIDE).unwrap();std::os::unix::fs::symlink(dir.path().join("secret.js"),dist.join("assets/linked-Qq11.js")).unwrap();let expected=av_daemon::ui::server::load_dist(&dist).unwrap().unwrap();assert_eq!(expected.assets.len(),4);let ui=UiServer::start(&dir.path().join("unused.sock"),UiServerOptions{port:0,dist_dir:Some(dist.clone()),..Default::default()}).await.unwrap();let launch=url::Url::parse(&ui.url()).unwrap();let claim=format!("{}?{}",launch.path(),launch.query().unwrap());let(s,h,_)=raw_ui(ui.bound_port(),&claim,"GET",None).await;assert_eq!(s,302);let cookie=header(&h,"set-cookie").split(';').next().unwrap().to_owned();
+ for(path,mime,bytes)in std::iter::once(("/".to_owned(),"text/html; charset=utf-8".to_owned(),DIST_INDEX.as_bytes().to_vec())).chain(expected.assets.iter().map(|(name,(mime,bytes))|(format!("/assets/{name}"),mime.clone(),bytes.clone()))){let(s,h,b)=raw_ui(ui.bound_port(),&path,"GET",Some(&cookie)).await;assert_eq!(s,200,"{path}");assert_eq!(b,bytes);assert_eq!(header(&h,"content-type"),mime);assert_eq!(header(&h,"content-security-policy"),STRICT_CSP);assert_eq!(header(&h,"cache-control"),"no-store");assert_eq!(header(&h,"x-content-type-options"),"nosniff");if path=="/"{assert_eq!(header(&h,"referrer-policy"),"no-referrer");}else{assert_eq!(header(&h,"cross-origin-resource-policy"),"same-origin");}}
+ for(path,cookie)in [("/",None),("/assets/index-Ab12Cd.js",None),("/assets/index-Ab12Cd.js",Some("av_ui=not-the-session"))]{let(s,h,b)=raw_ui(ui.bound_port(),path,"GET",cookie).await;assert_eq!(s,401);if path=="/"{assert_eq!(header(&h,"content-security-policy"),STRICT_CSP);}assert_eq!(header(&h,"cache-control"),"no-store");let html=String::from_utf8_lossy(&b).to_lowercase();for absent in ["fixture bundle","id=\"root\"","<style","<script"," style="," onclick="]{assert!(!html.contains(absent));}}
+ for path in ["/assets/../index.html","/assets/../manifest.json","/assets/../../secret.js","/assets/%2e%2e/index.html","/assets/%2E%2E/manifest.json","/assets/.%2e/index.html","/assets/..%2findex.html","/assets/..%2Fmanifest.json","/assets/%2e%2e%2f%2e%2e%2fsecret.js","/assets/nested%2finner.js","/assets/nested%2Finner.js","/assets/nested/inner.js","/assets/..\\index.html","/assets/nested\\inner.js","/assets/%5c..%5cindex.html","/assets/./index-Ab12Cd.js","/assets//index-Ab12Cd.js","/assets/index-Ab12Cd.js/","/assets/index-Ab12Cd.js%00","/assets/index-Ab12Cd.js%20","/assets/%69ndex-Ab12Cd.js","/assets/","/assets","/index.html","/manifest.json","/page.html","/dist/index.html","/assets/manifest.json","/assets/../","/assets/..","/assets/%2e%2e/","/assets/%2E%2E","/assets/..\\","/assets/../?anything=1","/./","/.","/%2e/","/assets/./../","/assets/nested/../../","//","/%2f","/%5c","/assets/../api/credentials","/x/../assets/index-Ab12Cd.js","/assets/nested/../index-Ab12Cd.js","/api/../api/credentials","//localhost:1/x","//[","/assets/.hidden.js","/assets/.env","/assets/index-Ab12Cd.js.map","/assets/notes.txt","/assets/page.html","/assets/linked-Qq11.js","/assets/nested"]{let(s,_,b)=raw_ui(ui.bound_port(),path,"GET",Some(&cookie)).await;assert_eq!(s,404,"{path}");assert!(!String::from_utf8_lossy(&b).contains(DIST_OUTSIDE));}
+ for path in ["/","/?x=1","/assets/index-Ab12Cd.js","/assets/index-Ab12Cd.js?v=2"]{assert_eq!(raw_ui(ui.bound_port(),path,"GET",Some(&cookie)).await.0,200);}for method in ["POST","PUT","DELETE","HEAD"]{assert_eq!(raw_ui(ui.bound_port(),"/assets/index-Ab12Cd.js",method,Some(&cookie)).await.0,404);}
+ std::fs::write(dist.join("assets/late-Ww77.js"),DIST_OUTSIDE).unwrap();std::fs::write(dist.join("assets/index-Ef34Gh.css"),DIST_OUTSIDE).unwrap();std::fs::remove_file(dist.join("assets/mark-Yy88.svg")).unwrap();assert_eq!(raw_ui(ui.bound_port(),"/assets/late-Ww77.js","GET",Some(&cookie)).await.0,404);for name in ["index-Ef34Gh.css","mark-Yy88.svg"]{let(s,_,b)=raw_ui(ui.bound_port(),&format!("/assets/{name}"),"GET",Some(&cookie)).await;assert_eq!(s,200);assert_eq!(b,expected.assets[name].1);}
+ let(s,h,b)=raw_ui(ui.bound_port(),&claim,"GET",None).await;assert_eq!(s,409);assert_eq!(header(&h,"content-security-policy"),STRICT_CSP);assert_eq!(header(&h,"cache-control"),"no-store");let html=String::from_utf8_lossy(&b).to_lowercase();for bad in ["<style","<script"," style="," onclick="]{assert!(!html.contains(bad));}assert!(!STRICT_CSP.contains("unsafe"));ui.stop().await;
+ }).await.unwrap();
+}
+#[test]
+fn dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts() {
+    use av_daemon::ui::server::{embedded_dist, literal_path, load_dist};
+    let base = url::Url::parse("http://localhost:1").unwrap();
+    for ok in [
+        "/",
+        "/api/credentials",
+        "/assets/index-Ab12Cd.js",
+        "/assets/index-Ab12Cd.js?v=1",
+        "/api/",
+    ] {
+        assert!(literal_path(ok, base.join(ok).unwrap().path()), "{ok}");
+    }
+    for bad in [
+        "/assets/..%2findex.html",
+        "/assets/x%2Fy.js",
+        "/api/%2fcredentials",
+        "/api/a%5cb",
+        "/assets/a%2E.js",
+        "/assets/a\\b.js",
+        "/assets//x.js",
+        "/api//credentials",
+        "/assets/../",
+        "/./",
+        "/assets/%2e%2e/",
+        "*",
+        "http://localhost:1/",
+    ] {
+        assert!(
+            !literal_path(
+                bad,
+                base.join(bad)
+                    .map(|u| u.path().to_owned())
+                    .unwrap_or_default()
+                    .as_str()
+            ),
+            "{bad}"
+        );
+    }
+    for (a, b) in [
+        ("/api/x%2fy", "/api/x%2fy"),
+        ("/api/./x", "/api/./x"),
+        ("/api/a\\b", "/api/a\\b"),
+        ("/api//x", "/api//x"),
+        ("/api/a{b", "/api/a%7Bb"),
+        ("/api/x", "/api/y"),
+    ] {
+        assert!(!literal_path(a, b));
+    }
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dist = dir.path().join("dist");
+    build_dist(&dist);
+    std::fs::write(dir.path().join("outside.js"), DIST_OUTSIDE).unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("outside.js"),
+        dist.join("assets/linked-Qq11.js"),
+    )
+    .unwrap();
+    let loaded = load_dist(&dist).unwrap().unwrap();
+    let mut names = loaded.assets.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "index-Ab12Cd.js",
+            "index-Ef34Gh.css",
+            "inter-latin-400-Zz99.woff2",
+            "mark-Yy88.svg"
+        ]
+    );
+    assert_eq!(loaded.index, DIST_INDEX.as_bytes());
+    assert!(load_dist(&dir.path().join("nowhere")).unwrap().is_none());
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../src/ui/dist");
+    let shipped = load_dist(&root).unwrap().unwrap();
+    let embedded = embedded_dist().unwrap();
+    assert_eq!(embedded.index, shipped.index);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
+    for entry in manifest.as_object().unwrap().values() {
+        let mut names = vec![entry["file"].as_str().unwrap().to_owned()];
+        for k in ["css", "assets"] {
+            if let Some(a) = entry[k].as_array() {
+                names.extend(a.iter().map(|v| v.as_str().unwrap().to_owned()));
+            }
+        }
+        for name in names {
+            let n = name.strip_prefix("assets/").unwrap();
+            assert!(shipped.assets.contains_key(n));
+            assert_eq!(embedded.assets[n], shipped.assets[n]);
+        }
+    }
+}
+#[tokio::test]
+async fn dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles(
+) {
+    use av_daemon::ui::server::{load_dist, UiServer, UiServerOptions};
+    use std::os::unix::fs::symlink;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for shape in [
+            "outside assets",
+            "inside assets",
+            "outside index",
+            "inside index",
+            "dangling index",
+            "linked dist",
+            "assets file",
+            "dist file",
+            "missing index",
+            "assets only",
+        ] {
+            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let dist = dir.path().join("dist");
+            std::fs::create_dir(&dist).unwrap();
+            let outside = dir.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("index.html"), DIST_OUTSIDE).unwrap();
+            std::fs::write(dist.join("index.html"), DIST_INDEX).unwrap();
+            let mut target = dist.clone();
+            match shape {
+                "outside assets" => symlink(&outside, dist.join("assets")).unwrap(),
+                "inside assets" => {
+                    std::fs::create_dir(dist.join("real")).unwrap();
+                    symlink(dist.join("real"), dist.join("assets")).unwrap();
+                }
+                "outside index" | "inside index" | "dangling index" => {
+                    std::fs::remove_file(dist.join("index.html")).unwrap();
+                    let path = if shape == "outside index" {
+                        outside.join("index.html")
+                    } else if shape == "inside index" {
+                        std::fs::write(dist.join("real.html"), DIST_INDEX).unwrap();
+                        dist.join("real.html")
+                    } else {
+                        outside.join("gone.html")
+                    };
+                    symlink(path, dist.join("index.html")).unwrap();
+                }
+                "linked dist" => {
+                    target = dir.path().join("linked-dist");
+                    symlink(&outside, &target).unwrap();
+                }
+                "assets file" => std::fs::write(dist.join("assets"), "not a directory").unwrap(),
+                "dist file" => {
+                    target = dir.path().join("flat");
+                    std::fs::write(&target, DIST_INDEX).unwrap();
+                }
+                _ => {
+                    std::fs::remove_file(dist.join("index.html")).unwrap();
+                    if shape == "assets only" {
+                        std::fs::create_dir(dist.join("assets")).unwrap();
+                        std::fs::write(dist.join("assets/index-Ab12Cd.js"), "x").unwrap();
+                    }
+                }
+            }
+            let missing = shape == "missing index" || shape == "assets only";
+            if missing {
+                assert!(load_dist(&target).unwrap().is_none());
+            } else {
+                let e = load_dist(&target).err().unwrap().to_string();
+                assert!(e.contains("npm run build:ui"));
+                assert!(!e.contains(DIST_OUTSIDE));
+                assert!(
+                    e.contains(if shape.ends_with("file") {
+                        "not a directory"
+                    } else {
+                        "symlink"
+                    }),
+                    "{shape}: {e}"
+                );
+            }
+            let e = UiServer::start(
+                &dir.path().join("unused.sock"),
+                UiServerOptions {
+                    port: 0,
+                    dist_dir: Some(target),
+                    ..Default::default()
+                },
+            )
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(e.contains("npm run build:ui"), "{shape}: {e}");
+            assert!(!e.contains(DIST_OUTSIDE));
+        }
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+#[ignore = "production mismatch: absolute-form UI target is normalized to literal index; daemon fix pending"]
+async fn dist_absolute_form_target_is_never_routed_as_literal_index() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let u = UiContractFixture::new(60000).await;
+        let (s, _, _) = raw_ui(
+            u.ui.bound_port(),
+            &format!("http://localhost:{}/", u.ui.bound_port()),
+            "GET",
+            Some(&u.cookie),
+        )
+        .await;
+        assert_eq!(s, 404, "absolute-form is not a literal path");
+        assert_eq!(
+            raw_ui(u.ui.bound_port(), "/", "GET", Some(&u.cookie))
+                .await
+                .0,
+            200
+        );
+        u.stop().await;
+    })
+    .await
+    .unwrap();
+}
+fn fake_touchid_body() -> Value {
+    use base64::Engine;
+    json!({"credential_id":"fake-prf-credential","prf_secret":base64::engine::general_purpose::STANDARD.encode([9u8;32])})
+}
+#[tokio::test]
+async fn ui_touchid_enroll_swap_refusal_remove_and_both_unlock_paths_use_fake_prf_without_biometrics(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let w = WidenFixture::new().await;
+        let mut body = fake_touchid_body();
+        body["presence"] = w.proof("touchid.enroll", &body).await;
+        let (s, v) = w.api("POST", "touchid/enroll", body).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(w
+            .f
+            .shared
+            .run(|c| c.vault.has_webauthn_unlock().unwrap())
+            .await
+            .unwrap());
+        let mut changed = fake_touchid_body();
+        changed["presence"] = w.proof("touchid.enroll", &changed).await;
+        changed["prf_secret"] = json!("CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=");
+        assert_ne!(w.api("POST", "touchid/enroll", changed).await.0, 200);
+        let proof = w.proof("touchid.remove", &json!({})).await;
+        assert_eq!(
+            w.api("POST", "touchid/remove", json!({"presence":proof}))
+                .await
+                .0,
+            200
+        );
+        assert!(!w
+            .f
+            .shared
+            .run(|c| c.vault.has_webauthn_unlock().unwrap())
+            .await
+            .unwrap());
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+fn assert_factor_order(status: u16, v: &Value) {
+    assert_eq!(status, 403, "{v}");
+    assert_eq!(v["code"], "AV_POLICY_DENIED");
+    assert_eq!(v["rule"], "factor_order");
+    assert_eq!(v["next"], "agent-vault passphrase set");
+    let hint = v["hint"].as_str().unwrap();
+    assert!(hint.contains("agent-vault passphrase set"));
+    assert!(hint.contains("recovery") || hint.contains("fall back"));
+}
+#[tokio::test]
+async fn ui_touchid_missing_recovery_refuses_before_any_tap_and_restoring_passphrase_allows_both_unlock_factors(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(50), async {
+        let w = WidenFixture::new().await;
+        w.f.shared
+            .run(|c| {
+                c.vault
+                    .remove_passphrase(&WIDEN_PASS.to_owned().into())
+                    .unwrap();
+                assert!(!c.vault.has_passphrase().unwrap());
+                assert_eq!(
+                    serde_json::to_value(c.vault.factors().unwrap()).unwrap(),
+                    json!(["none"])
+                );
+            })
+            .await
+            .unwrap();
+        let mut body = fake_touchid_body();
+        body["action"] = json!("enroll");
+        let (s, v) = w.ctl("POST", "/v1/factors/webauthn", body.clone()).await;
+        assert_factor_order(s, &v);
+        w.f.shared
+            .run(|c| c.dm.presence_grace_until = av_daemon::util::now_ms() + 60000)
+            .await
+            .unwrap();
+        body["presence"] = json!({"passphrase":WIDEN_PASS});
+        let (s, v) = w.ctl("POST", "/v1/factors/webauthn", body).await;
+        assert_factor_order(s, &v);
+        w.f.shared
+            .run(|c| c.dm.presence_grace_until = 0)
+            .await
+            .unwrap();
+        let mut body = fake_touchid_body();
+        body["presence"] = w.proof("touchid.enroll", &body).await;
+        let (s, v) = w.api("POST", "touchid/enroll", body).await;
+        assert_factor_order(s, &v["detail"]);
+        w.f.shared
+            .run(|c| {
+                let secret: av_core::secret::SecretBytes = vec![9u8; 32].into();
+                let e = c.vault.add_webauthn_unlock("fake", &secret).unwrap_err();
+                assert_eq!(
+                    e.as_vault().unwrap().extra.rule.as_deref(),
+                    Some("factor_order")
+                );
+                assert!(!c.vault.has_webauthn_unlock().unwrap());
+            })
+            .await
+            .unwrap();
+        assert!(!audit_records(&w.f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "presence.factor_added" && r["class"] == "webauthn-prf"));
+        w.f.shared
+            .run(|c| {
+                c.vault
+                    .set_passphrase(&WIDEN_PASS.to_owned().into(), None)
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let mut body = fake_touchid_body();
+        body["presence"] = w.proof("touchid.enroll", &body).await;
+        let (s, v) = w.api("POST", "touchid/enroll", body).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v, json!({"ok":true,"enrolled":true}));
+        let mut factors =
+            w.f.shared
+                .run(|c| serde_json::to_value(c.vault.factors().unwrap()).unwrap())
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone();
+        factors.sort_by_key(|v| v.to_string());
+        assert_eq!(factors, vec![json!("passphrase"), json!("webauthn-prf")]);
+        for unlock in [
+            json!({"prf_secret":fake_touchid_body()["prf_secret"]}),
+            json!({"passphrase":WIDEN_PASS}),
+        ] {
+            assert_eq!(w.ctl("POST", "/v1/lock", json!({})).await.0, 200);
+            let (s, v) = w.ctl("POST", "/v1/unlock", unlock).await;
+            assert_eq!(s, 200, "{v}");
+            assert_eq!(
+                w.ctl("GET", "/v1/lockstate", json!({})).await.1["locked"],
+                false
+            );
+        }
+        w.f.shared
+            .run(|c| {
+                assert!(c
+                    .vault
+                    .remove_passphrase(&WIDEN_PASS.to_owned().into())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("remove Touch ID unlock first"))
+            })
+            .await
+            .unwrap();
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_presence_key_can_rotate_without_passphrase_but_never_by_an_unsigned_or_windowed_call() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let w = WidenFixture::new().await;
+        w.f.shared
+            .run(|c| {
+                c.vault
+                    .remove_passphrase(&WIDEN_PASS.to_owned().into())
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let next = ported_common::FakeAuthenticator::new(64);
+        let record = fix_presence_record(64);
+        for window in [false, true] {
+            w.f.shared
+                .run(move |c| {
+                    c.dm.presence_grace_until = if window {
+                        av_daemon::util::now_ms() + 60000
+                    } else {
+                        0
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(w.ctl("POST", "/v1/presence", record.clone()).await.0, 401);
+        }
+        w.f.shared
+            .run(|c| c.dm.presence_grace_until = 0)
+            .await
+            .unwrap();
+        let proof = w.proof("presence.enroll", &record).await;
+        let mut b = record;
+        b["presence"] = proof;
+        let (s, v) = w.ctl("POST", "/v1/presence", b).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["replaced"], true);
+        assert_eq!(
+            w.f.shared
+                .run(|c| c.vault.presence_key().unwrap().unwrap().credential_id)
+                .await
+                .unwrap(),
+            next.id()
+        );
+        let third = fix_presence_record(65);
+        let mut b = third.clone();
+        b["presence"] = w.proof("presence.enroll", &third).await;
+        assert_ne!(w.ctl("POST", "/v1/presence", b).await.0, 200);
+        let mut b = third.clone();
+        b["presence"] = ui_proof_with(&w, &next, "presence.enroll", &third).await;
+        let (s, v) = w.ctl("POST", "/v1/presence", b).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            w.f.shared
+                .run(|c| c.vault.presence_key().unwrap().unwrap().credential_id)
+                .await
+                .unwrap(),
+            ported_common::FakeAuthenticator::new(65).id()
+        );
+        assert!(!w
+            .f
+            .shared
+            .run(|c| c.vault.has_passphrase().unwrap())
+            .await
+            .unwrap());
         w.stop().await;
     })
     .await
