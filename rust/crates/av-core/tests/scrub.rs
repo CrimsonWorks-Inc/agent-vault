@@ -233,3 +233,22 @@ fn stream_extra_pattern_hold_and_cut() {
         }
     }
 }
+#[test]
+fn unicode_custom_pattern_stream_window() {
+    let opts = ScrubberOptions {
+        extra_patterns: vec![ExtraPattern {
+            name: "unicode".into(),
+            source: "abcé{200}".into(),
+        }],
+        ..Default::default()
+    };
+    let token = format!("abc{}", "é".repeat(200));
+    let mut s = Scrubber::new(&[], &opts).unwrap();
+    let mut stream = s.stream();
+    let mut out = String::new();
+    for c in token.chars() {
+        out += &stream.push(&c.to_string());
+    }
+    out += &stream.flush();
+    assert_eq!(out, "[[av:derived]]");
+}

@@ -134,3 +134,16 @@ fn hardening_path_shapes_with_ordinary_control() {
     ));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
+proptest! {
+    #[test]
+    fn every_field_randomized_intersections(a in 1u64..100,b in 1u64..100,ai in 0usize..4,bi in 0usize..4,ap in any::<bool>(),bp in any::<bool>()) {
+        let modes=["auto","first-use","on-write","each"];
+        let make=|n:u64,i:usize,present:bool|{let mut v=json!({"kind":"http","hosts":["*.example.test"],"methods":["GET","POST"],"paths":["/a/**"],"deny_paths":[format!("/blocked{n}")],"approval":modes[i],"sql_profile":if i%2==0{"read-only"}else{"raw"},"mode":if i%2==0{"run"}else{"agent"},"rate":{"count":n,"per":"minute"},"quota":{"count":n,"window":"day"},"budget":{"limit":n},"spend":{"tokens":n,"usd_micros":n*2},"placeholder_policy":{"max_uses":n,"ttl":n*10,"max_active":n},"max_concurrent":n,"redirects":{"max":i},"databases":["db",format!("db{n}")],"rcpt":["a",format!("a{n}")],"commands":["ls",format!("cmd{n}")],"graphql":{"legacy":true},"stream_bodies":true,"routes":[{"methods":["GET"],"paths":["/a/**"]}],"payload":{"query":{"x":{"max_length":n}}}});if !present {for k in ["spend","placeholder_policy","rate","databases","rcpt","commands"]{v.as_object_mut().unwrap().remove(k);}}p(&v)};
+        let x=make(a,ai,ap);let y=make(b,bi,bp);let c=intersect(&[Some(&x),Some(&y)]);prop_assert!(validate(&c,&Default::default()).is_empty());prop_assert_eq!(c.clone(),intersect(&[Some(&c)]));let v=serial(&c);
+        prop_assert_eq!(&v["approval"],&json!(modes[ai.max(bi)]));prop_assert_eq!(&v["budget"]["limit"],&json!(a.min(b)));prop_assert_eq!(&v["max_concurrent"],&json!(a.min(b)));prop_assert_eq!(&v["quota"]["count"],&json!(a.min(b)));prop_assert_eq!(&v["redirects"]["max"],&json!(ai.min(bi)));prop_assert_eq!(v["route_sets"].as_array().unwrap().len(),2);prop_assert_eq!(v["payload_sets"].as_array().unwrap().len(),2);prop_assert_eq!(v["deny_paths"].as_array().unwrap().len(),2);
+        for field in ["methods","databases","rcpt","commands"]{if let Some(kept)=v[field].as_array(){for side in [&x,&y]{let s=serial(side);if let Some(values)=s[field].as_array(){for value in kept{prop_assert!(values.contains(value));}}}}}
+        for field in ["hosts","paths"]{for value in v[field].as_array().unwrap(){prop_assert!(serial(&x)[field].as_array().unwrap().contains(value));prop_assert!(serial(&y)[field].as_array().unwrap().contains(value));}}
+    }
+    #[test]
+    fn denied_path_spellings_never_escape(prefix in 0usize..8,encoded in any::<bool>()) {let policy=p(&json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/**"],"deny_paths":["/user/keys","/user/keys/**"]}));let path=format!("/{}user/{}keys", "a/../".repeat(prefix),if encoded{"%6b/../"}else{"./"});let result=evaluate_http(&policy,&HttpTarget{method:Some("GET"),host:"api.example.test",path:&path});prop_assert!(result.is_err());prop_assert!(evaluate_http(&policy,&HttpTarget{method:Some("GET"),host:"api.example.test",path:"/user/profile"}).is_ok(), "ordinary control must pass");}
+}

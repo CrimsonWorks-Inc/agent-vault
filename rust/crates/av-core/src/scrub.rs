@@ -630,10 +630,18 @@ impl ScrubStream<'_> {
             .scrubber
             .overlap()
             .max(self.scrubber.extra_hold)
-            .min(combined.len());
-        let mut cut = combined.len() - keep;
-        while !combined.is_char_boundary(cut) {
-            cut -= 1;
+            .min(combined.encode_utf16().count());
+        // JS string windows count UTF-16 units; converting the chosen cut to
+        // a UTF-8 boundary keeps non-ASCII custom patterns whole as well.
+        let cut_units = combined.encode_utf16().count().saturating_sub(keep);
+        let mut units = 0;
+        let mut cut = 0;
+        for (i, c) in combined.char_indices() {
+            if units + c.len_utf16() > cut_units {
+                break;
+            }
+            units += c.len_utf16();
+            cut = i + c.len_utf8();
         }
         if cut == 0 {
             self.held = combined;

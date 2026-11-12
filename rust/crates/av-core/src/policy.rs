@@ -76,13 +76,25 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// be reported and refused. There is no JS counterpart: it carries the JS
 /// fact that a policy field may hold any JSON value (`src/core/policy.js`,
 /// `validate` and `intersect`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Checked<T> {
     /// The value has the expected shape (range checks are still `validate`'s).
     Valid(T),
     /// Anything else, verbatim (including `null` where `null` is not allowed).
     Invalid(serde_json::Value),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Checked<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        Ok(
+            match T::deserialize(crate::canon::js_numbers(raw.clone())) {
+                Ok(value) => Checked::Valid(value),
+                Err(_) => Checked::Invalid(raw),
+            },
+        )
+    }
 }
 
 /// Deserialize a present field, so `null` becomes `Some(Checked::Invalid)`
@@ -94,6 +106,16 @@ where
     T: Deserialize<'de>,
 {
     Checked::<T>::deserialize(d).map(Some)
+}
+
+// Optional schema members are absent when omitted; an explicit null is not
+// absence in the JS validators. Let Checked preserve those invalid objects.
+pub(crate) fn non_null<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// An approval mode. Ports the values of `APPROVAL_ORDER` in
@@ -197,10 +219,18 @@ pub enum BudgetValue {
 #[serde(deny_unknown_fields)]
 pub struct Budget {
     /// `requests`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub unit: Option<String>,
     /// The limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub limit: Option<BudgetValue>,
 }
 
@@ -210,10 +240,18 @@ pub struct Budget {
 #[serde(deny_unknown_fields)]
 pub struct Spend {
     /// Token limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub tokens: Option<u64>,
     /// USD micros limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub usd_micros: Option<u64>,
 }
 
@@ -244,13 +282,25 @@ pub struct Route {
 #[serde(deny_unknown_fields)]
 pub struct PlaceholderPolicy {
     /// Uses per placeholder.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub max_uses: Option<u64>,
     /// Lifetime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub ttl: Option<u64>,
     /// Live placeholders at once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub max_active: Option<u64>,
 }
 
@@ -497,7 +547,13 @@ pub fn intersect(layers: &[Option<&Policy>]) -> Policy {
 /// `budgetInteger` in `src/core/policy.js`.
 pub fn budget_integer(value: &serde_json::Value) -> Option<u64> {
     let n = match value {
-        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|n| {
+                    n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= MAX_SAFE_INTEGER as f64
+                })
+                .map(|n| n as u64)
+        }),
         serde_json::Value::String(s)
             if s == "0"
                 || (!s.starts_with('0')
@@ -689,11 +745,8 @@ pub fn host_only(authority: &str) -> String {
     if h.starts_with('[') {
         return h.find(']').map_or(String::new(), |end| h[..=end].into());
     }
-    h.split(':')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('.')
-        .into()
+    let name = h.split(':').next().unwrap_or("");
+    name.strip_suffix('.').unwrap_or(name).into()
 }
 
 /// Confine requested hosts to a credential's ceiling; `None` or empty means
@@ -1303,7 +1356,9 @@ fn validate_raw(layer: &serde_json::Value, opts: &ValidateOptions) -> Vec<Proble
         v.as_object()
             .is_some_and(|o| o.keys().all(|k| allowed.contains(&k.as_str())))
     };
-    let int = |v: &V, min: u64, max: u64| v.as_u64().is_some_and(|n| n >= min && n <= max);
+    let int = |v: &V, min: u64, max: u64| {
+        v.is_number() && budget_integer(v).is_some_and(|n| n >= min && n <= max)
+    };
     let strings = |v: &V| {
         v.as_array()
             .is_some_and(|a| a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty())))

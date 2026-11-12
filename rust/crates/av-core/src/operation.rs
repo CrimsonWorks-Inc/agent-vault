@@ -88,6 +88,7 @@ pub fn canonical_operation(value: &serde_json::Value) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        serde_json::Value::Number(n) => crate::canon::js_number_text(n),
         _ => serde_json::to_string(value).expect("JSON value"),
     }
 }

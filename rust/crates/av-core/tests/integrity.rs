@@ -185,3 +185,29 @@ proptest! {
  #[test] fn wrong_key_never_verifies(key in any::<[u8;32]>()) {prop_assume!(key!=[42;32]);let p=minted("test-fake","token");prop_assert!(!ph::verify(&Key32::from_bytes(key),&ph::parse_at(&p.text,0).unwrap()));}
  #[test] fn random_text_never_verifies(s in "[av1.0-9a-hjkmnp-tv-z_-]{40,100}") {if let Some(parsed)=ph::parse_at(&format!("av1.{s}"),0){prop_assert!(!ph::verify(&Key32::from_bytes([42;32]),&parsed));}}
 }
+proptest! {
+    #[test]
+    fn operation_shapes_canonicalize_injectively(op1 in 0usize..5,op2 in 0usize..5,cred1 in "[a-z0-9-]{0,12}",cred2 in "[a-z0-9-]{0,12}",methods1 in prop::collection::vec(0usize..4,0..5),methods2 in prop::collection::vec(0usize..4,0..5),paths1 in prop::collection::vec(0usize..4,0..5),paths2 in prop::collection::vec(0usize..4,0..5)){
+        let ops=["session.create","cred.add","cred.remove","approval.approve","listener.add"];let methods=["GET","POST","DELETE","HEAD"];let paths=["/**","/v1/**","/user","/repos/*"];
+        let a=serde_json::json!({"op":ops[op1],"cred":cred1,"methods":methods1.iter().map(|i|methods[*i]).collect::<Vec<_>>(),"paths":paths1.iter().map(|i|paths[*i]).collect::<Vec<_>>()});let b=serde_json::json!({"paths":paths2.iter().map(|i|paths[*i]).collect::<Vec<_>>(),"methods":methods2.iter().map(|i|methods[*i]).collect::<Vec<_>>(),"cred":cred2,"op":ops[op2]});
+        prop_assert_eq!(av_core::operation::canonical_operation(&a)==av_core::operation::canonical_operation(&b),a==b);
+    }
+}
+#[test]
+fn js_number_canonical_vectors() {
+    let rows: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/number-vectors.json")).unwrap();
+    for row in rows.as_array().unwrap() {
+        let value: serde_json::Value = serde_json::from_str(row["raw"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            av_core::operation::canonical_operation(&value),
+            row["operation"],
+            "{row}"
+        );
+        assert_eq!(
+            serde_json::json!(canon::canonicalize(&value).ok()),
+            row["canon"],
+            "{row}"
+        );
+    }
+}

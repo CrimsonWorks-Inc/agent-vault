@@ -25,10 +25,21 @@ pub fn canonicalize(value: &serde_json::Value) -> Result<String, CanonError> {
         Value::Null => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => {
-            if !n.is_i64() && !n.is_u64() {
+            let v = n.as_f64().ok_or(CanonError::Float)?;
+            if v.fract() != 0.0 {
                 return Err(CanonError::Float);
             }
-            n.to_string()
+            if v == 0.0 {
+                "0".into()
+            } else if v.abs() < 1e21 {
+                v.to_string()
+            } else {
+                let mut s = format!("{v:e}");
+                if !s.contains("e-") {
+                    s = s.replace('e', "e+");
+                }
+                s
+            }
         }
         Value::String(s) => serde_json::to_string(s).expect("string serialization"),
         Value::Array(a) => format!(
@@ -169,5 +180,45 @@ mod tests {
             )
             .unwrap()
         );
+    }
+}
+
+// JS JSON numbers use binary64 even when the input token spells an integer.
+// Normalize before typed deserialization so 1.0 and 1 have the same meaning.
+pub(crate) fn js_numbers(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value as V;
+    match value {
+        V::Number(n) => {
+            if let Some(v) = n.as_f64() {
+                if v.fract() == 0.0 {
+                    if v >= 0.0 && v < (u64::MAX as f64) {
+                        return V::from(v as u64);
+                    }
+                    if v < 0.0 && v >= i64::MIN as f64 {
+                        return V::from(v as i64);
+                    }
+                }
+            }
+            V::Number(n)
+        }
+        V::Array(a) => V::Array(a.into_iter().map(js_numbers).collect()),
+        V::Object(o) => V::Object(o.into_iter().map(|(k, v)| (k, js_numbers(v))).collect()),
+        v => v,
+    }
+}
+
+pub(crate) fn js_number_text(n: &serde_json::Number) -> String {
+    let v = n.as_f64().expect("finite JSON number");
+    if v == 0.0 {
+        return "0".into();
+    }
+    if v.abs() >= 1e21 || v.abs() < 1e-6 {
+        let mut s = format!("{v:e}");
+        if !s.contains("e-") {
+            s = s.replace('e', "e+");
+        }
+        s
+    } else {
+        v.to_string()
     }
 }

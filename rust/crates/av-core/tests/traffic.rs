@@ -132,3 +132,59 @@ fn detector_pathological_input_linear_bound() {
     assert!(detect_all(&s).is_empty());
     assert!(start.elapsed() < std::time::Duration::from_secs(3));
 }
+#[test]
+fn substitution_sites_and_ordinary_controls() {
+    let ph = fixture()["ph"].as_str().unwrap().to_owned();
+    let site = parse_site("header:authorization:Bearer").unwrap();
+    for scheme in ["bearer ", "BEARER   ", "Bearer\t"] {
+        let req = ProxyRequest {
+            headers: vec![("Authorization".into(), format!("{scheme}{ph}"))],
+            ..Default::default()
+        };
+        let hit = locate(&req).occurrences.remove(0);
+        assert!(matches_site(&hit.location, &site));
+        assert!(describe_location(&hit.location).contains("authorization"));
+    }
+    let req = ProxyRequest {
+        body: Some(vec![b' '; MAX_BUFFERED_BODY + 1]),
+        ..Default::default()
+    };
+    assert!(locate(&req).unscannable.unwrap().contains("16 MiB"));
+    let utf16: String = ph
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .map(char::from)
+        .collect();
+    assert!(detect_all(&utf16).is_empty());
+    for (content_type, body) in [
+        ("application/json", "{\"ordinary\":\"hello\"}"),
+        ("text/plain", "ordinary prose"),
+        ("application/x-www-form-urlencoded", "a=1&b=2"),
+    ] {
+        let req = ProxyRequest {
+            headers: vec![("content-type".into(), content_type.into())],
+            body: Some(body.as_bytes().to_vec()),
+            ..Default::default()
+        };
+        assert!(locate(&req).occurrences.is_empty());
+    }
+    let req = ProxyRequest {
+        path: format!("/p/{ph}"),
+        ..Default::default()
+    };
+    let hit = locate(&req).occurrences.remove(0);
+    for spec in [
+        "header:authorization:Bearer",
+        "basic:pass",
+        "json:/auth/key",
+        "query:key",
+        "form:token",
+    ] {
+        assert!(!matches_site(&hit.location, &parse_site(spec).unwrap()));
+    }
+}
+proptest! {
+    #[test]
+    fn detector_is_structural_superset_for_all_encodings(slug in "[a-z0-9-]{1,24}",field in "[a-z0-9]{1,16}",pad in 0usize..3){use base64::Engine;let key=av_core::secret::Key32::from_bytes([42;32]);let minted=av_core::placeholder::mint(&av_core::placeholder::MintInput{k_ph:&key,sid:"0123456789ab",slug:&slug,field:&field}).unwrap();let ph=&minted.text;let pct=ph.replace('.',"%2e");let twice=pct.replace('%',"%25");let unicode=ph.bytes().map(|b|format!("\\u{b:04x}")).collect::<String>();let blob=base64::engine::general_purpose::STANDARD.encode(format!("{}{ph}-suffix","x".repeat(pad)));for encoded in [ph.clone(),pct,twice,unicode,blob.clone(),blob.replace('+',"-").replace('/',"_")]{let hits=detect_all(&format!("before ! {encoded} ! after"));prop_assert!(hits.iter().any(|h|h.parsed.nonce==minted.nonce));}let req=ProxyRequest{headers:vec![("Authorization".into(),format!("Bearer {ph}"))],..Default::default()};prop_assert!(locate(&req).occurrences.iter().any(|o|o.parsed.nonce==minted.nonce));prop_assert!(detect_all(&(ph.to_owned()+"x")).is_empty());
+    }
+}

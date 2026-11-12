@@ -1,0 +1,548 @@
+# Ports all 76 src/core protections in test/mutation-check.js.
+# C27 decision fields use usize indices: mutants 71/72 test their identity; text leakage cannot compile.
+
+[[mutation]]
+name = "the streaming scrubber tears matches at the cut"
+file = "src/scrub.rs"
+from = "self.scrubber.scrub(&combined[..cut])"
+to = "self.scrubber.scrub(&combined[..combined.len()-keep])"
+test = "stream_cut_regressions"
+
+[[mutation]]
+name = "an encoded placeholder counts as an injection site"
+file = "src/substitute.rs"
+from = "if location.encoding != HitEncoding::Raw {"
+to = "if false && location.encoding != HitEncoding::Raw {"
+test = "encoded_locations"
+
+[[mutation]]
+name = "the placeholder checksum always verifies"
+file = "src/placeholder.rs"
+from = "    use subtle::ConstantTimeEq;\n    checksum(k_ph, &parsed.sid, &parsed.label, &parsed.nonce)\n        .as_bytes()\n        .ct_eq(parsed.chk.as_bytes())\n        .into()"
+to = "    let _ = (k_ph, parsed); true"
+test = "wrong_key_never_verifies"
+
+[[mutation]]
+name = "a grant is not confined to its credential’s hosts"
+file = "src/policy.rs"
+from = "if !ceiling.iter().any(|c| match_host(c, &h)) {"
+to = "if false && !ceiling.iter().any(|c| match_host(c, &h)) {"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a control character in a path is allowed through"
+file = "src/policy.rs"
+from = "if let Some(b) = p.bytes().find(|b| *b < 32 || *b == 127) {"
+to = "if let Some(b) = p.bytes().find(|_| false) {"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a non-ASCII secret is not scrubbed"
+file = "src/scrub.rs"
+from = "add(secret.as_bytes().iter().copied().map(char::from).collect());"
+to = "/* latin1 encoding omitted */"
+test = "js_encoding_sets"
+
+[[mutation]]
+name = "a child may widen past a ceiling"
+file = "src/policy.rs"
+from = "\"paths\" => glob_segments(x, y, true),"
+to = "\"paths\" => y.starts_with(x.split(\"**\").next().unwrap_or(x)),"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "the base64 needle drops the secret’s tail"
+file = "src/scrub.rs"
+from = "let end = 4 * (pad + secret.len()) / 3;"
+to = "let end = std.len().saturating_sub(4);"
+test = "js_encoding_sets"
+
+[[mutation]]
+name = "a budget with no limit means no limit"
+file = "src/policy.rs"
+from = "(a, b) => a.or(b),"
+to = "(a, b) => if a.is_none() || b.is_none() { Some(0) } else { a.or(b) },"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "locate() does not read header names"
+file = "src/substitute.rs"
+from = "add_hits(&mut occurrences, name, at);"
+to = "let _ = at;"
+test = "js_substitution_vectors"
+
+[[mutation]]
+name = "wrapped base64 is invisible to the detector"
+file = "src/detect.rs"
+from = "variants.push(folded);"
+to = "let _ = folded;"
+test = "js_detector_vectors"
+
+[[mutation]]
+name = "an approval is not bound to its headers"
+file = "src/canon.rs"
+from = "\"headers\":headers"
+to = "\"headers\":[]"
+test = "canonical_hash_binds"
+
+[[mutation]]
+name = "derived token shapes match mid-word"
+file = "src/scrub.rs"
+from = "p.name == \"private-key\" || boundary(&out, m.start())"
+to = "true || p.name == \"private-key\" || boundary(&out, m.start())"
+test = "pathological_pattern_and_ordinary_controls"
+
+[[mutation]]
+name = "the request hash sorts the values of a repeated header"
+file = "src/canon.rs"
+from = "headers.sort_by(|a, b| a.0.cmp(&b.0));"
+to = "headers.sort();"
+test = "canonical_hash_binds"
+
+[[mutation]]
+name = "the scrubber reads only the fixed needles, not decoded or unwrapped text"
+file = "src/scrub.rs"
+from = "let (spans, unscannable) = self.collect_spans(&out);"
+to = "let (spans, unscannable) = (Vec::new(), false);"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "uppercase hex of a secret is not a needle"
+file = "src/scrub.rs"
+from = "out.push(hex.to_uppercase());"
+to = "/* uppercase encoding omitted */"
+test = "js_encoding_sets"
+
+[[mutation]]
+name = "a derived token straddling the stream cut is emitted in halves"
+file = "src/scrub.rs"
+from = "cut = m.start();\n                break;"
+to = "/* derived hold omitted */\n                break;"
+test = "stream_cut_regressions"
+
+[[mutation]]
+name = "an escaped secret straddling the stream cut is scrubbed in halves"
+file = "src/scrub.rs"
+from = "if start < cut && end > cut {\n                cut = end;"
+to = "if false && start < cut && end > cut {\n                cut = end;"
+test = "stream_cut_regressions"
+
+[[mutation]]
+name = "a backslash encoded twice passes the separator check"
+file = "src/policy.rs"
+from = "sep.is_match(raw) || sep.is_match(&p)"
+to = "sep.is_match(raw)"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "intersecting two rates compares their counts whatever the units"
+file = "src/policy.rs"
+from = "let ar = ac / duration(&a[key]);\n            let br = bc / duration(&b[key]);"
+to = "let ar = ac;\n            let br = bc;"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "Basic substitution writes the first Authorization header by name"
+file = "src/substitute.rs"
+from = "            let indexed = location.index.filter(|i| {\n                out.headers\n                    .get(*i)\n                    .is_some_and(|(n, _)| n.eq_ignore_ascii_case(\"authorization\"))\n            });"
+to = "            let indexed: Option<usize> = None;"
+test = "js_substitution_vectors"
+
+[[mutation]]
+name = "a placeholder left in the outgoing request after substitution is not looked for"
+file = "src/substitute.rs"
+from = "    locate(req)\n        .occurrences\n        .into_iter()\n        .find(|o| nonces.contains(&o.parsed.nonce))"
+to = "    let _ = (req,nonces); None"
+test = "encoded_locations"
+
+[[mutation]]
+name = "a JSON string literal the parse does not expose is not searched for placeholders"
+file = "src/substitute.rs"
+from = "if live {\n                        continue;\n                    }"
+to = "if true || live {\n                        continue;\n                    }"
+test = "js_substitution_vectors"
+
+[[mutation]]
+name = "a form placeholder with an encoded character is decoded and re-encoded with its whole value"
+file = "src/substitute.rs"
+from = "replace_encoded(&v, placeholder_text, &uri_encode(secret))"
+to = "uri_encode(&crate::detect::percent_decode(&v).replace(placeholder_text,secret))"
+test = "js_substitution_vectors"
+
+[[mutation]]
+name = "wrapped base64 is joined up only when its first line is 16 or longer"
+file = "src/scrub.rs"
+from = "for (start, end) in runs {"
+to = "for (start, end) in runs.into_iter().filter(|(s,_)|text[*s..].bytes().take_while(|b|b.is_ascii_alphanumeric()||b\"+/=_-\".contains(b)).count()>=16) {"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "mixed-case hex on one line is not folded before it is searched"
+file = "src/scrub.rs"
+from = "if i - start >= scrubber.min_hex && mixed_case(&text[start..i]) {"
+to = "if false && i - start >= scrubber.min_hex && mixed_case(&text[start..i]) {"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "mixed-case hex wrapped over lines is not folded before it is searched"
+file = "src/scrub.rs"
+from = "if joined.text.len() >= scrubber.min_hex && mixed_case(&joined.text) {"
+to = "if false && joined.text.len() >= scrubber.min_hex && mixed_case(&joined.text) {"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "a path whose escape was itself encoded is sent instead of refused"
+file = "src/policy.rs"
+from = "if regex::Regex::new(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
+to = "if false && regex::Regex::new(r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\")"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "an encoded %u escape, which IIS decodes, is not treated as an escape"
+file = "src/policy.rs"
+from = "r\"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})\""
+to = "r\"(?i)%(?:[0-9a-f]{2})\""
+test = "js_policy_reference"
+
+[[mutation]]
+name = "the decoded view leaves JSON's two-character escapes such as \\/ as they are"
+file = "src/scrub.rs"
+from = "r#\"\\\\u[0-9a-fA-F]{4}|\\\\[\"\\\\/bfnrt]\"#"
+to = "r#\"\\\\u[0-9a-fA-F]{4}\"#"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "the decoded view is searched for the secret only, not its base64, so percent-encoded base64 passes"
+file = "src/scrub.rs"
+from = "scrubber.plain.iter().chain(scrubber.blobs.iter())"
+to = "scrubber.plain.iter().chain(scrubber.blobs.iter().take(0))"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "the response scrubber peels only one layer, so nested encodings leak"
+file = "src/scrub.rs"
+from = "pub const DECODE_DEPTH: usize = 3;"
+to = "pub const DECODE_DEPTH: usize = 1;"
+test = "js_scrub_encoding_and_nested_vectors"
+
+[[mutation]]
+name = "an unknown approval mode needs no approval"
+file = "src/policy.rs"
+from = "        _ => true,\n    }\n}\n\n/// Severity"
+to = "        _ => false,\n    }\n}\n\n/// Severity"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "intersecting max_concurrent takes the inner layer instead of the minimum"
+file = "src/policy.rs"
+from = "let v = min(&a[key], &b[key]);"
+to = "let v = b[key].clone();"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "intersecting two rates takes the inner layer"
+file = "src/policy.rs"
+from = "if ar < br || (ar == br && ac <= bc) {"
+to = "if false && (ar < br || (ar == br && ac <= bc)) {"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "intersecting two spend limits takes the inner layer"
+file = "src/policy.rs"
+from = "let n = min(&aa, &bb);"
+to = "let n = if key == \"spend\" { bb.clone() } else { min(&aa,&bb) };"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a GraphQL document is judged by its first operation only"
+file = "src/payload.rs"
+from = "if !rules.operations.contains(&op) {"
+to = "if operations == 0 && !rules.operations.contains(&op) {"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a duplicate JSON key is read last-wins instead of refused"
+file = "src/payload.rs"
+from = "if map.contains_key(&k) {"
+to = "if false && map.contains_key(&k) {"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "only the last payload rule-set is enforced"
+file = "src/payload.rs"
+from = "    for set in sets {\n        if let Some(rules) = &set.query {"
+to = "    for set in sets.iter().rev().take(1) {\n        if let Some(rules) = &set.query {"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a request allowed by any one route set passes the others"
+file = "src/policy.rs"
+from = "for set in sets {\n        let i = set.iter().position"
+to = "for set in sets.into_iter().rev().take(1) {\n        let i = set.iter().position"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a route pair matches the method from one pair and the path from another"
+file = "src/policy.rs"
+from = "pair.methods.contains(&m) && pair.paths.iter().any(|g| match_path(g, &p))"
+to = "set.iter().any(|x|x.methods.contains(&m)) && set.iter().any(|x|x.paths.iter().any(|g|match_path(g,&p)))"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a scrub pattern may put classes after its variable quantifier, which backtracks for seconds"
+file = "src/scrub.rs"
+from = "if after_variable && (!literal || quantified) {"
+to = "if false && after_variable && (!literal || quantified) {"
+test = "js_scrub_pattern_grammar"
+
+[[mutation]]
+name = "a scrub pattern branch may match more than 512 characters"
+file = "src/scrub.rs"
+from = "if length > 512 {"
+to = "if false && length > 512 {"
+test = "js_scrub_pattern_grammar"
+
+[[mutation]]
+name = "the stream scrubber holds back less than an extra pattern can match"
+file = "src/scrub.rs"
+from = ".max(self.scrubber.extra_hold)"
+to = ".max(0)"
+test = "stream_extra_pattern_hold_and_cut"
+
+[[mutation]]
+name = "the stream scrubber cuts through an extra-pattern match instead of moving past it"
+file = "src/scrub.rs"
+from = "if m.start() < cut && m.end() > cut && boundary(&combined, m.start()) {"
+to = "if false && m.start() < cut && m.end() > cut && boundary(&combined, m.start()) {"
+test = "stream_extra_pattern_hold_and_cut"
+
+[[mutation]]
+name = "a call with no usage report is charged nothing"
+file = "src/model_usage.rs"
+from = "return Ok(*reservation);"
+to = "return Ok(Charge::default());"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a query the URL would cut at # or rewrite is checked as written"
+file = "src/request_view.rs"
+from = "let unsendable = query.contains(['#', '\\t', '\\n', '\\r'])\n        || query.as_bytes().last().is_some_and(|b| *b <= 0x20);"
+to = "let unsendable = false;"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a method-override field in the query is not read"
+file = "src/request_view.rs"
+from = "read(both_readings(&query));"
+to = "/* query override reading omitted */"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a method-override field in a form body is not read"
+file = "src/request_view.rs"
+from = "read(both_readings(text));"
+to = "/* form override reading omitted */"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a method-override field in a multipart body is not read"
+file = "src/request_view.rs"
+from = "} else if media_type == \"multipart/form-data\" {"
+to = "} else if false && media_type == \"multipart/form-data\" {"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a method-override field in a JSON body is not read"
+file = "src/request_view.rs"
+from = "} else if media_type.ends_with(\"/json\") || media_type.ends_with(\"+json\") {"
+to = "} else if false && (media_type.ends_with(\"/json\") || media_type.ends_with(\"+json\")) {"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a JSON body's repeated _method is read as its last copy only"
+file = "src/request_view.rs"
+from = "let fields = (&mut de).deserialize_map(Fields).ok()?;"
+to = "let fields = (&mut de).deserialize_map(Fields).ok()?;\n    let fields: Vec<_> = fields.into_iter().collect::<std::collections::BTreeMap<_,_>>().into_iter().collect();"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a method-override field name is not folded as PHP and Rack read it"
+file = "src/request_view.rs"
+from = "base.to_lowercase().replace([' ', '.', '-'], \"_\")"
+to = "base.to_lowercase()"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "the view stops splitting a query on ;"
+file = "src/request_view.rs"
+from = "c == '&' || (separator == QuerySeparator::AmpersandOrSemicolon && c == ';')"
+to = "c == '&'"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "the query rules' name check reads the raw query instead of the view"
+file = "src/payload.rs"
+from = "respelled(rules, &view.params)?;"
+to = "let list = crate::request_view::query_params(&view.query,crate::request_view::QuerySeparator::Ampersand);\n            let list:Vec<_>=list.into_iter().map(|mut p|{p.raw_name=p.name.clone();p}).collect();respelled(rules,&list)?;"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a ; query is read one way while payload rules are active"
+file = "src/payload.rs"
+from = "if view.semicolon {"
+to = "if false && view.semicolon {"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a ; form body is read one way while form rules are active"
+file = "src/payload.rs"
+from = "if text.contains(';') {\n                return Err(ambiguous(\"form_semicolon\"));\n            }\n            let list = form_list"
+to = "if false && text.contains(';') {\n                return Err(ambiguous(\"form_semicolon\"));\n            }\n            let list = form_list"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a JSON key differing from a rule's only by case is let through"
+file = "src/payload.rs"
+from = "if o.keys()\n                            .any(|x| *x != k && x.to_lowercase() == k.to_lowercase())"
+to = "if false && o.keys()\n                            .any(|x| *x != k && x.to_lowercase() == k.to_lowercase())"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "an override value is read only as a ;-splitting reader reads it"
+file = "src/request_view.rs"
+from = "if raw.contains(';') {\n        p.extend(query_params(raw, QuerySeparator::Ampersand));"
+to = "if false && raw.contains(';') {\n        p.extend(query_params(raw, QuerySeparator::Ampersand));"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a name with a NUL, a control or non-ASCII character, an edge space or none is read like any other"
+file = "src/request_view.rs"
+from = "let stray_name = names.iter().any(|n| is_stray_name(n)) || keys.iter().any(|n| is_stray_key(n));"
+to = "let stray_name = false;"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a name with DEL or a non-ASCII character is not stray"
+file = "src/request_view.rs"
+from = "!(0x20..=0x7e).contains(&b)"
+to = "b < 0x20"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a top-level JSON key is not checked for a stray name"
+file = "src/request_view.rs"
+from = "keys.push(k.clone());"
+to = "/* JSON stray keys omitted */"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a name is not folded as PHP registers it, cut at NUL and without leading spaces"
+file = "src/request_view.rs"
+from = "    for base in [\n        name,\n        name.split('\\0')\n            .next()\n            .unwrap_or(\"\")\n            .trim_start_matches(' '),\n    ] {"
+to = "    for base in [name] {"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a folded multipart Content-Disposition is read up to its first line break"
+file = "src/request_view.rs"
+from = "let disposition = fold.replace_all("
+to = "let disposition = regex::Regex::new(r\"\\b\\B\").unwrap().replace_all("
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a name that opens with a bracket or other punctuation is not stray"
+file = "src/request_view.rs"
+from = "|| !name\n            .as_bytes()"
+to = "|| false && !name\n            .as_bytes()"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a name is not folded as qs and Rack 2.2 read brackets, so [_method] and force] are other names"
+file = "src/request_view.rs"
+from = "for v in [a, b, c] {"
+to = "for v in [a, b] {"
+test = "js_request_view_vectors"
+
+[[mutation]]
+name = "a repeated list name such as expand[] is refused as a duplicate"
+file = "src/payload.rs"
+from = "&& crate::request_view::list_base(&p.name).is_none()"
+to = "&& true"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a rule on a list name checks only its first entry"
+file = "src/payload.rs"
+from = "for v in values {"
+to = "for v in values.into_iter().take(1) {"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "the shared budget reader calls an unreadable budget no limit"
+file = "src/policy.rs"
+from = "Some(Checked::Invalid(_)) => BudgetLimit::Unreadable,"
+to = "Some(Checked::Invalid(_)) => BudgetLimit::Unlimited,"
+test = "budget_reader_all_legacy_shapes"
+
+[[mutation]]
+name = "the stored-secret scrub matches values under the scrubber's floor (F14)"
+file = "src/scrub.rs"
+from = "if secret.encode_utf16().count() >= MIN_SECRET_LEN {"
+to = "if !secret.is_empty() {"
+test = "floor_and_untrusted"
+
+[[mutation]]
+name = "an agent-written reason is cut before it is scrubbed, so a secret across the cut leaves half behind (F16)"
+file = "src/scrub.rs"
+from = "let mut out = redact_stored(text, secrets);"
+to = "let text = &text[..text.len().min(max)];\n    let mut out = redact_stored(text, secrets);"
+test = "floor_and_untrusted"
+
+[[mutation]]
+name = "request.allowed names the path rule by its glob text, which can be an agent-proposed secret (C27, r4 F1)"
+file = "src/policy.rs"
+from = "        path_rule,\n        route_rule,"
+to = "        path_rule: path_rule.map(|i|i+1),\n        route_rule,"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "request.allowed names the route by METHOD and glob text, which can be an agent-proposed secret (C27, r4 F1)"
+file = "src/policy.rs"
+from = "route_rule = i;"
+to = "route_rule = i.map(|i|i+1);"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a deny-list denial names its pattern, which an open narrowing can set, in the filed rule (C27)"
+file = "src/policy.rs"
+from = "Some(&format!(\"deny_paths:{i}\"))"
+to = "Some(&format!(\"deny_paths:{dp}\"))"
+test = "js_policy_reference"
+
+[[mutation]]
+name = "a payload rule names its key by the key text, which can be agent-proposed (C28)"
+file = "src/payload.rs"
+from = "rule: Some(format!(\"payload:{kind}:{index}:{name}\"))"
+to = "rule: Some(format!(\"payload:{kind}:{key}:{name}\"))"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "a strict-query refusal names the parameter the agent chose (C28)"
+file = "src/payload.rs"
+from = "payload_fail(&format!(\"payload:query:{i}:strict\"))"
+to = "payload_fail(&format!(\"payload:query:{}:strict\",p.name))"
+test = "js_payload_and_model_reference_vectors"
+
+[[mutation]]
+name = "structured error recovery instructions are serialized as text"
+file = "src/errors.rs"
+from = "body[\"next\"] = v.clone();"
+to = "body[\"next\"] = serde_json::Value::String(v.to_string());"
+test = "structured_and_string_next_match_javascript"
+
+[[mutation]]
+name = "an explicit null budget limit is interpreted as absent"
+file = "src/policy.rs"
+from = "    #[serde(\n        default,\n        skip_serializing_if = \"Option::is_none\",\n        deserialize_with = \"non_null\"\n    )]\n    pub limit: Option<BudgetValue>,"
+to = "    #[serde(\n        default,\n        skip_serializing_if = \"Option::is_none\"\n    )]\n    pub limit: Option<BudgetValue>,"
+test = "explicit_null_schema_members_stay_invalid"

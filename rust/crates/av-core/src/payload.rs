@@ -151,23 +151,47 @@ impl<'de, V: Deserialize<'de>> Deserialize<'de> for OrderedMap<V> {
 #[serde(deny_unknown_fields)]
 pub struct FieldConstraint {
     /// The field must be present.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub required: Option<bool>,
     /// The field must be absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub absent: Option<bool>,
     /// Allowed values: null, booleans, finite numbers or strings of at most
     /// 256 chars; at most 64 of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub one_of: Option<Vec<serde_json::Value>>,
     /// Inclusive numeric minimum.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub min: Option<f64>,
     /// Inclusive numeric maximum.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub max: Option<f64>,
     /// Longest string or list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub max_length: Option<u64>,
 }
 
@@ -194,7 +218,11 @@ pub struct GraphqlRules {
     pub operations: Vec<GraphqlOperation>,
     /// Field names refused anywhere in the document (at most 64 GraphQL
     /// names).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub deny_fields: Option<Vec<String>>,
 }
 
@@ -206,22 +234,46 @@ pub struct GraphqlRules {
 #[serde(deny_unknown_fields)]
 pub struct PayloadRuleSet {
     /// JSON body constraints by pointer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub json: Option<OrderedMap<FieldConstraint>>,
     /// Form body constraints by field name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub form: Option<OrderedMap<FieldConstraint>>,
     /// Query constraints by parameter name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub query: Option<OrderedMap<FieldConstraint>>,
     /// Refuse any query parameter the `query` rules do not name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub query_strict: Option<bool>,
     /// GraphQL rules.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub graphql: Option<GraphqlRules>,
     /// Largest body allowed (default [`DEFAULT_MAX_BODY_BYTES`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::policy::non_null"
+    )]
     pub max_body_bytes: Option<u64>,
 }
 
@@ -246,9 +298,11 @@ pub fn validate_payload(set: &serde_json::Value) -> Vec<Problem> {
             bad();
         }
     }
-    if o.get("max_body_bytes")
-        .is_some_and(|v| v.as_u64().is_none())
-    {
+    if o.get("max_body_bytes").is_some_and(|v| {
+        crate::policy::budget_integer(v)
+            .filter(|_| v.is_number())
+            .is_none()
+    }) {
         bad();
     }
     if o.get("query_strict").is_some_and(|v| !v.is_boolean()) {
@@ -299,7 +353,11 @@ pub fn validate_payload(set: &serde_json::Value) -> Vec<Problem> {
                     bad();
                 }
             }
-            if c.get("max_length").is_some_and(|v| v.as_u64().is_none()) {
+            if c.get("max_length").is_some_and(|v| {
+                crate::policy::budget_integer(v)
+                    .filter(|_| v.is_number())
+                    .is_none()
+            }) {
                 bad();
             }
             if c.get("one_of").is_some_and(|v| {

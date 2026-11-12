@@ -348,7 +348,7 @@ fn meter_fail(rule: &str, detail: &str) -> crate::errors::VaultError {
     )
 }
 fn counter(v: &serde_json::Value) -> Option<u64> {
-    v.as_u64().filter(|n| *n <= crate::policy::MAX_SAFE_INTEGER)
+    crate::policy::budget_integer(v).filter(|_| v.is_number())
 }
 fn optional_counter(v: &serde_json::Value) -> Option<u64> {
     if v.is_null() {
