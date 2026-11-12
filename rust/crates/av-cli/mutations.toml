@@ -1,0 +1,732 @@
+# Protections in av-cli. Each `from` is the Rust text of one check.
+# Names are unique across crates/*/mutations.toml.
+
+[[mutation]]
+name = "the installer accepts a symlinked checkout"
+file = "src/setup.rs"
+from = 'assert_no_symlinks(&source, &["src", "bin", "package.json"])?;'
+to = "let _ = source.as_os_str();"
+test = "installer_refuses_a_symlinked"
+
+[[mutation]]
+name = "the install copy keeps a symlink instead of the target bytes"
+file = "src/setup.rs"
+from = "    std::fs::copy(src, dst)?;"
+to = "    std::os::unix::fs::symlink(src, dst)?;"
+test = "copy_dereference_writes_the_target_bytes"
+
+[[mutation]]
+name = "a missing privileged helper falls back to PATH"
+file = "src/setup.rs"
+from = '''    Err(format!(
+        "cannot find {cmd} at {}. Refusing to fall back to PATH: this process is root, and PATH came from a user account an agent may control.",
+        candidates.join(" or ")
+    ))'''
+to = "    Ok(std::path::PathBuf::from(cmd))"
+test = "resolve_bin_is_absolute"
+
+[[mutation]]
+name = "an unknown helper is run by its bare name"
+file = "src/setup.rs"
+from = '''        return Err(format!(
+            "refusing to run \"{cmd}\": not in the allow-list of privileged helpers"
+        ));'''
+to = "        return Ok(std::path::PathBuf::from(cmd));"
+test = "resolve_bin_is_absolute"
+
+[[mutation]]
+name = "the installer will install the app directory over itself"
+file = "src/setup.rs"
+from = "    source == app || source.starts_with(&app) || app.starts_with(&source)"
+to = "    false"
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "a reinstall starts systemd instead of restarting it"
+file = "src/setup.rs"
+from = '&["restart", "agent-vault.service"]'
+to = '&["start", "agent-vault.service"]'
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "an installer without --from is treated as able to upgrade itself"
+file = "src/commands.rs"
+from = "contains_bytes(bytes, marker_js) || contains_bytes(bytes, marker_rs)"
+to = "true"
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "CLI accepts secret-bearing command-line flags"
+file = "src/lib.rs"
+from = "    if cli.secret_traps.any() {"
+to = "    if false {"
+test = "secret_flags_are_refused"
+
+[[mutation]]
+name = "a boolean CLI flag reads any value as true, so env --force=false replaces the file"
+file = "src/policy_input.rs"
+from = "    if value.is_some_and(|v| !v.is_empty()) {"
+to = "    if false {"
+test = "boolean_flag_rejects_a_value"
+
+[[mutation]]
+name = "CLI session and approve commands ignore unknown limit flags"
+file = "src/policy_input.rs"
+from = '        if *flag != "_" && !allowed.contains(flag) {'
+to = "        if false {"
+test = "known_flags_refuses_an_unknown_limit"
+
+[[mutation]]
+name = "cleanText lets bidi through"
+file = "src/control_commands.rs"
+from = "            || (0x202a..=0x202e).contains(&u)"
+to = "            || false"
+test = "clean_text_drops_controls"
+
+# JS `r6 N4: cleanText lets bidi controls and line separators reach the terminal`
+# is the entry above (the bidi range) plus this one (U+2028/U+2029).
+[[mutation]]
+name = "cleanText lets a line separator through"
+file = "src/control_commands.rs"
+from = "            || u == 0x2028"
+to = "            || false"
+test = "clean_text_drops_controls"
+
+[[mutation]]
+name = "the stdio bridge writes non-protocol bytes to stdout"
+file = "src/commands.rs"
+from = '''pub(crate) fn as_rpc(text: &str, request_line: &str, http_status: u16) -> String {
+    let is_message'''
+to = '''pub(crate) fn as_rpc(text: &str, request_line: &str, http_status: u16) -> String {
+    return text.to_string();
+    let is_message'''
+test = "bridge_wraps_a_non_protocol_body"
+
+[[mutation]]
+name = "a server name can rewrite someone else's config"
+file = "src/mcp_install.rs"
+from = '''        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => return false,'''
+to = '''        Some(c) if c.is_ascii_alphanumeric() => {}
+        _ => {},'''
+test = "server_name_cannot_rewrite_a_config"
+
+[[mutation]]
+name = "env exports agent-planted state unquoted"
+file = "src/commands.rs"
+from = '''format!("'{}'", value.replace('\'', r"'\''"))'''
+to = "value.to_string()"
+test = "env_quotes_exported_values"
+
+[[mutation]]
+name = "exec passes real credentials to the child"
+file = "src/commands.rs"
+from = '''            if before && after {
+                return true;
+            }'''
+to = '''            if before && after {
+                return false;
+            }'''
+test = "exec_drops_credentials_and_generated_vars"
+
+[[mutation]]
+name = "the stdio bridge stays on a dead launch token"
+file = "src/commands.rs"
+from = "    status == 401 || session_invalid_header"
+to = "    status == 401"
+test = "dead_launch_token_includes_the_session_header"
+
+[[mutation]]
+name = "every AGENT_VAULT_* variable is exempt from the exec scrub"
+file = "src/commands.rs"
+from = '''    if CONFIG.contains(&name) {
+        return false;
+    }'''
+to = '''    if name.to_ascii_uppercase().starts_with("AGENT_VAULT") {
+        return false;
+    }'''
+test = "exec_drops_credentials_and_generated_vars"
+
+[[mutation]]
+name = "a URL password with an empty user part is not a password"
+file = "src/commands.rs"
+from = '"://[^/\s:@]*:[^/\s@]+@"'
+to = '"://[^/\s:@]+:[^/\s@]+@"'
+test = "exec_drops_credentials_and_generated_vars"
+
+[[mutation]]
+name = "exec inherits the variables it generates"
+file = "src/commands.rs"
+from = "    !(GENERATED.contains(&name) || looks_like_credential(name, value))"
+to = "    !(false || looks_like_credential(name, value))"
+test = "exec_drops_credentials_and_generated_vars"
+
+[[mutation]]
+name = "env leaves an earlier placeholder in the shell"
+file = "src/commands.rs"
+from = '''    if placeholder.is_none() {
+        lines.push("unset AGENT_VAULT_PLACEHOLDER".into());
+    }'''
+to = "    let _ = placeholder;"
+test = "env_unsets_a_placeholder_the_shell_already_holds"
+
+[[mutation]]
+name = "the bridge resends a whole batch when one call in it was refused"
+file = "src/lib.rs"
+from = "        line: serde_json::to_string(&Value::Array(redo)).ok()?,"
+to = "        line: line.to_string(),"
+test = "bridge_resends_only_the_refused_call"
+
+[[mutation]]
+name = "the env file writer opens an existing file instead of refusing it"
+file = "src/files.rs"
+from = '''        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)'''
+to = '''        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)'''
+test = "env_file_refuses_an_existing_path"
+
+[[mutation]]
+name = "the env file mode is left to the umask"
+file = "src/files.rs"
+from = '''    perms.set_mode(mode);
+    file.set_permissions(perms)?;'''
+to = "    let _ = perms;"
+test = "write_all_mode_restores_0600_under_umask_0377"
+
+[[mutation]]
+name = "force replaces a symlink or someone else's file"
+file = "src/files.rs"
+from = "            if !st.file_type().is_file() || st.uid() != euid() {"
+to = "            if false && (!st.file_type().is_file() || st.uid() != euid()) {"
+test = "force_refuses_a_symlink"
+
+[[mutation]]
+name = "env and exec write whatever the batch answered, unchecked"
+file = "src/files.rs"
+from = '''    if sid.is_empty() {
+        return Err(FileError::NotPlaceholder);
+    }'''
+to = '''    if sid.is_empty() {
+        return Err(FileError::NotPlaceholder);
+    }
+    return Ok(());'''
+test = "a_batch_value_that_is_not_a_placeholder_is_refused"
+
+# JS `force does not check that what the rename put in place is the file it wrote`
+# (src/cli/files.js): `is_same_file` only fails when the destination inode is
+# swapped in the gap after rename. A unit test cannot plant that race, and
+# ordinary writes still succeed if the check is removed, so the mutant would
+# be missed.
+
+[[mutation]]
+name = "an appended file keeps whatever mode it had"
+file = "src/files.rs"
+from = '''    let mut perms = file.metadata()?.permissions();
+    perms.set_mode(0o600);
+    file.set_permissions(perms)?;
+    let text = if line.ends_with'''
+to = '''    let text = if line.ends_with'''
+test = "append_tightens_the_mode_to_0600"
+
+[[mutation]]
+name = "the final check accepts a placeholder for another session"
+file = "src/files.rs"
+from = "                && p.sid == sid"
+to = "                && true"
+test = "placeholder_for_another_session_is_refused"
+
+[[mutation]]
+name = "CLI numeric limits accept invalid finite or integer bounds"
+file = "src/policy_input.rs"
+from = '''    let ok = n.is_some_and(|n| {
+        n.is_finite()'''
+to = '''    let ok = true || n.is_some_and(|n| {
+        n.is_finite()'''
+test = "number_flag_rejects_a_fraction_when_an_integer_is_required"
+
+[[mutation]]
+name = "CLI session creation drops the reviewed template hash"
+file = "src/commands.rs"
+from = '''    if let Some(hash) = template.get("hash").cloned() {
+        body.insert("template_hash".into(), hash);
+    }'''
+to = "    let _ = (body, template);"
+test = "template_hash_is_bound_onto_the_session_body"
+
+[[mutation]]
+name = "CLI backup and audit export overwrite files without force"
+file = "src/control_commands.rs"
+from = '''    text_flag(Some(path), "--out")?;
+    match files::write_file_exclusive(Path::new(path), text, force, 0o600) {'''
+to = '''    text_flag(Some(path), "--out")?;
+    match files::write_file_exclusive(Path::new(path), text, true, 0o600) {'''
+test = "backup_export_does_not_replace_without_force"
+
+[[mutation]]
+name = "CLI witness writes erase prior checkpoints"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn append_exclusive(path: &str, line: &str) -> Result<(), CliError> {
+    files::append_line_exclusive(Path::new(path), line).map_err(file_err)
+}'''
+to = '''pub(crate) fn append_exclusive(path: &str, line: &str) -> Result<(), CliError> {
+    files::write_file_exclusive(Path::new(path), &format!("{line}\n"), true, 0o600)
+        .map(|_| ())
+        .map_err(file_err)
+}'''
+test = "witness_append_keeps_earlier_lines"
+
+[[mutation]]
+name = "CLI probe treats a truthy non-boolean result as success"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn probe_ok(v: &Value) -> bool {
+    v.get("ok") == Some(&Value::Bool(true))
+}'''
+to = '''pub(crate) fn probe_ok(v: &Value) -> bool {
+    v.get("ok").is_some_and(|x| x != &Value::Bool(false) && !x.is_null())
+}'''
+test = "probe_decisions_are_strict"
+
+[[mutation]]
+name = "CLI approval preview renders agent terminal controls"
+file = "src/control_commands.rs"
+from = '''    let body = clean_text(
+        preview
+            .get("body")
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or(""),
+    );'''
+to = '''    let body = String::from(
+        preview
+            .get("body")
+            .and_then(|b| b.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or(""),
+    );'''
+test = "approval_preview_strips_controls_in_the_body"
+
+[[mutation]]
+name = "CLI watch puts notification text inside AppleScript code"
+file = "src/watch.rs"
+from = '''        "display notification (item 1 of argv) with title \"agent-vault\"",'''
+to = '''        "display notification \"${text}\" with title \"agent-vault\"",'''
+test = "notify_script_passes_text_as_argv"
+
+[[mutation]]
+name = "CLI watch omits notification control-character stripping"
+file = "src/watch.rs"
+from = "            !((u <= 0x1f)"
+to = "            !(false && (u <= 0x1f)"
+test = "watch_strips_controls_and_bidi"
+
+[[mutation]]
+name = "CLI approve sends an approval when parseOverrides cannot read a narrowing (C23)"
+file = "src/policy_input.rs"
+from = '''            return Err(usage(format!("--{}: {why}; nothing was sent", e.field)));'''
+to = '''            let _ = why;
+            pending::Overrides::default()'''
+test = "approve_refuses_a_bad_payload_before_sending"
+
+[[mutation]]
+name = "CLI approve sends only one of two spellings of a field"
+file = "src/policy_input.rs"
+from = "        if flags.len() > 1 && !merged {"
+to = "        if false && !merged {"
+test = "approve_refuses_two_spellings_of_one_field"
+
+[[mutation]]
+name = "CLI approve reads a bare value flag as true"
+file = "src/policy_input.rs"
+from = '''        if *flag != "infinite" && approve_raw(args, flag).is_some_and(|v| v.is_empty()) {'''
+to = '''        if false && approve_raw(args, flag).is_some_and(|v| v.is_empty()) {'''
+test = "approve_refuses_a_bare_value_flag"
+
+# JS `CLI approve drops a typed narrowing flag that parsed into nothing`
+# (src/cli/policy-input.js): every flag `approval_overrides` accepts is either
+# rejected by parseOverrides (the C23 entry) or present on the override object.
+# The "narrows nothing" loop does not fail for a value the parser accepted, so
+# flipping it does not fail a test.
+
+# JS `CLI approve sends a non-finite number, which JSON turns into an absent
+# narrowing` (src/cli/policy-input.js): serde_json cannot carry NaN or
+# Infinity, and `number_flag` already refuses a non-finite token. That refusal
+# is the entry "CLI numeric limits accept invalid finite or integer bounds".
+
+[[mutation]]
+name = "CLI approve reads the daemon before refusing an unreadable narrowing"
+file = "src/commands.rs"
+from = '''    let overrides = if granted {
+        let args = approve.ok_or_else(|| err("name the id to answer", Exit::Usage))?;
+        Some(policy_input::approval_overrides(args)?)
+    } else {
+        None
+    };
+    let pending = load_pending(ctx).await?;'''
+to = '''    let pending = load_pending(ctx).await?;
+    let overrides = if granted {
+        let args = approve.ok_or_else(|| err("name the id to answer", Exit::Usage))?;
+        Some(policy_input::approval_overrides(args)?)
+    } else {
+        None
+    };'''
+test = "approve_refuses_an_unreadable_narrowing_before_the_daemon"
+
+[[mutation]]
+name = "CLI watch --json prints the raw stream frame instead of the cleaned display fields"
+file = "src/watch.rs"
+from = '''    } else if name == "pending" {
+        safe_entry(raw)'''
+to = '''    } else if name == "pending" {
+        Some(raw.clone())'''
+test = "watch_json_uses_cleaned_fields"
+
+[[mutation]]
+name = "CLI watch keeps placeholders in the headline"
+file = "src/watch.rs"
+from = '''        if bytes[i..].starts_with(b"av1.") {'''
+to = '''        if false && bytes[i..].starts_with(b"av1.") {'''
+test = "watch_scrubs_a_placeholder_in_the_headline"
+
+[[mutation]]
+name = "CLI audit verify reports a broken chain inside a success envelope"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn chain_is_ok(chain: &Value) -> bool {
+    chain.get("ok") == Some(&Value::Bool(true))
+}'''
+to = '''pub(crate) fn chain_is_ok(chain: &Value) -> bool {
+    true
+}'''
+test = "audit_verify_requires_boolean_ok"
+
+[[mutation]]
+name = "CLI audit verify reports a failing witness inside a success envelope"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn witness_is_ok(witness: &Value) -> bool {
+    witness.get("ok") == Some(&Value::Bool(true))
+}'''
+to = '''pub(crate) fn witness_is_ok(witness: &Value) -> bool {
+    true
+}'''
+test = "audit_verify_requires_boolean_ok"
+
+[[mutation]]
+name = "CLI session create accepts --remote (R3 says the CLI has none)"
+file = "src/policy_input.rs"
+from = '''        "cred",
+        "grants-file",
+        "template",
+    ]);'''
+to = '''        "cred",
+        "grants-file",
+        "template",
+        "remote",
+    ]);'''
+test = "session_create_refuses_remote"
+
+[[mutation]]
+name = "CLI session narrow sends --uses, which the daemon refuses (C22)"
+file = "src/control_commands.rs"
+from = '''    if args.grant.uses.is_some() {
+        return Err(usage(
+            "session narrow cannot change --uses; nothing was sent",
+        ));
+    }'''
+to = '''    if false {
+        return Err(usage(
+            "session narrow cannot change --uses; nothing was sent",
+        ));
+    }'''
+test = "session_narrow_refuses_uses_before_the_daemon"
+
+[[mutation]]
+name = "CLI appendLineExclusive opens a planted fifo without O_NONBLOCK and hangs"
+file = "src/files.rs"
+from = '''    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if os_eq(&e, libc::ELOOP) || os_eq(&e, libc::ENXIO) {'''
+to = '''    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            if os_eq(&e, libc::ELOOP) || os_eq(&e, libc::ENXIO) {'''
+test = "append_refuses_a_fifo_without_hanging"
+
+[[mutation]]
+name = "CLI appendLineExclusive lets a fifo's ENXIO through as an unclassified error"
+file = "src/files.rs"
+from = "            if os_eq(&e, libc::ELOOP) || os_eq(&e, libc::ENXIO) {"
+to = "            if os_eq(&e, libc::ELOOP) {"
+test = "append_refuses_a_fifo_without_hanging"
+
+[[mutation]]
+name = "CLI session show reads --markdown=yes as an ordinary display flag"
+file = "src/argv.rs"
+from = '''        ["session", "show"] | ["report"] => &["markdown"],'''
+to = '''        ["session", "show"] | ["report"] => &[],'''
+test = "prepare_refuses_markdown_equals_yes"
+
+[[mutation]]
+name = "the CLI's approve sends its own reading of a narrowing, not parseOverrides' (C21)"
+file = "src/policy_input.rs"
+from = '''    if let Value::Object(typed_obj) = typed_value {
+        for (k, v) in typed_obj {
+            overrides.insert(k, v);
+        }
+    }'''
+to = '''    if let Value::Object(typed_obj) = typed_value {
+        for (k, v) in typed_obj {
+            overrides.entry(k).or_insert(v);
+        }
+    }'''
+test = "approve_rate_stays_a_string"
+
+[[mutation]]
+name = "a numeric CLI flag with no value reads as 1, so ph next --uses mints a one-use placeholder"
+file = "src/policy_input.rs"
+from = '''        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+to = '''        Some("") => Ok(Some(1.0)),
+        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+test = "optional_number_rejects_a_missing_value"
+
+# Same `from` as the numeric-flag entry above. Each name is one JS protection;
+# the checker swaps one occurrence in the file per run.
+
+[[mutation]]
+name = "env and exec read a valueless --uses as 1 and mint a one-use placeholder"
+file = "src/policy_input.rs"
+from = '''        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+to = '''        Some("") => Ok(Some(1.0)),
+        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+test = "optional_number_rejects_a_missing_value"
+
+[[mutation]]
+name = "mcp install reads a valueless --port as port 1"
+file = "src/policy_input.rs"
+from = '''        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+to = '''        Some("") => Ok(Some(1.0)),
+        Some(_) => number_flag(value, &format!("--{flag}"), limits).map(Some),'''
+test = "optional_number_rejects_a_missing_value"
+
+[[mutation]]
+name = "mcp install reads --tls=false as --tls and writes the https URL"
+file = "src/policy_input.rs"
+from = "    if value.is_some_and(|v| !v.is_empty()) {"
+to = "    if false {"
+test = "boolean_flag_rejects_a_value"
+
+[[mutation]]
+name = "r6 B1: `tripwire show` maps over a null rule list from an older daemon"
+file = "src/control_commands.rs"
+from = '''    rules_arr
+        .cloned()
+        .or_else(|| response.get("defaults").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default()'''
+to = '''    rules_arr.cloned().unwrap_or_default()'''
+test = "tripwire_null_rules_use_defaults"
+
+[[mutation]]
+name = "r6 B1: `tripwire on` reads the defaults in force as saved rules, so the gated install of them is skipped"
+file = "src/control_commands.rs"
+from = "    !stored"
+to = "    false && !stored"
+test = "tripwire_null_rules_use_defaults"
+
+[[mutation]]
+name = "r6 B2: the CLI's documented preflight sends no placeholder and is always refused"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn assume_placeholder(body: &mut Map<String, Value>) {
+    body.insert("assume_placeholder".into(), Value::Bool(true));
+}'''
+to = '''pub(crate) fn assume_placeholder(body: &mut Map<String, Value>) {
+    let _ = body;
+}'''
+test = "preflight_sends_a_placeholder_assumption"
+
+[[mutation]]
+name = "r6 N1: `approve` prints the agent's ask, not what was granted"
+file = "src/commands.rs"
+from = "    if granted.is_object() {"
+to = "    if false && granted.is_object() {"
+test = "approve_prints_what_was_granted"
+
+[[mutation]]
+name = "r6 N2: `cred test --all` fails on a kind with no probe"
+file = "src/control_commands.rs"
+from = '''pub(crate) fn probe_skipped(all: bool, v: &Value) -> bool {
+    all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe")
+}'''
+to = '''pub(crate) fn probe_skipped(all: bool, v: &Value) -> bool {
+    false && all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe")
+}'''
+test = "probe_decisions_are_strict"
+
+[[mutation]]
+name = "r6 N2: `cred test --all` skips every failure, not just a missing probe"
+file = "src/control_commands.rs"
+from = '''    all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe")'''
+to = '''    all || v.get("rule").and_then(|r| r.as_str()) == Some("no_probe")'''
+test = "probe_decisions_are_strict"
+
+[[mutation]]
+name = "r6 N4: watch lets bidi controls through in a headline or id"
+file = "src/watch.rs"
+from = "                || (0x202a..=0x202e).contains(&u)"
+to = "                || false"
+test = "watch_strips_controls_and_bidi"
+
+[[mutation]]
+name = "migrate reports a foreign vault.db as already migrated"
+file = "src/commands.rs"
+from = "    if db.exists() && !migrate::is_completed_migration(&db) {"
+to = "    if false && !migrate::is_completed_migration(&db) {"
+test = "probe_migrate_refuses_a_foreign_vault_db"
+
+[[mutation]]
+name = "exec keeps a password that is not in the first URL"
+file = "src/commands.rs"
+from = "    if url_password_anywhere(value) {"
+to = "    if false && url_password_anywhere(value) {"
+test = "probe_exec_scrub_drops_a_second_url_with_a_password"
+
+[[mutation]]
+name = "the self-install guard compares the spelled path, so a symlinked prefix deletes the app"
+file = "src/setup.rs"
+from = '''    let source = canonical_prefix(source);
+    let app = canonical_prefix(app);'''
+to = '''    let source = source.to_path_buf();
+    let app = app.to_path_buf();'''
+test = "probe_self_install_guard_survives_a_symlinked_prefix"
+
+[[mutation]]
+name = "the systemd unit drops the core dump limit"
+file = "src/setup.rs"
+from = "LimitCORE=0\\n\\"
+to = "LimitCORE=1\\n\\"
+test = "probe_service_units_keep_the_js_hardening"
+
+[[mutation]]
+name = "upgrade skips the root-owned installer because it lives in app"
+file = "src/commands.rs"
+from = "        if installer_supports_from(&bytes) {"
+to = "        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {"
+test = "upgrade_print_only_names_an_installer_and_source_install_app_accepts"
+
+[[mutation]]
+name = "upgrade bootstraps with the debug installer beside the CLI"
+file = "src/commands.rs"
+from = "    if release.is_file() && !installer_runs_inside_app(&release) {"
+to = "    if false && !installer_runs_inside_app(&release) {"
+test = "upgrade_bootstraps_from_the_checkout_release_installer"
+
+[[mutation]]
+name = "a checkout walk that lands on app is treated as a checkout"
+file = "src/commands.rs"
+from = "                if is_installed_app(dir) {"
+to = "                if false {"
+test = "checkout_root_refuses_the_installed_app"
+
+[[mutation]]
+name = "any directory named app is treated as the installed app"
+file = "src/commands.rs"
+from = '''    crate::setup::canonical_prefix(dir)
+        == crate::setup::canonical_prefix(&PathBuf::from(SYSTEM_ROOT).join("app"))'''
+to = '''    dir.file_name().is_some_and(|name| name == "app")'''
+test = "checkout_root_refuses_the_installed_app"
+
+[[mutation]]
+name = "upgrade names a release installer that was not built"
+file = "src/commands.rs"
+from = '''    Err(err_next(
+        "the release installer is not built.",
+        Exit::Usage,
+        "cargo build --release first",
+    ))'''
+to = '''    Ok((release, false))'''
+test = "upgrade_does_not_name_a_missing_release_installer"
+
+[[mutation]]
+name = "the root-owned installer blames itself when --from names the app"
+file = "src/setup.rs"
+from = '''    let hint = if from_passed {
+        "--from names the installed app; point it at your checkout."
+    } else if running_inside {'''
+to = '''    let hint = if running_inside {
+        "Run the installer from your checkout, not the installed copy."
+    } else if from_passed {'''
+test = "probe_from_that_names_the_installed_app"
+
+[[mutation]]
+name = "an installer inside app is refused even when --from is a checkout"
+file = "src/setup.rs"
+from = "    inside && !from_passed"
+to = "    inside"
+test = "probe_installed_setup_with_from_outside_app_is_not_a_self_install"
+
+[[mutation]]
+name = "--from that names the app is described as running the installed copy"
+file = "src/setup.rs"
+from = '"--from names the installed app; point it at your checkout."'
+to = '"Run the installer from your checkout, not the installed copy."'
+test = "probe_from_that_names_the_installed_app"
+
+[[mutation]]
+name = "a dry run does not notice that the release daemon is missing"
+file = "src/setup.rs"
+from = "    require_release_daemon(&source)?;"
+to = "    let _ = &source;"
+test = "probe_dry_run_rejects_a_missing_release_before_any_plan"
+
+[[mutation]]
+name = "save_state runs before the service file is recorded"
+file = "src/setup.rs"
+from = """    install_service(ctx, &enrolled, &mut state)?;
+    save_state(ctx, &mut state)?;"""
+to = """    save_state(ctx, &mut state)?;
+    install_service(ctx, &enrolled, &mut state)?;"""
+test = "install_dry_run_records_and_saves_state"
+
+[[mutation]]
+name = "install_app copies the rust bins from the app it is about to replace"
+file = "src/setup.rs"
+from = "        copy_rust_bins(&source, &app)?;"
+to = "        copy_rust_bins(&app, &app)?;"
+test = "probe_install_app_copies_rust_bins_from_the_source_checkout"
+
+[[mutation]]
+name = "a debug installer does not say it will install the release binaries"
+file = "src/setup.rs"
+from = "    if exe_is_checkout_debug_installer(&exe, checkout) {"
+to = "    if false && exe_is_checkout_debug_installer(&exe, checkout) {"
+test = "probe_debug_installer_warns_it_is_not_the_release_binary"
+
+[[mutation]]
+name = "install checks --port only after the tree exists"
+file = "src/setup.rs"
+from = "    service_port(value(&ctx.args, \"port\"))?;"
+to = "    let _ = value(&ctx.args, \"port\");"
+test = "probe_install_rejects_a_bad_port_before_any_change"
+
+[[mutation]]
+name = "install returns without saving state.json"
+file = "src/setup.rs"
+from = "    save_state(ctx, &mut state)?;"
+to = "    let _ = (&ctx, &state);"
+test = "install_dry_run_records_and_saves_state"

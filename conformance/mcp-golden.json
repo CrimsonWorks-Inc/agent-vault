@@ -1,0 +1,245 @@
+{
+  "instructions": "Credentials are placeholders, never real secrets. Never ask the user for a real secret. Prefer vault_http for API calls; use vault_get_placeholder only for tools that must run natively. Put a placeholder only where the usage field says. A placeholder anywhere else is refused. On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry. On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives. Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access.",
+  "tools": [
+    {
+      "name": "vault_status",
+      "description": "Whether the vault is reachable and unlocked, and a summary of the current session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "vault_list_creds",
+      "description": "Credentials this session may use, with the exact place a placeholder goes for each.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "available_only": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "vault_get_placeholder",
+      "description": "Get a placeholder for a credential. Returns the placeholder plus where to put it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cred": {
+            "type": "string",
+            "description": "credential slug"
+          },
+          "reason": {
+            "type": "string",
+            "description": "why you need it; shown to the human as an unverified claim"
+          },
+          "uses": {
+            "type": "number",
+            "description": "optional: make it n-use instead of session-lifetime"
+          }
+        },
+        "required": [
+          "cred",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "vault_request_session",
+      "description": "Ask a human for a session. This creates nothing by itself: it opens a request a human must approve, and they may narrow it first. Poll the returned id until they answer. Two error paths already tell you to call this.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cred": {
+            "type": "string",
+            "description": "credential slug"
+          },
+          "reason": {
+            "type": "string",
+            "description": "why you need it; shown to the human as an unverified claim"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "ask for the least you need"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "budget": {
+            "type": "number",
+            "description": "how many requests"
+          },
+          "ttl_minutes": {
+            "type": "number",
+            "description": "how long you need it for; ask for the least you need"
+          },
+          "uses": {
+            "type": "number",
+            "description": "optional: n-use placeholders instead of session-lifetime ones"
+          },
+          "grant_ttl_minutes": {
+            "type": "number",
+            "description": "how long the access itself is needed, if shorter than the session"
+          },
+          "routes": {
+            "type": "array",
+            "description": "optional: method-bound routes, each a set of methods allowed only on these paths",
+            "items": {
+              "type": "object",
+              "properties": {
+                "methods": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "methods",
+                "paths"
+              ]
+            }
+          },
+          "template": {
+            "type": "string",
+            "description": "a template name the human saved; they see the template, not a policy to read"
+          },
+          "poll_id": {
+            "type": "string",
+            "description": "an id from an earlier call: check whether it has been answered"
+          },
+          "poll_secret": {
+            "type": "string",
+            "description": "the poll_secret that earlier call returned; only the asker can poll"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "vault_approval_status",
+      "description": "Whether a human has answered a held request. The 202 from a held write names this tool and the id to pass.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "description": "the approval_id from the 202"
+          }
+        },
+        "required": [
+          "approval_id"
+        ]
+      }
+    },
+    {
+      "name": "vault_http",
+      "description": "Make an HTTP request through the vault. The credential is injected by the daemon; you never handle it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cred": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object"
+          },
+          "body": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cred",
+          "method",
+          "path",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "vault_explain_denial",
+      "description": "Explain why a request this session made was denied and what this session is allowed to do instead. The code and rule are always given; the full sentence is kept for an hour (the last 1000 denials) and is null after that, after the daemon restarts, or for a caller with no session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ]
+      }
+    },
+    {
+      "name": "vault_describe_access",
+      "description": "What this session may do right now: hosts, methods, paths, approval mode, budgets and limits, lifetimes, and where each placeholder goes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "vault_preflight",
+      "description": "Check whether a request would be allowed, held for a human, or refused, without sending it or spending anything. Advisory only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cred": {
+            "type": "string",
+            "description": "credential slug"
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "the upstream path, as for vault_http"
+          },
+          "query": {
+            "type": "string"
+          },
+          "headers": {
+            "type": "object"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cred",
+          "method",
+          "path"
+        ]
+      }
+    }
+  ]
+}

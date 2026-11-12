@@ -1,0 +1,1063 @@
+# Protections in av-store that the tests must catch. `cargo xtask mutation`
+# applies each swap to a temporary copy of rust/ and requires `cargo test` to
+# fail. Fields: name, file (relative to this crate), from (must appear exactly
+# once), to, and optionally test (a `cargo test` name filter).
+#
+# These reproduce the src/store/*, src/pending.js and src/client-state.js
+# entries of test/mutation-check.js (read as text, never imported), each
+# named as the JS names it, followed by protections that exist only in the
+# port (transactions, WAL checkpoints, migrate, locked memory).
+#
+# JS entries with no line of their own here, and why:
+# - "a revocation / a rotation / a restore is written without an fsync", "a
+#   vault writer is on neither durability list", "a one-line method that
+#   writes the vault is on no durability list": every operation is one
+#   transaction under `synchronous=FULL`; the db.rs entries below (and
+#   db::tests::pragmas_are_set_after_open) are that protection.
+# - "the backup key is derived synchronously": the port's KDFs are blocking
+#   functions the daemon runs with spawn_blocking; nothing in the store
+#   decides that.
+# - "the webhook URL is stored unsealed beside its sealed copy": the notify
+#   table has no column a URL could go in; key_material::no_plaintext_value_
+#   is_ever_written_to_the_files scans the files for it.
+# - "a restore writes each credential as it goes": a restore is one
+#   transaction; "a refused operation's changes are committed" below breaks
+#   that and the restore tests catch it.
+
+[[mutation]]
+name = "secure_delete is switched off when the vault database is opened"
+file = "src/db.rs"
+from = '("secure_delete", "ON"),'
+to = '("secure_delete", "OFF"),'
+test = "db::tests::"
+
+[[mutation]]
+name = "deleting a credential cascades into its grants and the placeholder ledger"
+file = "src/schema.rs"
+from = """
+    credential_id TEXT NOT NULL,
+    fields"""
+to = """
+    credential_id TEXT NOT NULL REFERENCES credentials (id) ON DELETE CASCADE,
+    fields"""
+test = "db::tests::"
+
+[[mutation]]
+name = "the refund trigger lets a placeholder whose grant row is missing come back"
+file = "src/schema.rs"
+from = "IFNULL((SELECT state FROM grants WHERE id = OLD.grant_id), '') = 'active'"
+to = "(SELECT state FROM grants WHERE id = OLD.grant_id) = 'active'"
+test = "db::tests::"
+
+[[mutation]]
+name = "a commit is not durable (synchronous is not FULL)"
+file = "src/db.rs"
+from = '("synchronous", "FULL"),'
+to = '("synchronous", "NORMAL"),'
+test = "db::tests::"
+
+[[mutation]]
+name = "audit rows can be deleted"
+file = "src/schema.rs"
+from = """CREATE TRIGGER audit_no_delete
+BEFORE DELETE ON audit
+BEGIN
+    SELECT RAISE(ABORT, 'audit rows are append-only');
+END;"""
+to = ""
+test = "db::tests::"
+
+[[mutation]]
+name = "a batch verdict is read by truthiness rather than as a boolean"
+file = "src/pending.rs"
+from = '''if !matches!(d.get("granted"), Some(Value::Bool(_))) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "idle activity extends a session past its approved lifetime"
+file = "src/vault.rs"
+from = '''let ceiling = if opts.ttl_ms.is_none() { cap } else { life };'''
+to = '''let ceiling = cap;'''
+
+[[mutation]]
+name = "a requested lifetime may exceed the hard ceiling"
+file = "src/vault.rs"
+from = '''let life = opts.ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS).min(cap);'''
+to = '''let life = opts.ttl_ms.unwrap_or(DEFAULT_SESSION_TTL_MS);'''
+
+[[mutation]]
+name = "removing the last wrap leaves the vault unopenable"
+file = "src/vault.rs"
+from = '''let downgraded = next.is_empty();'''
+to = '''let downgraded = false;'''
+
+[[mutation]]
+name = "the audit log's end is not anchored"
+file = "src/audit.rs"
+from = '''Some(a) if a.seq > last.seq => {'''
+to = '''Some(a) if false && a.seq > last.seq => {'''
+
+[[mutation]]
+name = "the fingerprint is an oracle for the checksum key"
+file = "src/vault.rs"
+from = '''let kfp = crypto::k_fingerprint(vmk);'''
+to = '''let kfp = crypto::k_ph(vmk);'''
+
+[[mutation]]
+name = "a one-time placeholder renews itself unlimited"
+file = "src/vault.rs"
+from = '''uses: Some(old.max_uses),'''
+to = '''uses: None,'''
+
+[[mutation]]
+name = "approving a session request records nothing"
+file = "src/pending.rs"
+from = '''    remember(got);'''
+to = '''    let _ = remember;'''
+
+[[mutation]]
+name = "narrowing a grant can widen it"
+file = "src/vault.rs"
+from = '''g.policy = av_core::policy::intersect(&[Some(&g.policy), Some(&layer)]);'''
+to = '''g.policy = layer;'''
+
+[[mutation]]
+name = "an expired session leaves its placeholders live"
+file = "src/vault.rs"
+from = '''rows::ph_kill_where(t.c, Some(&s.id), None, dead_reason::SESSION_ENDED)?;
+                t.keep = true;'''
+to = '''t.keep = true;'''
+
+[[mutation]]
+name = "booting a locked vault runs a full unlock"
+file = "src/vault.rs"
+from = '''let opened = self.open_with(&material, !was_locked).is_ok();'''
+to = '''let opened = self.open_with(&material, true).is_ok();'''
+
+[[mutation]]
+name = "a deleted audit log is re-created and re-anchored (here: an emptied audit table)"
+file = "src/audit.rs"
+from = '''} else if anchor.is_none() && anchored {'''
+to = '''} else if false {'''
+
+[[mutation]]
+name = "an unreadable audit line throws out of unlock"
+file = "src/audit.rs"
+from = '''.map_or(AuditRow::Unreadable { line: i + 1 }, AuditRow::Record)'''
+to = '''.map(AuditRow::Record).expect("unreadable audit line")'''
+
+[[mutation]]
+name = "a float in audit fields throws after the change is made"
+file = "src/audit.rs"
+from = '''let own = match recordable(&Value::Object(fields)) {'''
+to = '''let own = match Value::Object(fields) {'''
+
+[[mutation]]
+name = "the state file accepts a token of any shape"
+file = "src/client_state.rs"
+from = '''            if !v.as_str().is_some_and(ok) {'''
+to = '''            if false && !v.as_str().is_some_and(ok) {'''
+
+[[mutation]]
+name = "a parseable line without the chain fields is taken as a record"
+file = "src/audit.rs"
+from = '''                .filter(is_record)
+'''
+to = ''''''
+
+[[mutation]]
+name = "only unused placeholders count towards rotation at max_active"
+file = "src/vault.rs"
+from = '''for p in active.iter_mut().take(excess) {'''
+to = '''for p in active.iter_mut().filter(|x| x.uses == 0).take(1) {'''
+
+[[mutation]]
+name = "a max_active that is not a number disables the live-row bound"
+file = "src/vault.rs"
+from = '''.unwrap_or(DEFAULT_MAX_ACTIVE)'''
+to = '''.unwrap_or(u64::MAX)'''
+
+[[mutation]]
+name = "an explicit placeholder ttl replaces the grant's ttl ceiling"
+file = "src/vault.rs"
+from = '''let ttl = positive(opts.ttl_ms.map(|v| v as f64)).min(positive('''
+to = '''let ttl = positive(opts.ttl_ms.map(|v| v as f64)).max(positive('''
+
+[[mutation]]
+name = "narrowGrant drops the method, path and host lists it was asked to widen"
+file = "src/vault.rs"
+from = '''g.policy = av_core::policy::intersect(&[Some(&g.policy), Some(&layer)]);'''
+to = '''g.policy = av_core::policy::intersect(&[Some(&g.policy), Some(&layer)]);
+            if n.contains_key("hosts") { g.policy.methods = None; g.policy.paths = None; g.policy.hosts = None; }'''
+
+[[mutation]]
+name = "a forked grant drops the constraints its narrowing tried to widen"
+file = "src/vault.rs"
+from = '''av_core::policy::intersect(&[Some(&opts.policy), Some(n)])'''
+to = '''n.clone()'''
+
+[[mutation]]
+name = "Touch ID unlock is enrolled on a vault with no passphrase to recover it"
+file = "src/vault.rs"
+from = '''        if self.has_passphrase()? {
+            Ok(())'''
+to = '''        if true {
+            Ok(())'''
+
+[[mutation]]
+name = "the store wraps the vault key to Touch ID without checking for a recovery factor"
+file = "src/vault.rs"
+from = '''        if !has_passphrase(prev) {
+            return Err(recovery_refusal());
+        }'''
+to = '''        if !has_passphrase(prev) {
+            return Ok(());
+        }'''
+
+[[mutation]]
+name = "factor changes commit without the factor invariant"
+file = "src/vault.rs"
+from = '''pub fn assert_factor_invariant(prev: &FactorState, next: &FactorState) -> Result<()> {
+'''
+to = '''pub fn assert_factor_invariant(prev: &FactorState, next: &FactorState) -> Result<()> {
+    if true { return Ok(()); }
+'''
+
+[[mutation]]
+name = "the vault's last human factor can be removed"
+file = "src/vault.rs"
+from = '''if !had.is_empty() && human_factors(next).is_empty() {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a presence key that ES256 cannot verify is stored"
+file = "src/vault.rs"
+from = '''if p256::PublicKey::from_public_key_der(&der).is_err() {'''
+to = '''if false && p256::PublicKey::from_public_key_der(&der).is_err() {'''
+
+[[mutation]]
+name = "sessionExpiryMs treats any null expiry as infinite"
+file = "src/vault.rs"
+from = '''        None if session.infinite => f64::INFINITY,
+        None => f64::NEG_INFINITY,'''
+to = '''        None => f64::INFINITY,'''
+
+[[mutation]]
+name = "an unparseable expiry is NaN instead of already past"
+file = "src/vault.rs"
+from = '''Some(s) => util::parse_ms(s).map_or(f64::NEG_INFINITY, |ms| ms as f64),'''
+to = '''Some(s) => util::parse_ms(s).map_or(f64::NAN, |ms| ms as f64),'''
+
+[[mutation]]
+name = "an infinite session may be remote"
+file = "src/vault.rs"
+from = '''if opts.infinite && opts.remote {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a session lifetime that is not a positive number is accepted"
+file = "src/vault.rs"
+from = '''if opts.ttl_ms.is_some_and(|v| v <= 0) {
+        return Err(ttl_rule('''
+to = '''if false {
+        return Err(ttl_rule('''
+
+[[mutation]]
+name = "an unrecognised elevation is recorded instead of refused"
+file = "src/vault.rs"
+from = '''            .all(|e| ELEVATIONS.contains(&e.as_str()))
+    {'''
+to = '''            .all(|_| true)
+    {'''
+
+[[mutation]]
+name = "consumePlaceholder does not ask whether the grant has ended"
+file = "src/vault.rs"
+from = '''let mut grant = grant_live_in(t, grant.as_ref())?;'''
+to = '''let mut grant = grant.clone().unwrap();'''
+
+[[mutation]]
+name = "assertGrantLive never notices a grant's lifetime"
+file = "src/vault.rs"
+from = '''if expiry_ms(g.expires_at.as_deref()) <= t.now as f64 {
+        let expired'''
+to = '''if false {
+        let expired'''
+
+[[mutation]]
+name = "a grant lifetime is not clamped to its session"
+file = "src/vault.rs"
+from = '''let end = ((t.now + ttl) as f64).min(session_expiry_ms(&session));'''
+to = '''let end = (t.now + ttl) as f64;'''
+
+[[mutation]]
+name = "chargeGrant takes any n"
+file = "src/vault.rs"
+from = '''if !(1..=av_core::policy::MAX_SAFE_INTEGER).contains(&n) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "chargeGrant charges past the budget"
+file = "src/vault.rs"
+from = '''BudgetLimit::Limit(l) if used + n > l => return Ok(false),'''
+to = '''BudgetLimit::Limit(_) if false => return Ok(false),'''
+
+[[mutation]]
+name = "an unreadable grant budget means no limit"
+file = "src/vault.rs"
+from = '''    av_core::policy::budget_limit(p.budget.as_ref())
+'''
+to = '''    match av_core::policy::budget_limit(p.budget.as_ref()) { BudgetLimit::Unreadable => BudgetLimit::Unlimited, l => l }
+'''
+
+[[mutation]]
+name = "cred.health_recorded is written on every observation"
+file = "src/vault.rs"
+from = '''if changed {
+                t.audit_required(
+                    "cred.health_recorded",'''
+to = '''if true {
+                t.audit_required(
+                    "cred.health_recorded",'''
+
+[[mutation]]
+name = "a credential expiry that is not a date is stored"
+file = "src/vault.rs"
+from = '''"expires_at must be an ISO date, or null to clear it",
+                        "expires_at",
+                    )
+                })?),
+            };
+            cred.expires_at = expires.clone();'''
+to = '''"expires_at must be an ISO date, or null to clear it",
+                        "expires_at",
+                    )
+                }).unwrap_or_else(|_| s.to_string())),
+            };
+            cred.expires_at = expires.clone();'''
+
+[[mutation]]
+name = "a quarantined credential still issues placeholders"
+file = "src/vault.rs"
+from = '''        ));
+    }
+    if cred.quarantine.is_some() {
+        return Err(quarantined(&cred));
+    }
+    let limit = budget_of(&grant.policy);'''
+to = '''        ));
+    }
+    let limit = budget_of(&grant.policy);'''
+
+[[mutation]]
+name = "a tripwire rule set is stored without being checked"
+file = "src/vault.rs"
+from = '''return Err(refuse(ErrorCode::PolicyDenied, problem, "tripwire_rule"));'''
+to = '''let _ = problem;'''
+
+[[mutation]]
+name = "shortening can push an end later"
+file = "src/vault.rs"
+from = '''let at = current.min((now + ttl_ms) as f64);'''
+to = '''let at = (now + ttl_ms) as f64;'''
+
+[[mutation]]
+name = "a narrow may raise redirects above zero"
+file = "src/vault.rs"
+from = '''                if !zero {
+                    return Err(refuse('''
+to = '''                if false && !zero {
+                    return Err(refuse('''
+
+[[mutation]]
+name = "a scrub pattern may contain a stored credential value"
+file = "src/vault.rs"
+from = '''if !s.is_empty() && source.contains(s) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a scrub pattern may contain a placeholder"
+file = "src/vault.rs"
+from = '''if !av_core::placeholder::find_all(source).is_empty() {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a credential takes any number of scrub patterns"
+file = "src/vault.rs"
+from = '''if cred.scrub_patterns.len() >= MAX_SCRUB_PER_CRED {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "the scrub pattern source is written to the audit log"
+file = "src/vault.rs"
+from = '''"pattern_id": p.id,
+'''
+to = '''"pattern_id": p.id,
+            "source": p.source,
+'''
+
+[[mutation]]
+name = "allSecrets skips the retired values"
+file = "src/vault.rs"
+from = '''for r in &f.retired {
+                if expiry_ms'''
+to = '''for r in f.retired.iter().take(0) {
+                if expiry_ms'''
+
+[[mutation]]
+name = "revoke-mode rotation leaves the grants live"
+file = "src/vault.rs"
+from = '''if opts.mode == RotateMode::Revoke {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "rotation does not check the expiry before it changes anything"
+file = "src/vault.rs"
+from = '''"expires_at must be an ISO date, or null",
+                        "expires_at",
+                    )
+                })?),'''
+to = '''"expires_at must be an ISO date, or null",
+                        "expires_at",
+                    )
+                }).unwrap_or_else(|_| s.clone())),'''
+
+[[mutation]]
+name = "rotating to the same value is accepted"
+file = "src/vault.rs"
+from = '''if crypto::constant_time_eq(current.expose_secret().as_bytes(), value.as_bytes()) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "the webhook URL is audited whole instead of by host"
+file = "src/vault.rs"
+from = '''json!({ "host": host, "detail": detail }),'''
+to = '''json!({ "host": text, "detail": detail }),'''
+
+[[mutation]]
+name = "a plaintext http webhook to another machine is accepted"
+file = "src/vault.rs"
+from = '''if !(scheme == "https" || (scheme == "http" && loopback)) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a webhook URL with userinfo is accepted"
+file = "src/vault.rs"
+from = '''if !parsed.username().is_empty() || parsed.password().is_some() {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "the template hash is taken over the JSON text, not the canonical form"
+file = "src/vault.rs"
+from = '''let hash = crypto::sha256_hex(av_core::operation::canonical_operation(&stored).as_bytes());'''
+to = '''let hash = crypto::sha256_hex(text.as_bytes());'''
+
+[[mutation]]
+name = "a template spec may carry template, template_hash or presence"
+file = "src/vault.rs"
+from = '''        if o.contains_key(k) {
+            return Err(refuse('''
+to = '''        if false && o.contains_key(k) {
+            return Err(refuse('''
+
+[[mutation]]
+name = "a template spec of any size is stored"
+file = "src/vault.rs"
+from = '''if text.len() > MAX_TEMPLATE_BYTES {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a witness ahead of the log is treated as ok"
+file = "src/audit.rs"
+from = '''out.ok = out.forged.is_empty() && out.ahead.is_empty() && out.mismatched.is_empty();'''
+to = '''out.ok = out.forged.is_empty() && out.mismatched.is_empty();'''
+
+[[mutation]]
+name = "a witness past the last record is not reported ahead"
+file = "src/audit.rs"
+from = '''} else if seq > last {'''
+to = '''} else if false {'''
+
+[[mutation]]
+name = "a witness checkpoint's MAC is not checked"
+file = "src/audit.rs"
+from = '''if !crypto::constant_time_eq(mac.as_bytes(), want.as_bytes()) {
+                out.forged.push(i);'''
+to = '''if false {
+                out.forged.push(i);'''
+
+[[mutation]]
+name = "a caller may set a chain field in an audit record"
+file = "src/audit.rs"
+from = '''if let Some(reserved) = CHAIN_FIELDS.iter().find(|k| own.contains_key(**k)) {'''
+to = '''if let Some(reserved) = CHAIN_FIELDS.iter().find(|_| false) {'''
+
+[[mutation]]
+name = "the backup plaintext includes the sessions"
+file = "src/backup.rs"
+from = '''let bytes = Zeroizing::new(serde_json::to_vec(&plain)?);'''
+to = '''let mut with = serde_json::to_value(&plain)?;
+    with["sessions"] = serde_json::to_value(vault.sessions()?)?;
+    let bytes = Zeroizing::new(serde_json::to_vec(&with)?);'''
+
+[[mutation]]
+name = "a bundle that carries more than credentials and templates is read anyway"
+file = "src/backup.rs"
+from = '''    if !only_keys(p, &["credentials", "templates"]) {'''
+to = '''    if false {'''
+
+[[mutation]]
+name = "the backup is written to the audit log, not just its digest"
+file = "src/backup.rs"
+from = '''f.insert("bundle_sha256".into(), digest.clone().into());
+    audit.write("backup.exported", f)?;'''
+to = '''f.insert("bundle_sha256".into(), digest.clone().into());
+    f.insert("bundle".into(), serde_json::to_value(&bundle)?);
+    audit.write("backup.exported", f)?;'''
+
+[[mutation]]
+name = "a fail-mode restore with a conflict writes what it can"
+file = "src/backup.rs"
+from = '''ConflictMode::Fail => {
+                    let e = deny('''
+to = '''ConflictMode::Fail => {
+                    if true {
+                        skipped.push(slug);
+                        continue;
+                    }
+                    let e = deny('''
+
+[[mutation]]
+name = "a restore goes ahead when it cannot restore a bundle's pins"
+file = "src/vault.rs"
+from = '''table.insert(key, pin_list(&list)?);'''
+to = '''table.insert(key, list);'''
+
+[[mutation]]
+name = "a denial's detail is copied into the activity (here: a rule taken from the detail)"
+file = "src/activity.rs"
+from = '''let rule = str_of(r, "rule").map(str::to_string);'''
+to = '''let rule = str_of(r, "detail").or(str_of(r, "rule")).map(str::to_string);'''
+
+[[mutation]]
+name = "a log that starts after the session is reported complete"
+file = "src/activity.rs"
+from = '''    let note = anomaly.or_else(|| {'''
+to = '''    let note = anomaly.or_else(|| if true { None } else {'''
+
+[[mutation]]
+name = "a truncated or unanchored log is reported complete"
+file = "src/activity.rs"
+from = '''let hit = rows.iter().find(|r| ANOMALIES.contains(&r.kind.as_str()))?;'''
+to = '''let hit = rows.iter().find(|_| false)?;'''
+
+[[mutation]]
+name = "a placeholder in a recorded path is repeated in the activity"
+file = "src/activity.rs"
+from = '''    for hit in hits.iter().rev() {'''
+to = '''    for hit in hits.iter().rev().take(0) {'''
+
+[[mutation]]
+name = "a request held for approval counts as a use"
+file = "src/activity.rs"
+from = '''            || r.fields
+                .get("request_id")
+                .is_some_and(|v| ids.contains(&js_key(v)))
+            || (req_of(r, "status")'''
+to = '''            || (false && req_of(r, "status")'''
+
+[[mutation]]
+name = "consumePlaceholder does not ask whether the session is still live"
+file = "src/vault.rs"
+from = '''            let session = rows::session_get(t.c, &row.sid)?;
+            session_live_in(t, session.as_ref())?;'''
+to = '''            let _ = rows::session_get(t.c, &row.sid)?;'''
+
+[[mutation]]
+name = "a row the gateway marks as held is counted as a use"
+file = "src/activity.rs"
+from = '''        str_of(r, "decision") == Some("held")
+'''
+to = '''        false
+'''
+
+[[mutation]]
+name = "a restore does not check a credential's scrub patterns before it writes"
+file = "src/vault.rs"
+from = '''                for p in &patterns {
+                    check_scrub_source(&p.source, &secrets)?;
+                }'''
+to = ''''''
+
+[[mutation]]
+name = "a restore whose write fails keeps its credentials (here: a failed write is not reported as backup_persist)"
+file = "src/vault.rs"
+from = '''Error::Sqlite(_) | Error::Io(_) => deny('''
+to = '''Error::Io(_) => deny('''
+
+[[mutation]]
+name = "a restore the vault refuses is not recorded as a refusal"
+file = "src/backup.rs"
+from = '''        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };
+    Ok(RestoreResult {'''
+to = '''        Ok(o) => o,
+        Err(e) => return Err(e),
+    };
+    Ok(RestoreResult {'''
+
+[[mutation]]
+name = "touchSession extends a session that has ended"
+file = "src/vault.rs"
+from = '''if s.state != SessionState::Active || session_expiry_ms(&s) <= now as f64 {
+                return Ok(false);'''
+to = '''if false {
+                return Ok(false);'''
+
+[[mutation]]
+name = "a session marked ended is live again once its date is later"
+file = "src/vault.rs"
+from = '''    if s.state != SessionState::Active {
+        return Err(plain(
+            ErrorCode::SessionExpired,'''
+to = '''    if false {
+        return Err(plain(
+            ErrorCode::SessionExpired,'''
+
+[[mutation]]
+name = "touchSession extends past the ceiling"
+file = "src/vault.rs"
+from = '''let extended = (now as f64 + idle).min(session_ceiling_ms(&s));'''
+to = '''let extended = now as f64 + idle;'''
+
+[[mutation]]
+name = "a quarantined credential is consumed through a placeholder issued before it"
+file = "src/vault.rs"
+from = '''            if cred.quarantine.is_some() {
+                return Err(quarantined(&cred));
+            }
+            let die'''
+to = '''            let die'''
+
+[[mutation]]
+name = "a quarantined credential is revealed"
+file = "src/vault.rs"
+from = '''        if cred.quarantine.is_some() {
+            return Err(quarantined(&cred));
+        }
+        unseal(&vmk, &cred, field)'''
+to = '''        unseal(&vmk, &cred, field)'''
+
+[[mutation]]
+name = "a budget of 0 issues a placeholder"
+file = "src/vault.rs"
+from = '''if limit == BudgetLimit::Limit(0) {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "consume does not re-check the grant budget"
+file = "src/vault.rs"
+from = '''            if over {
+                return Err(budget_spent(limit));
+            }'''
+to = ''''''
+
+[[mutation]]
+name = "consume does not re-check a placeholder ceiling narrowed after issue"
+file = "src/vault.rs"
+from = '''if row.uses as f64 >= ph_max {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "a forked grant drops the lifetime of the grant it copies"
+file = "src/vault.rs"
+from = '''                        narrow: Some(opts.narrow.clone()),
+                        ttl_ms,'''
+to = '''                        narrow: Some(opts.narrow.clone()),
+                        ttl_ms: None,'''
+
+[[mutation]]
+name = "a backup leaves out each credential's quarantine"
+file = "src/vault.rs"
+from = '''                quarantine: c
+                    .quarantine
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,'''
+to = '''                quarantine: None,'''
+
+[[mutation]]
+name = "a restore drops the bundle's quarantine instead of re-applying it"
+file = "src/vault.rs"
+from = '''Some(q) if !q.is_null() => cred.quarantine = Some(restored_quarantine(q)?),'''
+to = '''Some(q) if !q.is_null() => { restored_quarantine(q)?; }'''
+
+[[mutation]]
+name = "a restore releases the copy of a credential this vault holds quarantined"
+file = "src/vault.rs"
+from = '''                        cred.quarantine = existing
+'''
+to = '''                        let _held = existing
+'''
+
+[[mutation]]
+name = "only the exact slug holds a restore, not a renamed copy of it"
+file = "src/vault.rs"
+from = '''a == b || copy_of(a, b) || copy_of(b, a)'''
+to = '''a == b'''
+
+[[mutation]]
+name = "an infinite session is usable from a network listener"
+file = "src/vault.rs"
+from = '''if s.infinite && l.remote {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "the store reads a budget layer with no limit as unreadable"
+file = "src/vault.rs"
+from = '''        BudgetLimit::Limit(n) => n,
+        _ => DEFAULT_PLACEHOLDER_USES,'''
+to = '''        BudgetLimit::Limit(n) => n,
+        BudgetLimit::Unlimited => 0,
+        _ => DEFAULT_PLACEHOLDER_USES,'''
+
+[[mutation]]
+name = "the store saves a scrub pattern the gateway grammar refuses"
+file = "src/vault.rs"
+from = '''    av_core::scrub::compile_scrub_pattern(source).map_err(Error::from)?;
+'''
+to = ''''''
+
+[[mutation]]
+name = "setPins stores a malformed pin list"
+file = "src/vault.rs"
+from = '''if av_core::pins::pin_list_state(Some(&v)) != PinListState::Pinned {'''
+to = '''if false {'''
+
+[[mutation]]
+name = "setPins pins a host the credential cannot reach"
+file = "src/vault.rs"
+from = '''                av_core::pins::url_host_of(h).as_deref() == Some(k.as_str())
+                    || av_core::policy::match_host(h, &k)'''
+to = '''                true'''
+
+[[mutation]]
+name = "setPins stores a host as written, not as the connectors read it"
+file = "src/vault.rs"
+from = '''            let key = pin_host(&cred, host)?;
+            let list = pin_list(pins)?;'''
+to = '''            let key = { pin_host(&cred, host)?; host.to_string() };
+            let list = pin_list(pins)?;'''
+
+[[mutation]]
+name = "a restore drops a bundle's pins"
+file = "src/vault.rs"
+from = '''                    cred.pins = table;
+                }
+                check_pin_hosts(&cred.pins)?;'''
+to = '''                    let _ = table;
+                }
+                check_pin_hosts(&cred.pins)?;'''
+
+[[mutation]]
+name = "the public credential view carries the pins themselves, not counts"
+file = "src/vault.rs"
+from = '''.map(|(k, v)| (k.clone(), v.len() as u64))'''
+to = '''.map(|(k, v)| (k.clone(), v.len() as u64 + v.iter().map(|p| p.len() as u64).sum::<u64>()))'''
+
+[[mutation]]
+name = "the shared narrowing parser drops a key it does not read instead of refusing it"
+file = "src/pending.rs"
+from = '''        if !OVERRIDE_KEYS.contains(&k.as_str()) {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = "placeholder.issued records the use ceiling"
+file = "src/vault.rs"
+from = '''            "field": field,
+        }),'''
+to = '''            "field": field,
+            "max_uses": max_uses,
+        }),'''
+
+[[mutation]]
+name = "placeholder.refunded records the use ceiling"
+file = "src/vault.rs"
+from = '''json!({ "placeholder_id": row_id, "grant_id": row.grant_id, "uses": row.uses }),'''
+to = '''json!({ "placeholder_id": row_id, "grant_id": row.grant_id, "uses": row.uses, "max_uses": row.max_uses }),'''
+
+[[mutation]]
+name = "a session or grant made from a request records its end"
+file = "src/vault.rs"
+from = '''    if requested {
+        map.insert("expires_at".into(), Value::Null);'''
+to = '''    if false {
+        map.insert("expires_at".into(), Value::Null);'''
+
+[[mutation]]
+name = "a session made by a human loses its end in the log"
+file = "src/vault.rs"
+from = '''            expires_at.map_or(Value::Null, Value::from),
+        );'''
+to = '''            Value::Null,
+        );
+        map.insert("has_expiry".into(), Value::Bool(expires_at.is_some()));'''
+
+[[mutation]]
+name = "session.created records the label text"
+file = "src/vault.rs"
+from = '''        "has_label".into(),
+        opts.label.as_ref().is_some_and(|l| !l.is_empty()).into(),'''
+to = '''        "label".into(),
+        json!(opts.label),'''
+
+[[mutation]]
+name = "a quarantine reason restored from a bundle is recorded uncleaned"
+file = "src/vault.rs"
+from = '''av_core::scrub::untrusted_text(Some(r), &scrub_set, 200)'''
+to = '''Some(r.to_string())'''
+
+[[mutation]]
+name = "the audit read ignores requestId"
+file = "src/audit.rs"
+from = '''                    .is_none_or(|id| field(r, "request_id") == Some(Value::from(id.clone())))'''
+to = '''                    .is_none_or(|_| true)'''
+
+[[mutation]]
+name = "a factor change leaves old pages in the WAL"
+file = "src/vault.rs"
+from = '''            if checkpoint {
+                checkpoint_truncate(&guard)?;
+            }'''
+to = ''''''
+
+[[mutation]]
+name = "a deleted credential's ciphertext is not checkpointed out of the WAL"
+file = "src/vault.rs"
+from = '''            rows::credential_delete(t.c, &cred.id)?;
+            t.checkpoint = true;'''
+to = '''            rows::credential_delete(t.c, &cred.id)?;'''
+
+[[mutation]]
+name = "a refused operation's changes are committed"
+file = "src/vault.rs"
+from = '''        if res.is_ok() || keep {'''
+to = '''        if true {'''
+
+[[mutation]]
+name = "an audit record written inside a rolled-back operation stays in the chain state"
+file = "src/audit.rs"
+from = '''    pub(crate) fn rollback(&mut self) {
+        if let Some((seq, prev, since)) = self.saved.take() {'''
+to = '''    pub(crate) fn rollback(&mut self) {
+        if let Some((seq, prev, since)) = self.saved.take().filter(|_| false) {'''
+
+[[mutation]]
+name = "migrate does not verify the audit chain's MACs before writing"
+file = "src/migrate.rs"
+from = '''    if !report.ok {
+        let at'''
+to = '''    if false {
+        let at'''
+
+[[mutation]]
+name = "migrate re-wraps under a new VMK"
+file = "src/migrate.rs"
+from = '''    let vmk = unlock_legacy(&legacy, passphrase)?;'''
+to = '''    let _old = unlock_legacy(&legacy, passphrase)?;
+    let vmk = crypto::random_key()?;'''
+
+[[mutation]]
+name = "migrate drops a PRF wrap without reporting it"
+file = "src/migrate.rs"
+from = '''        dropped,
+        written,'''
+to = '''        dropped: Vec::new(),
+        written,'''
+
+[[mutation]]
+name = "migrate writes vault.db in place instead of renaming a finished file"
+file = "src/migrate.rs"
+from = '''let temp_path = to.join(format!(".{VAULT_DB_FILE}.migrating"));'''
+to = '''let temp_path = to.join(VAULT_DB_FILE);'''
+
+[[mutation]]
+name = "a failed migration leaves its half-written database behind"
+file = "src/migrate.rs"
+from = '''            if !opts.dry_run {
+                remove_temp(&temp_path);
+            }
+            return Err(e.into());'''
+to = '''            return Err(e.into());'''
+
+[[mutation]]
+name = "a dry run writes the database"
+file = "src/migrate.rs"
+from = '''    let conn = if opts.dry_run {'''
+to = '''    let conn = if false && opts.dry_run {'''
+
+[[mutation]]
+name = "migrate does not chain vault.migrated to the old head"
+file = "src/migrate.rs"
+from = '''            old_head
+                .clone()
+                .unwrap_or_else(|| audit::GENESIS.to_string()),
+        );'''
+to = '''            audit::GENESIS.to_string(),
+        );'''
+
+[[mutation]]
+name = "the VMK is not held in locked memory"
+file = "src/mlock.rs"
+from = '''        let locked = lock(bytes.as_mut_slice());'''
+to = '''        let locked = false;'''
+
+[[mutation]]
+name = "a wrong length device key is accepted"
+file = "src/vault.rs"
+from = '''        .map_err(|_| Error::Invariant("the device key is not 32 bytes".into()))?;
+    Ok(Key32::from_bytes(arr))'''
+to = '''        .unwrap_or([0u8; 32]);
+    Ok(Key32::from_bytes(arr))'''
+
+[[mutation]]
+name = "the sealed format is not bound to its AAD"
+file = "src/crypto.rs"
+from = '''    let ct = cipher
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| CryptoError::Open)?;
+    Ok(SealedV2 {'''
+to = '''    let ct = cipher
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad: b"",
+            },
+        )
+        .map_err(|_| CryptoError::Open)?;
+    let _ = aad;
+    Ok(SealedV2 {'''
+
+# ---- fixes from the first review (review-store-1.md)
+
+[[mutation]]
+name = "migrate drops each grant's quota window and spend ledger"
+file = "src/migrate.rs"
+from = '''            rows::grant_runtime_set(c, &g.id, rt)?;'''
+to = '''            let _ = rt;'''
+test = "tests::migrate::"
+
+[[mutation]]
+name = "backup.restored is written after the restore has already committed"
+file = "src/backup.rs"
+from = '''    // `backup.restored` is written in the same transaction as the restore.
+    let out = match vault.restore_entries(crate::vault::RestoreEntries {
+        credentials: plan,
+        templates: plain.templates,
+        summary: Some(crate::vault::RestoreSummary {
+            skipped: skipped.clone(),
+            renamed: serde_json::to_value(&renames)?,
+            bundle_sha256: bundle_digest(bundle),
+        }),
+    }) {
+        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };'''
+to = '''    let out = match vault.restore_entries(crate::vault::RestoreEntries {
+        credentials: plan,
+        templates: plain.templates,
+        summary: None,
+    }) {
+        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };
+    let audit = vault.audit_mut().ok_or_else(locked)?;
+    let mut f = Map::new();
+    f.insert("restored".into(), serde_json::to_value(&out.restored)?);
+    f.insert("skipped".into(), serde_json::to_value(&skipped)?);
+    f.insert("renamed".into(), serde_json::to_value(&renames)?);
+    f.insert("bundle_sha256".into(), bundle_digest(bundle).into());
+    audit.write("backup.restored", f)?;'''
+test = "tests::"
+
+[[mutation]]
+name = "Vault::create leaves the first VMK wrap in the WAL"
+file = "src/vault.rs"
+from = '''            rows::kv_set(t.c, "locked", &Value::Bool(false))?;
+            t.checkpoint = true;'''
+to = '''            rows::kv_set(t.c, "locked", &Value::Bool(false))?;'''
+test = "tests::review_store_1::"
+
+[[mutation]]
+name = "a busy WAL checkpoint is treated as done"
+file = "src/vault.rs"
+from = '''    if busy != 0 {'''
+to = '''    if busy < 0 {'''
+test = "tests::review_store_1::"
+
+# A legacy health value of another shape reads as no health; JS lists the
+# credential with the value as it is.
+
+[[mutation]]
+name = 'a wrong-shape stored health value fails every query that lists the credential'
+file = "src/rows.rs"
+from = '''        health: health_opt(r.get(6)?),'''
+to = '''        health: parse_opt(r.get(6)?)?,'''
+
+# fix-control-audit.test.js:176-200: a malformed last row (JSON, not a
+# record) keeps its sequence number, so recovery numbers the next record
+# past every stored row; otherwise the corruption record collides with it
+# and the right factor gets AV_LOCKED.
+
+[[mutation]]
+name = 'a malformed last audit record makes the next write reuse its sequence number, locking the owner out'
+file = "src/audit.rs"
+from = '''        self.seq = last.seq.max(stored);'''
+to = '''        self.seq = last.seq;'''
+
+[[mutation]]
+name = 'a log holding only malformed rows restarts its numbering at 1, locking the owner out'
+file = "src/audit.rs"
+from = '''            self.seq = stored;
+            self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''
+to = '''            self.seq = 0;
+            self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''
+
+# The JS audit reader on a legacy log (#dropTornTail, #rows): a torn last
+# line is dropped, and a last line without its newline is still a record.
+
+[[mutation]]
+name = 'a torn last audit line is kept, so a crash mid-append makes a JS vault unmigratable'
+file = "src/audit.rs"
+from = '''        if serde_json::from_str::<Value>(last).is_err() {
+            lines.pop();
+        }'''
+to = '''        if false && serde_json::from_str::<Value>(last).is_err() {
+            lines.pop();
+        }'''
+
+[[mutation]]
+name = 'a last audit record without its newline is dropped as if torn'
+file = "src/migrate.rs"
+from = '''    let audit_lines: Vec<String> = audit_text
+        .split('\n')'''
+to = '''    let audit_lines: Vec<String> = audit_text[..audit_text.rfind('\n').map_or(0, |i| i + 1)]
+        .split('\n')'''
+
+# Found rehearsing the real migration (2026-11-12): in place, the report
+# listed device.key for deletion, and deleting it locks the new vault.
+
+[[mutation]]
+name = 'the migrate report lists the shared device key for deletion'
+file = "src/migrate.rs"
+from = '''    files.iter().filter(|f| !same(f, &kept)).cloned().collect()'''
+to = '''    files.to_vec()'''
+test = "tests::migrate::deleting_every_file"

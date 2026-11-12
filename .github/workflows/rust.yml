@@ -1,0 +1,59 @@
+# The Rust port (rust/PLAN.md). Format, lint with warnings as errors, test,
+# and check dependencies against rust/deny.toml, on Linux and macOS.
+# The toolchain is the one pinned in rust/rust-toolchain.toml.
+
+name: rust
+
+on:
+  push:
+    branches: [main, rust-port]
+    paths: ['rust/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', '.github/workflows/rust.yml']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUST_BACKTRACE: '1'
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup installs the pinned toolchain (and rustfmt, clippy) on first use.
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Dependencies (cargo deny)
+        run: cargo deny check
