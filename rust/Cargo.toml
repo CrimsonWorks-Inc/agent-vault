@@ -67,7 +67,8 @@ assert_cmd = "2.2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Panics unwind (the default; PLAN 4905f8d): a handler fault costs one
+# request under the daemon guard, and the zeroizing drops still run.
 
 # KDFs are deliberately slow; unoptimized they make tests take minutes.
 # Optimizing these packages in dev/test builds changes no behavior.
