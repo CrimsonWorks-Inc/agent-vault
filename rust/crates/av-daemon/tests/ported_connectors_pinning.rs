@@ -29,6 +29,16 @@ impl Drop for Peer {
         self.task.abort();
     }
 }
+#[derive(Debug)]
+struct OneCert(Arc<rustls::sign::CertifiedKey>);
+impl rustls::server::ResolvesServerCert for OneCert {
+    fn resolve(
+        &self,
+        _: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.0.clone())
+    }
+}
 async fn peer(chain: Vec<Vec<u8>>, key: Vec<u8>) -> Peer {
     peer_on(chain, key, "127.0.0.1:0", None).await
 }
@@ -38,17 +48,21 @@ async fn peer_on(
     address: &str,
     response: Option<Vec<u8>>,
 ) -> Peer {
+    let signing = rustls::crypto::aws_lc_rs::sign::any_supported_type(&PrivateKeyDer::Pkcs8(
+        PrivatePkcs8KeyDer::from(key),
+    ))
+    .unwrap();
+    let certified = rustls::sign::CertifiedKey::new(
+        chain.into_iter().map(CertificateDer::from).collect(),
+        signing,
+    );
     let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .unwrap()
     .with_no_client_auth()
-    .with_single_cert(
-        chain.into_iter().map(CertificateDer::from).collect(),
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
-    )
-    .unwrap();
+    .with_cert_resolver(Arc::new(OneCert(Arc::new(certified))));
     let accept = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
     let l = tokio::net::TcpListener::bind(address).await.unwrap();
     let port = l.local_addr().unwrap().port();
@@ -278,13 +292,16 @@ async fn host_alias_port_list_and_repeated_foreign_fields_refuse_with_matching_c
             format!("127.0.0.1:{}", if p.port == 65535 { 1 } else { p.port + 1 }),
         ] {
             for pinset in [Pins::None, pins(std::slice::from_ref(&pin))] {
-                let mut r = request(p.port, pinset);
-                r.headers.push(("HOST".into(), host.clone()));
-                let e = pinned_request(r).await.err().unwrap();
-                assert_eq!(
-                    e.vault.unwrap().extra.rule.as_deref(),
-                    Some("host_mismatch")
-                );
+                for scheme in ["http", "https"] {
+                    let mut r = request(p.port, pinset.clone());
+                    r.url = r.url.replace("https:", &format!("{scheme}:"));
+                    r.headers.push(("HOST".into(), host.clone()));
+                    let e = pinned_request(r).await.err().unwrap();
+                    assert_eq!(
+                        e.vault.unwrap().extra.rule.as_deref(),
+                        Some("host_mismatch")
+                    );
+                }
             }
         }
         let mut r = request(p.port, pins(std::slice::from_ref(&pin)));
@@ -334,6 +351,7 @@ async fn pinning_child_client() {
     tokio::time::timeout(Duration::from_secs(20),async {
  let mut out=Vec::new();
  for call in serde_json::from_str::<Vec<Value>>(&input).unwrap(){
+ if call["probe"]==true {out.push(child_probe(&call).await);continue;}
  let r=UpstreamRequest{url:call["url"].as_str().unwrap().into(),method:"POST".into(),headers:call.get("headers").map(|v|serde_json::from_value(v.clone()).unwrap()).unwrap_or_else(||vec![("authorization".into(),format!("Bearer {SECRET}"))]),body:Some(b"SENTINEL".to_vec()),pins:match &call["pins"]{Value::Array(v)=>Pins::List(v.clone()),_=>Pins::None}};
  out.push(match pinned_request(r).await{Ok(r)=>{let mut b=Vec::new();match r.body{Body::Full(v)=>b=v,Body::Stream(mut rx)=>while let Some(v)=rx.recv().await{b.extend(v.unwrap());}}json!({"ok":true,"status":r.status,"headers":r.headers,"body":String::from_utf8(b).unwrap()})},Err(e)=>json!({"ok":false,"code":e.code,"reason":e.reason,"presented":e.presented,"rule":e.vault.map(|v|v.extra.rule)})});
  }
@@ -811,6 +829,357 @@ async fn matching_or_absent_host_is_sent_and_sni_is_only_the_url_dns_name() {
         let seen = local.seen.lock().unwrap();
         assert!(String::from_utf8_lossy(&seen[0]).contains(&format!("LocalHost:{}", local.port)));
         assert!(String::from_utf8_lossy(&seen[1]).contains(&format!("localhost:{}", local.port)));
+    })
+    .await
+    .unwrap();
+}
+
+struct PublicOnly(Vec<u8>);
+impl rcgen::PublicKeyData for PublicOnly {
+    fn der_bytes(&self) -> &[u8] {
+        &self.0
+    }
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &rcgen::PKCS_ECDSA_P256_SHA256
+    }
+}
+#[tokio::test]
+#[ignore = "pending daemon fix: pinning leaf issuer classification"]
+async fn copied_intermediate_public_key_cannot_sign_the_handshake_or_authorize_an_appended_leaf() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let c = chain();
+        let (_, parsed) = x509_parser::parse_x509_certificate(c.inter.der()).unwrap();
+        let copied_key = PublicOnly(parsed.public_key().subject_public_key.data.to_vec());
+        let p = rcgen::CertificateParams::new(vec!["127.0.0.1".into()]).unwrap();
+        let (signer_params, signer) = ca("attacker");
+        let private = signer.serialize_der();
+        let issuer = rcgen::Issuer::new(signer_params, signer);
+        let copied = p.signed_by(&copied_key, &issuer).unwrap();
+        assert_eq!(pin(&copied), pin(&c.inter));
+        let bad = peer(vec![copied.der().to_vec()], private).await;
+        let e = pinned_request(request(bad.port, pins(&[pin(&c.inter)])))
+            .await
+            .err()
+            .unwrap();
+        assert_ne!(e.code, "AV_PIN_MISMATCH");
+        assert!(!e.code.is_empty());
+        let out = trusted(&c.root.pem(), vec![call(bad.port, json!([pin(&c.inter)]))]).await;
+        assert_eq!(out[0]["ok"], false);
+        assert_ne!(out[0]["code"], "AV_PIN_MISMATCH");
+        assert!(bad.seen.lock().unwrap().is_empty());
+        let (d, k) = cert("127.0.0.1", (-1, 2));
+        let goodpin = spki_of(&d).unwrap();
+        let behind = peer(vec![d, copied.der().to_vec()], k).await;
+        let e = pinned_request(request(behind.port, pins(&[pin(&c.inter)])))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.code, "DEPTH_ZERO_SELF_SIGNED_CERT");
+        assert!(behind.seen.lock().unwrap().is_empty());
+        success(request(behind.port, pins(&[goodpin]))).await;
+    })
+    .await
+    .unwrap();
+}
+#[test]
+fn only_cryptographically_proven_issuers_can_match_pins_and_duplicate_presentations_are_bounded() {
+    use av_daemon::connectors::pinning::{describe_cert, verdict_with};
+    use rustls::pki_types::ServerName;
+    let c = chain();
+    let a = webpki::anchor_from_trusted_cert(c.root.der())
+        .unwrap()
+        .to_owned();
+    let anchors = [a];
+    let name = ServerName::try_from("127.0.0.1").unwrap();
+    let chain = vec![
+        c.leaf.der().to_vec(),
+        c.inter.der().to_vec(),
+        c.root.der().to_vec(),
+    ];
+    for p in [pin(&c.leaf), pin(&c.inter), pin(&c.root)] {
+        assert!(verdict_with(&chain, &name, Some(&[p]), &anchors).is_none());
+    }
+    let forged = vec![
+        c.evil.der().to_vec(),
+        c.inter.der().to_vec(),
+        c.root.der().to_vec(),
+    ];
+    for p in [pin(&c.inter), pin(&c.root)] {
+        assert!(verdict_with(&forged, &name, Some(&[p]), &anchors).is_some());
+    }
+    assert!(verdict_with(&forged, &name, Some(&[pin(&c.evil)]), &anchors).is_none());
+    let mut repeated = chain.clone();
+    repeated.extend(chain.clone());
+    let wrong = format!("sha256/{}=", "A".repeat(43));
+    let e = verdict_with(&repeated, &name, Some(&[wrong]), &anchors).unwrap();
+    assert_eq!(e.code, "AV_PIN_MISMATCH");
+    assert_eq!(e.presented.len(), 3);
+    assert_eq!(
+        e.presented
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    assert!(describe_cert(b"not-a-cert").is_none());
+    assert!(spki_of(b"not-a-cert").is_none());
+}
+#[tokio::test]
+async fn owned_header_snapshot_is_exact_on_wire_and_foreign_first_value_never_connects() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (d, k) = cert("127.0.0.1", (-1, 2));
+        let pin = spki_of(&d).unwrap();
+        let p = peer(vec![d], k).await;
+        let good = format!("127.0.0.1:{}", p.port);
+        let mut backing = vec![
+            ("authorization".to_owned(), format!("Bearer {SECRET}")),
+            ("Host".to_owned(), good.clone()),
+            ("x-declared".to_owned(), "ordinary".to_owned()),
+        ];
+        let mut r = request(p.port, pins(std::slice::from_ref(&pin)));
+        r.headers = backing.clone();
+        let pending = pinned_request(r);
+        backing[0].1 = "Bearer test-secret-unapproved-0099".into();
+        backing[1].1 = "evil.example".into();
+        backing.push(("x-undeclared".into(), "hostile".into()));
+        let response = pending.await.unwrap();
+        assert_eq!(response.status, 200);
+        drop(response);
+        let raw = p.seen.lock().unwrap()[0].clone();
+        let text = String::from_utf8(raw).unwrap();
+        assert!(!text.contains("evil.example"));
+        assert!(!text.contains("unapproved"));
+        assert!(!text.contains("x-undeclared"));
+        let mut headers = text
+            .split("\r\n")
+            .skip(1)
+            .take_while(|s| !s.is_empty())
+            .map(|s| {
+                let (n, v) = s.split_once(':').unwrap();
+                (n.to_ascii_lowercase(), v.trim().to_owned())
+            })
+            .collect::<Vec<_>>();
+        headers.sort();
+        let mut expected = vec![
+            ("authorization".to_owned(), format!("Bearer {SECRET}")),
+            ("host".to_owned(), good),
+            ("x-declared".to_owned(), "ordinary".into()),
+            ("content-length".to_owned(), "8".into()),
+        ];
+        expected.sort();
+        assert_eq!(headers, expected);
+        let before = p.connections.load(std::sync::atomic::Ordering::SeqCst);
+        let mut r = request(p.port, pins(&[pin]));
+        r.headers = backing;
+        let e = pinned_request(r).await.err().unwrap();
+        assert_eq!(
+            e.vault.unwrap().extra.rule.as_deref(),
+            Some("host_mismatch")
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            p.connections.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ipv6_uses_ip_san_without_sni_and_still_checks_pins_and_host_before_http() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let (rp, rk) = ca("IPv6 Test Root");
+        let root = rp.self_signed(&rk).unwrap();
+        let issuer = rcgen::Issuer::new(rp, rk);
+        let p = rcgen::CertificateParams::new(vec!["::1".into()]).unwrap();
+        let k = rcgen::KeyPair::generate().unwrap();
+        let leaf = p.signed_by(&k, &issuer).unwrap();
+        let genuine = peer_on(
+            vec![leaf.der().to_vec(), root.der().to_vec()],
+            k.serialize_der(),
+            "[::1]:0",
+            None,
+        )
+        .await;
+        let (d, k) = cert("::1", (-1, 2));
+        let selfpin = spki_of(&d).unwrap();
+        let local = peer_on(vec![d], k, "[::1]:0", None).await;
+        for host in [None, Some(format!("[::1]:{}", local.port))] {
+            let mut r = request(local.port, pins(std::slice::from_ref(&selfpin)));
+            r.url = format!("https://[::1]:{}/user", local.port);
+            if let Some(h) = host {
+                r.headers.push(("host".into(), h));
+            }
+            success(r).await;
+        }
+        assert_eq!(local.seen.lock().unwrap().len(), 2);
+        for b in local.seen.lock().unwrap().iter() {
+            let s = String::from_utf8_lossy(b);
+            assert!(s.contains(&format!("[::1]:{}", local.port)));
+            assert!(s.contains(SECRET));
+        }
+        assert!(local
+            .handshakes
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(sni, _)| sni.is_none()));
+        let mut calls = Vec::new();
+        for pinset in [
+            json!([pin(&root)]),
+            Value::Null,
+            json!([format!("sha256/{}=", "A".repeat(43))]),
+        ] {
+            let mut r = call(genuine.port, pinset);
+            r["url"] = json!(format!("https://[::1]:{}/user", genuine.port));
+            calls.push(r);
+        }
+        let out = trusted(&root.pem(), calls).await;
+        assert_eq!(out[0]["ok"], true);
+        assert_eq!(out[1]["ok"], true);
+        assert_eq!(out[2]["code"], "AV_PIN_MISMATCH");
+        assert_eq!(genuine.seen.lock().unwrap().len(), 2);
+        let (d, k) = cert("127.0.0.1", (-1, 2));
+        let wrongpin = spki_of(&d).unwrap();
+        let wrong = peer_on(vec![d], k, "[::1]:0", None).await;
+        let mut r = request(wrong.port, pins(&[wrongpin]));
+        r.url = format!("https://[::1]:{}/user", wrong.port);
+        let e = pinned_request(r).await.err().unwrap();
+        assert_eq!(e.code, "ERR_TLS_CERT_ALTNAME_INVALID");
+        assert!(wrong.seen.lock().unwrap().is_empty());
+        let before = local.connections.load(std::sync::atomic::Ordering::SeqCst);
+        for h in [
+            "::1".to_owned(),
+            "evil.example".into(),
+            format!("127.0.0.1:{}", local.port),
+        ] {
+            let mut r = request(local.port, pins(std::slice::from_ref(&selfpin)));
+            r.url = format!("https://[::1]:{}/user", local.port);
+            r.headers.push(("host".into(), h));
+            assert_eq!(
+                pinned_request(r)
+                    .await
+                    .err()
+                    .unwrap()
+                    .vault
+                    .unwrap()
+                    .extra
+                    .rule
+                    .as_deref(),
+                Some("host_mismatch")
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            local.connections.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+    })
+    .await
+    .unwrap();
+}
+async fn child_probe(call: &Value) -> Value {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    let url = url::Url::parse(call["url"].as_str().unwrap()).unwrap();
+    let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    vault
+        .add_credential(av_store::vault::NewCredential {
+            slug: "probe".into(),
+            kind: "github".into(),
+            connector: serde_json::from_value(json!({"host":host,"scheme":"https"})).unwrap(),
+            fields: vec![("token".into(), SECRET.to_owned().into())],
+            sites: std::collections::BTreeMap::from([(
+                "token".into(),
+                vec!["header:authorization:Bearer".into()],
+            )]),
+        })
+        .unwrap();
+    if let Some(p) = call["pins"].as_array() {
+        let pins = p
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        vault.set_pins("probe", "127.0.0.1", &pins).unwrap();
+    }
+    let shared = av_daemon::state::Shared::new(vault);
+    let result = av_daemon::connectors::probe::run_probe(&shared, "probe".into(), None).await;
+    let health = shared
+        .run(|c| {
+            serde_json::to_value(c.vault.find_credential("probe").unwrap().unwrap().health).unwrap()
+        })
+        .await
+        .unwrap();
+    let audit = shared
+        .run(|c| {
+            serde_json::to_value(
+                c.vault
+                    .audit()
+                    .unwrap()
+                    .read(&av_store::audit::ReadFilter {
+                        limit: 1000,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap();
+    assert!(!audit.to_string().contains(SECRET));
+    match result {
+        Ok(v) => json!({"result":v,"health":health}),
+        Err(e) => json!({"error":{"code":e.code.as_str(),"rule":e.extra.rule},"health":health}),
+    }
+}
+#[tokio::test]
+async fn real_probe_root_pin_needs_ca_trust_refuses_mismatch_and_persists_scrubbed_health() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let c = chain();
+        let body = format!("{SECRET} test-marker-probe-body-0123456");
+        let reply = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let p = peer_on(
+            vec![
+                c.leaf.der().to_vec(),
+                c.inter.der().to_vec(),
+                c.root.der().to_vec(),
+            ],
+            c.key.clone(),
+            "127.0.0.1:0",
+            Some(reply),
+        )
+        .await;
+        let mut wrong = call(p.port, json!([format!("sha256/{}=", "D".repeat(43))]));
+        wrong["probe"] = json!(true);
+        let bad = trusted(&c.root.pem(), vec![wrong]).await;
+        assert_eq!(bad[0]["error"]["code"], "AV_PIN_MISMATCH");
+        assert_eq!(bad[0]["health"]["status"], "error");
+        assert_eq!(bad[0]["health"]["source"], "probe");
+        let mut normal = call(p.port, json!([pin(&c.root)]));
+        normal["probe"] = json!(true);
+        let untrusted = trusted("", vec![normal.clone()]).await;
+        assert_eq!(untrusted[0]["result"]["status"], "unreachable");
+        assert!(p.seen.lock().unwrap().is_empty());
+        let ok = trusted(&c.root.pem(), vec![normal]).await;
+        assert_eq!(ok[0]["result"]["status"], "ok");
+        assert_eq!(ok[0]["health"]["status"], "ok");
+        assert_eq!(ok[0]["health"]["source"], "probe");
+        assert_eq!(ok[0]["health"]["http_status"], 200);
+        assert!(!ok
+            .to_owned()
+            .iter()
+            .any(|v| v.to_string().contains(SECRET)
+                || v.to_string().contains("test-marker-probe-body")));
+        assert_eq!(p.seen.lock().unwrap().len(), 1);
+        let raw = p.seen.lock().unwrap()[0].clone();
+        let text = String::from_utf8(raw).unwrap();
+        assert!(text.starts_with("GET /user HTTP/1.1\r\n"));
+        assert!(text.contains(&format!("Bearer {SECRET}")));
+        assert!(!text.contains("pwned"));
     })
     .await
     .unwrap();

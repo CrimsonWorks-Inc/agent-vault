@@ -15257,3 +15257,54 @@ async fn fix_mcp_query_credential_authenticates_by_session_and_proposals_preserv
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn connector_probe_malformed_persisted_pin_entries_fail_before_reading_locked_secret() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let pin = format!("sha256/{}=", "C".repeat(43));
+        for list in [
+            json!(["garbage"]),
+            json!(["42"]),
+            json!([format!(" {pin}")]),
+            json!([pin, "garbage"]),
+            json!((0..5)
+                .map(|n| format!("sha256/{}=", char::from(b'A' + n).to_string().repeat(43)))
+                .collect::<Vec<_>>()),
+        ] {
+            let f = probe_fixture(
+                "github",
+                json!({"host":"api.github.com","scheme":"https"}),
+                vec![("token", vec!["header:authorization:Bearer"])],
+            )
+            .await;
+            let table = json!({"api.github.com":list});
+            let f = control_session_restart_after_seed(f, move |dir| {
+                ported_common::seed_credential_pins(dir, "probe", &table)
+            })
+            .await;
+            f.shared.run(|c| c.vault.lock().unwrap()).await.unwrap();
+            let e = run_public_probe(&f).await.unwrap_err();
+            assert_eq!(e.code.as_str(), "AV_PIN_MISMATCH");
+            assert_eq!(e.extra.rule.as_deref(), Some("pin_format"));
+            assert!(f.up.hits.lock().unwrap().is_empty());
+            f.shared
+                .run(|c| c.vault.unlock(None).unwrap())
+                .await
+                .unwrap();
+            assert!(probe_health(&f).await.is_null());
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(&f).await;
+        }
+        let f = probe_fixture(
+            "github",
+            json!({"host":"api.github.com","scheme":"https"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        assert_eq!(run_public_probe(&f).await.unwrap()["status"], "ok");
+        assert_eq!(probe_health(&f).await["status"], "ok");
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
