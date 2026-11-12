@@ -20,6 +20,8 @@ const SECRET: &str = "test-secret-ported-gateway-0123456789";
 struct RecordingUpstream {
     hits: Mutex<Vec<UpstreamRequest>>,
     reply: Mutex<Option<Reply>>,
+    failure: Mutex<Option<UpstreamError>>,
+    gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 #[derive(Clone)]
@@ -34,7 +36,15 @@ impl Upstream for RecordingUpstream {
     fn send(&self, req: UpstreamRequest) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
         self.hits.lock().unwrap().push(req);
         let reply = self.reply.lock().unwrap().clone();
+        let failure = self.failure.lock().unwrap().clone();
+        let gate = self.gate.lock().unwrap().clone();
         Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            if let Some(failure) = failure {
+                return Err(failure);
+            }
             if let Some(reply) = reply {
                 return Ok(UpstreamResponse {
                     status: reply.status,
@@ -84,6 +94,7 @@ struct Fixture {
     token: String,
     ph: String,
     secret: String,
+    grant_id: String,
 }
 
 impl Fixture {
@@ -99,6 +110,15 @@ impl Fixture {
         sites: &[&str],
         secret: &str,
         scrub_budget: Option<(Option<usize>, Option<usize>)>,
+    ) -> Self {
+        Self::configured(sites, secret, scrub_budget, json!({})).await
+    }
+
+    async fn configured(
+        sites: &[&str],
+        secret: &str,
+        scrub_budget: Option<(Option<usize>, Option<usize>)>,
+        policy_patch: Value,
     ) -> Self {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
@@ -131,19 +151,21 @@ impl Fixture {
         assert_eq!(status, 200, "{cred}");
         // Like gateway-helpers.js, seed the auto grant directly in the temp
         // vault: the control API intentionally requires a factor for auto writes.
-        let (token, ph) = shared.run(|core| {
+        let (token, ph, grant_id) = shared.run(move |core| {
             use av_core::secret::ExposeSecret;
             use av_store::vault::{CreateSessionOptions, CreateGrantOptions, IssueOptions};
             let credential = core.vault.find_credential("demo").unwrap().unwrap();
             let session = core.vault.create_session(CreateSessionOptions::default()).unwrap();
+            let mut policy = json!({"hosts": ["api.example.test"], "methods": ["GET", "POST"], "paths": ["/**"], "budget": {"unit": "requests", "limit": 1000}, "approval": "auto"});
+            for (k,v) in policy_patch.as_object().unwrap() { policy[k] = v.clone(); }
             let grant = core.vault.create_grant(CreateGrantOptions {
                 session_id: session.session.id,
                 credential_id: credential.id,
-                policy: serde_json::from_value(json!({"hosts": ["api.example.test"], "methods": ["GET", "POST"], "paths": ["/**"], "budget": {"unit": "requests", "limit": 1000}, "approval": "auto"})).unwrap(),
+                policy: serde_json::from_value(policy).unwrap(),
                 ..Default::default()
             }).unwrap();
-            let ph = core.vault.issue_placeholder(IssueOptions { grant_id: grant.id, ..Default::default() }).unwrap();
-            (session.token.expose_secret().to_string(), ph.placeholder)
+            let ph = core.vault.issue_placeholder(IssueOptions { grant_id: grant.id.clone(), ..Default::default() }).unwrap();
+            (session.token.expose_secret().to_string(), ph.placeholder, grant.id)
         }).await.unwrap();
         Self {
             _dir: dir,
@@ -153,7 +175,35 @@ impl Fixture {
             token,
             ph,
             secret: secret.into(),
+            grant_id,
         }
+    }
+
+    async fn mint(&self, uses: Option<u64>) -> String {
+        let grant_id = self.grant_id.clone();
+        self.shared
+            .run(move |core| {
+                core.vault
+                    .issue_placeholder(av_store::vault::IssueOptions {
+                        grant_id,
+                        uses,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .placeholder
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn write(&self, body: &str) -> GatewayResponse {
+        self.send(
+            "POST",
+            "/write",
+            vec![("x-key".into(), self.ph.clone())],
+            Some(body.into()),
+        )
+        .await
     }
 
     async fn send(
@@ -1222,5 +1272,417 @@ async fn missing_stream_indexes_are_safe_for_zero_default_and_distinct_missing_c
                 assert_client_cannot_reassemble(name, events, client, missing, secret).await;
             }
         }
+    }
+}
+
+// gateway-approvals.test.js: one decision must execute only what was approved.
+async fn approval_fixture(mode: &str, sites: &[&str]) -> Fixture {
+    Fixture::configured(sites, SECRET, None, json!({"approval":mode})).await
+}
+fn held_id(r: &GatewayResponse) -> String {
+    assert_eq!(r.status, 202);
+    serde_json::from_slice::<Value>(&r.body).unwrap()["approval_id"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+#[tokio::test]
+async fn consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays() {
+    let mut f = approval_fixture("on-write", &["header:x-key"]).await;
+    f.ph = f.mint(Some(1)).await;
+    let id = held_id(&f.write("x").await);
+    f.daemon
+        .pipeline()
+        .decide_approval(id.clone(), true)
+        .await
+        .unwrap();
+    let ran = f.write("x").await;
+    assert_eq!(ran.status, 200);
+    assert!(ran.header("av-placeholder-next").is_some());
+    f.clean(&ran).await;
+    for decision in [false, true] {
+        let error = f
+            .daemon
+            .pipeline()
+            .decide_approval(id.clone(), decision)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code.as_str(), "AV_POLICY_DENIED");
+        assert_eq!(
+            f.daemon
+                .pipeline()
+                .approval_status(id.clone())
+                .await
+                .unwrap()["state"],
+            "consumed"
+        );
+    }
+    let again = f.write("x").await;
+    assert_eq!(again.header("av-replayed"), Some("true"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&again).await;
+}
+#[tokio::test]
+async fn granted_approval_cannot_flip_and_pending_decisions_return_no_cached_result() {
+    let f = approval_fixture("on-write", &["header:x-key"]).await;
+    let yes = held_id(&f.write("yes").await);
+    let no = held_id(&f.write("no").await);
+    for (id, granted, state) in [
+        (yes.clone(), true, "granted"),
+        (no.clone(), false, "denied"),
+    ] {
+        let returned = f
+            .daemon
+            .pipeline()
+            .decide_approval(id, granted)
+            .await
+            .unwrap();
+        assert_eq!(returned["state"], state);
+        assert!(returned.get("result").is_none());
+    }
+    assert_eq!(
+        f.daemon
+            .pipeline()
+            .decide_approval(yes, false)
+            .await
+            .unwrap_err()
+            .code
+            .as_str(),
+        "AV_POLICY_DENIED"
+    );
+    let allowed = f.write("yes").await;
+    assert_eq!(allowed.status, 200);
+    f.clean(&allowed).await;
+    let denied = f.write("no").await;
+    assert_eq!(denied.status, 403);
+    f.clean(&denied).await;
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn literal_hash_marker_cannot_swap_header_and_json_injection_sites() {
+    let f = approval_fixture("each", &["header:x-key", "json:/token"]).await;
+    let marker = format!("<av:{}:key>", f.grant_id);
+    let send = |header: String, token: String| {
+        f.send(
+            "POST",
+            "/write",
+            vec![
+                ("content-type".into(), "application/json".into()),
+                ("x-key".into(), header),
+            ],
+            Some(json!({"token":token}).to_string()),
+        )
+    };
+    let id = held_id(&send(f.ph.clone(), marker.clone()).await);
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let swapped = send(marker.clone(), f.ph.clone()).await;
+    assert_eq!(swapped.status, 202);
+    f.clean(&swapped).await;
+    let id = held_id(&send(format!("{} {marker}", f.ph), "x".into()).await);
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    assert_eq!(
+        send(format!("{marker} {}", f.ph), "x".into()).await.status,
+        202
+    );
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    let original = send(f.ph.clone(), marker).await;
+    assert_eq!(original.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    assert!(f
+        .last()
+        .headers
+        .iter()
+        .any(|(k, v)| k == "x-key" && v == SECRET));
+    f.clean(&original).await;
+}
+#[tokio::test]
+async fn method_override_participates_in_approval_and_safe_ordinary_methods_pass() {
+    let f = Fixture::configured(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({"approval":"on-write","methods":["GET","POST","DELETE"]}),
+    )
+    .await;
+    let send = |method: &'static str, value: &str| {
+        f.send(
+            method,
+            "/x",
+            vec![
+                ("x-key".into(), f.ph.clone()),
+                ("x-http-method-override".into(), value.into()),
+            ],
+            None,
+        )
+    };
+    let r = send("GET", "DELETE").await;
+    assert_eq!(r.status, 202);
+    assert!(f.daemon.pipeline().pending_approvals().await[0]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("DELETE"));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    f.clean(&r).await;
+    for override_ in [false, true] {
+        let r = if override_ {
+            send("GET", "GET").await
+        } else {
+            f.get().await
+        };
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+    }
+    let r = f
+        .send(
+            "POST",
+            "/x",
+            vec![("x-key".into(), f.ph.clone())],
+            Some("x".into()),
+        )
+        .await;
+    assert_eq!(r.status, 202);
+    assert!(f
+        .daemon
+        .pipeline()
+        .pending_approvals()
+        .await
+        .iter()
+        .any(|a| a["summary"] == "POST api.example.test/x"));
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn streamed_or_failed_consumed_approval_gets_a_new_visible_pending_id() {
+    for streamed in [false, true] {
+        let f = approval_fixture("each", &["header:x-key"]).await;
+        if streamed {
+            stream_reply(&f, "data: hi\n\n", false);
+        } else {
+            *f.up.failure.lock().unwrap() = Some(UpstreamError::new("ECONNRESET", "test reset"));
+        }
+        let first = held_id(&f.get().await);
+        f.daemon
+            .pipeline()
+            .decide_approval(first.clone(), true)
+            .await
+            .unwrap();
+        let ran = drain(f.get().await).await;
+        assert_eq!(ran.status, if streamed { 200 } else { 502 });
+        f.clean(&ran).await;
+        *f.up.failure.lock().unwrap() = None;
+        let retry = f.get().await;
+        let second = held_id(&retry);
+        assert_ne!(second, first);
+        assert!(f
+            .daemon
+            .pipeline()
+            .pending_approvals()
+            .await
+            .iter()
+            .any(|a| a["id"] == second));
+        assert_eq!(
+            f.daemon.pipeline().approval_status(first).await.unwrap()["state"],
+            "consumed"
+        );
+        f.clean(&retry).await;
+        f.daemon
+            .pipeline()
+            .decide_approval(second, true)
+            .await
+            .unwrap();
+        let reran = drain(f.get().await).await;
+        assert_eq!(reran.status, 200);
+        f.clean(&reran).await;
+    }
+}
+#[tokio::test]
+async fn expired_buffered_replay_is_held_under_a_new_visible_id() {
+    let f = approval_fixture("each", &["header:x-key"]).await;
+    let first = held_id(&f.get().await);
+    f.daemon
+        .pipeline()
+        .decide_approval(first.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(f.get().await.status, 200);
+    assert_eq!(f.get().await.header("av-replayed"), Some("true"));
+    f.shared
+        .run(|core| {
+            for (_, approval) in &mut core.pl.approvals {
+                approval.decided_at = Some("2000-01-01T00:00:00.000Z".into());
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        f.send("GET", "/other", vec![("x-key".into(), f.ph.clone())], None)
+            .await
+            .status,
+        202
+    );
+    let retry = f.get().await;
+    let second = held_id(&retry);
+    assert_ne!(first, second);
+    assert!(f
+        .daemon
+        .pipeline()
+        .pending_approvals()
+        .await
+        .iter()
+        .any(|a| a["id"] == second));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&retry).await;
+}
+#[tokio::test]
+async fn in_flight_resend_waits_for_original_approval_and_replays_after_completion() {
+    let f = approval_fixture("each", &["header:x-key"]).await;
+    let first = held_id(&f.get().await);
+    f.daemon
+        .pipeline()
+        .decide_approval(first.clone(), true)
+        .await
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.up.gate.lock().unwrap() = Some(release.clone());
+    let running = f.get();
+    tokio::pin!(running);
+    tokio::select! { _ = &mut running => panic!("upstream should wait"), _=tokio::time::sleep(std::time::Duration::from_millis(20))=>{} }
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    let meanwhile = f.get().await;
+    assert_eq!(held_id(&meanwhile), first);
+    f.clean(&meanwhile).await;
+    release.notify_one();
+    let ran = running.await;
+    assert_eq!(ran.status, 200);
+    f.clean(&ran).await;
+    let again = f.get().await;
+    assert_eq!(again.header("av-replayed"), Some("true"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&again).await;
+}
+#[tokio::test]
+async fn basic_placeholder_renewal_preserves_approval_but_user_and_padding_changes_do_not() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let f = approval_fixture("each", &["basic:pass"]).await;
+    let send = |header: String| {
+        f.send(
+            "POST",
+            "/write",
+            vec![("authorization".into(), header)],
+            None,
+        )
+    };
+    let header =
+        |user: &str, ph: &str| format!("Basic {}", STANDARD.encode(format!("{user}:{ph}")));
+    let first = f.mint(None).await;
+    let id = held_id(&send(header("user", &first)).await);
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let fresh = f.mint(None).await;
+    let r = send(header("user", &fresh)).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    assert!(f
+        .last()
+        .headers
+        .iter()
+        .any(|(k, v)| k == "authorization" && v == &header("user", SECRET)));
+    f.clean(&r).await;
+    let g = approval_fixture("each", &["basic:pass"]).await;
+    let ph = g.mint(None).await;
+    let user = ["user", "users", "userss"]
+        .into_iter()
+        .find(|user| STANDARD.encode(format!("{user}:{ph}")).ends_with('='))
+        .unwrap();
+    let send = |header: String| {
+        g.send(
+            "POST",
+            "/write",
+            vec![("authorization".into(), header)],
+            None,
+        )
+    };
+    let id = held_id(&send(header(user, &ph)).await);
+    g.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let r = send(header("admin", &g.mint(None).await)).await;
+    assert_eq!(r.status, 202);
+    g.clean(&r).await;
+    let r = send(
+        header(user, &g.mint(None).await)
+            .trim_end_matches('=')
+            .into(),
+    )
+    .await;
+    assert_eq!(r.status, 202);
+    assert!(g.up.hits.lock().unwrap().is_empty());
+    g.clean(&r).await;
+}
+
+#[tokio::test]
+async fn refund_depends_on_whether_upstream_could_have_received_both_placeholder_fields() {
+    const SECOND: &str = "test-secret-second-refund-0123456789";
+    for (error, uses, budget) in [("ECONNREFUSED", 0, 0), ("ECONNRESET", 1, 2)] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (token,grant_id,placeholders)=f.shared.run(|core| {
+            use av_store::vault::{NewCredential,CreateSessionOptions,CreateGrantOptions,IssueOptions};
+            use av_core::secret::ExposeSecret;
+            let credential=core.vault.add_credential(NewCredential {slug:"pair".into(),kind:"http".into(),connector:serde_json::from_value(json!({"host":"api.example.test","scheme":"https"})).unwrap(),fields:vec![("key".into(),SECRET.to_string().into()),("second".into(),SECOND.to_string().into())],sites:std::collections::BTreeMap::from([("key".into(),vec!["header:x-key".into()]),("second".into(),vec!["header:x-second".into()])])}).unwrap();
+            let session=core.vault.create_session(CreateSessionOptions::default()).unwrap();
+            let grant=core.vault.create_grant(CreateGrantOptions{session_id:session.session.id,credential_id:credential.id,policy:serde_json::from_value(json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/**"],"budget":{"unit":"requests","limit":1000},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+            let placeholders=["key","second"].into_iter().map(|field|core.vault.issue_placeholder(IssueOptions{grant_id:grant.id.clone(),field:Some(field.into()),..Default::default()}).unwrap()).collect::<Vec<_>>();
+            (session.token.expose_secret().to_string(),grant.id,placeholders)
+        }).await.unwrap();
+        let request = || GatewayRequest {
+            method: "GET".into(),
+            path: "/p/pair/x".into(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token.clone()),
+                ("x-key".into(), placeholders[0].placeholder.clone()),
+                ("x-second".into(), placeholders[1].placeholder.clone()),
+            ],
+            ..Default::default()
+        };
+        *f.up.failure.lock().unwrap() = Some(UpstreamError::new(error, "test upstream failure"));
+        let r = f.daemon.pipeline().handle(request()).await;
+        assert_eq!(r.status, 502);
+        f.clean(&r).await;
+        assert!(!String::from_utf8_lossy(&r.body).contains(SECOND));
+        let ids = placeholders
+            .iter()
+            .map(|p| p.row.id.clone())
+            .collect::<Vec<_>>();
+        let check_grant = grant_id.clone();
+        f.shared
+            .run(move |core| {
+                for row in core
+                    .vault
+                    .list_placeholders(None)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|row| ids.contains(&row.id))
+                {
+                    assert_eq!(row.uses, uses);
+                }
+                assert_eq!(
+                    core.vault.grant(&check_grant).unwrap().unwrap().budget_used,
+                    budget
+                );
+                let records = core
+                    .vault
+                    .audit()
+                    .unwrap()
+                    .read(&av_store::audit::ReadFilter {
+                        limit: usize::MAX,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert!(!serde_json::to_string(&records).unwrap().contains(SECOND));
+            })
+            .await
+            .unwrap();
+        *f.up.failure.lock().unwrap() = None;
+        let r = f.daemon.pipeline().handle(request()).await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"ordinary-traffic-control");
+        f.clean(&r).await;
     }
 }

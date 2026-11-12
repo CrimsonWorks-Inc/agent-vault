@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 115 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **866 not yet ported**.
+Totals: 1090 JS tests: 131 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **850 not yet ported**.
 
 ## Mutation check
 
@@ -463,23 +463,23 @@ the vault on every call instead of caching an audit handle.
 | fix-control-webauthn.test.js | an ordinary request still binds every field, and the secret only by digest | not yet ported |
 | fix-control-webauthn.test.js | a signature for a narrow session cannot issue a placeholder | not yet ported |
 | fix-control-webauthn.test.js | a signature over the real placeholder request still works | not yet ported |
-| gateway-approvals.test.js | an approval that already ran cannot be denied, and the deny hands back nothing | not yet ported |
-| gateway-approvals.test.js | granting an approval that already ran does not arm it again | not yet ported |
-| gateway-approvals.test.js | a granted approval cannot be flipped to denied before it is sent | not yet ported |
-| gateway-approvals.test.js | deciding a pending approval still works, both ways, and returns no response body | not yet ported |
-| gateway-approvals.test.js | literal marker text cannot make two different requests hash alike | not yet ported |
-| gateway-approvals.test.js | reordering the values of a repeated header changes the request hash | not yet ported |
+| gateway-approvals.test.js | an approval that already ran cannot be denied, and the deny hands back nothing | tests/ported_gateway_core.rs::consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays |
+| gateway-approvals.test.js | granting an approval that already ran does not arm it again | tests/ported_gateway_core.rs::consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays |
+| gateway-approvals.test.js | a granted approval cannot be flipped to denied before it is sent | tests/ported_gateway_core.rs::granted_approval_cannot_flip_and_pending_decisions_return_no_cached_result |
+| gateway-approvals.test.js | deciding a pending approval still works, both ways, and returns no response body | tests/ported_gateway_core.rs::granted_approval_cannot_flip_and_pending_decisions_return_no_cached_result |
+| gateway-approvals.test.js | literal marker text cannot make two different requests hash alike | tests/ported_gateway_core.rs::literal_hash_marker_cannot_swap_header_and_json_injection_sites |
+| gateway-approvals.test.js | reordering the values of a repeated header changes the request hash | tests/ported_gateway_core_units.rs::repeated_header_values_keep_order_in_request_hash_but_header_names_do_not |
 | gateway-approvals.test.js | a method-override header is held to the methods allowlist | `tests::gateway::hardening_a_method_override_is_held_to_the_methods_allowlist` |
-| gateway-approvals.test.js | a method-override header counts for approval, and the human is shown it | not yet ported |
-| gateway-approvals.test.js | ordinary requests are not affected by the override checks | not yet ported |
-| gateway-approvals.test.js | a failure before connecting refunds every placeholder the request spent | not yet ported |
-| gateway-approvals.test.js | a failure that may have reached the server refunds nothing | not yet ported |
-| gateway-approvals.test.js | a streamed approval that ran does not leave its resend waiting forever | not yet ported |
-| gateway-approvals.test.js | a buffered approval whose replay window closed is asked for again, not stuck | not yet ported |
-| gateway-approvals.test.js | a request that failed after reaching the upstream is asked for again, not stuck | not yet ported |
-| gateway-approvals.test.js | a resend while the approved request is still in flight keeps waiting on it | not yet ported |
-| gateway-approvals.test.js | renewing the placeholder inside a Basic header keeps the approval | not yet ported |
-| gateway-approvals.test.js | a different Basic user, or another spelling of the same header, still needs its own approval | not yet ported |
+| gateway-approvals.test.js | a method-override header counts for approval, and the human is shown it | tests/ported_gateway_core.rs::method_override_participates_in_approval_and_safe_ordinary_methods_pass |
+| gateway-approvals.test.js | ordinary requests are not affected by the override checks | tests/ported_gateway_core.rs::method_override_participates_in_approval_and_safe_ordinary_methods_pass |
+| gateway-approvals.test.js | a failure before connecting refunds every placeholder the request spent | tests/ported_gateway_core.rs::refund_depends_on_whether_upstream_could_have_received_both_placeholder_fields |
+| gateway-approvals.test.js | a failure that may have reached the server refunds nothing | tests/ported_gateway_core.rs::refund_depends_on_whether_upstream_could_have_received_both_placeholder_fields |
+| gateway-approvals.test.js | a streamed approval that ran does not leave its resend waiting forever | tests/ported_gateway_core.rs::streamed_or_failed_consumed_approval_gets_a_new_visible_pending_id |
+| gateway-approvals.test.js | a buffered approval whose replay window closed is asked for again, not stuck | tests/ported_gateway_core.rs::expired_buffered_replay_is_held_under_a_new_visible_id |
+| gateway-approvals.test.js | a request that failed after reaching the upstream is asked for again, not stuck | tests/ported_gateway_core.rs::streamed_or_failed_consumed_approval_gets_a_new_visible_pending_id |
+| gateway-approvals.test.js | a resend while the approved request is still in flight keeps waiting on it | tests/ported_gateway_core.rs::in_flight_resend_waits_for_original_approval_and_replays_after_completion |
+| gateway-approvals.test.js | renewing the placeholder inside a Basic header keeps the approval | tests/ported_gateway_core.rs::basic_placeholder_renewal_preserves_approval_but_user_and_padding_changes_do_not |
+| gateway-approvals.test.js | a different Basic user, or another spelling of the same header, still needs its own approval | tests/ported_gateway_core.rs::basic_placeholder_renewal_preserves_approval_but_user_and_padding_changes_do_not |
 | gateway-core.test.js | the scrubber catches the encodings it used to miss | tests/ported_gateway_core_units.rs::escaped_and_wrapped_secret_shapes_are_redacted_with_ordinary_controls |
 | gateway-core.test.js | the scrubber leaves ordinary escaped and wrapped text alone | tests/ported_gateway_core_units.rs::ordinary_escaped_wrapped_and_partial_text_is_unchanged |
 | gateway-core.test.js | a percent-encoded secret split across stream chunks is still caught | tests/ported_gateway_core_units.rs::percent_secret_and_derived_token_straddling_holdback_are_not_emitted_in_halves |

@@ -474,3 +474,34 @@ fn shadowed_placeholder_and_unsubstituted_nonce_are_detected_by_position() {
     let control = request(r#"{"token":"SECRET","n":12345678901234567891}"#.into());
     assert!(sub::unsubstituted(&control, &["aaaaaaaaaaaaaaaaaaaaaaaaaa".into()]).is_none());
 }
+
+#[test]
+fn repeated_header_values_keep_order_in_request_hash_but_header_names_do_not() {
+    use av_core::canon::{request_hash, RequestHashInput};
+    let credentials = vec!["g:f".to_string()];
+    let hash = |headers: &[(String, String)]| {
+        request_hash(&RequestHashInput {
+            method: Some("POST"),
+            host: Some("h"),
+            path: Some("/x"),
+            query: Some(""),
+            body_sha256: Some(""),
+            credentials: &credentials,
+            headers,
+        })
+    };
+    assert_ne!(
+        hash(&[
+            ("X-HTTP-Method-Override".into(), "POST".into()),
+            ("X-HTTP-Method-Override".into(), "DELETE".into())
+        ]),
+        hash(&[
+            ("X-HTTP-Method-Override".into(), "DELETE".into()),
+            ("X-HTTP-Method-Override".into(), "POST".into())
+        ])
+    );
+    assert_eq!(
+        hash(&[("A".into(), "1".into()), ("b".into(), "2".into())]),
+        hash(&[("B".into(), "2".into()), ("a".into(), "1".into())])
+    );
+}
