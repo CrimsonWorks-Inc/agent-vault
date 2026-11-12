@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 583 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **513 not yet ported**.
+Totals: 1207 JS tests: 584 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **512 not yet ported**.
 
 ## Mutation check
 
@@ -156,7 +156,7 @@ the vault on every call instead of caching an audit handle.
 | control-api-mcp.test.js | the existing tools show lifetimes; the preview stays with the human (F13) | `ported_gateway_core::control_mcp_status_shows_lifetimes_but_only_human_pending_views_receive_scrubbed_preview` |
 | control-api-mcp.test.js | the server instructions point at the two new tools | `ported_gateway_core::control_mcp_access_description_is_read_only_and_instructions_name_both_advisory_tools` |
 | control-api-notify.test.js | the stream sends a snapshot, then each new item, without the agent's words | `ported_gateway_core::control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words` |
-| control-api-notify.test.js | a ninth watcher is refused | not yet ported |
+| control-api-notify.test.js | a ninth watcher is refused | `ported_gateway_core::control_notify_stream_caps_eight_watchers_and_releases_closed_slot` |
 | control-api-notify.test.js | the stream resolves no session: a token sent to it is ignored and touches nothing (C20) | `ported_gateway_core::control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words` |
 | control-api-notify.test.js | setting a webhook needs the owner; only its host is ever shown or recorded | `ported_gateway_core::control_notify_webhook_configuration_is_gated_encrypted_and_only_host_is_public` |
 | control-api-notify.test.js | the minimal webhook is counts and ids only; one POST per interval | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot` |

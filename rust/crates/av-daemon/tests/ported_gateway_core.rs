@@ -13617,3 +13617,59 @@ async fn session_requests_started_locked_reacquires_audit_on_every_unlock() {
     .await
     .expect("session request locked start audit timed out");
 }
+
+#[tokio::test]
+async fn notify_disconnect_monitor_preserves_two_control_requests_on_one_keep_alive_socket() {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let socket = tokio::net::UnixStream::connect(f._dir.path().join("control.sock"))
+            .await
+            .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket))
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        for path in ["/v1/status", "/v1/credentials"] {
+            let response = sender
+                .send_request(
+                    hyper::Request::builder()
+                        .uri(path)
+                        .header("host", "localhost")
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(!v.to_string().contains(SECRET));
+            if path == "/v1/status" {
+                assert_eq!(v["locked"], false);
+            } else {
+                assert_eq!(v[0]["slug"], "demo");
+            }
+        }
+        drop(sender);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("control keep-alive requests timed out");
+}
+
+#[tokio::test]
+async fn notify_disconnect_monitor_preserves_stream_when_another_request_is_already_pipelined() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),async {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        async fn until(socket:&mut tokio::net::UnixStream,raw:&mut Vec<u8>,needle:&str) {
+            tokio::time::timeout(std::time::Duration::from_secs(5),async {while !String::from_utf8_lossy(raw).contains(needle){let mut bytes=[0u8;1024];let n=socket.read(&mut bytes).await.unwrap();assert!(n>0,"pipelined request closed the notification stream");raw.extend_from_slice(&bytes[..n]);assert!(raw.len()<65536);}}).await.expect("pipelined SSE event stopped flowing");
+        }
+        let f=Fixture::new(&["header:x-key"]).await;let mut socket=tokio::net::UnixStream::connect(f._dir.path().join("control.sock")).await.unwrap();socket.write_all(b"GET /v1/pending/stream HTTP/1.1\r\nHost: localhost\r\n\r\nGET /v1/status HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();let mut raw=Vec::new();until(&mut socket,&mut raw,"event: snapshot").await;assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"));
+        let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","reason":"ordinary pipelined-stream control"})).await;assert_eq!(s,200,"{asked}");until(&mut socket,&mut raw,asked["id"].as_str().unwrap()).await;let text=String::from_utf8_lossy(&raw);assert!(text.contains("event: pending"));assert_eq!(text.matches("HTTP/1.1 ").count(),1,"a later response must not be interleaved into the active SSE body");assert!(!text.contains(SECRET));drop(socket);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("notify pipelining timed out");
+}
