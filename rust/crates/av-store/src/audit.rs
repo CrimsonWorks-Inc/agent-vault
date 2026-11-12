@@ -394,6 +394,26 @@ impl AuditLog {
         Ok(log)
     }
 
+    /// A log positioned at `(seq, head)` with no anchor file and no stamp,
+    /// for migrate, which writes the anchor itself once the new database is
+    /// in place.
+    pub(crate) fn detached(conn: SharedConn, path: &Path, key: Key32, seq: u64, head: String) -> AuditLog {
+        AuditLog {
+            path: path.to_path_buf(),
+            key,
+            stamp: None,
+            seq,
+            prev_hash: head,
+            since_checkpoint: seq % CHECKPOINT_EVERY,
+            truncation: None,
+            anchor_missing: None,
+            corruption: None,
+            conn,
+            anchor_path: None,
+            saved: None,
+        }
+    }
+
     /// The log file. Ports `this.path` in `src/store/audit.js`.
     pub fn path(&self) -> &Path {
         &self.path
