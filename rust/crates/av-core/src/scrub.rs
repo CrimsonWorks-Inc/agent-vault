@@ -176,7 +176,7 @@ pub struct CompiledScrubPattern {
     /// The pattern source as the human wrote it (without the boundary).
     pub source: String,
     /// The compiled pattern (no boundary; checked by hand).
-    pub regex: regex::Regex,
+    pub regex: crate::jsre::Regex,
     /// The longest text it can match (at most 512), which bounds what the
     /// stream scrubber holds back.
     pub max_len: usize,
@@ -185,7 +185,8 @@ pub struct CompiledScrubPattern {
 /// Compile a human's extra scrub pattern under the bounded grammar (C5):
 /// 3–256 chars, at most 16 branches, each starting with three literals, one
 /// variable quantifier followed only by literals, bounded repetition, no
-/// groups/anchors/`.`, longest match ≤ 512, matching none of
+/// groups/anchors/`.`, no repetition of non-BMP-capable atoms (including
+/// complement shorthands and negated classes), longest match ≤ 512, matching none of
 /// [`SCRUB_PATTERN_CORPUS`]. Refuses `AV_POLICY_DENIED` rule `scrub_pattern`
 /// naming the first rule broken. Ports `compileScrubPattern` in
 /// `src/core/scrub.js`.
@@ -743,6 +744,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
     let quantifier_re = crate::jsre::compile(r"^\{(\d{1,3})(?:,(\d{0,3}))?\}").expect("quantifier");
     let mut i = 0;
     let mut branches = 0;
+    let mut unsafe_repetition = false;
     let mut max_len = 0;
     loop {
         branches += 1;
@@ -758,6 +760,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
             i += 1;
             let after_variable = variables > 0;
             let mut literal = true;
+            let mut non_bmp = c.len_utf16() > 1;
             if c == '\\' {
                 let e = chars.get(i).copied().ok_or_else(|| {
                     scrub_bad(
@@ -771,9 +774,11 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
                     ));
                 }
                 literal = !"dwsDWS".contains(e);
+                non_bmp = "DWS".contains(e);
             } else if c == '[' {
                 literal = false;
                 if chars.get(i) == Some(&'^') {
+                    non_bmp = true;
                     i += 1;
                 }
                 let mut members = 0;
@@ -788,11 +793,13 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
                     if x == '[' {
                         return Err(scrub_bad("a class may not contain another"));
                     }
+                    non_bmp |= x.len_utf16() > 1;
                     if x == '\\' {
                         let e = chars
                             .get(i)
                             .copied()
                             .ok_or_else(|| scrub_bad("a class uses an unsupported escape"))?;
+                        non_bmp |= "DWS".contains(e);
                         i += 1;
                         if !SCRUB_ESCAPES.contains(e) {
                             return Err(scrub_bad("a class uses an unsupported escape"));
@@ -852,6 +859,7 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
                 upper = max;
                 i += m[0].len();
             }
+            unsafe_repetition |= quantified && non_bmp;
             if quantified && chars.get(i) == Some(&'?') {
                 return Err(scrub_bad("lazy and possessive quantifiers are not allowed"));
             }
@@ -889,6 +897,9 @@ fn compile_pattern(source: &str) -> Result<CompiledScrubPattern> {
         if i == chars.len() {
             return Err(scrub_bad("a branch is empty"));
         }
+    }
+    if unsafe_repetition {
+        return Err(scrub_bad("it is not a valid expression"));
     }
     let regex =
         crate::jsre::compile(source).map_err(|_| scrub_bad("it is not a valid expression"))?;
@@ -962,7 +973,7 @@ impl View {
 }
 fn transform(
     parent: &std::rc::Rc<View>,
-    re: &regex::Regex,
+    re: &crate::jsre::Regex,
     decode: impl Fn(&str) -> String,
 ) -> std::rc::Rc<View> {
     let mut text = String::new();

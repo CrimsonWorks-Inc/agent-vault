@@ -920,7 +920,7 @@ fn element(p: &crate::request_view::QueryParam, key: &str) -> bool {
     }
     let normalized = crate::jsre::compile("(?i)%5b|%5d")
         .expect("brackets")
-        .replace_all(&p.raw_name, |c: &regex::Captures<'_>| {
+        .replace_all(&p.raw_name, |c: &crate::jsre::Captures<'_>| {
             if c[0].eq_ignore_ascii_case("%5b") {
                 "["
             } else {

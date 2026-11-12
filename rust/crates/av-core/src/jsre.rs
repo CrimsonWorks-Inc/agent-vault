@@ -2,7 +2,10 @@
 //! the port. Shorthand classes and word boundaries retain ECMAScript semantics.
 //! A leading `(?i)` enables legacy case folding, including BMP literals, without
 //! Unicode folds such as Kelvin sign / ASCII K or long s / ASCII S.
-use regex::Regex;
+//! Matching and repetition count Unicode scalars, not UTF-16 units. In
+//! particular dot matches one scalar; custom scrub patterns refuse repetitions
+//! of atoms that can consume non-BMP text until a UTF-16 matcher exists.
+pub use regex::{Captures, Regex};
 
 const SPACE: &str =
     r"\x09-\x0d\x20\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}";
@@ -36,6 +39,11 @@ fn folds(c: char) -> String {
 /// Translate the supported JavaScript regex syntax to Rust regex syntax.
 /// Escaped backslashes are consumed as pairs, so `\\s` remains literal text.
 pub fn translate(pattern: &str) -> String {
+    if validate(pattern).is_err() {
+        // Preserve this public String signature while emitting syntax that the
+        // linear engine refuses, rather than passing divergent syntax through.
+        return "(?!)".into();
+    }
     let (insensitive, pattern) = pattern
         .strip_prefix("(?i)")
         .map_or((false, pattern), |p| (true, p));
@@ -75,6 +83,11 @@ pub fn translate(pattern: &str) -> String {
         } else if c == ']' {
             bracket = false;
             out.push(c);
+        } else if c == '.' && !bracket {
+            out.push_str(r"[^\n\r\x{2028}\x{2029}]");
+        } else if bracket && matches!(c, '&' | '~') {
+            out.push('\\');
+            out.push(c);
         } else if insensitive && c.is_alphabetic() {
             // Expand ranges before literals, preserving complement classes.
             if bracket
@@ -105,9 +118,43 @@ pub fn translate(pattern: &str) -> String {
     out
 }
 
+fn validate(pattern: &str) -> Result<(), regex::Error> {
+    let pattern = pattern.strip_prefix("(?i)").unwrap_or(pattern);
+    let chars: Vec<_> = pattern.chars().collect();
+    let mut bracket = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if c == '[' {
+            bracket = true;
+        } else if c == ']' {
+            bracket = false;
+        } else if bracket && c == '-' && chars.get(i + 1) == Some(&'-') {
+            return Err(regex::Error::Syntax(
+                "JavaScript class cannot contain --".into(),
+            ));
+        } else if !bracket
+            && c == '('
+            && chars.get(i + 1) == Some(&'?')
+            && chars.get(i + 2) != Some(&':')
+        {
+            return Err(regex::Error::Syntax(
+                "only one leading (?i) flag is supported".into(),
+            ));
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Compile a JavaScript pattern using the linear-time `regex` engine.
 /// A leading `(?i)` corresponds to JavaScript's `i` flag (without `u`).
 pub fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+    validate(pattern)?;
     Regex::new(&translate(pattern))
 }
 
