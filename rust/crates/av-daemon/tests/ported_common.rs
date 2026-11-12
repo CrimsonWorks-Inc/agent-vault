@@ -128,3 +128,80 @@ impl Drop for TempWriteLock {
         let _ = self.0.execute_batch("ROLLBACK");
     }
 }
+
+/// A deterministic, obviously fake ES256 platform authenticator for the
+/// widening.test.js fixture. Its counter stays zero, like the JS fixture,
+/// so replay tests exercise challenge consumption rather than counter checks.
+pub struct FakeAuthenticator {
+    key: p256::ecdsa::SigningKey,
+    id: Vec<u8>,
+}
+impl FakeAuthenticator {
+    pub fn new(seed: u8) -> Self {
+        Self {
+            key: p256::ecdsa::SigningKey::from_slice(&[seed; 32]).unwrap(),
+            id: vec![seed; 16],
+        }
+    }
+    pub fn id(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&self.id)
+    }
+    pub fn register(&self, challenge: &str, origin: &str) -> serde_json::Value {
+        use base64::Engine;
+        use ciborium::value::Value as C;
+        use sha2::{Digest, Sha256};
+        let point = self.key.verifying_key().to_sec1_point(false);
+        let cose = C::Map(vec![
+            (C::Integer(1.into()), C::Integer(2.into())),
+            (C::Integer(3.into()), C::Integer((-7).into())),
+            (C::Integer((-1).into()), C::Integer(1.into())),
+            (
+                C::Integer((-2).into()),
+                C::Bytes(point.x().unwrap().to_vec()),
+            ),
+            (
+                C::Integer((-3).into()),
+                C::Bytes(point.y().unwrap().to_vec()),
+            ),
+        ]);
+        let mut cose_bytes = Vec::new();
+        ciborium::ser::into_writer(&cose, &mut cose_bytes).unwrap();
+        let mut data = Sha256::digest(b"localhost").to_vec();
+        data.push(0x45);
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&[0; 16]);
+        data.extend_from_slice(&(self.id.len() as u16).to_be_bytes());
+        data.extend_from_slice(&self.id);
+        data.extend(cose_bytes);
+        let att = C::Map(vec![
+            (C::Text("fmt".into()), C::Text("none".into())),
+            (C::Text("attStmt".into()), C::Map(vec![])),
+            (C::Text("authData".into()), C::Bytes(data)),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&att, &mut bytes).unwrap();
+        let client = serde_json::to_vec(
+            &serde_json::json!({"type":"webauthn.create","challenge":challenge,"origin":origin}),
+        )
+        .unwrap();
+        serde_json::json!({"attestationObject":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),"clientDataJSON":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client)})
+    }
+    pub fn assertion(&self, challenge: &str, origin: &str) -> serde_json::Value {
+        use base64::Engine;
+        use p256::ecdsa::signature::Signer;
+        use sha2::{Digest, Sha256};
+        let client = serde_json::to_vec(
+            &serde_json::json!({"type":"webauthn.get","challenge":challenge,"origin":origin}),
+        )
+        .unwrap();
+        let mut data = Sha256::digest(b"localhost").to_vec();
+        data.push(0x05);
+        data.extend_from_slice(&0u32.to_be_bytes());
+        let mut signed = data.clone();
+        signed.extend_from_slice(&Sha256::digest(&client));
+        let signature: p256::ecdsa::Signature = self.key.sign(&signed);
+        let b64 = &base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        serde_json::json!({"credentialId":self.id(),"authenticatorData":b64.encode(data),"clientDataJSON":b64.encode(client),"signature":b64.encode(signature.to_der().as_bytes())})
+    }
+}

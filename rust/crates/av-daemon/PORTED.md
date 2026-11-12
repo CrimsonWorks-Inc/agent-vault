@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 339 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **641 not yet ported**.
+Totals: 1090 JS tests: 356 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **624 not yet ported**.
 
 ## Mutation check
 
@@ -1114,20 +1114,20 @@ the vault on every call instead of caching an audit handle.
 | webauthn.test.js | only ES256 on P-256 is accepted | not yet ported |
 | webauthn.test.js | the CBOR reader rejects what it does not understand rather than guessing | not yet ported |
 | webauthn.test.js | an assertion is bounded before anything parses it | not yet ported |
-| widening.test.js | the passphrase gate is on, so an unsigned call is refused | not yet ported |
-| widening.test.js | creating a session from the UI works with one fingerprint | not yet ported |
-| widening.test.js | the credential list says where a placeholder may go | not yet ported |
-| widening.test.js | adding a credential from the UI works the same way | not yet ported |
-| widening.test.js | removing a credential from the UI works, signature and all | not yet ported |
-| widening.test.js | a signature for one operation cannot authorise another | not yet ported |
-| widening.test.js | a signature is good for exactly one call | not yet ported |
-| widening.test.js | a challenge the daemon never minted proves nothing | not yet ported |
-| widening.test.js | a key the daemon never enrolled proves nothing | not yet ported |
-| widening.test.js | an agent at the socket cannot enrol its own key and sign for itself | not yet ported |
-| widening.test.js | the passphrase window still works, for the CLI | not yet ported |
-| widening.test.js | a wrong passphrase opens nothing | not yet ported |
-| widening.test.js | a signature does not authorise fields it never covered | not yet ported |
-| widening.test.js | the value stored under a cred.add signature is bound to it | not yet ported |
-| widening.test.js | a batch signature covers exactly the items it named | not yet ported |
-| widening.test.js | a batch signature is spent by the batch it named | not yet ported |
-| widening.test.js | reordering a signed batch does not change what it authorises | not yet ported |
+| widening.test.js | the passphrase gate is on, so an unsigned call is refused | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
+| widening.test.js | creating a session from the UI works with one fingerprint | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
+| widening.test.js | the credential list says where a placeholder may go | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
+| widening.test.js | adding a credential from the UI works the same way | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
+| widening.test.js | removing a credential from the UI works, signature and all | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
+| widening.test.js | a signature for one operation cannot authorise another | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | a signature is good for exactly one call | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | a challenge the daemon never minted proves nothing | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | a key the daemon never enrolled proves nothing | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | an agent at the socket cannot enrol its own key and sign for itself | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | the passphrase window still works, for the CLI | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
+| widening.test.js | a wrong passphrase opens nothing | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
+| widening.test.js | a signature does not authorise fields it never covered | `ported_gateway_core::widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize` |
+| widening.test.js | the value stored under a cred.add signature is bound to it | `ported_gateway_core::widening_credential_value_is_bound_to_consent_and_correctly_signed_value_is_stored` |
+| widening.test.js | a batch signature covers exactly the items it named | `ported_gateway_core::widening_batch_consent_binds_exact_items_and_verdicts_and_handover_is_collected_once` |
+| widening.test.js | a batch signature is spent by the batch it named | `ported_gateway_core::widening_batch_consent_binds_exact_items_and_verdicts_and_handover_is_collected_once` |
+| widening.test.js | reordering a signed batch does not change what it authorises | `ported_gateway_core::widening_batch_consent_binds_exact_items_and_verdicts_and_handover_is_collected_once` |

@@ -72,6 +72,14 @@ impl Upstream for RecordingUpstream {
 }
 
 async fn control(socket: &std::path::Path, path: &str, body: Value) -> (u16, Value) {
+    control_method(socket, "POST", path, body).await
+}
+async fn control_method(
+    socket: &std::path::Path,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> (u16, Value) {
     let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
@@ -80,7 +88,7 @@ async fn control(socket: &std::path::Path, path: &str, body: Value) -> (u16, Val
         let _ = connection.await;
     });
     let request = hyper::Request::builder()
-        .method("POST")
+        .method(method)
         .uri(path)
         .header("host", "localhost")
         .header("content-type", "application/json")
@@ -8118,6 +8126,16 @@ async fn loopback_http(
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 ) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    loopback_http_host(port, "127.0.0.1", method, path, headers, body).await
+}
+async fn loopback_http_host(
+    port: u16,
+    host: &str,
+    method: &str,
+    path: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
@@ -8130,7 +8148,7 @@ async fn loopback_http(
     let mut request = hyper::Request::builder()
         .method(method)
         .uri(path)
-        .header("host", "127.0.0.1");
+        .header("host", host);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -9265,4 +9283,196 @@ async fn expired_session_stops_a_previously_working_placeholder_whose_own_expiry
     })
     .await
     .expect("session expiry regression timed out");
+}
+
+const WIDEN_PASS: &str = "fake-widening-passphrase-012345";
+struct WidenFixture {
+    f: Fixture,
+    ui: av_daemon::ui::server::UiServer,
+    cookie: String,
+    auth: ported_common::FakeAuthenticator,
+}
+impl WidenFixture {
+    async fn new() -> Self {
+        let f = Fixture::new(&["header:authorization:Bearer"]).await;
+        let socket = f._dir.path().join("control.sock");
+        let (s, v) = control(&socket, "/v1/passphrase", json!({"passphrase":WIDEN_PASS})).await;
+        assert_eq!(s, 200, "{v}");
+        let dist = f._dir.path().join("fake-ui-dist");
+        std::fs::create_dir(&dist).unwrap();
+        std::fs::write(
+            dist.join("index.html"),
+            "<!doctype html><title>fake test UI</title>",
+        )
+        .unwrap();
+        let ui = av_daemon::ui::server::UiServer::start(
+            &socket,
+            av_daemon::ui::server::UiServerOptions {
+                port: 0,
+                dist_dir: Some(dist),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        f.daemon.allow_ui_origin(&ui.origin()).await.unwrap();
+        let url = url::Url::parse(&ui.url()).unwrap();
+        let path = format!("{}?{}", url.path(), url.query().unwrap());
+        let (s, h, _) =
+            loopback_http_host(ui.bound_port(), "localhost", "GET", &path, vec![], vec![]).await;
+        assert_eq!(s, 302);
+        let cookie = h
+            .iter()
+            .find(|(k, _)| k == "set-cookie")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let w = Self {
+            f,
+            ui,
+            cookie,
+            auth: ported_common::FakeAuthenticator::new(7),
+        };
+        let (s, begin) = w.api("POST", "presence/enroll/begin", json!({})).await;
+        assert_eq!(s, 200, "{begin}");
+        let mut att = w
+            .auth
+            .register(begin["challenge"].as_str().unwrap(), &w.ui.origin());
+        att["passphrase"] = json!(WIDEN_PASS);
+        let (s, v) = w.api("POST", "presence/enroll/finish", att).await;
+        assert_eq!(s, 200, "{v}");
+        // Close the enrolment grace window through the public lock/unlock API.
+        assert_eq!(w.ctl("POST", "/v1/lock", json!({})).await.0, 200);
+        assert_eq!(
+            w.ctl("POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                .await
+                .0,
+            200
+        );
+        w
+    }
+    async fn api(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        let (s, _, bytes) = loopback_http_host(
+            self.ui.bound_port(),
+            "localhost",
+            method,
+            &format!("/api/{path}"),
+            vec![
+                ("x-av-ui".into(), "1".into()),
+                ("cookie".into(), self.cookie.clone()),
+                ("content-type".into(), "application/json".into()),
+            ],
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .await;
+        (
+            s,
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                panic!("UI {method} {path}: {}", String::from_utf8_lossy(&bytes))
+            }),
+        )
+    }
+    async fn ctl(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
+        control_method(&self.f._dir.path().join("control.sock"), method, path, body).await
+    }
+    async fn proof(&self, operation: &str, params: &Value) -> Value {
+        let operation = av_daemon::util::operation_for(operation, params).unwrap();
+        let (s, ch) = self
+            .api("POST", "presence/challenge", json!({"operation":operation}))
+            .await;
+        assert_eq!(s, 200, "{ch}");
+        let mut assertion = self
+            .auth
+            .assertion(ch["challenge"].as_str().unwrap(), &self.ui.origin());
+        assertion["challengeId"] = ch["challengeId"].clone();
+        assertion
+    }
+    async fn stop(&self) {
+        let logs = serde_json::to_string(&audit_records(&self.f).await).unwrap();
+        assert!(!logs.contains(SECRET));
+        assert!(!logs.contains(WIDEN_PASS));
+        self.ui.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let w=WidenFixture::new().await;
+        let(s,v)=w.ctl("POST","/v1/sessions",json!({"cred":"demo","methods":["GET"],"paths":["/**"]})).await;assert_eq!(s,401);assert_eq!(v["code"],"AV_PRESENCE_REQUIRED");
+        let(s,list)=w.ctl("GET","/v1/credentials",json!({})).await;assert_eq!(s,200);let demo=list.as_array().unwrap().iter().find(|v|v["slug"]=="demo").unwrap();assert_eq!(demo["fields"][0]["sites"],json!(["header:authorization:Bearer"]));assert!(!serde_json::to_string(&list).unwrap().contains(SECRET));
+        let mut body=json!({"cred":"demo","methods":["GET"],"paths":["/**"]});body["presence"]=w.proof("session.create",&body).await;
+        let(s,made)=w.api("POST","sessions",body).await;assert_eq!(s,200,"{made}");assert!(made["session_id"].is_string());assert!(made["token"].as_str().unwrap().starts_with("avs1."));assert!(made["placeholder"].as_str().unwrap().starts_with("av1."));assert!(made["base_url"].as_str().unwrap().ends_with("/p/demo"));assert!(!made["usage"].as_array().unwrap().is_empty());assert!(!serde_json::to_string(&made).unwrap().contains(SECRET));
+        let mut add=json!({"slug":"signed-second","kind":"http","host":"other.example.test","value":"fake-signed-credential-012345"});add["presence"]=w.proof("cred.add",&add).await;
+        let(s,v)=w.api("POST","credentials",add).await;assert_eq!(s,200,"{v}");w.f.shared.run(|core|assert!(core.vault.find_credential("signed-second").unwrap().is_some())).await.unwrap();
+        let proof=w.proof("cred.remove",&json!({"slug":"signed-second"})).await;let(s,v)=w.api("DELETE","credentials?slug=signed-second",json!({"presence":proof})).await;assert_eq!(s,200,"{v}");w.f.shared.run(|core|assert!(core.vault.find_credential("signed-second").unwrap().is_none())).await.unwrap();
+        w.stop().await;
+    }).await.expect("signed UI widening timed out");
+}
+
+#[tokio::test]
+async fn widening_operation_swaps_unminted_challenges_unenrolled_keys_and_replays_never_authorize()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let w=WidenFixture::new().await;let benign=json!({"cred":"demo","methods":["GET"],"paths":["/**"]});
+        for shape in ["method swap","unsigned session fields","unminted challenge","unenrolled key"] {
+            let before=w.f.shared.run(|core|core.vault.sessions().unwrap().len()).await.unwrap();
+            let operation=av_daemon::util::operation_for("session.create",&benign).unwrap();let(s,ch)=w.api("POST","presence/challenge",json!({"operation":operation})).await;assert_eq!(s,200,"{ch}");
+            let mut proof=if shape=="unenrolled key" {ported_common::FakeAuthenticator::new(8).assertion(ch["challenge"].as_str().unwrap(),&w.ui.origin())}else{w.auth.assertion(ch["challenge"].as_str().unwrap(),&w.ui.origin())};proof["challengeId"]=ch["challengeId"].clone();
+            let mut body=benign.clone();
+            match shape {
+                "method swap"=>body["methods"]=json!(["GET","POST","DELETE"]),
+                "unsigned session fields"=>{for(k,v)in json!({"remote":true,"approval":"auto","budget":1000000000,"ttl_hours":87600,"uses":1000000}).as_object().unwrap(){body[k]=v.clone();}},
+                "unminted challenge"=>{proof=w.auth.assertion("ZmFrZS11bm1pbnRlZC1jaGFsbGVuZ2U",&w.ui.origin());proof["challengeId"]=json!("fake-unminted-id");},
+                _=>{}
+            }
+            body["presence"]=proof;let(s,v)=w.ctl("POST","/v1/sessions",body).await;assert_eq!(s,401,"{shape}: {v}");assert_eq!(v["code"],"AV_PRESENCE_REQUIRED");
+            assert_eq!(w.f.shared.run(|core|core.vault.sessions().unwrap().len()).await.unwrap(),before,"{shape}: denial changed sessions");
+            let mut control=benign.clone();control["presence"]=w.proof("session.create",&benign).await;let(s,v)=w.ctl("POST","/v1/sessions",control).await;assert_eq!(s,200,"{shape} control: {v}");assert!(!serde_json::to_string(&v).unwrap().contains(SECRET));
+        }
+        let mut once=benign.clone();once["presence"]=w.proof("session.create",&benign).await;
+        let(s,v)=w.ctl("POST","/v1/sessions",once.clone()).await;assert_eq!(s,200,"{v}");let(s,v)=w.ctl("POST","/v1/sessions",once).await;assert_eq!(s,401,"signature reused: {v}");
+        let mine=ported_common::FakeAuthenticator::new(9);let before=w.ctl("GET","/v1/presence",json!({})).await.1;
+        let(s,v)=w.ctl("POST","/v1/presence",json!({"credentialId":"aGVsbG8","publicKeySpki":"x","signCount":0,"attestation":mine.register("ZmFrZS1yZWdpc3RyYXRpb24",&w.ui.origin())})).await;
+        assert_eq!(s,401,"self enrolment: {v}");assert_eq!(v["code"],"AV_PRESENCE_REQUIRED");let after=w.ctl("GET","/v1/presence",json!({})).await.1;assert_eq!(after["credentialId"],before["credentialId"]);assert_ne!(after["credentialId"],"aGVsbG8");
+        w.stop().await;
+    }).await.expect("hostile widening proofs timed out");
+}
+
+#[tokio::test]
+async fn widening_credential_value_is_bound_to_consent_and_correctly_signed_value_is_stored() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use av_core::secret::ExposeSecret;
+        let w=WidenFixture::new().await;let intended=json!({"slug":"bound","kind":"http","host":"api.example.test","value":"INTENDED-SECRET-0001"});
+        let proof=w.proof("cred.add",&intended).await;let mut swapped=intended.clone();swapped["value"]=json!("ATTACKER-SUBSTITUTED-VALUE-0002");swapped["presence"]=proof;
+        let(s,v)=w.ctl("POST","/v1/credentials",swapped).await;assert_eq!(s,401,"{v}");w.f.shared.run(|core|assert!(core.vault.find_credential("bound").unwrap().is_none())).await.unwrap();
+        let mut control=intended.clone();control["presence"]=w.proof("cred.add",&intended).await;let(s,v)=w.ctl("POST","/v1/credentials",control).await;assert_eq!(s,200,"{v}");
+        w.f.shared.run(|core|{let cred=core.vault.find_credential("bound").unwrap().unwrap();assert_eq!(core.vault.reveal_field(&cred.id,"token").unwrap().expose_secret(),"INTENDED-SECRET-0001");}).await.unwrap();
+        let logs=serde_json::to_string(&audit_records(&w.f).await).unwrap();for value in ["INTENDED-SECRET-0001","ATTACKER-SUBSTITUTED-VALUE-0002"]{assert!(!logs.contains(value));assert!(!serde_json::to_string(&v).unwrap().contains(value));}
+        w.stop().await;
+    }).await.expect("credential value consent binding timed out");
+}
+
+#[tokio::test]
+async fn widening_batch_consent_binds_exact_items_and_verdicts_and_handover_is_collected_once() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        for shape in ["extra item","swapped verdicts"] {
+            let w=WidenFixture::new().await;let mut asks=Vec::new();
+            for path in ["/a","/b"] {let(s,v)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":[path]})).await;assert_eq!(s,200,"{v}");asks.push(v);}
+            let signed=if shape=="extra item" {json!([{"id":asks[0]["id"],"kind":"session","granted":true}])}else{json!([{"id":asks[0]["id"],"kind":"session","granted":true},{"id":asks[1]["id"],"kind":"session","granted":false}])};
+            let proof=w.proof("pending.decide_many",&json!({"decisions":signed})).await;
+            let swapped=if shape=="extra item" {json!([{"id":asks[0]["id"],"kind":"session","granted":true},{"id":asks[1]["id"],"kind":"session","granted":true}])}else{json!([{"id":asks[0]["id"],"kind":"session","granted":false},{"id":asks[1]["id"],"kind":"session","granted":true}])};
+            let(s,v)=w.ctl("POST","/v1/pending/decide-many",json!({"decisions":swapped,"presence":proof})).await;assert_eq!(s,401,"{shape}: {v}");assert_eq!(v["code"],"AV_PRESENCE_REQUIRED");
+            for ask in &asks {let path=format!("/v1/session-requests/collect?id={}&secret={}",ask["id"].as_str().unwrap(),ask["collect_secret"].as_str().unwrap());let(s,v)=w.ctl("GET",&path,json!({})).await;assert_eq!(s,200,"{v}");assert_eq!(v["state"],"pending","{shape}: refusal settled a request");}
+            let proof=w.proof("pending.decide_many",&json!({"decisions":signed})).await;let body=json!({"decisions":signed,"presence":proof});
+            let(s,v)=w.ctl("POST","/v1/pending/decide-many",body.clone()).await;assert_eq!(s,200,"{shape} control: {v}");
+            assert_eq!(v["decided"][0]["outcome"],"decided");let mut result=v["decided"][0]["result"].as_object().unwrap().clone();assert_eq!(result["state"],"approved");let session=result.remove("session").unwrap();assert!(session["token"].as_str().unwrap().starts_with("avs1."));assert!(!serde_json::to_string(&result).unwrap().contains("avs1."));assert!(!serde_json::to_string(&v).unwrap().contains(SECRET));
+            let path=format!("/v1/session-requests/collect?id={}&secret={}",asks[0]["id"].as_str().unwrap(),asks[0]["collect_secret"].as_str().unwrap());let(s,polled)=w.ctl("GET",&path,json!({})).await;assert_eq!(s,200);assert_eq!(polled["state"],"collected");assert!(polled.get("token").is_none());
+            let(s,v)=w.ctl("POST","/v1/pending/decide-many",body).await;assert_eq!(s,401,"batch signature reused: {v}");
+            w.stop().await;
+        }
+    }).await.expect("batch signature binding timed out");
 }
