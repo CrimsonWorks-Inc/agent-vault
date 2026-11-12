@@ -104,6 +104,7 @@ mod tests {
     fn a_locked_key_keeps_its_bytes_and_hides_them() {
         let k = Key32::from_bytes([0x5a; 32]);
         let l = LockedKey::new(&k);
+        assert!(l.is_locked(), "the VMK page was not locked into RAM");
         assert_eq!(l.expose(), &[0x5a; 32]);
         assert_eq!(l.key().expose(), &[0x5a; 32]);
         assert!(!format!("{l:?}").contains("5a"));

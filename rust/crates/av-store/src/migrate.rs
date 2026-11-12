@@ -526,16 +526,11 @@ pub fn migrate(
                 .into());
             }
         }
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let p = PathBuf::from(format!("{}{suffix}", temp_path.display()));
-            let _ = std::fs::remove_file(p);
-        }
+        remove_temp(&temp_path);
         crate::db::open(&temp_path).map_err(Error::from)?
     };
     let shared = std::sync::Arc::new(std::sync::Mutex::new(conn));
-    let new_head;
-    let new_seq;
-    {
+    let outcome = (|| -> Result<(u64, String), Error> {
         let mut guard = audit::lock_conn(&shared);
         let tx = guard
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -570,12 +565,22 @@ pub fn migrate(
                 .clone()
                 .unwrap_or_else(|| audit::GENESIS.to_string())
         );
-        new_seq = log.seq();
-        new_head = log.head().to_string();
+        let (seq, head) = (log.seq(), log.head().to_string());
         tx.commit().map_err(Error::from)?;
         crate::vault::checkpoint_truncate(&guard)?;
-    }
+        Ok((seq, head))
+    })();
     drop(shared);
+    // A migration that failed leaves no half-written database behind.
+    let (new_seq, new_head) = match outcome {
+        Ok(v) => v,
+        Err(e) => {
+            if !opts.dry_run {
+                remove_temp(&temp_path);
+            }
+            return Err(e.into());
+        }
+    };
 
     let mut written = None;
     if !opts.dry_run {
@@ -611,6 +616,15 @@ pub fn migrate(
 }
 
 use std::os::unix::fs::DirBuilderExt as _;
+
+/// Remove a temp database and its WAL and shared-memory files.
+fn remove_temp(temp_path: &Path) {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut p = temp_path.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
 
 fn obj(v: Value) -> serde_json::Map<String, Value> {
     match v {

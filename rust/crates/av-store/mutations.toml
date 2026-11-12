@@ -144,7 +144,7 @@ to = '''} else if false {'''
 name = "an unreadable audit line throws out of unlock"
 file = "src/audit.rs"
 from = '''.map_or(AuditRow::Unreadable { line: i + 1 }, AuditRow::Record)'''
-to = '''.expect("unreadable audit line")'''
+to = '''.map(AuditRow::Record).expect("unreadable audit line")'''
 
 [[mutation]]
 name = "a float in audit fields throws after the change is made"
@@ -186,9 +186,9 @@ to = '''let ttl = positive(opts.ttl_ms.map(|v| v as f64)).max(positive('''
 [[mutation]]
 name = "narrowGrant drops the method, path and host lists it was asked to widen"
 file = "src/vault.rs"
-from = '''let layer: Policy = serde_json::from_value(narrow.clone()).map_err(|_| invalid())?;'''
-to = '''let mut layer: Policy = serde_json::from_value(narrow.clone()).map_err(|_| invalid())?;
-            if n.contains_key("hosts") { layer.methods = None; layer.paths = None; layer.hosts = None; }'''
+from = '''g.policy = av_core::policy::intersect(&[Some(&g.policy), Some(&layer)]);'''
+to = '''g.policy = av_core::policy::intersect(&[Some(&g.policy), Some(&layer)]);
+            if n.contains_key("hosts") { g.policy.methods = None; g.policy.paths = None; g.policy.hosts = None; }'''
 
 [[mutation]]
 name = "a forked grant drops the constraints its narrowing tried to widen"
@@ -520,7 +520,11 @@ name = "a fail-mode restore with a conflict writes what it can"
 file = "src/backup.rs"
 from = '''ConflictMode::Fail => {
                     let e = deny('''
-to = '''ConflictMode::Fail if false => {
+to = '''ConflictMode::Fail => {
+                    if true {
+                        skipped.push(slug);
+                        continue;
+                    }
                     let e = deny('''
 
 [[mutation]]
@@ -865,18 +869,21 @@ to = '''    let _old = unlock_legacy(&legacy, passphrase)?;
     let vmk = crypto::random_key()?;'''
 
 [[mutation]]
-name = "migrate keeps a PRF wrap it cannot re-create"
+name = "migrate drops a PRF wrap without reporting it"
 file = "src/migrate.rs"
-from = '''            FactorClass::WebauthnPrf => dropped.push(Dropped {'''
-to = '''            FactorClass::WebauthnPrf => dropped.push(Dropped {
-                what: String::new(), why: String::new(), next: String::new(),
-            }).min(dropped.push(Dropped {'''
+from = '''        dropped,
+        written,'''
+to = '''        dropped: Vec::new(),
+        written,'''
 
 [[mutation]]
-name = "migrate writes the database in place instead of renaming a finished file"
+name = "a failed migration leaves its half-written database behind"
 file = "src/migrate.rs"
-from = '''let temp_path = to.join(format!(".{VAULT_DB_FILE}.migrating"));'''
-to = '''let temp_path = to.join(VAULT_DB_FILE);'''
+from = '''            if !opts.dry_run {
+                remove_temp(&temp_path);
+            }
+            return Err(e.into());'''
+to = '''            return Err(e.into());'''
 
 [[mutation]]
 name = "a dry run writes the database"

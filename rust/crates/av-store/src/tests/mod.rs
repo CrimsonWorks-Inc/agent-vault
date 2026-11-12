@@ -10,6 +10,7 @@ mod activity;
 mod audit_witness;
 mod backup;
 mod factors;
+mod gaps;
 mod hygiene;
 mod integrity;
 mod invariants;
