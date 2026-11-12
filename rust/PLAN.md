@@ -117,6 +117,15 @@ port, so the conformance suite stays a pure equivalence check.
 - **Audit storage**: audit records live in an insert-only `audit` table in
   `vault.db`, written in the same transaction as the change they record; the
   authenticated head anchor stays a separate file, `vault.db.head`.
+- **Custom scrub patterns fail closed on non-BMP repetition.** JavaScript
+  (without the `u` flag) counts a repetition such as `\S{253}` or
+  `[^Q]{0,256}` in UTF-16 code units, the Rust `regex` crate in scalars, so
+  the two disagree on emoji. Rather than match differently, `jsre` refuses a
+  custom scrub pattern that repeats an atom able to match a non-BMP character
+  (negated classes, `\S`, `\W`, `\D`, `.`, astral literals), with the same
+  invalid-pattern refusal the JS gives. BMP-only repetitions (`\d{4}`,
+  `[A-Za-z]{8}`) still work. The JS test case that accepts such patterns is
+  ported with the Rust refusal as the expected result.
 - README "Honest limits" is updated to match.
 
 ## Layout and ownership
