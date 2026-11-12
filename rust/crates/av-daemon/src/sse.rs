@@ -963,4 +963,265 @@ mod tests {
         assert_eq!(text, "data: one\n\ndata: two\n\n");
         assert!(complete);
     }
+
+    // ------------------------------------------------ the pipeline.js entries
+
+    fn cut_reason(events: &[Value]) -> Vec<String> {
+        let chunks: Vec<String> = events
+            .iter()
+            .map(|e| format!("data: {}\n\n", js_stringify(e)))
+            .collect();
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        drive(&refs).1
+    }
+
+    fn halves() -> (String, String) {
+        let (a, b) = SECRET.split_at(SECRET.len() / 2);
+        (a.to_string(), b.to_string())
+    }
+
+    fn cut(name: &str, events: Vec<Value>) {
+        assert_eq!(
+            cut_reason(&events),
+            vec!["credential_split_across_events"],
+            "{name}"
+        );
+    }
+
+    fn chat(choices: Vec<Value>) -> Value {
+        serde_json::json!({"id": "chatcmpl-1", "object": "chat.completion.chunk", "choices": choices})
+    }
+
+    fn content(index: Option<u64>, text: &str) -> Value {
+        let mut c = serde_json::json!({"delta": {"content": text}});
+        if let Some(i) = index {
+            c["index"] = i.into();
+        }
+        c
+    }
+
+    /// 'a content block's starting text is not gathered with the deltas that
+    /// continue it' and 'an index written as a string is not also read as its
+    /// number'.
+    #[test]
+    fn a_secret_from_a_content_block_into_its_deltas_is_cut() {
+        let (a, b) = halves();
+        let start = |i: Value, t: &str| serde_json::json!({"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": t}});
+        let delta = |i: u64, t: &str| serde_json::json!({"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": t}});
+        cut(
+            "another block in between",
+            vec![
+                start(1.into(), &a),
+                start(0.into(), "x"),
+                delta(0, "yz"),
+                delta(1, &b),
+            ],
+        );
+        cut(
+            "an index written \"0\"",
+            vec![start("0".into(), &a), start(1.into(), "x"), delta(0, &b)],
+        );
+    }
+
+    /// 'an event-stream array element is gathered by its position only, not
+    /// wherever its index puts it', 'an event-stream value is gathered by key
+    /// path only, not by the indexes a client groups it by', 'a secret split
+    /// across one JSON field of two events is not reassembled'.
+    #[test]
+    fn a_secret_whose_index_disagrees_with_its_position_is_cut() {
+        let (a, b) = halves();
+        cut(
+            "chat: the choice moves",
+            vec![
+                chat(vec![content(Some(0), &a)]),
+                chat(vec![content(Some(1), "x"), content(Some(0), &b)]),
+            ],
+        );
+    }
+
+    /// 'an event-stream value is gathered by all of its indexes at once, so a
+    /// decoy index splits the run'.
+    #[test]
+    fn a_decoy_index_does_not_split_a_run() {
+        let (a, b) = halves();
+        cut(
+            "decoy",
+            vec![
+                serde_json::json!({"index": 0, "decoy_index": 1, "delta": {"content": a}}),
+                serde_json::json!({"index": 1, "delta": {"content": "x"}}),
+                serde_json::json!({"index": 0, "decoy_index": 2, "delta": {"content": b}}),
+            ],
+        );
+    }
+
+    /// "a Responses item's content position is not read as its content_index".
+    #[test]
+    fn a_responses_item_content_position_is_its_content_index() {
+        let (a, b) = halves();
+        let text = |c: u64, d: &str| serde_json::json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": c, "delta": d});
+        cut(
+            "item content",
+            vec![
+                serde_json::json!({"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_1", "type": "message", "content": [{"type": "output_text", "text": "x"}, {"type": "output_text", "text": a}]}}),
+                text(0, "y"),
+                text(1, &b),
+            ],
+        );
+    }
+
+    /// 'an index field missing from one event is not read as zero or as a
+    /// group of its own', 'a missing index that came before the field was
+    /// first seen is not filed with it', 'a missing index field is read as
+    /// zero only, never as a group of its own'.
+    #[test]
+    fn a_missing_index_is_read_as_zero_and_as_its_own_group() {
+        let (a, b) = halves();
+        cut(
+            "missing read as zero, after",
+            vec![
+                chat(vec![content(Some(0), &a)]),
+                chat(vec![content(Some(1), "x")]),
+                chat(vec![content(None, &b)]),
+            ],
+        );
+        cut(
+            "missing before the field is seen, then zero",
+            vec![
+                chat(vec![content(None, &a)]),
+                chat(vec![content(Some(1), "x")]),
+                chat(vec![content(Some(0), &b)]),
+            ],
+        );
+        cut(
+            "missing as its own group",
+            vec![
+                chat(vec![content(None, &a)]),
+                chat(vec![content(Some(0), "x")]),
+                chat(vec![content(None, &b)]),
+            ],
+        );
+    }
+
+    /// "an annotation's character offsets are counted as index fields".
+    #[test]
+    fn an_annotation_event_passes_whole() {
+        let ev = serde_json::json!({"type": "response.output_text.annotation.added", "item_id": "msg_1", "output_index": 1, "content_index": 0, "annotation_index": 0,
+            "annotation": {"type": "url_citation", "start_index": 31, "end_index": 34, "url": "https://en.wikipedia.org/wiki/Paris", "title": "Paris"}, "sequence_number": 9});
+        assert!(cut_reason(&[ev]).is_empty());
+    }
+
+    /// 'an event-stream value under more index fields than are combined is
+    /// passed instead of cut' and 'an event stream past the key-path limit
+    /// forgets the oldest path and carries on'.
+    #[test]
+    fn a_stream_past_what_can_be_tracked_is_cut() {
+        let ev = serde_json::json!({"a_index": 0, "b_index": 1, "c_index": 2, "d_index": 3, "e_index": 4, "delta": {"text": "x"}});
+        assert_eq!(cut_reason(&[ev]), vec!["too_many_indexes"]);
+        let mut m = serde_json::Map::new();
+        for i in 0..(MAX_SSE_PATHS + 10) {
+            m.insert(format!("k{i}"), Value::from("v"));
+        }
+        assert_eq!(cut_reason(&[Value::Object(m)]), vec!["too_many_paths"]);
+    }
+
+    /// 'an event-stream key path is the keys joined with a dot, so a dotted
+    /// key names another path' and 'an event-stream array index is the same
+    /// path segment as a key spelled like it'.
+    #[test]
+    fn a_path_is_its_segments_not_their_spelling() {
+        let (a, b) = halves();
+        cut(
+            "dotted key",
+            vec![
+                serde_json::json!({"x": {"y": a}}),
+                serde_json::json!({"x.y": "zz"}),
+                serde_json::json!({"x": {"y": b}}),
+            ],
+        );
+        cut(
+            "index spelled as a key",
+            vec![
+                serde_json::json!({"p": {"q": [a]}}),
+                serde_json::json!({"p": {"q": {"0": "zz"}}}),
+                serde_json::json!({"p": {"q": [b]}}),
+            ],
+        );
+    }
+
+    /// 'an event payload with NaN or Infinity, which Python reads, is not
+    /// reassembled by path'.
+    #[test]
+    fn a_payload_with_nan_is_still_reassembled() {
+        let (a, b) = halves();
+        let chunks = [
+            format!("data: {{\"index\":0,\"score\":NaN,\"delta\":{{\"text\":\"{a}\"}}}}\n\n"),
+            "data: {\"index\":1,\"score\":Infinity,\"delta\":{\"text\":\"zz\"}}\n\n".to_string(),
+            format!("data: {{\"index\":0,\"score\":-Infinity,\"delta\":{{\"text\":\"{b}\"}}}}\n\n"),
+        ];
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        assert_eq!(drive(&refs).1, vec!["credential_split_across_events"]);
+    }
+
+    /// 'an event-stream path run is trimmed before the new value is searched'
+    /// and 'the joined event-stream view is trimmed before the new event is
+    /// searched'.
+    #[test]
+    fn a_long_second_half_is_searched_whole() {
+        let (a, b) = halves();
+        let long = format!("{b}{}", "f".repeat(800));
+        cut(
+            "path run",
+            vec![
+                serde_json::json!({"index": 0, "delta": {"text": a}}),
+                serde_json::json!({"index": 1, "delta": {"text": "zz"}}),
+                serde_json::json!({"index": 0, "delta": {"text": long}}),
+            ],
+        );
+        let (_, cuts, _) = drive(&[&format!("data: {a}\n\n"), &format!("data: {long}\n\n")]);
+        assert_eq!(cuts, vec!["credential_split_across_events"]);
+    }
+
+    /// 'an event that never ends is held without bound', 'a compressed event
+    /// stream is bounded per chunk only', 'a failing event stream throws at
+    /// the response writer'.
+    #[test]
+    fn a_stream_is_bounded_and_a_failure_is_a_cut() {
+        let line = format!("data: {}\n", "x".repeat(1000));
+        let big = line.repeat(MAX_EVENT_BYTES / line.len() + 2);
+        let (_, cuts, _) = drive(&[&big[..big.len() / 2], &big[big.len() / 2..]]);
+        assert_eq!(cuts, vec!["event_too_large"]);
+        let mut input = vec![
+            Input::Chunk(b"data: 0123456789012345678901234567890123456789\n\n".to_vec()),
+            Input::Chunk(b"data: 0123456789012345678901234567890123456789\n\n".to_vec()),
+            Input::End,
+        ]
+        .into_iter();
+        let mut cuts = Vec::new();
+        run(
+            scrubber(),
+            scrubber(),
+            60,
+            || input.next().unwrap_or(Input::End),
+            |_| true,
+            |r| cuts.push(r.to_string()),
+        );
+        assert_eq!(cuts, vec!["stream_too_large"]);
+        let mut input = vec![Input::Chunk(b"data: one\n\n".to_vec()), Input::Failed].into_iter();
+        let mut cuts = Vec::new();
+        let mut out = Vec::new();
+        let complete = run(
+            scrubber(),
+            scrubber(),
+            usize::MAX,
+            || input.next().unwrap_or(Input::End),
+            |f| {
+                out.extend(f);
+                true
+            },
+            |r| cuts.push(r.to_string()),
+        );
+        assert!(!complete);
+        assert_eq!(cuts, vec!["upstream_failed"]);
+        assert!(String::from_utf8_lossy(&out).contains("AV_UNSCANNABLE"));
+    }
 }
