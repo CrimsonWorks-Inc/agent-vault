@@ -708,6 +708,16 @@ async fn an_elevated_session_is_stored_with_its_elevation() {
         .cloned()
         .unwrap_or(Value::Null);
     assert_eq!(me["elevated"], json!(["approval_auto_writes"]), "{list}");
+    // The list derives it from the grants; the record itself must hold it.
+    let (s, d) = w
+        .control("GET", &format!("/v1/sessions/detail?sid={sid}"), json!({}))
+        .await;
+    assert_eq!(s, 200, "{d}");
+    assert_eq!(
+        d["session"]["elevated"],
+        json!(["approval_auto_writes"]),
+        "{d}"
+    );
 }
 
 /// 'a session for a quarantined credential is planned and gated' and 'a

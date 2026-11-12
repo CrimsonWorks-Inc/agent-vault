@@ -468,6 +468,17 @@ async fn a_search_cannot_test_a_withheld_value() {
         .handle(msg, sess, Some(u._w.token.clone()), None)
         .await
         .unwrap();
+    // And one with it in a field the search reads.
+    u._w.shared
+        .run(move |c| {
+            c.audit(
+                "test.planted",
+                json!({"rule": format!("see {fake}"), "credential_slug": "demo"}),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         u._w.audit_text().await.contains("avs1."),
         "the row holds it"
@@ -481,6 +492,17 @@ async fn a_search_cannot_test_a_withheld_value() {
         assert!(!r.body.contains("avs1."), "{list}: {}", r.body);
         assert_eq!(r.json()["items"], json!([]), "{list}: {}", r.body);
     }
+    // A search that does match the row hands it over as the page sees it.
+    let r = u
+        .get("/api/audit?paged=1&q=demo&limit=200", "X-AV-UI: 1\r\n")
+        .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(
+        r.body.contains("\u{ab}token\u{bb}"),
+        "the matched row is there, its token withheld: {}",
+        r.body
+    );
+    assert!(!r.body.contains("avs1."), "{}", r.body);
 }
 
 async fn audit_page(u: &Ui, q: &str) -> Value {
