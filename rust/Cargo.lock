@@ -225,6 +225,7 @@ dependencies = [
  "p256",
  "rand",
  "rcgen",
+ "rusqlite",
  "rustls",
  "rustls-webpki",
  "secrecy",

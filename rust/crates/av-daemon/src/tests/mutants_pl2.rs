@@ -403,3 +403,115 @@ async fn an_echoed_injected_secret_comes_back_as_its_placeholder() {
         );
     }
 }
+
+fn sse_stream(events: usize) -> UpstreamResponse {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        for i in 0..events {
+            if tx
+                .send(Ok(format!("data: event-{i}\n\n").into_bytes()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    UpstreamResponse {
+        status: 200,
+        headers: vec![("content-type".into(), "text/event-stream".into())],
+        body: Body::Stream(rx),
+    }
+}
+
+/// Many event streams whose agents do not read never stall the daemon: the
+/// SSE pump waits without blocking a runtime thread, so the control API
+/// still answers on a two-thread runtime.
+#[test]
+fn slow_event_stream_readers_never_stall_the_daemon() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let w = World::seeded(json!({"budget": 1000})).await;
+        w.up.answer(Box::new(|_| Ok(sse_stream(500))));
+        let mut held = Vec::new();
+        for _ in 0..60 {
+            held.push(w.get("/s").await);
+        }
+        assert!(held.iter().all(|r| r.status == 200));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            w.control("GET", "/v1/sessions", json!({})),
+        )
+        .await;
+        assert!(
+            answered.is_ok(),
+            "the control API answered while 60 streams waited"
+        );
+        drop(held);
+    });
+}
+
+/// Every event of a long stream is delivered, and output starts before a
+/// quarter of them were sent (response.test.js:218), on a current-thread
+/// runtime.
+#[test]
+fn a_long_event_stream_starts_early_and_delivers_every_event() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let w = World::seeded(json!({})).await;
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let s2 = sent.clone();
+        w.up.answer(Box::new(move |_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            let s3 = s2.clone();
+            tokio::spawn(async move {
+                for i in 0..200 {
+                    if tx
+                        .send(Ok(format!("data: e{i}\n\n").into_bytes()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    s3.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+            Ok(UpstreamResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body: Body::Stream(rx),
+            })
+        }));
+        let mut r = w.get("/s").await;
+        let mut rx = r.stream.take().expect("streamed");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("output started")
+            .unwrap();
+        assert!(!first.is_empty());
+        assert!(
+            sent.load(std::sync::atomic::Ordering::SeqCst) < 50,
+            "output started before a quarter of the events were sent"
+        );
+        let mut text = String::from_utf8_lossy(&first).into_owned();
+        while let Ok(Some(c)) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await
+        {
+            text.push_str(&String::from_utf8_lossy(&c));
+        }
+        for i in 0..200 {
+            assert!(
+                text.contains(&format!("data: e{i}\n\n")),
+                "event {i} missing"
+            );
+        }
+    });
+}
