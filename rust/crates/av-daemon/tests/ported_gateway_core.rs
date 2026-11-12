@@ -14133,7 +14133,18 @@ async fn probe_fixture(kind: &str, connector: Value, fields: Vec<(&str, Vec<&str
         .collect();
     let values = fields
         .iter()
-        .map(|(n, _)| (n.to_string(), SECRET.to_string().into()))
+        .map(|(n, _)| {
+            (
+                n.to_string(),
+                if *n == "password" {
+                    "FAKE-BYSTANDER-PASSWORD-0123456"
+                } else {
+                    SECRET
+                }
+                .to_string()
+                .into(),
+            )
+        })
         .collect();
     f.shared
         .run(move |c| {
@@ -14384,6 +14395,7 @@ async fn connector_probe_absent_profile_header_site_and_bad_destinations_refuse_
             let e = run_public_probe(&f).await.unwrap_err();
             assert_eq!(e.code.as_str(), "AV_NOT_FOUND");
             assert_eq!(e.extra.rule.as_deref(), Some("no_probe"));
+            if kind != "github" { assert_eq!(e.extra.hint.as_deref(),Some("This kind has no fixed read-only probe. Use vault_http on a path you know.")); }
             assert!(f.up.hits.lock().unwrap().is_empty());
             credential_api(&f, "POST", "/v1/unlock", json!({})).await;
             assert!(probe_health(&f).await.is_null());
