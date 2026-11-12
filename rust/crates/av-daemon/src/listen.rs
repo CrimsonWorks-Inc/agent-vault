@@ -631,10 +631,10 @@ mod read_ahead_edges {
         }
     }
 
-    fn conn(
-        steps: Vec<Step>,
-        stash: Vec<u8>,
-    ) -> (Arc<Mutex<Conn<StepIo>>>, Arc<Mutex<Option<Waker>>>) {
+    type ConnRef<T> = Arc<Mutex<Conn<T>>>;
+    type Slot = Arc<Mutex<Option<Waker>>>;
+
+    fn conn(steps: Vec<Step>, stash: Vec<u8>) -> (ConnRef<StepIo>, Slot) {
         let waker = Arc::new(Mutex::new(None));
         let conn = Arc::new(Mutex::new(Conn {
             io: StepIo {
@@ -650,7 +650,7 @@ mod read_ahead_edges {
 
     fn once<T>(fut: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         fut.poll(&mut cx)
     }
 
@@ -707,7 +707,7 @@ mod read_ahead_edges {
         let mut chunk = [0u8; 128];
         let mut buf = tokio::io::ReadBuf::new(&mut chunk);
         let waker = Waker::noop();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(waker);
         match Pin::new(io).poll_read(&mut cx, &mut buf) {
             Poll::Ready(Ok(())) => Ok(buf.filled().to_vec()),
             Poll::Ready(Err(e)) => Err(e),

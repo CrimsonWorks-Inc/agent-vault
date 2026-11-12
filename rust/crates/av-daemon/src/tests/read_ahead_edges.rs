@@ -193,7 +193,7 @@ async fn a_second_request_past_a_full_stash_ends_the_stream_and_is_not_served() 
     }
     let mut big =
         b"POST /echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: 70000\r\n\r\n".to_vec();
-    big.extend(std::iter::repeat(b'B').take(70000));
+    big.extend(std::iter::repeat_n(b'B', 70000));
     let write = tokio::time::timeout(Duration::from_secs(3), s.write_all(&big)).await;
     // The server fail-closes once the stash is full, so the write may be cut.
     let _ = write;
@@ -395,7 +395,7 @@ async fn gateway_frames_keep_going_after_extra_bytes_and_a_half_close() {
         assert!(n > 0);
         raw.extend_from_slice(&buf[..n]);
     }
-    wr.write_all(&vec![b'Z'; 64]).await.unwrap();
+    wr.write_all(&[b'Z'; 64]).await.unwrap();
     wr.shutdown().await.unwrap();
     while !raw.windows(6).any(|w| w == b"three\n") {
         let n = tokio::time::timeout(Duration::from_secs(3), rd.read(&mut buf))

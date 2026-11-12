@@ -14098,9 +14098,13 @@ async fn session_request_human_hints_and_all_daemon_error_string_commands_exist_
                 }
             }
         }
+        // `help` is handled before the command table, in the CLI as in the
+        // JS (src/cli/index.js: `first === 'help'`), so COMMAND_NAMES does
+        // not list it; it is still a real command a hint may name.
         let first = names
             .iter()
             .map(|n| n.split_whitespace().next().unwrap())
+            .chain(["help"])
             .collect::<std::collections::BTreeSet<_>>();
         let prose = [
             "needs",
