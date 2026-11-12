@@ -23,7 +23,6 @@ use serde_json::{Map, Value};
 
 use crate::notify::Notifier;
 use crate::pipeline::PipelineState;
-use crate::runtime::RuntimeStore;
 use crate::server::DaemonState;
 use crate::session_requests::SessionRequestStore;
 use crate::tripwire::TripwireState;
@@ -40,8 +39,6 @@ pub struct Core {
     pub sr: SessionRequestStore,
     /// Tripwire counters.
     pub tw: TripwireState,
-    /// Per-grant quota and spend state (see [`crate::runtime`]).
-    pub runtime: RuntimeStore,
     /// Who is told when something starts waiting.
     pub notifier: Option<Arc<Notifier>>,
     /// The gateway's bound port, once started.
@@ -58,7 +55,6 @@ impl Core {
             dm: DaemonState::default(),
             sr,
             tw: TripwireState::default(),
-            runtime: RuntimeStore::default(),
             notifier: None,
             gateway_port: 0,
         }

@@ -320,7 +320,6 @@ async fn pending_session_requests_survive_a_restart_and_approved_tokens_never_to
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs av-store grant_runtime"]
 async fn the_rolling_quota_survives_a_restart() {
     let w = World::seeded(json!({"quota": {"count": 1, "window": "hour"}})).await;
     assert_eq!(w.get("/user").await.status, 200);
@@ -329,8 +328,10 @@ async fn the_rolling_quota_survives_a_restart() {
     core.vault.unlock(None).unwrap();
     let grant = core.vault.grants().unwrap()[0].clone();
     assert!(
-        core.runtime
-            .get(&core.vault, &grant.id)
+        core.vault
+            .grant_runtime(&grant.id)
+            .unwrap()
+            .unwrap()
             .quota_state
             .is_some(),
         "quota_state is stored with the grant"
@@ -338,25 +339,30 @@ async fn the_rolling_quota_survives_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs av-store grant_runtime"]
 async fn a_reservation_left_by_a_previous_process_is_charged_in_full() {
     let w = World::seeded(json!({})).await;
     let dir = w._dir.path().to_path_buf();
     let mut core = crate::state::Core::new(av_store::vault::Vault::open(&dir).unwrap());
     core.vault.unlock(None).unwrap();
     let gid = core.vault.grants().unwrap()[0].id.clone();
-    let rt = crate::runtime::GrantRuntime {
+    let rt = av_store::model::GrantRuntime {
         quota_state: None,
         spend: Some(
             json!({"tokens_used": 0, "usd_micros_used": 0, "reserved": {"rq_x": {"tokens": 100, "usd_micros": 5, "at": 1}}}),
         ),
     };
-    core.runtime.set(&mut core.vault, &gid, rt);
+    core.vault.set_grant_runtime(&gid, &rt).unwrap();
     drop(core);
     let mut again = crate::state::Core::new(av_store::vault::Vault::open(&dir).unwrap());
     again.vault.unlock(None).unwrap();
     again.pl_recover_spend();
-    let spend = again.runtime.get(&again.vault, &gid).spend.unwrap();
+    let spend = again
+        .vault
+        .grant_runtime(&gid)
+        .unwrap()
+        .unwrap()
+        .spend
+        .unwrap();
     assert_eq!(spend["tokens_used"], 100);
     assert_eq!(spend["reserved"], json!({}));
 }
