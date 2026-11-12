@@ -660,5 +660,5 @@ fn grant_creation_rejects_coercion_and_host_escape_but_allows_zero_limits() {
     .unwrap();
     assert!(policy::lint(&p, &Default::default())
         .iter()
-        .any(|p| p.rule == "routes" && serde_json::to_value(&p.level).unwrap() == "warn"));
+        .any(|p| p.rule == "routes" && serde_json::to_value(p.level).unwrap() == "warn"));
 }
