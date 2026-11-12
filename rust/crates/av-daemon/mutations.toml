@@ -593,3 +593,192 @@ name = 'notify.failed records any string an error carries as its code (C28)'
 file = "src/notify.rs"
 from = '''let ok = code.starts_with('E')'''
 to = '''let ok = true || code.starts_with('E')'''
+
+# ---------------------------------------------------- src/connectors/pinning.js, probe.js, profiles.js
+
+[[mutation]]
+name = 'the request is ended before the certificate pin is checked'
+file = "src/connectors/pinning.rs"
+from = '''        if let Some(err) = verdict(&chain, &name, pin_list.as_deref()) {
+            drop(tls);
+            return Err(err);
+        }
+        exchange(tls, &req.method, &path, &sent, req.body, &url).await'''
+to = '''        let sent_first = exchange(tls, &req.method, &path, &sent, req.body, &url).await;
+        if let Some(err) = verdict(&chain, &name, pin_list.as_deref()) {
+            return Err(err);
+        }
+        sent_first'''
+
+[[mutation]]
+name = 'the certificate identity check reads the Host header'
+file = "src/connectors/pinning.rs"
+from = '''    let identity = identity_of(&url);
+    if !sent'''
+to = '''    let identity = sent.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.split(':').next().unwrap_or("").to_string()).unwrap_or_else(|| identity_of(&url));
+    if false && !sent'''
+
+[[mutation]]
+name = 'a Host header naming another host is sent instead of refused'
+file = "src/connectors/pinning.rs"
+from = '''    if !sent
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))'''
+to = '''    if false && !sent
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))'''
+
+[[mutation]]
+name = 'any Host header value passes as the URL host'
+file = "../av-core/src/pins.rs"
+from = '''    url.port().is_none()
+        && match url.scheme() {'''
+to = '''    true || url.port().is_none()
+        && match url.scheme() {'''
+
+[[mutation]]
+name = 'a Host header under another spelling of the name is not checked'
+file = "src/connectors/pinning.rs"
+from = '''        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+        .all(|(_, v)| host_header_matches(v, &url))'''
+to = '''        .filter(|(n, _)| n == "host")
+        .all(|(_, v)| host_header_matches(v, &url))'''
+
+[[mutation]]
+name = 'a pinned request treats an unverified chain as verified'
+file = "src/connectors/pinning.rs"
+from = '''    if check.authorized.is_ok() {
+        if check.verified'''
+to = '''    if true {
+        if check.verified'''
+
+[[mutation]]
+name = 'a pinned leaf that is not yet valid is accepted'
+file = "src/connectors/pinning.rs"
+from = 'Some((not_before, _)) if now < not_before => Some(pin_error('
+to = 'Some((not_before, _)) if false && now < not_before => Some(pin_error('
+
+# NOT APPLICABLE: 'an issuer satisfies a pin without having signed the
+# certificate below it'. The JS links issuers itself (checkIssued, a name
+# match, then verify, the signature). Here the verified path comes from
+# webpki's path builder, which accepts an issuer only by verifying its
+# signature over the child; there is no name-only link to fall back to.
+# The neighbouring protection (a pin matches only the verified path, never a
+# merely presented certificate) is the entry 'a pin on any presented
+# certificate stands in for CA trust' above.
+
+[[mutation]]
+name = 'a pin list with a malformed entry is used anyway'
+file = "../av-core/src/pins.rs"
+from = '''    if pins
+        .iter()
+        .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))'''
+to = '''    if true || pins
+        .iter()
+        .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))'''
+
+# NOT APPLICABLE: "pinnedRequest gives Node the caller's headers, not the
+# copy it checked". The JS guards against a caller's header object whose
+# getters answer differently on a second read. Here the headers are a
+# Vec<(String, String)>: read once into `sent`, checked, and sent from that
+# same Vec; a second read of plain data cannot differ.
+
+[[mutation]]
+name = 'pinnedRequest connects to the bracketed IPv6 host'
+file = "src/connectors/pinning.rs"
+from = 'tokio::net::lookup_host((identity.as_str(), port))'
+to = 'tokio::net::lookup_host((url.host_str().unwrap_or(""), port))'
+
+[[mutation]]
+name = 'probe pin keys that are a bare IPv6 address are not read as a host'
+file = "../av-core/src/pins.rs"
+from = '    let host = if bare.parse::<std::net::Ipv6Addr>().is_ok() {'
+to = '    let host = if false && bare.parse::<std::net::Ipv6Addr>().is_ok() {'
+
+[[mutation]]
+name = 'a request with no pins skips certificate verification'
+file = "src/connectors/pinning.rs"
+from = '''    let Some(pins) = pins else {
+        return check.authorized.err().map(|code| {'''
+to = '''    let Some(pins) = pins else {
+        return check.authorized.err().filter(|_| false).map(|code| {'''
+
+[[mutation]]
+name = 'probe pins are looked up by the declared host, not the URL host'
+file = "src/connectors/probe.rs"
+from = '&av_core::pins::url_identity(&u),'
+to = '&{ let _ = &u; declared.clone() },'
+
+# NOT APPLICABLE: 'the probe takes its path from the request input', 'the
+# probe takes its method from the request input', 'the probe sends a body
+# supplied by the caller', 'the probe throttle reads a time supplied on the
+# call'. run_probe(shared, slug, upstream) takes no path, method, body or
+# clock from its caller: the request is built from the profile alone and the
+# throttle reads the process clock. The type has no field a caller could set
+# (the route test asserts a supplied path and method are ignored).
+
+[[mutation]]
+name = 'a probe body past the drain bound is left open'
+file = "src/connectors/probe.rs"
+from = '''                        if n > DRAIN_LIMIT_BYTES {
+                            break;
+                        }'''
+to = '''                        if n > DRAIN_LIMIT_BYTES {
+                            continue;
+                        }'''
+
+[[mutation]]
+name = 'a probe body that never ends holds the probe open'
+file = "src/connectors/probe.rs"
+from = '''                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(DRAIN_TIMEOUT_MS), drain)
+                        .await;'''
+to = '''                drain.await;'''
+
+[[mutation]]
+name = 'a recordHealth failure is swallowed'
+file = "src/connectors/probe.rs"
+from = 'core.vault.record_health(&id, &patch).v()?;'
+to = 'let _ = core.vault.record_health(&id, &patch);'
+
+[[mutation]]
+name = 'a probe pin entry of the wrong shape is skipped'
+file = "../av-core/src/pins.rs"
+from = '''        let Some(pins) = value.as_array() else {
+            return PinLookup::Malformed;
+        };'''
+to = '''        let Some(pins) = value.as_array() else {
+            continue;
+        };'''
+
+[[mutation]]
+name = 'the probe result includes the credential value'
+file = "src/connectors/probe.rs"
+from = '''"observed_expires_at": observed, "checked_at": checked_at,
+    });'''
+to = '''"observed_expires_at": observed, "checked_at": checked_at, "secret": p.scrubber_secret.expose_secret(),
+    });'''
+
+[[mutation]]
+name = 'a probe host that is not a hostname is used anyway'
+file = "src/connectors/probe.rs"
+from = 'let (raw_host, port) = split_host_port(&declared).ok_or_else(credential_host)?;'
+to = 'let (raw_host, port) = split_host_port(&declared).unwrap_or_else(|| (declared.clone(), None));'
+
+[[mutation]]
+name = 'a probe accepts a scheme other than http or https'
+file = "src/connectors/probe.rs"
+from = 'if scheme != "https" && scheme != "http" {'
+to = 'if false && scheme != "https" && scheme != "http" {'
+
+[[mutation]]
+name = 'an unparseable expiry header is kept as the observed expiry'
+file = "../av-core/src/profiles.rs"
+from = 'let observed_expires_at = header(h.expiry_header).and_then(|s| parse_expiry(&s));'
+to = 'let observed_expires_at = header(h.expiry_header).map(|s| parse_expiry(&s).unwrap_or_else(|| s.trim().to_string()));'
+
+[[mutation]]
+name = 'an expiry offset outside +-14:00 is applied'
+file = "../av-core/src/profiles.rs"
+from = '        if hours > 14 || minutes > 59 || (hours == 14 && minutes > 0) {'
+to = '        if false {'

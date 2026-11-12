@@ -54,3 +54,4 @@ rustls-webpki = { version = "=0.103.16", default-features = false, features = ["
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite.workspace = true
