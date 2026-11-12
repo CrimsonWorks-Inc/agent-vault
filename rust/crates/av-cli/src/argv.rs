@@ -383,9 +383,10 @@ fn resolve(positionals: &[String]) -> Result<(Vec<&'static str>, Vec<String>), C
                 return Ok((path, positionals[2..].to_vec()));
             }
         }
-        // `mcp <anything else>` is the stdio bridge. Every other group with
-        // an unknown second word is `unknown command "<group>"`.
-        if first == "mcp" && positionals.get(1).is_some() {
+        // Bare `mcp`, and `mcp <anything else>`, is the stdio bridge.
+        // `mcp url` and `mcp install` already returned above. Every other
+        // group with an unknown second word is `unknown command "<group>"`.
+        if first == "mcp" {
             return Ok((vec!["mcp"], Vec::new()));
         }
         return Err(usage(format!("unknown command \"{first}\"")));

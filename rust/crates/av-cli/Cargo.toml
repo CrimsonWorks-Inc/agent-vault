@@ -28,4 +28,6 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true
+av-core.workspace = true
+av-store.workspace = true
 tempfile.workspace = true

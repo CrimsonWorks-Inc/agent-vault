@@ -118,6 +118,76 @@ pub fn approval_preview_lines(preview: &Value, full: bool) -> Vec<String> {
     lines
 }
 
+/// A scrub pattern post. `sample` is sent only when the caller passed one.
+pub(crate) fn scrub_add_body(
+    slug: &str,
+    pattern: &str,
+    sample: Option<&str>,
+) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("slug".into(), Value::from(slug));
+    body.insert("pattern".into(), Value::from(pattern));
+    if let Some(sample) = sample {
+        body.insert("sample".into(), Value::from(sample));
+    }
+    body
+}
+
+/// `DELETE /v1/credentials/scrub` query. The id is form-encoded.
+pub(crate) fn scrub_delete_query(slug: &str, id: &str) -> String {
+    query(&[("slug", Some(slug)), ("id", Some(id))])
+}
+
+/// A pin post. Every `--add` is one entry; nothing else is inferred.
+pub(crate) fn pin_add_body(slug: &str, host: &str, pins: &[String]) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("slug".into(), Value::from(slug));
+    body.insert("host".into(), Value::from(host));
+    body.insert(
+        "pins".into(),
+        Value::Array(pins.iter().cloned().map(Value::from).collect()),
+    );
+    body
+}
+
+/// `--on-conflict`, defaulting to `skip`. Anything else is a usage error.
+pub(crate) fn conflict_mode(value: Option<&str>) -> Result<&'static str, CliError> {
+    match value.unwrap_or("skip") {
+        "skip" => Ok("skip"),
+        "rename" => Ok("rename"),
+        "fail" => Ok("fail"),
+        _ => Err(usage("--on-conflict is skip, rename or fail")),
+    }
+}
+
+/// The rotate body. The value is the secret read from the terminal, never argv.
+pub(crate) fn rotate_body(
+    slug: &str,
+    value: &str,
+    mode: &str,
+    field: Option<&str>,
+    retire_hours: Option<f64>,
+    expires_at: Option<Option<String>>,
+) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("slug".into(), Value::from(slug));
+    body.insert("value".into(), Value::from(value));
+    body.insert("mode".into(), Value::from(mode));
+    if let Some(field) = field {
+        body.insert("field".into(), Value::from(field));
+    }
+    if let Some(hours) = retire_hours {
+        body.insert("retire_hours".into(), json_number(hours));
+    }
+    if let Some(expires) = expires_at {
+        body.insert(
+            "expires_at".into(),
+            expires.map(Value::from).unwrap_or(Value::Null),
+        );
+    }
+    body
+}
+
 /// Ports `'cred:rotate'` in `src/cli/control-commands.js`.
 pub async fn cred_rotate(ctx: &Context, args: &CredRotateArgs) -> Outcome {
     let slug = text_flag(args.slug.as_deref(), "credential")?;
@@ -126,41 +196,38 @@ pub async fn cred_rotate(ctx: &Context, args: &CredRotateArgs) -> Outcome {
     } else {
         "keep"
     };
-    let mut body = Map::new();
-    body.insert("slug".into(), Value::from(slug));
     let value = ctx.read_secret(&format!("new value for {slug} (not echoed): "))?;
     if value.expose_secret().is_empty() {
         return Err(usage("no value given"));
     }
-    body.insert(
-        "value".into(),
-        Value::from(value.expose_secret().to_string()),
-    );
-    body.insert("mode".into(), Value::from(mode));
-    if let Some(field) = args.field.as_deref() {
-        body.insert(
-            "field".into(),
-            Value::from(text_flag(Some(field), "--field")?),
-        );
-    }
-    if let Some(hours) = args.retire_hours.as_deref() {
-        let n = number_flag(
+    let field = match args.field.as_deref() {
+        Some(field) => Some(text_flag(Some(field), "--field")?.to_string()),
+        None => None,
+    };
+    let retire_hours = match args.retire_hours.as_deref() {
+        Some(hours) => Some(number_flag(
             Some(hours),
             "--retire-hours",
             NumberLimits {
                 max: 168.0,
                 ..NumberLimits::default()
             },
-        )?;
-        body.insert("retire_hours".into(), json_number(n));
-    }
-    if args.expires.is_some() {
-        let expires = expiry_input(args.expires.as_deref())?;
-        body.insert(
-            "expires_at".into(),
-            expires.map(Value::from).unwrap_or(Value::Null),
-        );
-    }
+        )?),
+        None => None,
+    };
+    let expires_at = if args.expires.is_some() {
+        Some(expiry_input(args.expires.as_deref())?)
+    } else {
+        None
+    };
+    let body = rotate_body(
+        slug,
+        value.expose_secret(),
+        mode,
+        field.as_deref(),
+        retire_hours,
+        expires_at,
+    );
     let r = ctx
         .control_with_presence("POST", "/v1/credentials/rotate", Some(&Value::Object(body)))
         .await?;
@@ -242,18 +309,12 @@ pub async fn cred_scrub(ctx: &Context, args: &CredScrubArgs) -> Outcome {
     if !args.add.is_empty() {
         let mut results = Vec::new();
         for pattern in &args.add {
-            let mut body = Map::new();
-            body.insert("slug".into(), Value::from(slug));
-            body.insert(
-                "pattern".into(),
-                Value::from(text_flag(Some(pattern), "--add")?),
-            );
-            if args.sample.is_some() {
-                body.insert(
-                    "sample".into(),
-                    Value::from(text_flag(args.sample.as_deref(), "--sample")?),
-                );
-            }
+            let sample = if args.sample.is_some() {
+                Some(text_flag(args.sample.as_deref(), "--sample")?.to_string())
+            } else {
+                None
+            };
+            let body = scrub_add_body(slug, text_flag(Some(pattern), "--add")?, sample.as_deref());
             results.push(
                 ctx.control_with_presence(
                     "POST",
@@ -278,10 +339,7 @@ pub async fn cred_scrub(ctx: &Context, args: &CredScrubArgs) -> Outcome {
     }
     if args.rm.is_some() {
         let id = text_flag(args.rm.as_deref(), "--rm")?;
-        let path = format!(
-            "/v1/credentials/scrub?{}",
-            query(&[("slug", Some(slug)), ("id", Some(id))])
-        );
+        let path = format!("/v1/credentials/scrub?{}", scrub_delete_query(slug, id));
         let r = ctx.control_with_presence("DELETE", &path, None).await?;
         output(ctx, &r, "scrub pattern removed");
         return Ok(0);
@@ -352,13 +410,7 @@ pub async fn cred_pin(ctx: &Context, args: &CredPinArgs) -> Outcome {
             .iter()
             .map(|p| text_flag(Some(p), "--add").map(str::to_string))
             .collect();
-        let mut body = Map::new();
-        body.insert("slug".into(), Value::from(slug));
-        body.insert("host".into(), Value::from(host));
-        body.insert(
-            "pins".into(),
-            Value::Array(pins?.into_iter().map(Value::from).collect()),
-        );
+        let body = pin_add_body(slug, host, &pins?);
         let r = ctx
             .control_with_presence("POST", "/v1/credentials/pins", Some(&Value::Object(body)))
             .await?;
@@ -431,8 +483,8 @@ pub async fn cred_test(ctx: &Context, args: &CredTestArgs) -> Outcome {
     let human = results
         .iter()
         .map(|v| {
-            let ok = v.get("ok") == Some(&Value::Bool(true));
-            let skipped = all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe");
+            let ok = probe_ok(v);
+            let skipped = probe_skipped(all, v);
             let mark = if ok {
                 ctx.paint("32", "ok  ")
             } else if skipped {
@@ -467,11 +519,9 @@ pub async fn cred_test(ctx: &Context, args: &CredTestArgs) -> Outcome {
         .collect::<Vec<_>>()
         .join("\n");
     output(ctx, &r, &human);
-    let failing = results.iter().filter(|v| {
-        let ok = v.get("ok") == Some(&Value::Bool(true));
-        let skipped = all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe");
-        !ok && !skipped
-    });
+    let failing = results
+        .iter()
+        .filter(|v| !probe_ok(v) && !probe_skipped(all, v));
     let mut any = false;
     let mut policy = false;
     for v in failing {
@@ -584,10 +634,7 @@ pub async fn tripwire_show(ctx: &Context) -> Outcome {
     let r = ctx.control("GET", "/v1/tripwires", None).await?;
     let rules_arr = r.get("rules").and_then(|v| v.as_array());
     let saved = rules_arr.is_some() && r.get("rules_saved") != Some(&Value::Bool(false));
-    let rules = rules_arr
-        .cloned()
-        .or_else(|| r.get("defaults").and_then(|v| v.as_array()).cloned())
-        .unwrap_or_default();
+    let rules = tripwire_listed_rules(&r);
     let enabled = r.get("enabled") == Some(&Value::Bool(true));
     let which = if saved {
         ""
@@ -638,14 +685,9 @@ pub async fn tripwire_show(ctx: &Context) -> Outcome {
 /// Ports `'tripwire:on'` in `src/cli/control-commands.js`.
 pub async fn tripwire_on(ctx: &Context) -> Outcome {
     let current = ctx.control("GET", "/v1/tripwires", None).await?;
-    let stored = current.get("rules_saved") != Some(&Value::Bool(false))
-        && current
-            .get("rules")
-            .and_then(|r| r.as_array())
-            .is_some_and(|a| !a.is_empty());
     let mut body = Map::new();
     body.insert("enabled".into(), Value::Bool(true));
-    if !stored {
+    if tripwire_on_sends_defaults(&current) {
         body.insert("rules".into(), Value::from("defaults"));
     }
     let r = ctx
@@ -1009,13 +1051,10 @@ pub async fn session_show(ctx: &Context, args: &SessionShowArgs) -> Outcome {
     let path = format!("/v1/sessions/detail?{}", query(&[("sid", Some(&sid))]));
     let r = ctx.control("GET", &path, None).await?;
     output(ctx, &r, &session_summary(&r, markdown));
-    if !ctx.json && r.get("activity").and_then(|a| a.get("complete")) == Some(&Value::Bool(false)) {
-        let text = r
-            .get("activity")
-            .and_then(|a| a.get("note"))
-            .and_then(|n| n.as_str())
-            .unwrap_or("history is incomplete");
-        note(ctx, text);
+    if !ctx.json {
+        if let Some(text) = activity_incomplete_note(r.get("activity")) {
+            note(ctx, &text);
+        }
     }
     Ok(0)
 }
@@ -1096,10 +1135,7 @@ pub async fn backup_inspect(ctx: &Context, args: &BackupFileArg) -> Outcome {
 
 /// Ports `'backup:restore'` in `src/cli/control-commands.js`.
 pub async fn backup_restore(ctx: &Context, args: &BackupRestoreArgs) -> Outcome {
-    let on_conflict = args.on_conflict.as_deref().unwrap_or("skip");
-    if !matches!(on_conflict, "skip" | "rename" | "fail") {
-        return Err(usage("--on-conflict is skip, rename or fail"));
-    }
+    let on_conflict = conflict_mode(args.on_conflict.as_deref())?;
     let input = backup_input(ctx, args.file.as_deref()).await?;
     let inspection = ctx
         .control("POST", "/v1/backup/inspect", Some(&input))
@@ -1296,10 +1332,8 @@ pub async fn audit_verify(ctx: &Context, args: &AuditVerifyArgs) -> Outcome {
     } else {
         None
     };
-    let chain_ok = chain.get("ok") == Some(&Value::Bool(true));
-    let witness_ok = witness
-        .as_ref()
-        .is_none_or(|w| w.get("ok") == Some(&Value::Bool(true)));
+    let chain_ok = chain_is_ok(&chain);
+    let witness_ok = witness.as_ref().is_none_or(witness_is_ok);
     let ok = chain_ok && witness_ok;
     let result = if let Some(w) = &witness {
         let mut obj = match chain.clone() {
@@ -1332,7 +1366,7 @@ pub async fn audit_verify(ctx: &Context, args: &AuditVerifyArgs) -> Outcome {
         return fail_problem(ctx, &message, &result);
     }
     if let Some(w) = &witness {
-        if w.get("ok") != Some(&Value::Bool(true)) {
+        if !witness_is_ok(w) {
             let message = format!(
                 "the audit log does not match the witness: {} ahead of the log (records were removed) · {} mismatched · {} forged · {} other vault",
                 arr_len(w, "ahead"),
@@ -1391,7 +1425,7 @@ pub async fn preflight(ctx: &Context, args: &PreflightArgs) -> Outcome {
     body.insert("method".into(), Value::from(method));
     body.insert("path".into(), Value::from(format!("/p/{cred}{path}")));
     body.insert("headers".into(), Value::Array(headers));
-    body.insert("assume_placeholder".into(), Value::Bool(true));
+    assume_placeholder(&mut body);
     if args.query.is_some() {
         body.insert(
             "query".into(),
@@ -1724,7 +1758,52 @@ async fn backup_input(ctx: &Context, file: Option<&str>) -> Result<Value, CliErr
     }))
 }
 
-async fn write_exclusive(
+/// A probe row succeeded only when `ok` is the boolean `true`.
+pub(crate) fn probe_ok(v: &Value) -> bool {
+    v.get("ok") == Some(&Value::Bool(true))
+}
+
+/// `--all` skips a credential kind the daemon has no probe for, and nothing else.
+pub(crate) fn probe_skipped(all: bool, v: &Value) -> bool {
+    all && v.get("rule").and_then(|r| r.as_str()) == Some("no_probe")
+}
+
+/// Rules to print. A null `rules` (never saved) falls back to `defaults`.
+pub(crate) fn tripwire_listed_rules(response: &Value) -> Vec<Value> {
+    let rules_arr = response.get("rules").and_then(|v| v.as_array());
+    rules_arr
+        .cloned()
+        .or_else(|| response.get("defaults").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default()
+}
+
+/// `tripwire on` installs the defaults when none were saved.
+pub(crate) fn tripwire_on_sends_defaults(current: &Value) -> bool {
+    let stored = current.get("rules_saved") != Some(&Value::Bool(false))
+        && current
+            .get("rules")
+            .and_then(|r| r.as_array())
+            .is_some_and(|a| !a.is_empty());
+    !stored
+}
+
+/// The audit chain is intact only when `ok` is the boolean `true`.
+pub(crate) fn chain_is_ok(chain: &Value) -> bool {
+    chain.get("ok") == Some(&Value::Bool(true))
+}
+
+/// A witness matches only when `ok` is the boolean `true`.
+pub(crate) fn witness_is_ok(witness: &Value) -> bool {
+    witness.get("ok") == Some(&Value::Bool(true))
+}
+
+/// Preflight always sends a placeholder assumption so the gateway can judge
+/// the call. Ports `assume_placeholder: true` in `src/cli/control-commands.js`.
+pub(crate) fn assume_placeholder(body: &mut Map<String, Value>) {
+    body.insert("assume_placeholder".into(), Value::Bool(true));
+}
+
+pub(crate) async fn write_exclusive(
     ctx: &Context,
     path: &str,
     text: &str,
@@ -1746,7 +1825,7 @@ async fn write_exclusive(
     }
 }
 
-fn append_exclusive(path: &str, line: &str) -> Result<(), CliError> {
+pub(crate) fn append_exclusive(path: &str, line: &str) -> Result<(), CliError> {
     files::append_line_exclusive(Path::new(path), line).map_err(file_err)
 }
 
@@ -1835,7 +1914,7 @@ fn parse_duration(text: &str) -> Option<(u64, char)> {
     Some((digits.parse().ok()?, unit))
 }
 
-fn session_summary(r: &Value, markdown: bool) -> String {
+pub(crate) fn session_summary(r: &Value, markdown: bool) -> String {
     let mut lines = Vec::new();
     let id = r.get("session").and_then(|s| s.get("id"));
     lines.push(if markdown {
@@ -1947,6 +2026,21 @@ fn session_summary(r: &Value, markdown: bool) -> String {
     lines.join("\n")
 }
 
+/// The stderr note when activity is explicitly incomplete. `None` otherwise.
+pub(crate) fn activity_incomplete_note(activity: Option<&Value>) -> Option<String> {
+    let activity = activity?;
+    if activity.get("complete") != Some(&Value::Bool(false)) {
+        return None;
+    }
+    Some(
+        activity
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or("history is incomplete")
+            .to_string(),
+    )
+}
+
 fn field(lines: &mut Vec<String>, markdown: bool, key: &str, value: &Value) {
     let shown = show(value);
     if markdown {
@@ -1990,7 +2084,7 @@ fn locale_int(n: f64) -> String {
     }
 }
 
-fn report_summary(r: &Value, markdown: bool) -> String {
+pub(crate) fn report_summary(r: &Value, markdown: bool) -> String {
     let mut lines = vec![
         if markdown {
             "# Access review".into()

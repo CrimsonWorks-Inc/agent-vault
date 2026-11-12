@@ -474,15 +474,8 @@ impl Context {
                 .problem
                 .as_ref()
                 .and_then(|p| p.get("detail"))
-                .and_then(|d| d.as_str())
-                .unwrap_or("this change needs a human factor, and none is enrolled");
-            return Err(CliError {
-                message: detail.to_string(),
-                exit: Exit::Presence,
-                next: Some("agent-vault passphrase set".into()),
-                problem: None,
-                skew: false,
-            });
+                .and_then(|d| d.as_str());
+            return Err(factor_required(detail));
         }
         let factors: Vec<String> = err
             .problem
@@ -506,18 +499,7 @@ impl Context {
             });
         }
         if !stdin_is_tty() {
-            let mut e = CliError {
-                message: "this change needs your passphrase, and there is no terminal to ask on"
-                    .into(),
-                exit: Exit::Presence,
-                next: None,
-                problem: None,
-                skew: false,
-            };
-            if factors.iter().any(|f| f == "authenticator") {
-                e.next = Some("agent-vault ui   (confirm it there with your authenticator)".into());
-            }
-            return Err(e);
+            return Err(presence_without_a_terminal(&factors));
         }
         if rule == Some("fresh_presence") {
             let passphrase = self.read_secret("passphrase (for this change only): ")?;
@@ -597,6 +579,37 @@ fn json_port(value: &Value) -> Option<u16> {
         }
         _ => None,
     }
+}
+
+/// A gated change on a vault with no human factor. Exit 5, and the next
+/// step is to enroll one. Ports the `factor_required` arm of
+/// `controlWithPresence` in `src/cli/index.js`.
+pub(crate) fn factor_required(detail: Option<&str>) -> CliError {
+    CliError {
+        message: detail
+            .unwrap_or("this change needs a human factor, and none is enrolled")
+            .to_string(),
+        exit: Exit::Presence,
+        next: Some("agent-vault passphrase set".into()),
+        problem: None,
+        skew: false,
+    }
+}
+
+/// A presence gate with no terminal does not open a window. An authenticator
+/// factor names `agent-vault ui`; a passphrase-only factor does not.
+pub(crate) fn presence_without_a_terminal(factors: &[String]) -> CliError {
+    let mut err = CliError {
+        message: "this change needs your passphrase, and there is no terminal to ask on".into(),
+        exit: Exit::Presence,
+        next: None,
+        problem: None,
+        skew: false,
+    };
+    if factors.iter().any(|f| f == "authenticator") {
+        err.next = Some("agent-vault ui   (confirm it there with your authenticator)".into());
+    }
+    err
 }
 
 fn problem_next(problem: Option<&Value>) -> Option<String> {

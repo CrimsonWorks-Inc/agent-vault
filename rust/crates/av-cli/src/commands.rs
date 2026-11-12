@@ -60,7 +60,7 @@ fn state_value() -> Value {
     load_client_state()
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
@@ -230,7 +230,7 @@ fn permits_write(g: &Value) -> bool {
         .any(|m| !matches!(m.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS"))
 }
 
-fn looks_like_credential(name: &str, value: &str) -> bool {
+pub(crate) fn looks_like_credential(name: &str, value: &str) -> bool {
     const CONFIG: &[&str] = &[
         "AGENT_VAULT_DIR",
         "AGENT_VAULT_PORT",
@@ -291,6 +291,7 @@ fn url_has_password(value: &str) -> bool {
                     let pass = &userinfo[colon + 1..];
                     let clean =
                         |s: &str| !s.chars().any(|c| c == '/' || c.is_whitespace() || c == '@');
+                    // An empty user (`://:secret@host`) is still a password.
                     if !user.contains(':') && clean(user) && !pass.is_empty() && clean(pass) {
                         return true;
                     }
@@ -299,6 +300,21 @@ fn url_has_password(value: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether a parent environment variable may reach the `exec` child.
+/// Generated vault variables are dropped (the child gets the ones this
+/// command just computed) and anything that looks like a credential is
+/// dropped. Ports the filter in `COMMANDS.exec` in `src/cli/index.js`.
+pub(crate) fn parent_env_kept(name: &str, value: &str) -> bool {
+    const GENERATED: &[&str] = &[
+        "AGENT_VAULT",
+        "AGENT_VAULT_URL",
+        "AGENT_VAULT_SESSION",
+        "AGENT_VAULT_PLACEHOLDER",
+        "AGENT_VAULT_HINT",
+    ];
+    !(GENERATED.contains(&name) || looks_like_credential(name, value))
 }
 
 fn show_value(value: &Value) -> String {
@@ -496,7 +512,7 @@ pub async fn daemon(_ctx: &Context, args: &DaemonArgs) -> Outcome {
             "agent-vault status",
         ));
     }
-    let _ = optional_number(
+    let port = optional_number(
         args.port.as_deref(),
         "port",
         NumberLimits {
@@ -506,10 +522,26 @@ pub async fn daemon(_ctx: &Context, args: &DaemonArgs) -> Outcome {
         },
     )?;
     let _ = boolean_flag(args.passphrase.then_some(""), "passphrase")?;
-    if let Some(port) = &args.port {
-        std::env::set_var("AGENT_VAULT_PORT", port);
+    // The daemon binary reads AV_VAULT_DIR and AV_RUN_DIR. Dev mode is
+    // AGENT_VAULT_DIR: the vault and the control socket live in that one
+    // directory. `--port` is AV_PORT (0 is ephemeral).
+    let vault = vault_dir();
+    let socket = socket_path();
+    let run = socket
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| vault.clone());
+    std::env::set_var("AV_VAULT_DIR", &vault);
+    std::env::set_var("AV_RUN_DIR", &run);
+    if let Some(port) = port {
+        std::env::set_var("AV_PORT", (port as u16).to_string());
     }
-    Ok(av_daemon::run_from_env().code())
+    // `run_from_env` builds its own runtime. This command is already inside
+    // the CLI runtime, so the daemon runs on a blocking thread.
+    let code = tokio::task::spawn_blocking(|| av_daemon::run_from_env().code())
+        .await
+        .unwrap_or(Exit::Failure.code());
+    Ok(code)
 }
 
 /// Ports `COMMANDS.upgrade`.
@@ -684,23 +716,11 @@ pub async fn status(ctx: &Context) -> Outcome {
             .get("has_touchid")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if !pass && !touch {
+        if let Some(lines) = no_factor_status_lines(pass, touch) {
             println!();
-            println!("  {}", ctx.paint("33", "no human factor is enrolled"));
-            println!(
-                "{}",
-                ctx.paint(
-                    "2",
-                    "  Anything running as you can use every credential here, and can set a"
-                )
-            );
-            println!(
-                "{}",
-                ctx.paint(
-                    "2",
-                    "  passphrase of its own — after which the vault is no longer yours."
-                )
-            );
+            println!("  {}", ctx.paint("33", lines[0]));
+            println!("{}", ctx.paint("2", lines[1]));
+            println!("{}", ctx.paint("2", lines[2]));
             println!("  {}", ctx.paint("36", "agent-vault passphrase set"));
         }
     }
@@ -846,10 +866,7 @@ pub async fn cred_list(ctx: &Context) -> Outcome {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                println!(
-                    "  {name} {}",
-                    ctx.paint("2", &format!("fp:{fp} -> {sites}"))
-                );
+                println!("  {name} {}", ctx.paint("2", &cred_field_label(fp, &sites)));
             }
         }
     }
@@ -870,6 +887,92 @@ pub async fn cred_rm(ctx: &Context, args: &SlugArg) -> Outcome {
         &json!({ "removed": slug }),
     );
     Ok(0)
+}
+
+/// Status text when neither factor is enrolled. `None` once one is.
+pub(crate) fn no_factor_status_lines(pass: bool, touch: bool) -> Option<[&'static str; 3]> {
+    if pass || touch {
+        return None;
+    }
+    Some([
+        "no human factor is enrolled",
+        "  Anything running as you can use every credential here, and can set a",
+        "  passphrase of its own — after which the vault is no longer yours.",
+    ])
+}
+
+/// Doctor's human-factor row: not enrolled until a passphrase or authenticator exists.
+pub(crate) fn doctor_factor_note(pass: bool, touch: bool) -> (bool, String) {
+    if pass || touch {
+        let mut parts = Vec::new();
+        if pass {
+            parts.push("passphrase");
+        }
+        if touch {
+            parts.push("authenticator");
+        }
+        (true, parts.join(" + "))
+    } else {
+        (
+            false,
+            "none: anything running as you can use every credential, and can claim the vault by setting its own passphrase. Run: agent-vault passphrase set".into(),
+        )
+    }
+}
+
+/// Doctor always asks whether the audit chain is intact, and only a boolean `ok` counts.
+pub(crate) fn doctor_audit_check(chain: &Value) -> (&'static str, bool) {
+    (
+        "audit chain intact",
+        chain.get("ok").and_then(|v| v.as_bool()) == Some(true),
+    )
+}
+
+/// The human `cred list` field line: fingerprint and injection site, never the value.
+pub(crate) fn cred_field_label(fp: &str, sites: &str) -> String {
+    format!("fp:{fp} -> {sites}")
+}
+
+/// The stdio command `mcp install` writes. Project scope with a shim on `PATH`
+/// stays portable; an installed user scope names the system binary.
+pub(crate) fn mcp_launch(
+    portable: bool,
+    shim: Option<&str>,
+    use_system: bool,
+    system_bin: &str,
+    current_exe: &str,
+) -> (String, Vec<String>) {
+    let args = vec!["mcp".into()];
+    if portable {
+        (shim.unwrap_or("agent-vault").to_string(), args)
+    } else if use_system {
+        (system_bin.to_string(), args)
+    } else {
+        (current_exe.to_string(), args)
+    }
+}
+
+/// Copy the reviewed template's hash onto the session body. Ports
+/// `body.template_hash = template.hash` in `src/cli/index.js`.
+pub(crate) fn bind_template_hash(body: &mut Map<String, Value>, template: &Value) {
+    if let Some(hash) = template.get("hash").cloned() {
+        body.insert("template_hash".into(), hash);
+    }
+}
+
+/// The line `approve` prints: what was granted, not the agent's ask.
+/// Ports the `describeGranted` branch of `COMMANDS.approve`.
+pub(crate) fn approval_human(answered: &Value) -> String {
+    let granted = answered.get("granted").cloned().unwrap_or(Value::Null);
+    if granted.is_object() {
+        pending::describe_granted(&granted)
+    } else {
+        answered
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
 }
 
 /// Ports `COMMANDS['session:create']`.
@@ -901,9 +1004,7 @@ pub async fn session_create(ctx: &Context, args: &SessionSpecArgs) -> Outcome {
                 None,
             )
             .await?;
-        if let Some(hash) = got.get("hash").cloned() {
-            body.insert("template_hash".into(), hash);
-        }
+        bind_template_hash(&mut body, &got);
         if !ctx.json {
             let summary = got
                 .get("summary")
@@ -1030,29 +1131,30 @@ pub async fn session_create(ctx: &Context, args: &SessionSpecArgs) -> Outcome {
         .and_then(|a| a.first())
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let as_header = header_site(site).then_some(site);
     let base = s.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
     let probe = s.get("probe_path").and_then(|v| v.as_str()).unwrap_or("/");
     let token = s.get("token").and_then(|v| v.as_str()).unwrap_or("");
     println!();
     println!("{}", ctx.paint("2", "  try:"));
-    println!(
-        "{}",
-        ctx.paint("2", &format!("    curl \"{base}{probe}\" \\"))
-    );
-    println!(
-        "{}",
-        ctx.paint("2", &format!("      -H \"AV-Session: {token}\" \\"))
-    );
-    if let Some(header) = as_header {
-        println!("{}", ctx.paint("2", &format!("      -H \"{header}\"")));
-    } else {
-        println!(
-            "{}",
-            ctx.paint("2", &format!("      # then put the placeholder at: {site}"))
-        );
+    for line in try_command_lines(base, probe, token, site) {
+        println!("{}", ctx.paint("2", &line));
     }
     Ok(0)
+}
+
+/// The `try:` curl. The session token is `AV-Session`. A header injection
+/// site is one more `-H`, so `Authorization` appears once.
+pub(crate) fn try_command_lines(base: &str, probe: &str, token: &str, site: &str) -> Vec<String> {
+    let mut lines = vec![
+        format!("    curl \"{base}{probe}\" \\"),
+        format!("      -H \"AV-Session: {token}\" \\"),
+    ];
+    if header_site(site) {
+        lines.push(format!("      -H \"{site}\""));
+    } else {
+        lines.push(format!("      # then put the placeholder at: {site}"));
+    }
+    lines
 }
 
 fn header_site(site: &str) -> bool {
@@ -1418,25 +1520,19 @@ pub async fn env(ctx: &Context, args: &EnvArgs) -> Outcome {
     Ok(0)
 }
 
-fn legacy_env(ctx: &Context) -> Outcome {
-    let st = state();
-    let Some(token) = st.token else {
-        return Err(err_next(
-            "no session yet",
-            Exit::Session,
-            "agent-vault session create --cred <slug>",
-        ));
-    };
-    let port = ctx.gateway_port_of(&state_value());
+/// Shell lines for a recorded session. A missing placeholder unsets any
+/// earlier one, and every value is single-quoted. Ports `legacyEnv` in
+/// `src/cli/index.js`.
+pub(crate) fn legacy_env_lines(token: &str, port: u16, placeholder: Option<&str>) -> Vec<String> {
     let mut lines = vec![
         format!("export AGENT_VAULT={}", shell_quote("1")),
         format!(
             "export AGENT_VAULT_URL={}",
             shell_quote(&format!("http://127.0.0.1:{port}"))
         ),
-        format!("export AGENT_VAULT_SESSION={}", shell_quote(&token)),
+        format!("export AGENT_VAULT_SESSION={}", shell_quote(token)),
     ];
-    if let Some(ph) = &st.placeholder {
+    if let Some(ph) = placeholder {
         lines.push(format!(
             "export AGENT_VAULT_PLACEHOLDER={}",
             shell_quote(ph)
@@ -1448,9 +1544,23 @@ fn legacy_env(ctx: &Context) -> Outcome {
             "Credentials are placeholders. Put one only where the usage says. On AV_PH_EXHAUSTED run: agent-vault ph next <cred>"
         )
     ));
-    if st.placeholder.is_none() {
+    if placeholder.is_none() {
         lines.push("unset AGENT_VAULT_PLACEHOLDER".into());
     }
+    lines
+}
+
+fn legacy_env(ctx: &Context) -> Outcome {
+    let st = state();
+    let Some(token) = st.token else {
+        return Err(err_next(
+            "no session yet",
+            Exit::Session,
+            "agent-vault session create --cred <slug>",
+        ));
+    };
+    let port = ctx.gateway_port_of(&state_value());
+    let lines = legacy_env_lines(&token, port, st.placeholder.as_deref());
     ctx.out(Some(&lines.join("\n")), &json!({ "env": lines }));
     Ok(0)
 }
@@ -1953,16 +2063,9 @@ pub async fn exec(ctx: &Context, args: &ExecArgs) -> Outcome {
     } else {
         None
     };
-    const GENERATED: &[&str] = &[
-        "AGENT_VAULT",
-        "AGENT_VAULT_URL",
-        "AGENT_VAULT_SESSION",
-        "AGENT_VAULT_PLACEHOLDER",
-        "AGENT_VAULT_HINT",
-    ];
     let mut env: Vec<(String, String)> = Vec::new();
     for (k, v) in std::env::vars() {
-        if GENERATED.contains(&k.as_str()) || looks_like_credential(&k, &v) {
+        if !parent_env_kept(&k, &v) {
             continue;
         }
         env.push((k, v));
@@ -1992,32 +2095,41 @@ pub async fn exec(ctx: &Context, args: &ExecArgs) -> Outcome {
     let mut child = Command::new(&args.command[0]);
     child.args(&args.command[1..]).env_clear().envs(env);
     match child.status() {
-        Ok(status) => {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(code) = status.code() {
-                Ok(code)
-            } else if let Some(sig) = status.signal() {
-                Ok(128 + sig)
-            } else {
-                Ok(1)
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let failure = err(
-                format!("command not found: {}", args.command[0]),
-                Exit::Failure,
-            );
-            ctx.fail(&failure);
-            Ok(127)
-        }
+        Ok(status) => Ok(child_status_code(status)),
         Err(e) => {
+            let code = spawn_error_code(e.kind());
             let failure = err(
-                format!("could not run {}: {e}", args.command[0]),
+                if code == 127 {
+                    format!("command not found: {}", args.command[0])
+                } else {
+                    format!("could not run {}: {e}", args.command[0])
+                },
                 Exit::Failure,
             );
             ctx.fail(&failure);
-            Ok(126)
+            Ok(code)
         }
+    }
+}
+
+/// A child's exit code. A signal is `128 + signal`, never success.
+pub(crate) fn child_status_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(code) = status.code() {
+        code
+    } else if let Some(sig) = status.signal() {
+        128 + sig
+    } else {
+        1
+    }
+}
+
+/// `127` when the binary is missing, `126` for any other spawn failure.
+pub(crate) fn spawn_error_code(kind: std::io::ErrorKind) -> i32 {
+    if kind == std::io::ErrorKind::NotFound {
+        127
+    } else {
+        126
     }
 }
 
@@ -2121,15 +2233,7 @@ async fn load_pending(ctx: &Context) -> Result<Vec<av_store::pending::PendingIte
 /// Ports `COMMANDS.approve` / `decide(args, true)`.
 pub async fn approve(ctx: &Context, args: &ApproveArgs) -> Outcome {
     let r = decide(ctx, args.id.as_deref(), true, Some(args)).await?;
-    let granted = r.get("granted").cloned().unwrap_or(Value::Null);
-    let summary = if granted.is_object() {
-        pending::describe_granted(&granted)
-    } else {
-        r.get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
+    let summary = approval_human(&r);
     ctx.out(
         Some(&format!(
             "{} {}",
@@ -2173,7 +2277,7 @@ pub async fn deny(ctx: &Context, args: &DenyArgs) -> Outcome {
     Ok(0)
 }
 
-async fn decide(
+pub(crate) async fn decide(
     ctx: &Context,
     id: Option<&str>,
     granted: bool,
@@ -2682,21 +2786,16 @@ pub async fn mcp_install(ctx: &Context, args: &McpInstallArgs) -> Outcome {
         .join("bin")
         .join("agent-vault");
     let use_system = !portable && using_system() && system_bin.is_file();
-    let (command, cmd_args) = if portable {
-        (
-            shim.unwrap_or("agent-vault").to_string(),
-            vec!["mcp".into()],
-        )
-    } else if use_system {
-        (system_bin.display().to_string(), vec!["mcp".into()])
-    } else {
-        (
-            std::env::current_exe()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "agent-vault".into()),
-            vec!["mcp".into()],
-        )
-    };
+    let current_exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "agent-vault".into());
+    let (command, cmd_args) = mcp_launch(
+        portable,
+        shim,
+        use_system,
+        &system_bin.display().to_string(),
+        &current_exe,
+    );
     let url = if tls {
         format!("https://localhost:{port}/mcp")
     } else {
@@ -2857,13 +2956,27 @@ pub async fn mcp_install(ctx: &Context, args: &McpInstallArgs) -> Outcome {
     Ok(0)
 }
 
+/// `true` when `origin` is not in the daemon's trusted UI origin list.
+pub(crate) fn origin_is_untrusted(origins: &[Value], origin: &str) -> bool {
+    !origins.iter().any(|o| o.as_str() == Some(origin))
+}
+
+/// The warning `agent-vault ui` prints for a page the daemon will not trust.
+pub(crate) fn untrusted_origin_warning(origin: &str) -> String {
+    format!(
+        "  {origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page."
+    )
+}
+
+/// The Streamable HTTP endpoint on the session's gateway port.
+pub(crate) fn mcp_endpoint(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
 /// Ports `COMMANDS['mcp:url']`.
 pub async fn mcp_url(ctx: &Context) -> Outcome {
     let st = state();
-    let url = format!(
-        "http://127.0.0.1:{}/mcp",
-        ctx.gateway_port_of(&state_value())
-    );
+    let url = mcp_endpoint(ctx.gateway_port_of(&state_value()));
     let stored = st.token.clone();
     let token = stored.clone().unwrap_or_else(|| "<session token>".into());
     if ctx.json {
@@ -2966,7 +3079,7 @@ fn bridge_one(port: u16, line: &str, mcp_session: &mut Option<String>) -> Result
     };
     let token = current_token().ok_or_else(|| "no session".to_string())?;
     let mut res = send(&token, line, mcp_session)?;
-    let invalid = res.status == 401 || res.header("av-session-invalid").is_some();
+    let invalid = launch_token_dead(res.status, res.header("av-session-invalid").is_some());
     let mut answer: Option<String> = None;
     if invalid {
         let fresh = state().token;
@@ -3005,7 +3118,14 @@ fn bridge_one(port: u16, line: &str, mcp_session: &mut Option<String>) -> Result
     Ok(as_rpc(&text, line, res.status))
 }
 
-fn as_rpc(text: &str, request_line: &str, http_status: u16) -> String {
+/// A 401, or the daemon's `av-session-invalid` header, means the launch
+/// token is dead and the bridge must pick up the newly recorded session.
+pub(crate) fn launch_token_dead(status: u16, session_invalid_header: bool) -> bool {
+    status == 401 || session_invalid_header
+}
+
+/// Stdout of the stdio bridge is MCP JSON-RPC, never the daemon's raw body.
+pub(crate) fn as_rpc(text: &str, request_line: &str, http_status: u16) -> String {
     let is_message = |m: &Value| m.get("jsonrpc").and_then(|v| v.as_str()) == Some("2.0");
     if let Ok(payload) = serde_json::from_str::<Value>(text) {
         let ok = match &payload {
@@ -3110,7 +3230,7 @@ pub async fn ui(ctx: &Context, args: &UiArgs, hash: &str) -> Outcome {
             .and_then(|n| u16::try_from(n).ok())
             .unwrap_or(0)
     });
-    let server = av_daemon::ui::server::UiServer::new(
+    let server = match av_daemon::ui::server::serve(
         &socket_path(),
         av_daemon::ui::server::UiServerOptions {
             port,
@@ -3119,20 +3239,19 @@ pub async fn ui(ctx: &Context, args: &UiArgs, hash: &str) -> Outcome {
             state_path: Some(client_state_path()),
             dist_dir: None,
         },
-    );
-    if let Err(e) = server.start().await {
-        if e.kind() == std::io::ErrorKind::AddrInUse {
+    )
+    .await
+    {
+        Ok(server) => server,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             return Err(err_next(
-                format!(
-                    "port {} is in use; is another agent-vault ui running?",
-                    server.bound_port()
-                ),
+                format!("port {port} is in use; is another agent-vault ui running?"),
                 Exit::Failure,
                 "agent-vault ui --port <free port> --allow-origin",
             ));
         }
-        return Err(err(e.to_string(), Exit::Failure));
-    }
+        Err(e) => return Err(err(e.to_string(), Exit::Failure)),
+    };
     if let Some(trusted) = &trusted {
         let origins = trusted
             .get("origins")
@@ -3140,7 +3259,7 @@ pub async fn ui(ctx: &Context, args: &UiArgs, hash: &str) -> Outcome {
             .cloned()
             .unwrap_or_default();
         let origin = server.origin();
-        if !origins.iter().any(|o| o.as_str() == Some(origin.as_str())) {
+        if origin_is_untrusted(&origins, &origin) {
             if args.allow_origin {
                 ctx.control_with_presence(
                     "POST",
@@ -3158,13 +3277,7 @@ pub async fn ui(ctx: &Context, args: &UiArgs, hash: &str) -> Outcome {
                     );
                 }
             } else if !ctx.json {
-                println!(
-                    "{}",
-                    ctx.paint(
-                        "33",
-                        &format!("  {origin} is not a trusted UI origin, so the daemon will refuse fingerprints from this page.")
-                    )
-                );
+                println!("{}", ctx.paint("33", &untrusted_origin_warning(&origin)));
                 println!(
                     "{}",
                     ctx.paint(
@@ -3178,47 +3291,55 @@ pub async fn ui(ctx: &Context, args: &UiArgs, hash: &str) -> Outcome {
     let url = format!("{}{hash}", server.url());
     if ctx.json {
         ctx.out(None, &json!({ "url": url, "port": server.bound_port() }));
-        return Ok(0);
+    } else {
+        println!(
+            "{} {}",
+            ctx.paint("32", "agent-vault ui"),
+            ctx.paint("2", &format!("on 127.0.0.1:{}", server.bound_port()))
+        );
+        println!();
+        println!("  {}", ctx.paint("36", &url));
+        println!();
+        println!(
+            "{}",
+            ctx.paint(
+                "2",
+                "  The link works once. If your browser says the session was already"
+            )
+        );
+        println!(
+            "{}",
+            ctx.paint(
+                "2",
+                "  claimed, something else opened it first: check agent-vault audit tail."
+            )
+        );
+        println!(
+            "{}",
+            ctx.paint(
+                "2",
+                "  No credential value is ever sent to the page. Ctrl-C to stop."
+            )
+        );
+        if !args.no_open {
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            let _ = Command::new(opener).arg(&url).spawn();
+        }
     }
-    println!(
-        "{} {}",
-        ctx.paint("32", "agent-vault ui"),
-        ctx.paint("2", &format!("on 127.0.0.1:{}", server.bound_port()))
-    );
-    println!();
-    println!("  {}", ctx.paint("36", &url));
-    println!();
-    println!(
-        "{}",
-        ctx.paint(
-            "2",
-            "  The link works once. If your browser says the session was already"
-        )
-    );
-    println!(
-        "{}",
-        ctx.paint(
-            "2",
-            "  claimed, something else opened it first: check agent-vault audit tail."
-        )
-    );
-    println!(
-        "{}",
-        ctx.paint(
-            "2",
-            "  No credential value is ever sent to the page. Ctrl-C to stop."
-        )
-    );
-    if !args.no_open {
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        let _ = Command::new(opener).arg(&url).spawn();
+    // Stdout is block-buffered when piped. The URL has to leave the process
+    // while the server is still up, or a client that waits for the JSON
+    // fetches a port nothing is listening on.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    tokio::select! {
+        _ = server.stopped() => {}
+        _ = tokio::signal::ctrl_c() => {
+            server.stop().await;
+        }
     }
-    tokio::signal::ctrl_c().await.ok();
-    server.stop().await;
     Ok(0)
 }
 
@@ -3530,7 +3651,7 @@ pub async fn doctor(ctx: &Context) -> Outcome {
         socket.display().to_string(),
     ));
     if let Ok(chain) = ctx.control("GET", "/v1/audit/verify", None).await {
-        let ok = chain.get("ok").and_then(|v| v.as_bool()) == Some(true);
+        let (audit_name, ok) = doctor_audit_check(&chain);
         let note = if ok {
             format!(
                 "{} records",
@@ -3546,7 +3667,7 @@ pub async fn doctor(ctx: &Context) -> Outcome {
                 .unwrap_or("")
                 .to_string()
         };
-        checks.push(("audit chain intact".into(), ok, note));
+        checks.push((audit_name.into(), ok, note));
         if let Some(before) = chain.get("unanchored_before").filter(|v| !v.is_null()) {
             checks.push((
                 "audit log anchored throughout".into(),
@@ -3561,19 +3682,7 @@ pub async fn doctor(ctx: &Context) -> Outcome {
     if let Ok(lock) = ctx.control("GET", "/v1/lockstate", None).await {
         let pass = lock.get("has_passphrase").and_then(|v| v.as_bool()) == Some(true);
         let touch = lock.get("has_touchid").and_then(|v| v.as_bool()) == Some(true);
-        let enrolled = pass || touch;
-        let note = if enrolled {
-            let mut parts = Vec::new();
-            if pass {
-                parts.push("passphrase");
-            }
-            if touch {
-                parts.push("authenticator");
-            }
-            parts.join(" + ")
-        } else {
-            "none: anything running as you can use every credential, and can claim the vault by setting its own passphrase. Run: agent-vault passphrase set".into()
-        };
+        let (enrolled, note) = doctor_factor_note(pass, touch);
         checks.push(("human factor enrolled".into(), enrolled, note));
     }
     let credentials = ctx

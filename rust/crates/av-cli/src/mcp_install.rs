@@ -430,7 +430,7 @@ pub fn install(spec: &InstallSpec) -> Result<InstallResult, String> {
 }
 
 /// `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`, scanned by hand.
-fn server_name_ok(name: &str) -> bool {
+pub(crate) fn server_name_ok(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_alphanumeric() => {}

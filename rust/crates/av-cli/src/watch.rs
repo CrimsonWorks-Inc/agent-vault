@@ -161,22 +161,66 @@ fn split_head(buf: &[u8]) -> Option<(Head, usize)> {
     ))
 }
 
+/// Reconnect delay, capped at 30 seconds. Ports the backoff in `src/cli/watch.js`.
+pub(crate) fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(Duration::from_secs(30))
+}
+
+/// A 404 with no control route is an old daemon. Other statuses keep the
+/// registered exit for the error code.
+pub(crate) fn stream_refusal(status: u16, problem: &Value) -> CliError {
+    let detail = problem.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+    if status == 404 && detail.contains("no control route") {
+        return CliError {
+            message: "the running daemon is older than this command".into(),
+            exit: Exit::VersionSkew,
+            next: Some("restart the daemon you started with: agent-vault daemon".into()),
+            problem: Some(Box::new(problem.clone())),
+            skew: true,
+        };
+    }
+    let code = problem.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let exit = av_core::errors::ErrorCode::parse(code)
+        .map(|c| c.spec().exit)
+        .unwrap_or(Exit::Failure);
+    let message = if detail.is_empty() {
+        format!("approval stream returned HTTP {status}")
+    } else {
+        detail.to_string()
+    };
+    CliError {
+        message,
+        exit,
+        next: None,
+        problem: Some(Box::new(problem.clone())),
+        skew: false,
+    }
+}
+
+/// osascript that shows `argv`'s first item. The notification text is an
+/// argument, never interpolated into the script. Ports the `osascript`
+/// invocation in `src/cli/watch.js`.
+pub(crate) fn macos_notify_script() -> &'static [&'static str] {
+    &[
+        "-e",
+        "on run argv",
+        "-e",
+        "display notification (item 1 of argv) with title \"agent-vault\"",
+        "-e",
+        "end run",
+        "--",
+    ]
+}
+
 fn notify_desktop(text: &str) {
     let text = text.to_string();
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "on run argv",
-                "-e",
-                "display notification (item 1 of argv) with title \"agent-vault\"",
-                "-e",
-                "end run",
-                "--",
-                &text,
-            ])
-            .output();
+        let result = {
+            let mut args: Vec<&str> = macos_notify_script().to_vec();
+            args.push(&text);
+            std::process::Command::new("osascript").args(&args).output()
+        };
         #[cfg(target_os = "linux")]
         let result = std::process::Command::new("notify-send")
             .args(["agent-vault", &text])
@@ -242,7 +286,7 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
                     _ = &mut sigint => break,
                     _ = tokio::time::sleep(backoff) => {}
                 }
-                backoff = (backoff * 2).min(Duration::from_secs(30));
+                backoff = next_backoff(backoff);
                 continue;
             }
         };
@@ -277,7 +321,7 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
                 ));
             }
             tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(30));
+            backoff = next_backoff(backoff);
             continue;
         };
         if head.status != 200 {
@@ -290,35 +334,13 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
                 }
             }
             let problem: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let detail = problem.get("detail").and_then(|v| v.as_str()).unwrap_or("");
-            if head.status == 404 && detail.contains("no control route") {
-                return Err(CliError {
-                    message: "the running daemon is older than this command".into(),
-                    exit: Exit::VersionSkew,
-                    next: Some("restart the daemon you started with: agent-vault daemon".into()),
-                    problem: Some(Box::new(problem)),
-                    skew: true,
-                });
-            }
-            let code = problem.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            let exit = av_core::errors::ErrorCode::parse(code)
-                .map(|c| c.spec().exit)
-                .unwrap_or(Exit::Failure);
-            let message = if detail.is_empty() {
-                format!("approval stream returned HTTP {}", head.status)
-            } else {
-                detail.to_string()
-            };
-            return Err(CliError {
-                message,
-                exit,
-                next: None,
-                problem: Some(Box::new(problem)),
-                skew: false,
-            });
+            return Err(stream_refusal(head.status, &problem));
         }
         connected = true;
         backoff = Duration::from_secs(1);
+        // The snapshot often arrives in the same read as the headers
+        // (chunked). Parse that before blocking on the next read, or a
+        // client waiting for the first line sits through the keep-alive.
         let mut carry = head.body_start;
         let mut name = "message".to_string();
         let mut lines: Vec<String> = Vec::new();
@@ -330,24 +352,10 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
                 cooling = true;
                 cool_until = std::time::Instant::now() + Duration::from_secs(10);
             }
-            let mut tmp = [0u8; 4096];
-            let n = tokio::select! {
-                _ = &mut sigint => { stopped = true; break; }
-                n = stream.read(&mut tmp) => n,
-            };
-            let n = match n {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            carry.extend_from_slice(&tmp[..n]);
-            if carry.len() > FRAME_CAP {
-                break;
-            }
+            let mut oversize = false;
             while let Some(at) = carry.iter().position(|b| *b == b'\n') {
                 let raw = carry.drain(..=at).collect::<Vec<_>>();
-                let mut line = String::from_utf8_lossy(&raw)
-                    .trim_end_matches(['\n', '\r'])
-                    .to_string();
+                let line = sse_line(&raw);
                 if line.is_empty() {
                     if !lines.is_empty() {
                         if let Ok(data) = serde_json::from_str::<Value>(&lines.join("\n")) {
@@ -371,17 +379,30 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
                     frame_bytes = 0;
                     continue;
                 }
+                // A chunk-size line (`24`) is not an SSE field.
                 if let Some(rest) = line.strip_prefix("event:") {
                     name = rest.strip_prefix(' ').unwrap_or(rest).to_string();
                 } else if let Some(rest) = line.strip_prefix("data:") {
                     let data = rest.strip_prefix(' ').unwrap_or(rest).to_string();
                     frame_bytes += data.len();
                     if frame_bytes > FRAME_CAP {
+                        oversize = true;
                         break;
                     }
                     lines.push(data);
                 }
-                let _ = &mut line;
+            }
+            if oversize || carry.len() > FRAME_CAP {
+                break;
+            }
+            let mut tmp = [0u8; 4096];
+            let n = tokio::select! {
+                _ = &mut sigint => { stopped = true; break; }
+                n = stream.read(&mut tmp) => n,
+            };
+            match n {
+                Ok(0) | Err(_) => break,
+                Ok(n) => carry.extend_from_slice(&tmp[..n]),
             }
         }
         if stopped {
@@ -391,7 +412,7 @@ pub async fn watch_approvals(opts: WatchOptions) -> Result<(), CliError> {
             _ = &mut sigint => break,
             _ = tokio::time::sleep(backoff) => {}
         }
-        backoff = (backoff * 2).min(Duration::from_secs(30));
+        backoff = next_backoff(backoff);
     }
     Ok(())
 }
@@ -418,6 +439,39 @@ fn desktop_batch(items: &[Value]) {
     notify_desktop(&format!("{cut}{suffix}"));
 }
 
+/// One SSE line, with the trailing LF or CRLF removed. The bytes are
+/// decoded only after the newline has arrived, so a character split across
+/// reads is whole by the time this runs.
+pub(crate) fn sse_line(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw)
+        .trim_end_matches(['\n', '\r'])
+        .to_string()
+}
+
+/// `true` the first time `id` is shown. An empty id is never shown, and a
+/// repeat is not shown again. Ports the `seen` set in `src/cli/watch.js`.
+pub(crate) fn first_time(seen: &mut std::collections::BTreeSet<String>, id: &str) -> bool {
+    !id.is_empty() && seen.insert(id.to_string())
+}
+
+/// The display object for one SSE event: cleaned fields only, never the
+/// raw frame. Ports the `data: { ...data, event }` write in `src/cli/watch.js`.
+pub(crate) fn event_data(name: &str, raw: &Value) -> Option<Value> {
+    if name == "snapshot" {
+        let items = raw
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|items| items.iter().filter_map(safe_entry).collect::<Vec<_>>())?;
+        let mut map = Map::new();
+        map.insert("items".into(), Value::from(items));
+        Some(Value::Object(map))
+    } else if name == "pending" {
+        safe_entry(raw)
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_event(
     name: &str,
@@ -430,23 +484,7 @@ fn handle_event(
     cool_until: &mut std::time::Instant,
     opened: &mut bool,
 ) {
-    let data = if name == "snapshot" {
-        let items = raw
-            .get("items")
-            .and_then(|v| v.as_array())
-            .map(|items| items.iter().filter_map(safe_entry).collect::<Vec<_>>());
-        let Some(items) = items else {
-            return;
-        };
-        let mut map = Map::new();
-        map.insert("items".into(), Value::from(items));
-        Value::Object(map)
-    } else if name == "pending" {
-        let Some(safe) = safe_entry(raw) else {
-            return;
-        };
-        safe
-    } else {
+    let Some(data) = event_data(name, raw) else {
         return;
     };
     if opts.json {
@@ -459,10 +497,13 @@ fn handle_event(
             "{}",
             serde_json::to_string(&Value::Object(env)).unwrap_or_else(|_| "{}".into())
         );
+        // Piped stdout is block-buffered. A watcher that waits for the
+        // snapshot line never sees it if the process is killed first.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
     let mut show = |safe: &Value| {
         let id = safe.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if id.is_empty() || !seen.insert(id.to_string()) {
+        if !first_time(seen, id) {
             return;
         }
         let headline = safe.get("headline").and_then(|v| v.as_str()).unwrap_or("");

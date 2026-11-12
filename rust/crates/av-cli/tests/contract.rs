@@ -46,7 +46,7 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn js_vault(factor: &str) -> (tempfile::TempDir, PathBuf) {
+fn js_vault(factor: &str) -> (tempfile::TempDir, PathBuf, serde_json::Value) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("vault");
     let out = tmp.path().join("out.json");
@@ -61,7 +61,9 @@ fn js_vault(factor: &str) -> (tempfile::TempDir, PathBuf) {
         .status()
         .expect("node is needed to build the JS fixture vault");
     assert!(status.success(), "JS fixture vault failed");
-    (tmp, dir)
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&out).expect("fixture out.json")).unwrap();
+    (tmp, dir, report)
 }
 
 const HELP: &str = "\
@@ -334,8 +336,9 @@ fn installer_unknown_verb_is_help_and_a_flag_is_not_the_verb() {
 
 #[test]
 fn migrate_moves_a_js_vault_refuses_tampering_and_dry_run_writes_nothing() {
-    let (_keep, dir) = js_vault("none");
+    let (_keep, dir, fixture) = js_vault("none");
     let before = listing(&dir);
+    let vault_json_before = fs::read(dir.join("vault.json")).unwrap();
     let dry = av(
         &dir,
         &[
@@ -353,15 +356,48 @@ fn migrate_moves_a_js_vault_refuses_tampering_and_dry_run_writes_nothing() {
     assert_eq!(dry_json["ok"], true);
     assert_eq!(dry_json["data"]["dry_run"], true);
 
-    let done = av(
-        &dir,
-        &["migrate", "--from", &dir.display().to_string(), "--json"],
-    );
+    let done = av(&dir, &["migrate", "--from", &dir.display().to_string()]);
     assert_eq!(done.status.code(), Some(0), "{}", text(&done.stderr));
-    let report: serde_json::Value = serde_json::from_slice(&done.stdout).unwrap();
-    assert_eq!(report["data"]["counts"]["credentials"], 3);
+    let human = text(&done.stdout);
+    assert!(
+        human.contains("  credentials: 3"),
+        "counts missing: {human}"
+    );
+    assert!(
+        human.contains("left vault.json in place"),
+        "no leave-in-place message: {human}"
+    );
+    let vault_json = dir.join("vault.json");
+    assert!(
+        human.contains(&vault_json.display().to_string()),
+        "message does not name {vault_json:?}: {human}"
+    );
+    assert_eq!(
+        fs::read(&vault_json).unwrap(),
+        vault_json_before,
+        "migrate rewrote vault.json"
+    );
     assert!(dir.join("vault.db").is_file());
-    assert!(dir.join("vault.json").is_file(), "vault.json must stay");
+
+    let mut vault = av_store::vault::Vault::open(&dir).unwrap();
+    vault.unlock(None).unwrap();
+    let token = fixture["token"].as_str().unwrap();
+    let session = vault
+        .session_by_token(token)
+        .unwrap()
+        .expect("the pre-migration session token still resolves");
+    assert_eq!(session.id, fixture["session_id"].as_str().unwrap());
+    let placeholder = fixture["placeholder"].as_str().unwrap();
+    let parsed = av_core::placeholder::parse_at(placeholder, 0).unwrap();
+    assert!(
+        av_core::placeholder::verify(&vault.k_ph().unwrap(), &parsed),
+        "the pre-migration placeholder no longer verifies"
+    );
+    let row = vault
+        .resolve_placeholder(&parsed)
+        .unwrap()
+        .expect("the pre-migration placeholder row is missing");
+    assert_eq!(row.id, fixture["row_id"].as_str().unwrap());
     let human = av(&dir, &["migrate", "--from", &dir.display().to_string()]);
     assert_eq!(human.status.code(), Some(0), "{}", text(&human.stderr));
     assert!(
@@ -379,7 +415,7 @@ fn migrate_moves_a_js_vault_refuses_tampering_and_dry_run_writes_nothing() {
 
 #[test]
 fn migrate_refuses_a_tampered_audit_and_a_live_socket() {
-    let (_keep, dir) = js_vault("none");
+    let (_keep, dir, _) = js_vault("none");
     let audit = dir.join("audit.jsonl");
     let mut bytes = fs::read(&audit).unwrap();
     if let Some(byte) = bytes.iter_mut().find(|b| b.is_ascii_alphanumeric()) {
@@ -396,7 +432,7 @@ fn migrate_refuses_a_tampered_audit_and_a_live_socket() {
         "a refused migrate wrote vault.db"
     );
 
-    let (_keep2, live) = js_vault("none");
+    let (_keep2, live, _) = js_vault("none");
     let sock = live.join("control.sock");
     let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
     let blocked = av(&live, &["migrate", "--from", &live.display().to_string()]);
@@ -404,12 +440,20 @@ fn migrate_refuses_a_tampered_audit_and_a_live_socket() {
     let err = format!("{}{}", text(&blocked.stdout), text(&blocked.stderr));
     assert_ne!(blocked.status.code(), Some(0), "{err}");
     assert!(err.contains("stop the daemon"), "{err}");
+    assert!(
+        err.contains("sudo launchctl bootout"),
+        "does not say how to stop an installed daemon: {err}"
+    );
+    assert!(
+        err.contains("agent-vault daemon"),
+        "does not say how to stop a dev daemon: {err}"
+    );
     assert!(!live.join("vault.db").exists());
 }
 
 #[test]
 fn migrate_prompts_the_passphrase_and_never_takes_it_as_a_flag() {
-    let (_keep, dir) = js_vault("passphrase");
+    let (_keep, dir, _) = js_vault("passphrase");
     let mut child = Command::new(bin("agent-vault"))
         .args(["migrate", "--from"])
         .arg(&dir)
@@ -430,8 +474,18 @@ fn migrate_prompts_the_passphrase_and_never_takes_it_as_a_flag() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert!(dir.join("vault.db").is_file());
-    assert!(!text(&out.stdout).contains("test-passphrase-not-real"));
+    let human = text(&out.stdout);
+    assert!(!human.contains("test-passphrase-not-real"));
     assert!(!text(&out.stderr).contains("test-passphrase-not-real"));
+    assert!(
+        human.contains("webauthn-prf unlock wrap"),
+        "dropped wrap not named: {human}"
+    );
+    assert!(
+        human.contains("re-enroll: agent-vault ui"),
+        "re-enroll command missing: {human}"
+    );
+    assert!(dir.join("vault.json").is_file());
 }
 
 #[test]
