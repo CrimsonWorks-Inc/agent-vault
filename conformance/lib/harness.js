@@ -2,7 +2,7 @@
 // and the CLI. Nothing here imports src/.
 import { spawn } from 'node:child_process'
 import { createServer, request as httpRequest } from 'node:http'
-import { mkdtemp, rm, mkdir } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, chmod } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,7 +37,14 @@ export function binaries() {
   }
   const daemon = join(ROOT, 'rust/target/debug/agent-vault-daemon')
   const cli = join(ROOT, 'rust/target/debug/agent-vault')
-  if (!existsSync(daemon) || !existsSync(cli)) return null
+  if (!existsSync(daemon) || !existsSync(cli)) {
+    // A missing binary is a skip unless a gate asked to be failed instead.
+    // AV_REQUIRE_IMPL=1 is how the Rust acceptance run refuses to pass by skipping.
+    if (process.env.AV_REQUIRE_IMPL === '1') {
+      throw new Error(`${SKIP_RUST} (AV_REQUIRE_IMPL=1: a missing implementation is a failure, not a skip)`)
+    }
+    return null
+  }
   return { impl, daemon: [daemon], cli: [cli] }
 }
 
@@ -66,7 +73,7 @@ export function secretForms(secret) {
   ]
 }
 
-/** True when none of the encodings the scrubber and detector search for is present. */
+/** The first encoding of `secret` found in `text`, or null when none is present. */
 export function leaksSecret(text, secret = SECRET) {
   const blob = typeof text === 'string' ? text : JSON.stringify(text)
   return secretForms(secret).find((form) => form && blob.includes(form)) || null
@@ -85,6 +92,10 @@ export function startUpstream() {
         const payload = JSON.stringify(obj)
         res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) })
         res.end(payload)
+      }
+      if (req.url.startsWith('/reflect')) {
+        // The stored secret, so a retire-window scrub can be seen from outside.
+        return send(200, { echoed: SECRET, ordinary: 'ordinary-traffic-control', lookalike: LOOKALIKE })
       }
       if (req.url.startsWith('/echo')) {
         return send(200, {
@@ -131,12 +142,7 @@ function baseEnv(dir) {
   return env
 }
 
-export async function openWorld() {
-  const bins = binaries()
-  if (!bins) throw new Error(SKIP_RUST)
-  const dir = await mkdtemp(join(tempParent(), 'avc-'))
-  const upstream = await startUpstream()
-  const env = baseEnv(dir)
+function spawnDaemon(bins, env, dir) {
   const stderr = []
   const stdout = []
   const child = spawn(bins.daemon[0], bins.daemon.slice(1), {
@@ -170,7 +176,6 @@ export async function openWorld() {
       }
     })
   })
-
   const stop = async () => {
     if (child.exitCode !== null || child.signalCode) return
     child.kill('SIGTERM')
@@ -179,31 +184,69 @@ export async function openWorld() {
     await exited
     clearTimeout(killer)
   }
+  return ready.then((port) => ({
+    port,
+    stop,
+    log: () => ({ stdout: stdout.join(''), stderr: stderr.join('') }),
+  })).catch(async (e) => {
+    await stop()
+    throw e
+  })
+}
 
+export async function openWorld() {
+  const bins = binaries()
+  if (!bins) throw new Error(SKIP_RUST)
+  const dir = await mkdtemp(join(tempParent(), 'avc-'))
+  // mkdtemp is already 0700. Loosen it so a daemon that never chmods the
+  // vault directory cannot pass the mode check.
+  await chmod(dir, 0o755)
+  const upstream = await startUpstream()
+  const env = baseEnv(dir)
+  let daemon
+  const attach = () => spawnDaemon(bins, env, dir)
   try {
-    const port = await ready
+    daemon = await attach()
     const world = {
       dir,
       env,
-      port,
+      port: daemon.port,
       upstream,
       bins,
       socketPath: join(dir, 'control.sock'),
-      log() { return { stdout: stdout.join(''), stderr: stderr.join('') } },
+      log() { return daemon.log() },
       control(method, path, body) { return control(world.socketPath, method, path, body) },
+      async restart() {
+        await daemon.stop()
+        daemon = await attach()
+        world.port = daemon.port
+        return world
+      },
       async close() {
-        await stop()
+        await daemon.stop()
         await upstream.close()
         await rm(dir, { recursive: true, force: true })
       },
     }
     return world
   } catch (e) {
-    await stop()
+    if (daemon) await daemon.stop()
     await upstream.close()
     await rm(dir, { recursive: true, force: true })
     throw e
   }
+}
+
+/** A loopback port that is free at the moment it is returned. */
+export function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close((err) => (err ? reject(err) : resolve(port)))
+    })
+  })
 }
 
 export function control(socketPath, method, path, body, { timeout = 20_000 } = {}) {
@@ -254,7 +297,7 @@ export function readStream(socketPath) {
       })
       res.on('end', finish)
     })
-    const timer = setTimeout(() => { req.destroy(); reject(new Error('pending stream produced no snapshot')) }, 3000)
+    const timer = setTimeout(() => { req.destroy(); reject(new Error('pending stream produced no snapshot')) }, 15_000)
     req.on('error', (e) => { clearTimeout(timer); reject(e) })
     req.on('close', () => clearTimeout(timer))
     req.end()

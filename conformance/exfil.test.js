@@ -95,6 +95,7 @@ if (skip) {
             body: method === 'POST' ? JSON.stringify({ token: made.json.placeholder }) : undefined,
           })
           assert.equal(res.status, 403, `${method} ${res.text}`)
+          assert.equal(res.json.code, 'AV_NO_GRANT')
           assert.equal(leaksSecret(res.text), null)
         }
         const direct = await fetch(`http://127.0.0.1:${catcher.port}/collect`, {
@@ -133,6 +134,7 @@ if (skip) {
       assert.equal(noSecret.json.code, 'AV_LOCKED')
       const wrong = await w.control('POST', '/v1/unlock', { passphrase: 'guess-wrong' })
       assert.equal(wrong.status, 423)
+      assert.equal(wrong.json.code, 'AV_LOCKED')
       const right = await w.control('POST', '/v1/unlock', { passphrase: PASSPHRASE })
       assert.equal(right.status, 200, right.text)
       assert.equal(right.json.locked, false)

@@ -1,10 +1,12 @@
 // MCP over Streamable HTTP and the stdio bridge. Schemas and one call per tool.
 import { describe, test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
-import { rustSkipReason, implName, openWorld, seed, runCli, leaksSecret, ROOT } from './lib/harness.js'
+import { rustSkipReason, implName, openWorld, seed, runCli, leaksSecret, gateway } from './lib/harness.js'
 
 const PKG_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+const GOLDEN = JSON.parse(readFileSync(new URL('./mcp-golden.json', import.meta.url), 'utf8'))
 const TOOLS = {
   vault_status: [],
   vault_list_creds: [],
@@ -85,11 +87,10 @@ if (skip) {
 
       const listed = await post({ jsonrpc: '2.0', id: 4, method: 'tools/list' })
       const tools = listed.json.result.tools
+      const shape = (list) => list.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
+      assert.deepEqual(shape(tools), shape(GOLDEN.tools))
+      assert.equal(init.json.result.instructions, GOLDEN.instructions)
       assert.deepEqual(tools.map((t) => t.name).sort(), Object.keys(TOOLS).sort())
-      for (const tool of tools) {
-        assert.equal(tool.inputSchema.type, 'object')
-        assert.deepEqual(tool.inputSchema.required || [], TOOLS[tool.name])
-      }
 
       const status = toolBody((await post({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'vault_status', arguments: {} } })).json)
       assert.equal(status.isError, false)
@@ -150,12 +151,22 @@ if (skip) {
       assert.ok(missingApproval.text.includes('no approval'))
       assert.equal(leaksSecret(missingApproval.text), null)
 
-      const missingDenial = toolBody((await post({
+      assert.equal(typeof http.json.request_id, 'string')
+      const explained = toolBody((await post({
         jsonrpc: '2.0', id: 13, method: 'tools/call',
-        params: { name: 'vault_explain_denial', arguments: { request_id: http.json.request_id || 'no-such-request' } },
+        params: { name: 'vault_explain_denial', arguments: { request_id: http.json.request_id } },
       })).json)
-      assert.equal(typeof missingDenial.text, 'string')
-      assert.equal(leaksSecret(missingDenial.text), null)
+      assert.equal(explained.isError, false)
+      assert.equal(explained.json.request_id, http.json.request_id)
+      assert.notEqual(explained.json.decision, 'deny')
+      assert.equal(explained.json.rule ?? null, null)
+      assert.equal(leaksSecret(explained.text), null)
+      const unknownDenial = toolBody((await post({
+        jsonrpc: '2.0', id: 15, method: 'tools/call',
+        params: { name: 'vault_explain_denial', arguments: { request_id: 'no-such-request' } },
+      })).json)
+      assert.match(unknownDenial.text, /no record of request/)
+      assert.equal(leaksSecret(unknownDenial.text), null)
 
       const badVersion = await post(
         { jsonrpc: '2.0', id: 14, method: 'tools/list' },
@@ -248,7 +259,128 @@ if (skip) {
       assert.equal(lines[0].result.protocolVersion, '2025-06-18')
       assert.equal(lines[1].result.tools.length, Object.keys(TOOLS).length)
       assert.equal(leaksSecret(bridged.stdout + bridged.stderr), null)
-      assert.equal(ROOT.includes('agent-vault'), true)
+    })
+
+    test('vault_http enforces the grant, and explain_denial names the rule that failed', async () => {
+      const narrow = await w.control('POST', '/v1/sessions', {
+        cred: w.slug, label: 'narrow', methods: ['GET'], paths: ['/user'], budget: 10, approval: 'auto', ttl_hours: 1,
+      })
+      assert.equal(narrow.status, 200, narrow.text)
+      async function call(token, name, args) {
+        const res = await fetch(`http://127.0.0.1:${w.port}/mcp`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }),
+        })
+        const json = await res.json()
+        return { status: res.status, ...toolBody(json) }
+      }
+      const before = w.upstream.hits.length
+      const pathDenied = await call(narrow.json.token, 'vault_http', {
+        cred: w.slug, method: 'GET', path: '/other', reason: 'conformance drill',
+      })
+      assert.equal(pathDenied.status, 200, pathDenied.text)
+      assert.equal(pathDenied.isError, false)
+      assert.equal(pathDenied.json.status, 403)
+      assert.equal(pathDenied.json.decision, 'deny')
+      const pathBody = JSON.parse(pathDenied.json.body)
+      assert.equal(pathBody.code, 'AV_POLICY_DENIED')
+      assert.equal(pathBody.rule, 'paths')
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(pathDenied.text), null)
+
+      const methodDenied = await call(narrow.json.token, 'vault_http', {
+        cred: w.slug, method: 'DELETE', path: '/user', reason: 'conformance drill',
+      })
+      assert.equal(methodDenied.json.status, 403)
+      assert.equal(methodDenied.json.decision, 'deny')
+      assert.equal(JSON.parse(methodDenied.json.body).rule, 'methods')
+      assert.equal(w.upstream.hits.length, before)
+
+      const explained = await call(narrow.json.token, 'vault_explain_denial', { request_id: pathDenied.json.request_id })
+      assert.equal(explained.isError, false)
+      assert.equal(explained.json.decision, 'deny')
+      assert.equal(explained.json.code, 'AV_POLICY_DENIED')
+      assert.equal(explained.json.rule, 'paths')
+      assert.equal(explained.json.request_id, pathDenied.json.request_id)
+
+      // vault_http always requests /p/<slug><path>, so a host outside the grant
+      // is the gateway /t/ route with the same session. A second local catcher
+      // is the thing that would have received it.
+      const catcher = await new Promise((resolve, reject) => {
+        const hits = []
+        const server = createServer((req, res) => { hits.push(req.url); res.end('caught') })
+        server.once('error', reject)
+        server.listen(0, '127.0.0.1', () => resolve({
+          port: server.address().port,
+          hits,
+          close: () => new Promise((r) => server.close(r)),
+        }))
+      })
+      try {
+        // localhost is not the credential host 127.0.0.1. The catcher is
+        // where that name would connect. 127.0.0.2 is not assigned here.
+        const host = await gateway(w, `/t/http/localhost:${catcher.port}/x`, {
+          token: narrow.json.token, placeholder: narrow.json.placeholder,
+        })
+        assert.equal(host.status, 403, host.text)
+        assert.equal(host.json.code, 'AV_NO_GRANT')
+        assert.equal(catcher.hits.length, 0)
+        assert.equal(w.upstream.hits.length, before)
+        assert.equal(leaksSecret(host.text), null)
+      } finally {
+        await catcher.close()
+      }
+
+      const allowed = await call(narrow.json.token, 'vault_http', {
+        cred: w.slug, method: 'GET', path: '/user', reason: 'conformance drill',
+      })
+      assert.equal(allowed.json.status, 200)
+      assert.ok(allowed.json.body.includes('ordinary-traffic-control'))
+      assert.equal(w.upstream.hits.length, before + 1)
+    })
+
+    test('tools/call with a dead token or a revoked token does not run', async () => {
+      const before = w.upstream.hits.length
+      async function call(token) {
+        const res = await fetch(`http://127.0.0.1:${w.port}/mcp`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0', id: 1, method: 'tools/call',
+            params: { name: 'vault_http', arguments: { cred: w.slug, method: 'GET', path: '/user', reason: 'conformance drill' } },
+          }),
+        })
+        const json = await res.json()
+        return { status: res.status, ...toolBody(json) }
+      }
+      const dead = await call('avs1.dead.not-a-real-token')
+      assert.equal(dead.status, 200, dead.text)
+      assert.equal(dead.isError, true)
+      assert.match(dead.text, /this tool needs a live session/)
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(dead.text), null)
+
+      const extra = await w.control('POST', '/v1/sessions', {
+        cred: w.slug, label: 'revoked-mcp', methods: ['GET'], paths: ['/**'], budget: 3, approval: 'auto', ttl_hours: 1,
+      })
+      assert.equal(extra.status, 200, extra.text)
+      const gone = await w.control('DELETE', `/v1/sessions?sid=${extra.json.session_id}`)
+      assert.equal(gone.status, 200, gone.text)
+      const revoked = await call(extra.json.token)
+      assert.equal(revoked.status, 200, revoked.text)
+      assert.equal(revoked.isError, true)
+      assert.match(revoked.text, /this tool needs a live session/)
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(revoked.text), null)
     })
   })
 }

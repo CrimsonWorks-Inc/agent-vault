@@ -2,14 +2,14 @@ import { describe, test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
 import {
-  binaries, rustSkipReason, openWorld, seed, leaksSecret, SECRET, readStream, pinValue, presenceKey, PASSPHRASE,
+  binaries, rustSkipReason, openWorld, seed, leaksSecret, SECRET, readStream, pinValue, presenceKey, PASSPHRASE, gateway, freePort,
 } from './lib/harness.js'
 
 const skip = rustSkipReason()
 if (skip) {
   test('control api', { skip }, () => {})
 } else {
-  describe('control api', { concurrency: false, timeout: 120_000 }, () => {
+  describe('control api', { concurrency: false, timeout: 180_000 }, () => {
     let w
     before(async () => {
       w = await openWorld()
@@ -79,6 +79,7 @@ if (skip) {
         slug: w.slug, value: 'test-secret-conform-rotate-fffffffffffffff0', retire_hours: 999,
       })
       assert.equal(badHours.status, 403)
+      assert.equal(badHours.json.code, 'AV_POLICY_DENIED')
       assert.equal(badHours.json.rule, 'retire_window')
 
       const expiry = await w.control('POST', '/v1/credentials/expiry', {
@@ -126,18 +127,80 @@ if (skip) {
       assert.ok(all.json.results.some((r) => r.slug === w.slug && r.rule === 'no_probe'))
       const badAll = await w.control('POST', '/v1/credentials/test', { all: false })
       assert.equal(badAll.status, 403)
+      assert.equal(badAll.json.code, 'AV_POLICY_DENIED')
+      assert.equal(badAll.json.rule, 'policy_invalid')
 
       const side = await w.control('POST', '/v1/credentials', {
-        slug: 'side', kind: 'http', host: '127.0.0.1', scheme: 'http', value: SECRET,
+        slug: 'side', kind: 'http', host: `127.0.0.1:${w.upstream.port}`, scheme: 'http',
+        value: SECRET, sites: ['header:authorization:Bearer'],
       })
       assert.equal(side.status, 200)
+      const held = await w.control('POST', '/v1/sessions', {
+        cred: 'side', label: 'held', methods: ['GET'], paths: ['/**'], budget: 8, approval: 'auto', ttl_hours: 1,
+      })
+      assert.equal(held.status, 200, held.text)
+      const before = w.upstream.hits.length
+      const live = await gateway(w, '/p/side/user', { token: held.json.token, placeholder: held.json.placeholder })
+      assert.equal(live.status, 200, live.text)
+      assert.equal(live.json.ordinary, 'ordinary-traffic-control')
+      assert.equal(w.upstream.hits.length, before + 1)
+      assert.equal(w.upstream.hits.at(-1).seen, SECRET)
+      const ask = await w.control('POST', '/v1/session-requests', {
+        cred: 'side', reason: 'approve me', methods: ['GET'], paths: ['/user'], budget: 2,
+      })
+      const bulkAsk = await w.control('POST', '/v1/session-requests', {
+        cred: 'side', reason: 'bulk me', methods: ['GET'], paths: ['/user'], budget: 2,
+      })
+      assert.equal(ask.status, 200, ask.text)
+      assert.equal(bulkAsk.status, 200, bulkAsk.text)
       const quarantined = await w.control('POST', '/v1/credentials/quarantine', { slug: 'side', reason: 'drill' })
       assert.equal(quarantined.status, 200)
       assert.equal(quarantined.json.slug, 'side')
       assert.ok(quarantined.json.quarantine)
+      const stopped = w.upstream.hits.length
+      const refused = await gateway(w, '/p/side/user', { token: held.json.token, placeholder: held.json.placeholder })
+      assert.equal(refused.status, 403, refused.text)
+      assert.equal(refused.json.code, 'AV_QUARANTINED')
+      assert.equal(refused.json.rule, 'quarantine')
+      assert.equal(w.upstream.hits.length, stopped)
+      assert.equal(leaksSecret(refused.text), null)
+      const noSession = await w.control('POST', '/v1/sessions', {
+        cred: 'side', label: 'later', methods: ['GET'], paths: ['/**'], budget: 2, ttl_hours: 1,
+      })
+      assert.equal(noSession.status, 403, noSession.text)
+      assert.equal(noSession.json.code, 'AV_QUARANTINED')
+      assert.equal(noSession.json.rule, 'quarantine')
+      const noBatch = await w.control('POST', '/v1/placeholders/batch', {
+        sid: held.json.session_id, purpose: 'env', items: [{ cred: 'side' }],
+      })
+      assert.equal(noBatch.status, 403, noBatch.text)
+      assert.equal(noBatch.json.code, 'AV_QUARANTINED')
+      assert.equal(noBatch.json.items, undefined)
+      const noAsk = await w.control('POST', '/v1/session-requests', {
+        cred: 'side', reason: 'after', methods: ['GET'], paths: ['/user'], budget: 2,
+      })
+      assert.equal(noAsk.status, 403, noAsk.text)
+      assert.equal(noAsk.json.code, 'AV_QUARANTINED')
+      const noApprove = await w.control('POST', '/v1/session-requests/decide', { id: ask.json.id, granted: true })
+      assert.equal(noApprove.status, 403, noApprove.text)
+      assert.equal(noApprove.json.code, 'AV_QUARANTINED')
+      const stillPending = await w.control('GET', '/v1/session-requests')
+      assert.equal(stillPending.json.find((r) => r.id === ask.json.id).state, 'pending')
+      const skipped = await w.control('POST', '/v1/pending/decide-many', {
+        decisions: [{ id: bulkAsk.json.id, kind: 'session', granted: true }],
+      })
+      assert.equal(skipped.status, 200, skipped.text)
+      assert.equal(skipped.json.decided[0].outcome, 'skipped')
+      assert.match(skipped.json.decided[0].reason, /quarantined/)
+      assert.equal((await w.control('GET', '/v1/session-requests')).json.find((r) => r.id === bulkAsk.json.id).state, 'pending')
       const released = await w.control('POST', '/v1/credentials/release', { slug: 'side' })
       assert.equal(released.status, 200)
       assert.equal(released.json.released, true)
+      const again = await gateway(w, '/p/side/user', { token: held.json.token, placeholder: held.json.placeholder })
+      assert.equal(again.status, 200, again.text)
+      assert.equal(again.json.ordinary, 'ordinary-traffic-control')
+      assert.equal(leaksSecret(again.text), null)
+      assert.equal(w.upstream.hits.at(-1).seen, SECRET)
       await w.control('DELETE', '/v1/credentials?slug=side')
     })
 
@@ -169,6 +232,7 @@ if (skip) {
       assert.ok(issued.json.usage.length)
       const noGrant = await w.control('POST', '/v1/placeholders', { cred: 'missing', sid: w.session.session_id })
       assert.equal(noGrant.status, 404)
+      assert.equal(noGrant.json.code, 'AV_NOT_FOUND')
 
       const batch = await w.control('POST', '/v1/placeholders/batch', {
         sid: w.session.session_id,
@@ -202,6 +266,10 @@ if (skip) {
       assert.equal(detail.status, 200)
       assert.equal(detail.json.session.id, w.session.session_id)
       assert.equal(typeof detail.json.grants[0].budget.limit, 'number')
+      assert.equal(typeof detail.json.activity, 'object')
+      assert.equal(leaksSecret(detail.json.activity), null)
+      assert.equal(JSON.stringify(detail.json.activity).includes(w.session.placeholder), false)
+      assert.equal(JSON.stringify(detail.json.activity).includes(w.session.token), false)
       assert.equal(leaksSecret(detail.text), null)
       assert.equal(detail.text.includes(w.session.placeholder), false)
       const noSession = await w.control('GET', '/v1/sessions/detail?sid=missing')
@@ -249,7 +317,8 @@ if (skip) {
       assert.equal(denied.status, 200)
       const approved = await w.control('POST', '/v1/session-requests/decide', { id: asked.json.id, granted: true })
       assert.equal(approved.status, 200)
-      assert.ok(approved.json.state === 'approved' || approved.json.session)
+      assert.equal(approved.json.state, 'approved')
+      assert.equal(typeof approved.json.session.session_id, 'string')
       assert.equal(leaksSecret(approved.text), null)
 
       const third = await w.control('POST', '/v1/session-requests', {
@@ -274,8 +343,8 @@ if (skip) {
       assert.equal(approvals.status, 200)
       assert.ok(Array.isArray(approvals.json))
       const noApproval = await w.control('POST', '/v1/approvals', { id: 'missing-approval', granted: false })
-      assert.ok(noApproval.status >= 400)
-      assert.match(noApproval.json.code, /^AV_/)
+      assert.equal(noApproval.status, 404)
+      assert.equal(noApproval.json.code, 'AV_NOT_FOUND')
       const badGrant = await w.control('POST', '/v1/approvals', { id: 'missing-approval', granted: 'no' })
       assert.equal(badGrant.status, 403)
       assert.equal(badGrant.json.rule, 'bulk_decision')
@@ -303,6 +372,27 @@ if (skip) {
       const witness = await w.control('POST', '/v1/audit/verify-witness', { checkpoints: [checkpoint.json] })
       assert.equal(witness.status, 200)
       assert.equal(witness.json.ok, true)
+      const mac = checkpoint.json.mac
+      const flipped = `${mac[0] === 'a' ? 'b' : 'a'}${mac.slice(1)}`
+      const forged = await w.control('POST', '/v1/audit/verify-witness', {
+        checkpoints: [{ ...checkpoint.json, mac: flipped }],
+      })
+      assert.equal(forged.status, 200, forged.text)
+      assert.equal(forged.json.ok, false)
+      assert.deepEqual(forged.json.forged, [0])
+      const notAList = await w.control('POST', '/v1/audit/verify-witness', { checkpoints: 'all' })
+      assert.equal(notAList.status, 403, notAList.text)
+      assert.equal(notAList.json.code, 'AV_POLICY_DENIED')
+      assert.equal(notAList.json.rule, 'audit_range')
+      const clamped = await w.control('GET', '/v1/audit/export?limit=0')
+      assert.equal(clamped.status, 200, clamped.text)
+      assert.equal(clamped.json.rows.length, 1)
+      const unbounded = await w.control('GET', '/v1/audit/export')
+      assert.ok(unbounded.json.rows.length > 1, `rows ${unbounded.json.rows.length}`)
+      const badLimit = await w.control('GET', '/v1/audit/export?limit=nope')
+      assert.equal(badLimit.status, 403, badLimit.text)
+      assert.equal(badLimit.json.code, 'AV_POLICY_DENIED')
+      assert.equal(badLimit.json.rule, 'audit_range')
 
       const saved = await w.control('POST', '/v1/templates', {
         name: 'read-user',
@@ -351,8 +441,9 @@ if (skip) {
       const badAddr = await w.control('POST', '/v1/listeners', { id: 'bad', address: 'not-an-address' })
       assert.equal(badAddr.status, 404)
       assert.equal(badAddr.json.rule, 'listener_address')
+      const loopPort = await freePort()
       const added = await w.control('POST', '/v1/listeners', {
-        id: 'loop', address: '127.0.0.1:59991', surfaces: ['gateway'],
+        id: 'loop', address: `127.0.0.1:${loopPort}`, surfaces: ['gateway'],
       })
       assert.equal(added.status, 200)
       assert.equal(added.json.id, 'loop')
@@ -375,15 +466,33 @@ if (skip) {
       const notify0 = await w.control('GET', '/v1/notify')
       assert.equal(notify0.status, 200)
       assert.equal(notify0.json.webhook, null)
+      for (const webhook_url of [
+        'http://user:pass@127.0.0.1/hook',
+        'http://example.test/hook',
+        'not a url',
+      ]) {
+        const refused = await w.control('POST', '/v1/notify', { webhook_url })
+        assert.equal(refused.status, 403, `${webhook_url} ${refused.text}`)
+        assert.equal(refused.json.code, 'AV_POLICY_DENIED')
+        assert.equal(refused.json.rule, 'webhook_url')
+        assert.equal(w.upstream.hits.some((h) => h.url.startsWith('/hook')), false)
+      }
       const hook = await w.control('POST', '/v1/notify', {
         webhook_url: `http://127.0.0.1:${w.upstream.port}/hook`, detail: 'minimal',
       })
       assert.equal(hook.status, 200)
       assert.equal(hook.json.webhook.host, `127.0.0.1:${w.upstream.port}`)
       assert.equal(hook.text.includes('/hook'), false)
+      const marked = w.upstream.hits.length
       const tested = await w.control('POST', '/v1/notify/test', {})
       assert.equal(tested.status, 200)
       assert.equal(tested.json.sent, true)
+      const delivered = w.upstream.hits.slice(marked).filter((h) => h.method === 'POST' && h.url.startsWith('/hook'))
+      assert.equal(delivered.length, 1)
+      assert.equal(leaksSecret(delivered[0].body), null)
+      assert.equal(delivered[0].body.includes('/hook'), false)
+      assert.equal(delivered[0].body.includes(String(w.upstream.port)), false)
+      assert.match(delivered[0].body, /"source":"agent-vault"/)
       const cleared = await w.control('DELETE', '/v1/notify')
       assert.equal(cleared.status, 200)
       assert.equal(cleared.json.removed, true)
@@ -453,6 +562,120 @@ if (skip) {
       assert.match(missing.json.detail, /no control route/)
       const still = await w.control('GET', '/v1/status')
       assert.equal(still.status, 200)
+    })
+
+    test('an elevated session is refused when no human factor is enrolled', async () => {
+      const elevated = await w.control('POST', '/v1/sessions', {
+        cred: w.slug, methods: ['POST'], paths: ['/**'], approval: 'auto', budget: 2, ttl_hours: 1,
+      })
+      assert.equal(elevated.status, 401, elevated.text)
+      assert.equal(elevated.json.code, 'AV_PRESENCE_REQUIRED')
+      assert.equal(elevated.json.rule, 'factor_required')
+      const infinite = await w.control('POST', '/v1/sessions', {
+        cred: w.slug, methods: ['GET'], paths: ['/**'], infinite: true,
+      })
+      assert.equal(infinite.status, 401, infinite.text)
+      assert.equal(infinite.json.code, 'AV_PRESENCE_REQUIRED')
+      assert.equal(infinite.json.rule, 'factor_required')
+      const listed = await w.control('GET', '/v1/sessions')
+      assert.equal(listed.json.some((s) => s.infinite === true), false)
+    })
+
+    test('a retire window scrubs the old value, and revoke mode stops the grant', async () => {
+      // Its own vault: the shared one has already retired the fixture secret,
+      // and the scrubber matches every retired value, not only this credential's.
+      const own = await openWorld()
+      try {
+        const add = (slug) => own.control('POST', '/v1/credentials', {
+          slug, kind: 'http', host: `127.0.0.1:${own.upstream.port}`, scheme: 'http',
+          value: SECRET, sites: ['header:authorization:Bearer'],
+        })
+        const sessionFor = (slug, label) => own.control('POST', '/v1/sessions', {
+          cred: slug, label, methods: ['GET'], paths: ['/**'], budget: 5, approval: 'auto', ttl_hours: 1,
+        })
+        assert.equal((await add('dropwin')).status, 200)
+        const drop = await sessionFor('dropwin', 'drop')
+        assert.equal(drop.status, 200, drop.text)
+        const dropped = await own.control('POST', '/v1/credentials/rotate', {
+          slug: 'dropwin', value: 'test-secret-conform-drop-0123456789abcd', retire_hours: 0,
+        })
+        assert.equal(dropped.status, 200, dropped.text)
+        const visible = await gateway(own, '/p/dropwin/reflect', { token: drop.json.token, placeholder: drop.json.placeholder })
+        assert.equal(visible.status, 200, visible.text)
+        assert.equal(visible.json.ordinary, 'ordinary-traffic-control')
+        assert.notEqual(leaksSecret(visible.text), null)
+        assert.equal(own.upstream.hits.at(-1).seen, 'test-secret-conform-drop-0123456789abcd')
+        assert.equal(visible.text.includes('test-secret-conform-drop-0123456789abcd'), false)
+
+        assert.equal((await add('keepwin')).status, 200)
+        const keep = await sessionFor('keepwin', 'keep')
+        assert.equal(keep.status, 200, keep.text)
+        const kept = await own.control('POST', '/v1/credentials/rotate', {
+          slug: 'keepwin', value: 'test-secret-conform-kept-0123456789abcd', retire_hours: 1,
+        })
+        assert.equal(kept.status, 200, kept.text)
+        const hidden = await gateway(own, '/p/keepwin/reflect', { token: keep.json.token, placeholder: keep.json.placeholder })
+        assert.equal(hidden.status, 200, hidden.text)
+        assert.equal(hidden.json.ordinary, 'ordinary-traffic-control')
+        assert.equal(leaksSecret(hidden.text), null)
+        assert.equal(hidden.text.includes('test-secret-conform-kept-0123456789abcd'), false)
+        assert.equal(own.upstream.hits.at(-1).seen, 'test-secret-conform-kept-0123456789abcd')
+        const same = await own.control('POST', '/v1/credentials/rotate', {
+          slug: 'keepwin', value: 'test-secret-conform-kept-0123456789abcd',
+        })
+        assert.equal(same.status, 403, same.text)
+        assert.equal(same.json.code, 'AV_POLICY_DENIED')
+        assert.equal(same.json.rule, 'rotate_same_value')
+
+        assert.equal((await add('revoked')).status, 200)
+        const doomed = await sessionFor('revoked', 'revoke')
+        assert.equal(doomed.status, 200, doomed.text)
+        const once = await gateway(own, '/p/revoked/user', { token: doomed.json.token, placeholder: doomed.json.placeholder })
+        assert.equal(once.status, 200, once.text)
+        const hits = own.upstream.hits.length
+        const revoked = await own.control('POST', '/v1/credentials/rotate', {
+          slug: 'revoked', value: 'test-secret-conform-revoke-0123456789ab', mode: 'revoke', retire_hours: 0,
+        })
+        assert.equal(revoked.status, 200, revoked.text)
+        const stopped = await gateway(own, '/p/revoked/user', { token: doomed.json.token, placeholder: doomed.json.placeholder })
+        assert.equal(stopped.status, 403, stopped.text)
+        assert.equal(stopped.json.code, 'AV_NO_GRANT')
+        assert.equal(own.upstream.hits.length, hits)
+        assert.equal(leaksSecret(stopped.text), null)
+      } finally {
+        await own.close()
+      }
+    })
+
+    test('quarantine and a pending request survive a restart', async () => {
+      const added = await w.control('POST', '/v1/credentials', {
+        slug: 'sticky', kind: 'http', host: `127.0.0.1:${w.upstream.port}`, scheme: 'http',
+        value: SECRET, sites: ['header:authorization:Bearer'],
+      })
+      assert.equal(added.status, 200, added.text)
+      const session = await w.control('POST', '/v1/sessions', {
+        cred: 'sticky', methods: ['GET'], paths: ['/**'], budget: 5, approval: 'auto', ttl_hours: 1,
+      })
+      assert.equal(session.status, 200, session.text)
+      const asked = await w.control('POST', '/v1/session-requests', {
+        cred: 'sticky', reason: 'survive', methods: ['GET'], paths: ['/user'], budget: 2,
+      })
+      assert.equal(asked.status, 200, asked.text)
+      const quarantined = await w.control('POST', '/v1/credentials/quarantine', { slug: 'sticky', reason: 'restart' })
+      assert.equal(quarantined.status, 200, quarantined.text)
+      await w.restart()
+      const pending = await w.control('GET', '/v1/session-requests')
+      assert.equal(pending.status, 200, pending.text)
+      assert.equal(pending.json.find((r) => r.id === asked.json.id)?.state, 'pending')
+      const creds = await w.control('GET', '/v1/credentials')
+      assert.ok(creds.json.find((c) => c.slug === 'sticky')?.quarantine)
+      const before = w.upstream.hits.length
+      const refused = await gateway(w, '/p/sticky/user', { token: session.json.token, placeholder: session.json.placeholder })
+      assert.equal(refused.status, 403, refused.text)
+      assert.equal(refused.json.code, 'AV_QUARANTINED')
+      assert.equal(refused.json.rule, 'quarantine')
+      assert.equal(w.upstream.hits.length, before)
+      assert.equal(leaksSecret(refused.text), null)
     })
 
     test('revoking a session removes it', async () => {

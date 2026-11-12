@@ -200,9 +200,92 @@ if (skip) {
       assert.equal(leaksSecret(docs.text), null)
       for (const path of ['/api/credentials/demo', '/api/secrets', '/api/reveal']) {
         const missing = await raw(ui.port, path, { cookie, 'x-av-ui': '1' })
-        assert.ok(missing.status >= 400, path)
+        assert.equal(missing.status, 404, `${path} ${missing.text}`)
+        const body = JSON.parse(missing.text)
+        assert.match(body.error, /no route/)
+        assert.equal(body.code ?? null, null)
         assert.equal(leaksSecret(missing.text), null)
       }
+    })
+
+    test('an unsigned change is refused and the vault is unchanged', async () => {
+      const credsBefore = (await w.control('GET', '/v1/credentials')).json.map((c) => c.slug).sort()
+      const sessionsBefore = (await w.control('GET', '/v1/sessions')).json.map((s) => s.id).sort()
+      const posted = await raw(ui.port, '/api/credentials', {
+        method: 'POST', cookie, 'x-av-ui': '1',
+        'content-type': 'application/json', 'content-length': 2, body: '{}',
+      })
+      assert.equal(posted.status, 412, posted.text)
+      const postBody = JSON.parse(posted.text)
+      assert.match(postBody.error, /no authenticator is enrolled/)
+      assert.equal(postBody.code ?? null, null)
+      const removed = await raw(ui.port, '/api/credentials?slug=demo', {
+        method: 'DELETE', cookie, 'x-av-ui': '1',
+      })
+      assert.equal(removed.status, 412, removed.text)
+      assert.equal(JSON.parse(removed.text).code ?? null, null)
+      const session = await raw(ui.port, '/api/sessions', {
+        method: 'POST', cookie, 'x-av-ui': '1',
+        'content-type': 'application/json', 'content-length': 2, body: '{}',
+      })
+      assert.equal(session.status, 412, session.text)
+      assert.equal(JSON.parse(session.text).code ?? null, null)
+      const credsAfter = (await w.control('GET', '/v1/credentials')).json.map((c) => c.slug).sort()
+      const sessionsAfter = (await w.control('GET', '/v1/sessions')).json.map((s) => s.id).sort()
+      assert.deepEqual(credsAfter, credsBefore)
+      assert.deepEqual(sessionsAfter, sessionsBefore)
+      const ordinary = await raw(ui.port, '/api/credentials', { cookie, 'x-av-ui': '1' })
+      assert.equal(ordinary.status, 200, ordinary.text)
+      assert.equal(leaksSecret(ordinary.text + posted.text + removed.text + session.text), null)
+    })
+
+    test('paging refuses a bad limit or cursor, and a search cannot see a withheld value', async () => {
+      const badLimit = await raw(ui.port, '/api/credentials?paged=1&limit=0', { cookie, 'x-av-ui': '1' })
+      assert.equal(badLimit.status, 400, badLimit.text)
+      assert.equal(JSON.parse(badLimit.text).code, 'AV_BAD_LIMIT')
+      const tooBig = await raw(ui.port, '/api/sessions?paged=1&limit=201', { cookie, 'x-av-ui': '1' })
+      assert.equal(tooBig.status, 400, tooBig.text)
+      assert.equal(JSON.parse(tooBig.text).code, 'AV_BAD_LIMIT')
+      const scientific = await raw(ui.port, '/api/sessions?paged=1&limit=1e2', { cookie, 'x-av-ui': '1' })
+      assert.equal(scientific.status, 400, scientific.text)
+      assert.equal(JSON.parse(scientific.text).code, 'AV_BAD_LIMIT')
+      const forged = await raw(ui.port, '/api/sessions?paged=1&cursor=not-a-cursor', { cookie, 'x-av-ui': '1' })
+      assert.equal(forged.status, 400, forged.text)
+      assert.equal(JSON.parse(forged.text).code, 'AV_BAD_CURSOR')
+      const bareCursor = await raw(ui.port, '/api/sessions?cursor=not-a-cursor', { cookie, 'x-av-ui': '1' })
+      assert.equal(bareCursor.status, 400, bareCursor.text)
+      assert.equal(JSON.parse(bareCursor.text).code, 'AV_BAD_CURSOR')
+
+      const hidden = await raw(ui.port, `/api/sessions?paged=1&q=${encodeURIComponent(w.session.placeholder)}`, { cookie, 'x-av-ui': '1' })
+      assert.equal(hidden.status, 200, hidden.text)
+      const hiddenPage = JSON.parse(hidden.text)
+      assert.deepEqual(hiddenPage.items, [])
+      assert.equal(hiddenPage.total, 0)
+      const token = await raw(ui.port, `/api/sessions?paged=1&q=${encodeURIComponent(w.session.token)}`, { cookie, 'x-av-ui': '1' })
+      assert.deepEqual(JSON.parse(token.text).items, [])
+      const found = await raw(ui.port, '/api/sessions?paged=1&q=ordinary-traffic-control', { cookie, 'x-av-ui': '1' })
+      assert.equal(found.status, 200, found.text)
+      const page = JSON.parse(found.text)
+      assert.ok(page.items.some((s) => s.label === 'ordinary-traffic-control'))
+      assert.equal(page.total >= 1, true)
+      assert.equal(found.text.includes(w.session.placeholder), false)
+      assert.equal(found.text.includes(w.session.token), false)
+
+      const audit = await raw(ui.port, '/api/audit?paged=1&limit=1', { cookie, 'x-av-ui': '1' })
+      assert.equal(audit.status, 200, audit.text)
+      const auditPage = JSON.parse(audit.text)
+      assert.ok(Array.isArray(auditPage.items))
+      assert.equal(auditPage.items.length, 1)
+      const auditLimit = await raw(ui.port, '/api/audit?paged=1&limit=0', { cookie, 'x-av-ui': '1' })
+      assert.equal(auditLimit.status, 400, auditLimit.text)
+      assert.equal(JSON.parse(auditLimit.text).code, 'AV_BAD_LIMIT')
+      const auditCursor = await raw(ui.port, '/api/audit?paged=1&cursor=not-a-cursor', { cookie, 'x-av-ui': '1' })
+      assert.equal(auditCursor.status, 400, auditCursor.text)
+      assert.equal(JSON.parse(auditCursor.text).code, 'AV_BAD_CURSOR')
+      const auditSecret = await raw(ui.port, `/api/audit?paged=1&q=${encodeURIComponent(w.session.placeholder)}`, { cookie, 'x-av-ui': '1' })
+      assert.equal(auditSecret.status, 200, auditSecret.text)
+      assert.deepEqual(JSON.parse(auditSecret.text).items, [])
+      assert.equal(leaksSecret(hidden.text + found.text + audit.text + auditSecret.text), null)
     })
   })
 }

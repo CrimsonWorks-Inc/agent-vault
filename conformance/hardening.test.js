@@ -3,7 +3,7 @@
 import { describe, test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  rustSkipReason, openWorld, seed, gateway, runCli, leaksSecret, LOOKALIKE, SECRET,
+  rustSkipReason, openWorld, seed, gateway, runCli, leaksSecret, LOOKALIKE, SECRET, readStream,
 } from './lib/harness.js'
 
 const skip = rustSkipReason()
@@ -36,6 +36,13 @@ if (skip) {
       assert.equal(posted.status, 202, posted.text)
       assert.equal(posted.json.code, 'AV_APPROVAL_PENDING')
       assert.equal(leaksSecret(posted.text), null)
+      const approvals = await w.control('GET', '/v1/approvals')
+      assert.equal(approvals.status, 200, approvals.text)
+      assert.equal(approvals.text.includes(SECRET), false)
+      assert.equal(leaksSecret(approvals.text), null)
+      const stream = await readStream(w.socketPath)
+      assert.equal(stream.text.includes(SECRET), false)
+      assert.equal(leaksSecret(stream.text), null)
     })
 
     test('the secret stays out of MCP results, CLI output, the audit log, and daemon logs', async () => {

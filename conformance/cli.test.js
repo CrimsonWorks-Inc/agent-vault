@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  rustSkipReason, binaries, openWorld, runCli, leaksSecret, SECRET, pinValue, PASSPHRASE,
+  rustSkipReason, binaries, openWorld, runCli, leaksSecret, SECRET, pinValue, freePort,
 } from './lib/harness.js'
 
 const skip = rustSkipReason()
@@ -128,17 +128,32 @@ if (skip) {
       const side = assertOk(await runCli(w, ['cred', 'add', 'side', '--kind', 'http', '--host', '127.0.0.1', '--json'], { input: `${SECRET}\n` }), 'cred add side')
       assert.equal(side.slug, 'side')
       assertOk(await runCli(w, ['cred', 'quarantine', 'side', '--reason', 'drill', '--json']), 'quarantine')
+      const blocked = await runCli(w, ['session', 'create', '--cred', 'side', '--methods', 'GET', '--json'])
+      assert.equal(blocked.code, 6, blocked.stdout + blocked.stderr)
+      assert.equal(blocked.json.ok, false)
+      assert.equal(blocked.json.error.code, 'AV_QUARANTINED')
+      assert.equal(leaksSecret(blocked.stdout + blocked.stderr), null)
       assertOk(await runCli(w, ['cred', 'release', 'side', '--json']), 'release')
+      const restored = assertOk(await runCli(w, ['session', 'create', '--cred', 'side', '--methods', 'GET', '--json']), 'session after release')
+      assert.equal(typeof restored.token, 'string')
       const removed = assertOk(await runCli(w, ['cred', 'rm', 'side', '--json']), 'cred rm')
       assert.equal(removed.removed, 'side')
 
+      const badHook = await runCli(w, ['notify', 'set', '--json'], { input: 'http://example.test/hook\n' })
+      assert.equal(badHook.code, 6, badHook.stdout + badHook.stderr)
+      assert.equal(badHook.json.error.code, 'AV_POLICY_DENIED')
       const hook = `http://127.0.0.1:${w.upstream.port}/hook`
       assertOk(await runCli(w, ['notify', 'set', '--json'], { input: `${hook}\n` }), 'notify set')
       const shown = assertOk(await runCli(w, ['notify', 'show', '--json']), 'notify show')
-      assert.match(shown.webhook.host, /^127\.0\.0\.1(:\d+)?$/)
+      assert.equal(shown.webhook.host, `127.0.0.1:${w.upstream.port}`)
       assert.equal(JSON.stringify(shown).includes('/hook'), false)
+      const marked = w.upstream.hits.length
       const ping = assertOk(await runCli(w, ['notify', 'test', '--json']), 'notify test')
       assert.equal(ping.sent, true)
+      const delivered = w.upstream.hits.slice(marked).filter((h) => h.method === 'POST' && h.url.startsWith('/hook'))
+      assert.equal(delivered.length, 1)
+      assert.equal(leaksSecret(delivered[0].body), null)
+      assert.equal(delivered[0].body.includes('/hook'), false)
       assertOk(await runCli(w, ['notify', 'off', '--json']), 'notify off')
 
       assertOk(await runCli(w, ['tripwire', 'show', '--json']), 'tripwire show')
@@ -160,11 +175,13 @@ if (skip) {
       assert.equal(typeof witnessed.head, 'string')
       assertOk(await runCli(w, ['audit', 'verify', '--witness', witness, '--json']), 'audit verify witness')
       const report = assertOk(await runCli(w, ['report', '--since', '7d', '--json']), 'report')
-      assert.ok(report.credentials || report.sessions || typeof report === 'object')
+      assert.ok(Array.isArray(report.credentials))
+      assert.ok(Array.isArray(report.sessions))
 
       const listeners = assertOk(await runCli(w, ['listen', 'list', '--json']), 'listen list')
       assert.ok(Array.isArray(listeners))
-      assertOk(await runCli(w, ['listen', 'add', 'loop', '--address', '127.0.0.1:59992', '--surfaces', 'gateway', '--json']), 'listen add')
+      const loopPort = await freePort()
+      assertOk(await runCli(w, ['listen', 'add', 'loop', '--address', `127.0.0.1:${loopPort}`, '--surfaces', 'gateway', '--json']), 'listen add')
       assertOk(await runCli(w, ['listen', 'rm', 'loop', '--json']), 'listen rm')
       assertOk(await runCli(w, ['tls', 'status', '--json']), 'tls status')
       const tls = assertOk(await runCli(w, ['tls', 'setup', '--json'], { timeout: 30_000 }), 'tls setup')
@@ -188,10 +205,25 @@ if (skip) {
       const approved = assertOk(await runCli(w, ['approve', second.json.id, '--json']), 'approve')
       assert.equal(leaksSecret(JSON.stringify(approved)), null)
 
-      const child = await runCli(w, ['exec', '--json', '--', process.execPath, '-e', 'process.stdout.write("child-ok\\n")'])
-      assert.equal(child.code, 0, child.stderr)
-      assert.equal(child.stdout, 'child-ok\n')
-      assert.equal(child.json, null)
+      const script = `process.stdout.write(JSON.stringify({
+        placeholder: process.env.AGENT_VAULT_PLACEHOLDER || null,
+        has_session: typeof process.env.AGENT_VAULT_SESSION === 'string' && process.env.AGENT_VAULT_SESSION.length > 0,
+        url: process.env.AGENT_VAULT_URL || null,
+        agent: process.env.AGENT_VAULT || null,
+        ordinary: process.env.ORDINARY || null,
+        secret_present: Object.values(process.env).some((v) => typeof v === 'string' && v.includes(${JSON.stringify(SECRET)})),
+      }))`
+      const child = await runCli(w, ['exec', '--json', '--', process.execPath, '-e', script], {
+        env: { ...w.env, ORDINARY: 'ordinary-traffic-control' },
+      })
+      assert.equal(child.code, 0, child.stderr + child.stdout)
+      assert.match(child.json.placeholder, /^av1\./)
+      assert.equal(child.json.has_session, true)
+      assert.equal(child.json.agent, '1')
+      assert.match(child.json.url, /^http:\/\/127\.0\.0\.1:\d+$/)
+      assert.equal(child.json.ordinary, 'ordinary-traffic-control')
+      assert.equal(child.json.secret_present, false)
+      assert.equal(leaksSecret(child.stdout + child.stderr), null)
       assertFail(await runCli(w, ['exec', '--json', '--', 'no-such-agent-vault-bin']), 127, 'exec missing')
 
       const url = assertOk(await runCli(w, ['mcp', 'url', '--json']), 'mcp url')
@@ -264,8 +296,13 @@ if (skip) {
       })
       assert.equal(docs.json?.ok, true, docs.stdout.slice(0, 500))
       assert.match(docs.json.data.url, /#docs\//)
-      const watch = await runCli(w, ['watch', '--no-notify', '--json'], { timeout: 2500 })
-      assert.ok(watch.code === null || watch.signal === 'SIGTERM' || watch.signal === 'SIGKILL' || watch.code === 0)
+      const watch = await runCli(w, ['watch', '--no-notify', '--json'], {
+        timeout: 15_000,
+        until: (out) => out.includes('"event":"snapshot"'),
+      })
+      assert.equal(watch.json?.ok, true, watch.stdout.slice(0, 500))
+      assert.equal(watch.json.data.event, 'snapshot')
+      assert.ok(Array.isArray(watch.json.data.items))
       assert.equal(leaksSecret(watch.stdout + watch.stderr), null)
     })
 
@@ -279,7 +316,6 @@ if (skip) {
         assert.ok(panic.revoked_sessions >= 1)
         const sessions = assertOk(await runCli(own, ['session', 'list', '--json']), 'panic list')
         assert.equal(sessions.some((s) => s.state === 'active'), false)
-        assert.equal(PASSPHRASE.length >= 8, true)
       } finally {
         await own.close()
       }

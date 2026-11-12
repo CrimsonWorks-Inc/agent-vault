@@ -177,11 +177,16 @@ if (skip) {
       }
     })
 
-    test('the vault directory and the control socket are not group-readable', async () => {
+    test('the daemon tightens the vault directory and keeps the socket private', async () => {
+      // openWorld chmods the directory to 0755 before the daemon starts, so
+      // this fails when the daemon never sets a mode of its own.
       const dir = await stat(w.dir)
       const sock = await stat(w.socketPath)
       assert.equal(dir.mode & 0o777, 0o700)
       assert.equal(sock.mode & 0o777, 0o600)
+      // No client group is configured, so the daemon only chmods the socket.
+      // On macOS, stat of that socket reports gid 0, which is not the
+      // process group and is not something the daemon set.
     })
   })
 }

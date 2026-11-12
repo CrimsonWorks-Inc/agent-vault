@@ -29,9 +29,11 @@ if (skip) {
 
         const revoked = await w.control('DELETE', `/v1/sessions?sid=${w.session.session_id}`)
         assert.equal(revoked.json.ok, true)
+        const hitsAtRevoke = w.upstream.hits.length
         const afterRevoke = await gateway(w, `/p/${w.slug}/user`, { token: w.session.token, placeholder: w.session.placeholder })
-        assert.notEqual(afterRevoke.status, 200)
-        assert.ok(['AV_SESSION_REVOKED', 'AV_PH_REPLAY'].includes(afterRevoke.json.code), afterRevoke.text)
+        assert.equal(afterRevoke.status, 401, afterRevoke.text)
+        assert.equal(afterRevoke.json.code, 'AV_SESSION_REVOKED')
+        assert.equal(w.upstream.hits.length, hitsAtRevoke)
 
         const another = await w.control('POST', '/v1/sessions', {
           cred: w.slug, label: 'panic', methods: ['GET'], paths: ['/**'], budget: 5, approval: 'on-write', ttl_hours: 1,
@@ -41,9 +43,11 @@ if (skip) {
         assert.equal(panic.status, 200, panic.text)
         assert.equal(typeof panic.json.revoked_sessions, 'number')
         assert.ok(panic.json.revoked_sessions >= 1)
+        const hitsAtPanic = w.upstream.hits.length
         const afterPanic = await gateway(w, `/p/${w.slug}/user`, { token: another.json.token, placeholder: another.json.placeholder })
-        assert.notEqual(afterPanic.status, 200)
-        assert.ok(['AV_SESSION_REVOKED', 'AV_PH_REPLAY'].includes(afterPanic.json.code), afterPanic.text)
+        assert.equal(afterPanic.status, 401, afterPanic.text)
+        assert.equal(afterPanic.json.code, 'AV_SESSION_REVOKED')
+        assert.equal(w.upstream.hits.length, hitsAtPanic)
 
         const live = await w.control('POST', '/v1/sessions', {
           cred: w.slug, label: 'lock', methods: ['GET'], paths: ['/**'], budget: 5, approval: 'on-write', ttl_hours: 1,
@@ -104,6 +108,8 @@ if (skip) {
         await seed(w, { approval: 'auto', methods: ['GET'] })
         const set = await w.control('POST', '/v1/passphrase', { passphrase: PASSPHRASE })
         assert.equal(set.status, 200, set.text)
+        const quarantined = await w.control('POST', '/v1/credentials/quarantine', { slug: w.slug, reason: 'backup' })
+        assert.equal(quarantined.status, 200, quarantined.text)
         const exported = await w.control('POST', '/v1/backup/export', {
           recovery_passphrase: RECOVERY,
           presence: { passphrase: PASSPHRASE },
@@ -139,6 +145,17 @@ if (skip) {
         })
         assert.equal(restored.status, 200, restored.text)
         assert.ok(restored.json.restored.includes(w.slug), restored.text)
+        const still = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, label: 'still-quarantined', methods: ['GET'], paths: ['/**'], budget: 2, ttl_hours: 1,
+        })
+        assert.equal(still.status, 403, still.text)
+        assert.equal(still.json.code, 'AV_QUARANTINED')
+        assert.equal(still.json.rule, 'quarantine')
+        const reopen = await w.control('POST', '/v1/presence/window', { passphrase: PASSPHRASE })
+        assert.equal(reopen.json.granted, true)
+        const released = await w.control('POST', '/v1/credentials/release', { slug: w.slug })
+        assert.equal(released.status, 200, released.text)
+        assert.equal(released.json.released, true)
 
         const list = await w.control('GET', '/v1/credentials')
         assert.ok(list.json.some((c) => c.slug === w.slug))
@@ -154,6 +171,51 @@ if (skip) {
         const chain = await w.control('GET', '/v1/audit/verify')
         assert.equal(chain.json.ok, true)
         assert.equal(leaksSecret(chain.text), null)
+      } finally {
+        await w.close()
+      }
+    })
+
+    test('an elevated session needs the passphrase itself, and the audit records why', async () => {
+      const w = await openWorld()
+      try {
+        await seed(w)
+        const set = await w.control('POST', '/v1/passphrase', { passphrase: PASSPHRASE })
+        assert.equal(set.status, 200, set.text)
+        const bare = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, methods: ['POST'], paths: ['/**'], approval: 'auto', budget: 3, ttl_hours: 1,
+        })
+        assert.equal(bare.status, 401, bare.text)
+        assert.equal(bare.json.code, 'AV_PRESENCE_REQUIRED')
+        assert.equal(bare.json.rule, 'fresh_presence')
+        const window = await w.control('POST', '/v1/presence/window', { passphrase: PASSPHRASE })
+        assert.equal(window.json.granted, true)
+        const riding = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, methods: ['POST'], paths: ['/**'], approval: 'auto', budget: 3, ttl_hours: 1,
+        })
+        assert.equal(riding.status, 401, riding.text)
+        assert.equal(riding.json.code, 'AV_PRESENCE_REQUIRED')
+        assert.equal(riding.json.rule, 'fresh_presence')
+        const ordinary = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, label: 'ordinary', methods: ['GET'], paths: ['/**'], budget: 3, ttl_hours: 1,
+        })
+        assert.equal(ordinary.status, 200, ordinary.text)
+        const made = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, methods: ['POST'], paths: ['/**'], approval: 'auto', budget: 3, ttl_hours: 1,
+          presence: { passphrase: PASSPHRASE },
+        })
+        assert.equal(made.status, 200, made.text)
+        const infinite = await w.control('POST', '/v1/sessions', {
+          cred: w.slug, methods: ['GET'], paths: ['/**'], infinite: true,
+          presence: { passphrase: PASSPHRASE },
+        })
+        assert.equal(infinite.status, 200, infinite.text)
+        const audit = await w.control('GET', '/v1/audit?limit=200')
+        assert.equal(audit.status, 200, audit.text)
+        const created = audit.json.filter((r) => r.kind === 'session.created')
+        assert.ok(created.some((r) => Array.isArray(r.elevated) && r.elevated.includes('approval_auto_writes')))
+        assert.ok(created.some((r) => Array.isArray(r.elevated) && r.elevated.includes('infinite')))
+        assert.equal(leaksSecret(audit.text), null)
       } finally {
         await w.close()
       }
