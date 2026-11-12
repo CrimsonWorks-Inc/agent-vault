@@ -109,3 +109,22 @@ fn unsafe_appears_only_in_the_mlock_module() {
         .iter()
         .any(|(n, s)| *n == "lib.rs" && s.contains("#![deny(unsafe_code)]")));
 }
+
+#[test]
+fn every_regex_goes_through_av_core_jsre() {
+    // rust/PLAN.md: a pattern is compiled only through av_core::jsre, which
+    // gives JavaScript semantics. av-store compiles none of its own; its
+    // shape checks are written by hand.
+    for (name, src) in SOURCES {
+        for banned in ["Regex::new", "RegexBuilder", "regex::"] {
+            assert!(
+                !src.contains(banned),
+                "{name} compiles a regex directly ({banned}); use av_core::jsre"
+            );
+        }
+    }
+    assert!(
+        !include_str!("../../Cargo.toml").contains("regex"),
+        "av-store depends on regex directly"
+    );
+}
