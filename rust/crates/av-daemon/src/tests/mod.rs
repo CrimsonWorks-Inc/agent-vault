@@ -19,10 +19,12 @@ mod guards;
 mod mcp;
 mod mutants;
 mod mutants_conn;
+mod mutants_hop;
 mod mutants_mcp;
 mod mutants_notify;
 mod mutants_pending;
 mod mutants_pl;
+mod mutants_pl2;
 mod mutants_sr;
 mod mutants_srv;
 mod mutants_srv2;
@@ -105,6 +107,15 @@ impl World {
 
     /// A daemon with no credential and the given notifier options.
     pub async fn bare_with(notify: crate::notify::NotifierOptions) -> World {
+        World::bare_opts(notify, None).await
+    }
+
+    /// A daemon with no credential, the given notifier options and scrub
+    /// budget (`nested_views`, `nested_bytes`).
+    pub async fn bare_opts(
+        notify: crate::notify::NotifierOptions,
+        scrub_budget: Option<(Option<usize>, Option<usize>)>,
+    ) -> World {
         let dir = tempfile::tempdir().unwrap();
         let vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
         let shared = Shared::new(vault);
@@ -115,6 +126,7 @@ impl World {
                 port: 0,
                 pipeline: PipelineOptions {
                     upstream: Some(up.clone()),
+                    scrub_budget,
                     ..Default::default()
                 },
                 notify,

@@ -2454,9 +2454,45 @@ to = '''        if false && scrubbed.unscannable {
 name = 'a concurrency slot is released only when the upstream answered'
 file = "src/pipeline.rs"
 from = '''                            let streaming = p.stream.is_some();
-                            if !streaming {'''
+                            if !streaming {
+                                if let Some(g) = ctx.resources.release.take() {
+                                    core.pl_release(&g);
+                                }
+                            }
+                            GatewayResponse {
+                                status: p.status,
+                                headers: p.headers,
+                                body: p.body,
+                                stream: p.stream,
+                                request_id: Some(ctx.request_id.clone()),
+                                error: None,
+                            }
+                        }
+                        Err(e) => core.pl_fail(&mut ctx, e),
+                    },
+                    Err(e) => core.pl_fail(&mut ctx, e),
+                };
+                if resp.stream.is_none() {'''
 to = '''                            let streaming = p.stream.is_some();
-                            if !streaming && ctx.upstream_opened {'''
+                            if !streaming && ctx.upstream_opened {
+                                if let Some(g) = ctx.resources.release.take() {
+                                    core.pl_release(&g);
+                                }
+                            }
+                            GatewayResponse {
+                                status: p.status,
+                                headers: p.headers,
+                                body: p.body,
+                                stream: p.stream,
+                                request_id: Some(ctx.request_id.clone()),
+                                error: None,
+                            }
+                        }
+                        Err(e) => core.pl_fail(&mut ctx, e),
+                    },
+                    Err(e) => core.pl_fail(&mut ctx, e),
+                };
+                if resp.stream.is_none() && ctx.upstream_opened {'''
 
 [[mutation]]
 name = 'a stored scrub pattern that no longer compiles is skipped instead of withholding the response'

@@ -2493,7 +2493,9 @@ impl Core {
             injected.push(ScrubEntry {
                 secret: SecretString::from(secret.expose_secret().to_string()),
                 label: cred.slug.clone(),
-                replacement: None,
+                // The secret this request injected comes back as the very
+                // placeholder the agent sent, as the JS scrubber does.
+                replacement: Some(s.occ.text.clone()),
                 always: true,
             });
             outgoing = sub::apply(&outgoing, &s.occ.location, &s.occ.text, &secret)?;
@@ -3626,7 +3628,10 @@ impl Pipeline {
         sp_kind: Option<String>,
     ) -> FrameStream {
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(16);
-        let (in_tx, in_rx) = std::sync::mpsc::sync_channel::<crate::sse::Input>(16);
+        // Both queues are tokio channels: the reader is an async task and
+        // must never block a runtime thread; only the scrubber, on a
+        // blocking thread, waits synchronously (blocking_recv/blocking_send).
+        let (in_tx, mut in_rx) = mpsc::channel::<crate::sse::Input>(16);
         tokio::spawn(async move {
             loop {
                 let item = match rx.recv().await {
@@ -3634,7 +3639,10 @@ impl Pipeline {
                         let tail = decoder.as_mut().map(|d| d.finish());
                         if let Some(Ok(t)) = &tail {
                             if !t.is_empty()
-                                && in_tx.send(crate::sse::Input::Chunk(t.clone())).is_err()
+                                && in_tx
+                                    .send(crate::sse::Input::Chunk(t.clone()))
+                                    .await
+                                    .is_err()
                             {
                                 return;
                             }
@@ -3655,7 +3663,7 @@ impl Pipeline {
                     },
                 };
                 let last = !matches!(item, crate::sse::Input::Chunk(_));
-                if in_tx.send(item).is_err() || last {
+                if in_tx.send(item).await.is_err() || last {
                     return;
                 }
             }
@@ -3679,7 +3687,7 @@ impl Pipeline {
                 kit.framing,
                 kit.check,
                 max_bytes,
-                || in_rx.recv().unwrap_or(crate::sse::Input::End),
+                || in_rx.blocking_recv().unwrap_or(crate::sse::Input::End),
                 |frame| {
                     if let Some(kind) = &kind {
                         if !failed {
