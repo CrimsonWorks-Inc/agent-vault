@@ -1,6 +1,6 @@
 //! Socket peer credentials for the control socket: who is on the other end of
-//! an accepted Unix-domain connection, this process's uid, and the umask the
-//! control socket is bound under. The JS relied on file mode and group
+//! an accepted Unix-domain connection, this process's uid, the umask the
+//! control socket is bound under, and the core-dump limits set at startup. The JS relied on file mode and group
 //! ownership of `control.sock` (`#secureSocket` in `src/daemon/server.js`);
 //! the Rust daemon also checks the peer uid against `AV_ENROLLED_UID`.
 //!
@@ -95,9 +95,77 @@ pub fn with_umask<T>(mask: u32, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// Keep the daemon's memory (decrypted secrets, the vault key) out of core
+/// files: `RLIMIT_CORE` 0/0 everywhere and, on Linux, `PR_SET_DUMPABLE` 0,
+/// which also stops other processes of the same user from attaching. The
+/// service units set the same limit; this covers a daemon started by hand.
+/// The JS set none, so a failure is reported, never fatal.
+pub fn disable_core_dumps() -> std::io::Result<()> {
+    let none = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `none` is a valid, initialised rlimit that outlives the call;
+    // setrlimit only reads it.
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: PR_SET_DUMPABLE takes plain integer arguments and touches
+        // no memory of ours.
+        let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// This process's core-file limit, `(soft, hard)`.
+pub fn core_limit() -> std::io::Result<(u64, u64)> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `lim` is a valid, writable rlimit that outlives the call.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut lim) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((lim.rlim_cur, lim.rlim_max))
+}
+
+/// Whether this process may leave a core file (`PR_GET_DUMPABLE`; always
+/// reported as dumpable off Linux, where there is no such flag).
+#[cfg(target_os = "linux")]
+pub fn dumpable() -> bool {
+    // SAFETY: PR_GET_DUMPABLE takes no pointers and only returns a value.
+    unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_leaves_no_core_file_limit_to_raise() {
+        disable_core_dumps().unwrap();
+        assert_eq!(core_limit().unwrap(), (0, 0));
+        // The hard limit is gone too: an unprivileged process cannot raise it back.
+        let back = libc::rlimit {
+            rlim_cur: 1 << 20,
+            rlim_max: 1 << 20,
+        };
+        // SAFETY: as in disable_core_dumps.
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &back) };
+        if effective_uid() != 0 {
+            assert_ne!(rc, 0, "the hard limit was raised back");
+        }
+        #[cfg(target_os = "linux")]
+        assert!(!dumpable());
+    }
 
     #[test]
     fn a_socket_pair_reports_this_process() {
