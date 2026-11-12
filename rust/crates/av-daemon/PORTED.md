@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 264 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **716 not yet ported**.
+Totals: 1090 JS tests: 297 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **683 not yet ported**.
 
 ## Mutation check
 
@@ -603,7 +603,7 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | a redirect hop answers to the body rules as a body-less request, not to none | tests/ported_gateway_core.rs::graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops |
 | gateway-w2-pipeline.test.js | a single-valued header sent twice, differently, is refused before anything is sent | tests/ported_gateway_core.rs::conflicting_single_valued_headers_are_refused_without_spending_or_upstream |
 | gateway-w2-pipeline.test.js | one Content-Type, or an exact repeat of it, is checked and sent as that one value | tests/ported_gateway_core.rs::exact_repeat_content_type_is_sent_once_and_the_selected_form_rules_apply |
-| gateway-w2-pipeline.test.js | a repeated list header goes upstream once per name, carrying every value | not yet ported: waiting for daemon header fix; regression tests/ported_gateway_core.rs::repeated_list_headers_preserve_every_value_and_substitute_only_the_targeted_copy |
+| gateway-w2-pipeline.test.js | a repeated list header goes upstream once per name, carrying every value | `ported_gateway_core::repeated_list_headers_preserve_every_value_and_substitute_only_the_targeted_copy`; ported (header-name casing compared case-insensitively; RFC 9110) |
 | gateway-w2-pipeline.test.js | a query a URL would cut or rewrite is refused before the payload rules read it | tests/ported_gateway_core.rs::query_url_rewrite_shapes_are_refused_and_encoded_value_controls_pass |
 | gateway-w2-pipeline.test.js | a request a method override made a write does not have its redirect followed | tests/ported_gateway_core.rs::method_override_writes_never_follow_redirect_even_after_human_approval |
 | gateway-w2-pipeline.test.js | a followed redirect sends nothing of the agent's but the credential and the hop allowlist | tests/ported_gateway_core.rs::hop_forwards_only_credential_and_allowlisted_agent_headers_and_omits_framing_credentials |
@@ -837,57 +837,57 @@ the vault on every call instead of caching an audit handle.
 | path-parsing.test.js | a path that is only control characters does not become the root | not yet ported |
 | pipeline.test.js | the placeholder is replaced with the real secret and only the upstream sees it | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
 | pipeline.test.js | the session token works as a carrier instead of a placeholder-derived session | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
-| pipeline.test.js | S06: a valid placeholder aimed at a non-granted host never opens a connection | not yet ported |
-| pipeline.test.js | a path outside the grant is denied before the wire | not yet ported |
+| pipeline.test.js | S06: a valid placeholder aimed at a non-granted host never opens a connection | `ported_gateway_core::pipeline_confinement_rejects_foreign_host_path_and_profile_webhook_before_wire` |
+| pipeline.test.js | a path outside the grant is denied before the wire | `ported_gateway_core::pipeline_confinement_rejects_foreign_host_path_and_profile_webhook_before_wire` |
 | pipeline.test.js | a write method under a read-only grant is denied | `tests::control::narrowing_only_takes_away` |
-| pipeline.test.js | a profile deny list blocks webhook creation even under a wide grant | not yet ported |
-| pipeline.test.js | S25: a placeholder in a request body is refused with zero upstream bytes | not yet ported |
-| pipeline.test.js | encoded placeholders in a body are caught in every encoding | not yet ported |
-| pipeline.test.js | a placeholder in the request path is refused: the path is never a site | not yet ported |
+| pipeline.test.js | a profile deny list blocks webhook creation even under a wide grant | `ported_gateway_core::pipeline_confinement_rejects_foreign_host_path_and_profile_webhook_before_wire` |
+| pipeline.test.js | S25: a placeholder in a request body is refused with zero upstream bytes | `ported_gateway_core::pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream` |
+| pipeline.test.js | encoded placeholders in a body are caught in every encoding | `ported_gateway_core::pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream` |
+| pipeline.test.js | a placeholder in the request path is refused: the path is never a site | `ported_gateway_core::pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream` |
 | pipeline.test.js | a placeholder in an undeclared header is refused | `tests::gateway::hardening_a_placeholder_outside_its_site_is_refused_before_any_upstream_byte` |
-| pipeline.test.js | the places a naive scan does not look are not hiding places | not yet ported |
+| pipeline.test.js | the places a naive scan does not look are not hiding places | `ported_gateway_core::pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream` |
 | pipeline.test.js | a second Authorization header is refused, so no placeholder goes upstream | covered by conformance: `gateway.test.js` “a placeholder in an undeclared header, an encoding, or a second Authorization is refused”; `util::tests::hardening_only_the_first_authorization_header_counts` |
-| pipeline.test.js | a malformed percent-escape in a query key does not blind the scan | not yet ported |
+| pipeline.test.js | a malformed percent-escape in a query key does not blind the scan | `ported_gateway_core::pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream` |
 | pipeline.test.js | S05: a one-time placeholder cannot be used twice | `tests::gateway::hardening_a_tripwire_revokes_a_session_replaying_a_dead_placeholder` |
-| pipeline.test.js | S05: concurrent uses of a one-time placeholder produce exactly one upstream call | not yet ported |
+| pipeline.test.js | S05: concurrent uses of a one-time placeholder produce exactly one upstream call | `ported_gateway_core::twenty_racing_one_shot_uses_send_exactly_once_and_successors_remain_one_shot` |
 | pipeline.test.js | an exhausted placeholder hands back a working successor | `tests::gateway::the_placeholder_successor_is_handed_back_when_one_is_spent` |
-| pipeline.test.js | S04: a placeholder from another session is refused | not yet ported |
-| pipeline.test.js | a budget layer that names no limit does not make the grant unlimited | not yet ported |
-| pipeline.test.js | a budget limit written as a string still counts | not yet ported |
-| pipeline.test.js | a budget limit that is not a number refuses rather than counts nothing | not yet ported |
-| pipeline.test.js | held approvals are bounded, and do not hold response bodies forever | not yet ported |
-| pipeline.test.js | a stale pending approval is forgotten, so the cap is not permanent | not yet ported |
-| pipeline.test.js | a bare placeholder does not authorize on a network listener | not yet ported |
-| pipeline.test.js | the successor to a one-time placeholder is also one-time | not yet ported |
-| pipeline.test.js | an approval does not carry over to a request with different headers | not yet ported |
-| pipeline.test.js | a fractional use count does not persist state the log never records | not yet ported |
-| pipeline.test.js | an upstream cannot choose how much of the daemon it occupies | not yet ported |
+| pipeline.test.js | S04: a placeholder from another session is refused | `ported_gateway_core::cross_session_placeholders_and_bare_remote_carriers_are_refused_with_legitimate_controls` |
+| pipeline.test.js | a budget layer that names no limit does not make the grant unlimited | `ported_gateway_core::unit_only_grant_budget_keeps_the_session_limit_and_charges_every_allowed_request` |
+| pipeline.test.js | a budget limit written as a string still counts | `ported_gateway_core::stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused` |
+| pipeline.test.js | a budget limit that is not a number refuses rather than counts nothing | `ported_gateway_core::stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused` |
+| pipeline.test.js | held approvals are bounded, and do not hold response bodies forever | `ported_gateway_core::approval_pending_capacity_is_bounded_and_expired_entries_release_the_cap` |
+| pipeline.test.js | a stale pending approval is forgotten, so the cap is not permanent | `ported_gateway_core::approval_pending_capacity_is_bounded_and_expired_entries_release_the_cap` |
+| pipeline.test.js | a bare placeholder does not authorize on a network listener | `ported_gateway_core::cross_session_placeholders_and_bare_remote_carriers_are_refused_with_legitimate_controls` |
+| pipeline.test.js | the successor to a one-time placeholder is also one-time | `ported_gateway_core::twenty_racing_one_shot_uses_send_exactly_once_and_successors_remain_one_shot` |
+| pipeline.test.js | an approval does not carry over to a request with different headers | `ported_gateway_core::approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures` |
+| pipeline.test.js | a fractional use count does not persist state the log never records | not yet ported: control normalization mismatch sent to coordinator; active regression `ported_gateway_core::fractional_control_issuance_normalizes_uses_and_records_each_ledger_row_once` |
+| pipeline.test.js | an upstream cannot choose how much of the daemon it occupies | `ported_gateway_core::buffered_upstream_is_cut_at_the_size_limit_instead_of_occupying_unbounded_memory` |
 | pipeline.test.js | a use is given back when the request never reached anyone | `tests::gateway::a_denial_before_connecting_refunds_the_use` |
 | pipeline.test.js | a use is NOT given back when the request may have been delivered | `tests::gateway::a_failure_after_connecting_is_not_refunded` |
 | pipeline.test.js | a refused request does not decrypt the whole vault three times | not yet ported |
-| pipeline.test.js | an approval survives a request that never reached the upstream | not yet ported |
-| pipeline.test.js | a refund into a revoked grant is refused, not quietly granted | not yet ported |
-| pipeline.test.js | a legitimate refund is recorded, so the ledger and the log agree | not yet ported |
-| pipeline.test.js | a placeholder cannot be spent under a grant it was not issued under | not yet ported |
-| pipeline.test.js | a revoked session stops working immediately | not yet ported |
+| pipeline.test.js | an approval survives a request that never reached the upstream | `ported_gateway_core::approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures` |
+| pipeline.test.js | a refund into a revoked grant is refused, not quietly granted | `ported_gateway_core::refunds_require_a_live_grant_and_both_refund_decisions_are_audited` |
+| pipeline.test.js | a legitimate refund is recorded, so the ledger and the log agree | `ported_gateway_core::refunds_require_a_live_grant_and_both_refund_decisions_are_audited` |
+| pipeline.test.js | a placeholder cannot be spent under a grant it was not issued under | `ported_gateway_core::placeholder_grant_binding_cannot_bill_a_different_grant_for_a_wider_route` |
+| pipeline.test.js | a revoked session stops working immediately | `ported_gateway_core::revocation_stops_an_existing_session_and_allow_deny_consumption_records_verify` |
 | pipeline.test.js | a forged placeholder is refused by its checksum, before any lookup | `tests::mutants::hardening_the_placeholder_checksum_is_checked` |
 | pipeline.test.js | a real placeholder with one character changed does not verify | `tests::mutants::hardening_the_placeholder_checksum_is_checked` |
-| pipeline.test.js | the fingerprint shown in cred list is not an oracle for the checksum key | not yet ported |
+| pipeline.test.js | the fingerprint shown in cred list is not an oracle for the checksum key | `ported_gateway_core::chosen_credential_fingerprint_is_domain_separated_from_placeholder_checksum_key` |
 | pipeline.test.js | S09: an upstream echoing the secret back has it replaced by the placeholder | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
 | pipeline.test.js | an upstream echoing the secret in a header has it scrubbed too | `tests::gateway::hardening_a_reflected_secret_in_a_header_name_or_value_is_dropped_or_redacted` |
 | pipeline.test.js | an upstream cannot forge AV-* headers or set cookies on the agent | `tests::gateway::hardening_a_reflected_secret_in_a_header_name_or_value_is_dropped_or_redacted` |
-| pipeline.test.js | a derived token minted upstream is redacted by shape | not yet ported |
+| pipeline.test.js | a derived token minted upstream is redacted by shape | `ported_gateway_core::upstream_minted_github_tokens_are_redacted_by_shape_and_ordinary_text_survives` |
 | pipeline.test.js | S28: a request carrying Origin is refused, so a web page cannot use the gateway | `tests::gateway::hardening_browser_origin_and_foreign_host_are_refused` |
 | pipeline.test.js | a Host header outside the allowed set is refused, blocking DNS rebinding | `tests::gateway::hardening_browser_origin_and_foreign_host_are_refused` |
 | pipeline.test.js | a write under on-write approval is held, then executes exactly once on resend | `tests::gateway::approval_each_holds_then_executes_exactly_once_and_replays` |
-| pipeline.test.js | a denied approval stays denied on resend | not yet ported |
+| pipeline.test.js | a denied approval stays denied on resend | `ported_gateway_core::approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures` |
 | pipeline.test.js | a spent budget stops the session without a human | `tests::gateway::budget_is_counted_and_spent` |
-| pipeline.test.js | every decision is recorded in a chain that detects tampering | not yet ported |
+| pipeline.test.js | every decision is recorded in a chain that detects tampering | `ported_gateway_core::revocation_stops_an_existing_session_and_allow_deny_consumption_records_verify` |
 | pipeline.test.js | no audit record contains the secret in any form | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
-| pipeline.test.js | a locked vault refuses every proxied request | not yet ported |
-| pipeline.test.js | locking is recorded on disk, so a restart comes back locked | not yet ported |
-| pipeline.test.js | unlocking clears the recorded state | not yet ported |
-| pipeline.test.js | a locked vault still answers questions that reveal nothing | not yet ported |
+| pipeline.test.js | a locked vault refuses every proxied request | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
+| pipeline.test.js | locking is recorded on disk, so a restart comes back locked | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
+| pipeline.test.js | unlocking clears the recorded state | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
+| pipeline.test.js | a locked vault still answers questions that reveal nothing | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
 | pipeline.test.js | a held write is resendable with a freshly minted placeholder | `tests::mutants::an_approval_survives_a_fresh_placeholder_on_the_resend` |
 | pipeline.test.js | a resend cannot change what the human approved | `tests::mutants::hardening_a_resend_may_not_change_the_bytes_the_human_approved` |
 | remote.test.js | on loopback a placeholder alone authenticates, which is the point | not yet ported |

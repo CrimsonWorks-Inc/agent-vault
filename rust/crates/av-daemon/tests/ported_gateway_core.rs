@@ -3037,13 +3037,13 @@ async fn repeated_list_headers_preserve_every_value_and_substitute_only_the_targ
         .headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("x-trace"))
-        .cloned()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
         .collect::<Vec<_>>();
     assert_eq!(
         trace,
         vec![
-            ("X-Trace".into(), "checked".into()),
-            ("X-Trace".into(), "other".into())
+            ("x-trace".into(), "checked".into()),
+            ("x-trace".into(), "other".into())
         ]
     );
     assert!(sent
@@ -3064,7 +3064,7 @@ async fn repeated_list_headers_preserve_every_value_and_substitute_only_the_targ
         sent.headers
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("x-api-key"))
-            .cloned()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
             .collect::<Vec<_>>(),
         vec![
             ("x-api-key".into(), "not-a-secret".into()),
@@ -6177,6 +6177,7 @@ async fn stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused(
         json!("-1"),
         json!("1e3"),
         json!("abc"),
+        json!("lots"),
         Value::Null,
     ] {
         let mut policy = seeded_policy();
@@ -7235,4 +7236,877 @@ async fn real_health_write_contention_preserves_executed_response_consumption_an
     let ordinary = f.get().await;
     assert_eq!(ordinary.status, 200);
     f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn pipeline_confinement_rejects_foreign_host_path_and_profile_webhook_before_wire() {
+    let f = Fixture::configured_kind(
+        &["header:authorization:Bearer"],
+        SECRET,
+        None,
+        json!({"paths":["/user","/repos/allowed/**"]}),
+        "github",
+        "api.github.com",
+    )
+    .await;
+    for (name, path, rule, code) in [
+        (
+            "foreign host",
+            "/t/https/evil.test/steal",
+            None,
+            "AV_NO_GRANT",
+        ),
+        (
+            "foreign path",
+            "/p/demo/repos/someone-else/private",
+            Some("paths"),
+            "AV_POLICY_DENIED",
+        ),
+    ] {
+        let mut request = gateway_input(&f, "GET", "/user", "", None, None);
+        request.path = path.into();
+        request.headers.retain(|(k, _)| k != "x-key");
+        request
+            .headers
+            .push(("authorization".into(), format!("Bearer {}", f.ph)));
+        let response = f.daemon.pipeline().handle(request).await;
+        assert_eq!(response.status, 403, "{name}");
+        let error = response.error.as_ref().unwrap();
+        assert_eq!(error.code.as_str(), code, "{name}");
+        if let Some(rule) = rule {
+            assert_eq!(error.extra.rule.as_deref(), Some(rule), "{name}");
+        }
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        assert_eq!(grant_counters(&f).await, (0, vec![0]));
+        f.clean(&response).await;
+    }
+    let allowed = f
+        .send(
+            "GET",
+            "/user",
+            vec![("authorization".into(), format!("Bearer {}", f.ph))],
+            None,
+        )
+        .await;
+    assert_eq!(allowed.status, 200);
+    f.clean(&allowed).await;
+    let wide = Fixture::configured_kind(
+        &["header:authorization:Bearer"],
+        SECRET,
+        None,
+        json!({}),
+        "github",
+        "api.github.com",
+    )
+    .await;
+    let denied = wide
+        .send(
+            "POST",
+            "/repos/allowed/project/hooks",
+            vec![("authorization".into(), format!("Bearer {}", wide.ph))],
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, 403);
+    assert!(denied
+        .error
+        .as_ref()
+        .unwrap()
+        .extra
+        .rule
+        .as_deref()
+        .unwrap()
+        .starts_with("deny_paths"));
+    assert!(wide.up.hits.lock().unwrap().is_empty());
+    wide.clean(&denied).await;
+    let control = wide
+        .send(
+            "POST",
+            "/repos/allowed/project/issues",
+            vec![("authorization".into(), format!("Bearer {}", wide.ph))],
+            None,
+        )
+        .await;
+    assert_eq!(control.status, 200);
+    wide.clean(&control).await;
+}
+
+#[tokio::test]
+async fn pipeline_encoded_body_and_parser_hidden_placeholder_shapes_never_reach_upstream() {
+    use base64::Engine;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let encodings = [
+        (
+            "base64",
+            base64::engine::general_purpose::STANDARD.encode(&f.ph),
+        ),
+        (
+            "base64url",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&f.ph),
+        ),
+        (
+            "base64 offset",
+            base64::engine::general_purpose::STANDARD.encode(format!("xy{}", f.ph)),
+        ),
+        ("percent", f.ph.replace('.', "%2e")),
+        (
+            "JSON escapes",
+            f.ph.chars()
+                .map(|c| format!("\\u{:04x}", c as u32))
+                .collect::<String>(),
+        ),
+    ];
+    for (name, text) in encodings {
+        let response = f
+            .post("application/json", format!("{{\"body\":\"{text}\"}}"))
+            .await;
+        assert_eq!(response.status, 403, "{name}");
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_BAD_LOCATION",
+            "{name}"
+        );
+        f.clean(&response).await;
+    }
+    for name in [
+        "JSON body value",
+        "request path",
+        "header name",
+        "query name",
+        "form name",
+        "JSON key",
+        "shadowed JSON value",
+        "malformed query key",
+    ] {
+        let mut req = gateway_input(&f, "POST", "/ordinary", "", None, None);
+        req.headers.retain(|(k, _)| k != "x-key");
+        match name {
+            "JSON body value" => {
+                req.headers
+                    .push(("content-type".into(), "application/json".into()));
+                req.body = Some(
+                    json!({"body":format!("my token is {}",f.ph)})
+                        .to_string()
+                        .into_bytes(),
+                );
+            }
+            "request path" => req.path = format!("/p/demo/repos/{}", f.ph),
+            "header name" => req.headers.push((format!("x-{}", f.ph), "1".into())),
+            "query name" => req.query = format!("{}=1", f.ph),
+            "form name" => {
+                req.headers.push((
+                    "content-type".into(),
+                    "application/x-www-form-urlencoded".into(),
+                ));
+                req.body = Some(format!("{}=1", f.ph).into_bytes());
+            }
+            "JSON key" => {
+                req.headers
+                    .push(("content-type".into(), "application/json".into()));
+                req.body = Some(json!({f.ph.clone():"x"}).to_string().into_bytes());
+            }
+            "shadowed JSON value" => {
+                req.headers
+                    .push(("content-type".into(), "application/json".into()));
+                req.body =
+                    Some(format!("{{\"note\":\"{}\",\"note\":\"harmless\"}}", f.ph).into_bytes());
+            }
+            "malformed query key" => req.query = format!("bad%={}", f.ph),
+            _ => unreachable!(),
+        }
+        let response = f.daemon.pipeline().handle(req).await;
+        assert_eq!(response.status, 403, "{name}: {:?}", response.error);
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_BAD_LOCATION",
+            "{name}"
+        );
+        if name == "JSON body value" {
+            let error = response.error.as_ref().unwrap();
+            assert!(error.detail.contains("JSON body at /body"));
+            assert!(error
+                .extra
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("only ever injected at"));
+        }
+        f.clean(&response).await;
+    }
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    assert_eq!(grant_counters(&f).await, (0, vec![0]));
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn twenty_racing_one_shot_uses_send_exactly_once_and_successors_remain_one_shot() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let once = f.mint(Some(1)).await;
+    let mut attempts = Vec::new();
+    for _ in 0..20 {
+        let daemon = f.daemon.clone();
+        let mut req = gateway_input(&f, "GET", "/ordinary", "", None, None);
+        req.headers
+            .iter_mut()
+            .find(|(k, _)| k == "x-key")
+            .unwrap()
+            .1 = once.clone();
+        attempts.push(tokio::spawn(
+            async move { daemon.pipeline().handle(req).await },
+        ));
+    }
+    let mut success = None;
+    for attempt in attempts {
+        let response = attempt.await.unwrap();
+        if response.status == 200 {
+            assert!(success.is_none());
+            success = Some(response);
+        } else {
+            assert_eq!(response.status, 401);
+            assert_eq!(
+                response.error.as_ref().unwrap().code.as_str(),
+                "AV_PH_EXHAUSTED"
+            );
+            f.clean(&response).await;
+        }
+    }
+    let success = success.unwrap();
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&success).await;
+    let successor = success.header("av-placeholder-next").unwrap().to_string();
+    let gid = f.grant_id.clone();
+    f.shared
+        .run(move |core| {
+            let rows = core.vault.list_placeholders(None).unwrap();
+            let successors = rows
+                .iter()
+                .filter(|p| p.grant_id == gid && p.replaces_id.is_some())
+                .collect::<Vec<_>>();
+            assert_eq!(successors.len(), 1);
+            assert_eq!(successors[0].max_uses, 1);
+        })
+        .await
+        .unwrap();
+    for expected in [200, 401] {
+        let response = f
+            .send(
+                "GET",
+                "/ordinary",
+                vec![("x-key".into(), successor.clone())],
+                None,
+            )
+            .await;
+        assert_eq!(response.status, expected);
+        if expected == 401 {
+            assert_eq!(
+                response.error.as_ref().unwrap().code.as_str(),
+                "AV_PH_EXHAUSTED"
+            );
+        }
+        f.clean(&response).await;
+    }
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn cross_session_placeholders_and_bare_remote_carriers_are_refused_with_legitimate_controls()
+{
+    use av_store::vault::{CreateGrantOptions, IssueOptions};
+    let f = Fixture::new(&["header:x-key"]).await;
+    let foreign = f
+        .shared
+        .run(|core| {
+            let other = core.vault.create_session(Default::default()).unwrap();
+            let credential = core.vault.find_credential("demo").unwrap().unwrap();
+            let grant = core
+                .vault
+                .create_grant(CreateGrantOptions {
+                    session_id: other.session.id,
+                    credential_id: credential.id,
+                    policy: serde_json::from_value(seeded_policy()).unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+            core.vault
+                .issue_placeholder(IssueOptions {
+                    grant_id: grant.id,
+                    ..Default::default()
+                })
+                .unwrap()
+                .placeholder
+        })
+        .await
+        .unwrap();
+    let cross = f
+        .send("GET", "/ordinary", vec![("x-key".into(), foreign)], None)
+        .await;
+    assert_eq!(cross.status, 403);
+    assert_eq!(
+        cross.error.as_ref().unwrap().code.as_str(),
+        "AV_PH_CROSS_SESSION"
+    );
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    f.clean(&cross).await;
+    for (name, remote, token, expected) in [
+        ("loopback bare", false, false, 200),
+        ("network bare", true, false, 401),
+        ("network explicit token", true, true, 200),
+    ] {
+        let mut req = gateway_input(&f, "GET", "/ordinary", "", None, None);
+        if !token {
+            req.headers.retain(|(k, _)| k != "av-session");
+        }
+        req.listener = Some(av_daemon::pipeline::ListenerInfo {
+            id: if remote { "remote" } else { "local" }.into(),
+            kind: if remote { "tls" } else { "tcp" }.into(),
+            remote,
+            advertise: vec![],
+        });
+        let response = f.daemon.pipeline().handle(req).await;
+        assert_eq!(response.status, expected, "{name}: {:?}", response.error);
+        if expected == 401 {
+            let e = response.error.as_ref().unwrap();
+            assert_eq!(e.code.as_str(), "AV_SESSION_REQUIRED");
+            assert_eq!(e.extra.rule.as_deref(), Some("remote_carrier"));
+            assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        }
+        f.clean(&response).await;
+    }
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn approval_pending_capacity_is_bounded_and_expired_entries_release_the_cap() {
+    let f = approval_fixture("each", &["header:x-key"]).await;
+    for n in 0..av_daemon::pipeline::MAX_APPROVALS {
+        let response = f
+            .send(
+                "GET",
+                &format!("/pending/{n}"),
+                vec![("x-key".into(), f.ph.clone())],
+                None,
+            )
+            .await;
+        assert_eq!(response.status, 202, "held {n}");
+    }
+    let capped = f
+        .send(
+            "GET",
+            "/over-cap",
+            vec![("x-key".into(), f.ph.clone())],
+            None,
+        )
+        .await;
+    assert_eq!(capped.status, 403);
+    assert!(capped
+        .error
+        .as_ref()
+        .unwrap()
+        .detail
+        .contains("waiting for approval"));
+    assert_eq!(f.daemon.pipeline().pending_approvals().await.len(), 1000);
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    assert_eq!(grant_counters(&f).await, (0, vec![0]));
+    f.clean(&capped).await;
+    f.shared
+        .run(|core| {
+            let old = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap();
+            for (_, approval) in &mut core.pl.approvals {
+                approval.created_at = old.clone();
+            }
+        })
+        .await
+        .unwrap();
+    let fresh = f
+        .send(
+            "GET",
+            "/new-after-sweep",
+            vec![("x-key".into(), f.ph.clone())],
+            None,
+        )
+        .await;
+    assert_eq!(fresh.status, 202);
+    let id = held_id(&fresh);
+    let pending = f.daemon.pipeline().pending_approvals().await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], id);
+    f.clean(&fresh).await;
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let control = f
+        .send(
+            "GET",
+            "/new-after-sweep",
+            vec![("x-key".into(), f.ph.clone())],
+            None,
+        )
+        .await;
+    assert_eq!(control.status, 200);
+    f.clean(&control).await;
+}
+
+#[tokio::test]
+async fn refunds_require_a_live_grant_and_both_refund_decisions_are_audited() {
+    for revoked in [false, true] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let _ = f.mint(Some(1)).await;
+        let token = f.token.clone();
+        let gid = f.grant_id.clone();
+        f.shared
+            .run(move |core| {
+                let row = core
+                    .vault
+                    .list_placeholders(None)
+                    .unwrap()
+                    .into_iter()
+                    .find(|p| p.grant_id == gid && p.max_uses == 1)
+                    .unwrap();
+                core.vault.consume_placeholder(&row.id).unwrap();
+                assert_eq!(
+                    core.vault
+                        .list_placeholders(None)
+                        .unwrap()
+                        .iter()
+                        .find(|p| p.id == row.id)
+                        .unwrap()
+                        .uses,
+                    1
+                );
+                if revoked {
+                    let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+                    core.vault
+                        .revoke_session(&sid, "fixture revocation")
+                        .unwrap();
+                }
+                core.vault.refund_placeholder(&row.id).unwrap();
+                let after = core
+                    .vault
+                    .list_placeholders(None)
+                    .unwrap()
+                    .into_iter()
+                    .find(|p| p.id == row.id)
+                    .unwrap();
+                assert_eq!(after.uses, u64::from(revoked));
+                assert_eq!(
+                    after.state == av_store::model::PlaceholderState::Active,
+                    !revoked
+                );
+            })
+            .await
+            .unwrap();
+        let records = audit_records(&f).await;
+        let event = if revoked {
+            "placeholder.refund_refused"
+        } else {
+            "placeholder.refunded"
+        };
+        assert_eq!(records.iter().filter(|r| r["kind"] == event).count(), 1);
+        let response = f.get().await;
+        if revoked {
+            assert_eq!(
+                response.error.as_ref().unwrap().code.as_str(),
+                "AV_SESSION_REVOKED"
+            );
+            assert!(f.up.hits.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(response.status, 200);
+        }
+        f.clean(&response).await;
+    }
+}
+
+#[tokio::test]
+async fn locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+    f.shared
+        .run(|core| {
+            core.vault.lock().unwrap();
+            assert!(core.vault.locked_on_disk().unwrap());
+            assert_eq!(core.vault.list_credentials().unwrap().len(), 1);
+            assert!(core.vault.stats().unwrap().locked);
+            let cred = core.vault.find_credential("demo").unwrap().unwrap();
+            assert!(core.vault.reveal_field(&cred.id, "token").is_err());
+        })
+        .await
+        .unwrap();
+    let response = f.get().await;
+    assert_eq!(response.status, 423);
+    assert_eq!(response.error.as_ref().unwrap().code.as_str(), "AV_LOCKED");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    assert!(!String::from_utf8_lossy(&response.body).contains(SECRET));
+    let mut restarted = av_store::vault::Vault::open(f._dir.path()).unwrap();
+    assert!(!restarted.start_in_recorded_state(None).unwrap());
+    assert!(restarted.locked());
+    drop(restarted);
+    f.shared
+        .run(|core| {
+            core.vault.unlock(None).unwrap();
+            assert!(!core.vault.locked());
+            assert!(!core.vault.locked_on_disk().unwrap());
+        })
+        .await
+        .unwrap();
+    let restored = f.get().await;
+    assert_eq!(restored.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    f.clean(&restored).await;
+    let mut restarted = av_store::vault::Vault::open(f._dir.path()).unwrap();
+    assert!(restarted.start_in_recorded_state(None).unwrap());
+    assert!(!restarted.locked());
+}
+
+#[tokio::test]
+async fn revocation_stops_an_existing_session_and_allow_deny_consumption_records_verify() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let allowed = f.get().await;
+    assert_eq!(allowed.status, 200);
+    f.clean(&allowed).await;
+    let mut foreign = gateway_input(&f, "GET", "/ordinary", "", None, None);
+    foreign.path = "/t/https/evil.test/steal".into();
+    let denied = f.daemon.pipeline().handle(foreign).await;
+    assert_eq!(denied.status, 403);
+    f.clean(&denied).await;
+    f.shared
+        .run(|core| assert!(core.vault.audit().unwrap().verify().unwrap().ok))
+        .await
+        .unwrap();
+    let records = audit_records(&f).await;
+    for kind in ["request.allowed", "request.denied", "placeholder.resolved"] {
+        assert!(records.iter().any(|r| r["kind"] == kind), "{kind}");
+    }
+    let token = f.token.clone();
+    f.shared
+        .run(move |core| {
+            let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+            core.vault.revoke_session(&sid, "fixture revoked").unwrap();
+        })
+        .await
+        .unwrap();
+    let revoked = f.get().await;
+    assert_eq!(
+        revoked.error.as_ref().unwrap().code.as_str(),
+        "AV_SESSION_REVOKED"
+    );
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&revoked).await;
+}
+
+#[tokio::test]
+async fn upstream_minted_github_tokens_are_redacted_by_shape_and_ordinary_text_survives() {
+    let f = Fixture::configured_kind(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({}),
+        "github",
+        "api.github.com",
+    )
+    .await;
+    f.reply(200,"application/json",json!({"token":"ghs_MINTEDINSTALLATION1234567890abcdef","ordinary":"ordinary-traffic-control"}).to_string());
+    let response = f.get().await;
+    assert_eq!(response.status, 200);
+    let text = String::from_utf8_lossy(&response.body);
+    assert!(text.contains("[[av:derived]]"));
+    assert!(!text.contains("ghs_MINTEDINSTALLATION"));
+    assert!(text.contains("ordinary-traffic-control"));
+    f.clean(&response).await;
+    assert!(!serde_json::to_string(&audit_records(&f).await)
+        .unwrap()
+        .contains("ghs_MINTEDINSTALLATION"));
+}
+
+#[tokio::test]
+async fn chosen_credential_fingerprint_is_domain_separated_from_placeholder_checksum_key() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let token = f.token.clone();
+    f.shared
+        .run(move |core| {
+            let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+            let message = format!("av1.{sid}.demo_token.5a8e1n0t2rc7q9x4wz6vhb3pdk");
+            let public = core
+                .vault
+                .add_credential(av_store::vault::NewCredential {
+                    slug: "chosen-message-probe".into(),
+                    kind: "http".into(),
+                    connector: serde_json::from_value(json!({"host":"probe.example.test"}))
+                        .unwrap(),
+                    fields: vec![("token".into(), message.clone().into())],
+                    sites: std::collections::BTreeMap::from([(
+                        "token".into(),
+                        vec!["header:authorization:Bearer".into()],
+                    )]),
+                })
+                .unwrap();
+            let under_checksum =
+                av_store::crypto::fingerprint8(&core.vault.k_ph().unwrap(), message.as_bytes());
+            let under_fingerprint = av_store::crypto::fingerprint8(
+                &core.vault.k_fingerprint().unwrap(),
+                message.as_bytes(),
+            );
+            assert_ne!(public.fields[0].fp8, under_checksum);
+            assert_eq!(public.fields[0].fp8, under_fingerprint);
+        })
+        .await
+        .unwrap();
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn unit_only_grant_budget_keeps_the_session_limit_and_charges_every_allowed_request() {
+    use av_core::secret::ExposeSecret;
+    use av_store::vault::{CreateGrantOptions, CreateSessionOptions, IssueOptions};
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (token,marker,gid)=f.shared.run(|core| {
+        let credential=core.vault.find_credential("demo").unwrap().unwrap();
+        let session=core.vault.create_session(CreateSessionOptions{policy:serde_json::from_value(json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/**"],"budget":{"unit":"requests","limit":2}})).unwrap(),..Default::default()}).unwrap();
+        let grant=core.vault.create_grant(CreateGrantOptions{session_id:session.session.id,credential_id:credential.id,policy:serde_json::from_value(json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/**"],"budget":{"unit":"requests"},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+        let marker=core.vault.issue_placeholder(IssueOptions{grant_id:grant.id.clone(),..Default::default()}).unwrap().placeholder;
+        (session.token.expose_secret().to_string(),marker,grant.id)
+    }).await.unwrap();
+    for expected in [200, 200, 403] {
+        let mut req = gateway_input(&f, "GET", "/ordinary", "", None, None);
+        for (k, v) in &mut req.headers {
+            if k == "av-session" {
+                *v = token.clone();
+            }
+            if k == "x-key" {
+                *v = marker.clone();
+            }
+        }
+        let response = f.daemon.pipeline().handle(req).await;
+        assert_eq!(response.status, expected);
+        if expected == 403 {
+            assert!(response.error.as_ref().unwrap().detail.contains("budget"));
+        }
+        f.clean(&response).await;
+    }
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    f.shared
+        .run(move |core| assert_eq!(core.vault.grant(&gid).unwrap().unwrap().budget_used, 2))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures() {
+    let f = Fixture::configured(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({"approval":"each","methods":["GET","POST","DELETE"]}),
+    )
+    .await;
+    let base = || {
+        f.send(
+            "POST",
+            "/ordinary",
+            vec![("x-key".into(), f.ph.clone())],
+            Some("{\"title\":\"a\"}".into()),
+        )
+    };
+    let id = held_id(&base().await);
+    f.daemon
+        .pipeline()
+        .decide_approval(id.clone(), true)
+        .await
+        .unwrap();
+    *f.up.failure.lock().unwrap() = Some(UpstreamError::new("ENOTFOUND", "fake DNS failure"));
+    let failed = base().await;
+    assert_eq!(failed.status, 502);
+    assert_eq!(failed.error.as_ref().unwrap().extra.refunded, Some(true));
+    f.clean(&failed).await;
+    let expected = id.clone();
+    f.shared
+        .run(move |core| {
+            assert_eq!(
+                core.pl
+                    .approvals
+                    .iter()
+                    .find(|(_, a)| a.id == expected)
+                    .unwrap()
+                    .1
+                    .state,
+                "granted"
+            )
+        })
+        .await
+        .unwrap();
+    *f.up.failure.lock().unwrap() = None;
+    let before = f.up.hits.lock().unwrap().len();
+    let executed = base().await;
+    assert_eq!(executed.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), before + 1);
+    f.clean(&executed).await;
+    let replay = base().await;
+    assert_eq!(replay.status, 200);
+    assert_eq!(replay.header("av-replayed"), Some("true"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), before + 1);
+    f.clean(&replay).await;
+    let changed = f
+        .send(
+            "POST",
+            "/ordinary",
+            vec![
+                ("x-key".into(), f.ph.clone()),
+                ("x-http-method-override".into(), "DELETE".into()),
+            ],
+            Some("{\"title\":\"a\"}".into()),
+        )
+        .await;
+    assert_eq!(changed.status, 202);
+    let other = held_id(&changed);
+    assert_ne!(other, id);
+    assert_eq!(f.up.hits.lock().unwrap().len(), before + 1);
+    f.clean(&changed).await;
+    f.daemon
+        .pipeline()
+        .decide_approval(other, false)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let denied = f
+            .send(
+                "POST",
+                "/ordinary",
+                vec![
+                    ("x-key".into(), f.ph.clone()),
+                    ("x-http-method-override".into(), "DELETE".into()),
+                ],
+                Some("{\"title\":\"a\"}".into()),
+            )
+            .await;
+        assert_eq!(denied.status, 403);
+        f.clean(&denied).await;
+    }
+    assert_eq!(f.up.hits.lock().unwrap().len(), before + 1);
+}
+
+#[tokio::test]
+async fn placeholder_grant_binding_cannot_bill_a_different_grant_for_a_wider_route() {
+    use av_store::vault::{CreateGrantOptions, IssueOptions};
+    let f = Fixture::new(&["header:x-key"]).await;
+    let token = f.token.clone();
+    let (marker,narrow)=f.shared.run(move |core| {
+        let sid=core.vault.session_by_token(&token).unwrap().unwrap().id;let credential=core.vault.find_credential("demo").unwrap().unwrap();
+        let grant=core.vault.create_grant(CreateGrantOptions{session_id:sid,credential_id:credential.id,policy:serde_json::from_value(json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/ordinary"],"budget":{"unit":"requests","limit":2},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+        let ph=core.vault.issue_placeholder(IssueOptions{grant_id:grant.id.clone(),..Default::default()}).unwrap().placeholder;(ph,grant.id)
+    }).await.unwrap();
+    let refused = f
+        .send("GET", "/ordinary", vec![("x-key".into(), marker)], None)
+        .await;
+    assert_eq!(refused.status, 403);
+    assert_eq!(
+        refused.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("placeholder_grant")
+    );
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    assert_eq!(grant_counters(&f).await, (0, vec![0]));
+    f.shared
+        .run(move |core| assert_eq!(core.vault.grant(&narrow).unwrap().unwrap().budget_used, 0))
+        .await
+        .unwrap();
+    f.clean(&refused).await;
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn buffered_upstream_is_cut_at_the_size_limit_instead_of_occupying_unbounded_memory() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    *f.up.reply.lock().unwrap() = Some(Reply {
+        streaming: false,
+        status: 200,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: vec![],
+    });
+    *f.up.source.lock().unwrap() = Some(Body::chunks(
+        (0..33).map(|_| Ok(vec![b'A'; 1024 * 1024])).collect(),
+    ));
+    let refused = f.get().await;
+    assert_eq!(refused.status, 502);
+    let error = refused.error.as_ref().unwrap();
+    assert_eq!(error.code.as_str(), "AV_UNSCANNABLE");
+    assert_eq!(error.extra.rule.as_deref(), Some("response_size"));
+    assert!(refused.body.len() < 16384);
+    f.clean(&refused).await;
+    f.reply(200, "application/json", "{\"ordinary\":true}".into());
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    assert_eq!(ordinary.body, b"{\"ordinary\":true}");
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn fractional_control_issuance_normalizes_uses_and_records_each_ledger_row_once() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let token = f.token.clone();
+    let sid = f
+        .shared
+        .run(move |core| core.vault.session_by_token(&token).unwrap().unwrap().id)
+        .await
+        .unwrap();
+    for (value, exact) in [
+        (json!(1.5), Some(1)),
+        (json!(2), Some(2)),
+        (json!(0), None),
+        (json!(-3), None),
+        (json!(0.2), None),
+        (Value::Null, None),
+        (json!("lots"), None),
+    ] {
+        let before = f
+            .shared
+            .run(|core| core.vault.list_placeholders(None).unwrap().len())
+            .await
+            .unwrap();
+        let audit_before = audit_records(&f)
+            .await
+            .iter()
+            .filter(|r| r["kind"] == "placeholder.issued")
+            .count();
+        let (status, body) = control(
+            &f._dir.path().join("control.sock"),
+            "/v1/placeholders",
+            json!({"cred":"demo","sid":sid,"uses":value}),
+        )
+        .await;
+        assert_eq!(status, 200, "uses={value}: {body}");
+        let ph = body["placeholder"].as_str().unwrap().to_string();
+        let wanted = ph.clone();
+        f.shared
+            .run(move |core| {
+                let rows = core.vault.list_placeholders(None).unwrap();
+                assert_eq!(rows.len(), before + 1);
+                let parsed = av_core::placeholder::parse_at(&wanted, 0).unwrap();
+                let row = rows
+                    .iter()
+                    .find(|p| p.nonce_hash == av_core::placeholder::hash_nonce(&parsed.nonce))
+                    .unwrap();
+                assert!(row.max_uses >= 1);
+                if let Some(exact) = exact {
+                    assert_eq!(row.max_uses, exact);
+                }
+            })
+            .await
+            .unwrap();
+        let after = audit_records(&f).await;
+        assert_eq!(
+            after
+                .iter()
+                .filter(|r| r["kind"] == "placeholder.issued")
+                .count(),
+            audit_before + 1
+        );
+        assert!(!serde_json::to_string(&body).unwrap().contains(SECRET));
+        assert!(!serde_json::to_string(&after).unwrap().contains(SECRET));
+    }
 }
