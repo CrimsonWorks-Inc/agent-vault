@@ -401,3 +401,36 @@ async fn a_t_https_route_to_an_http_credential_goes_out_over_https() {
     let url = w.up.hits.lock().unwrap()[0].url.clone();
     assert!(url.starts_with("https://plain.example.test/"), "{url}");
 }
+
+/// Repeated request headers go upstream as separate field lines, in order,
+/// with only the declared copy substituted. Also holds 'a repeated header
+/// reaches pinnedRequest as a list and the request is refused'.
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_request_headers_go_upstream_as_separate_lines_in_order() {
+    let w = World::seeded(json!({})).await;
+    let h = vec![
+        ("x-note".to_string(), "first".to_string()),
+        (
+            "authorization".to_string(),
+            format!("Bearer {}", w.placeholder),
+        ),
+        ("x-note".to_string(), "second".to_string()),
+        ("accept".to_string(), "text/plain".to_string()),
+        ("x-note".to_string(), "third".to_string()),
+    ];
+    let r = w.send("GET", "/user", h, None).await;
+    assert_eq!(r.status, 200, "{:?}", r.error);
+    let hit = w.up.hits.lock().unwrap()[0].clone();
+    let notes: Vec<&str> = hit
+        .headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("x-note"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(notes, vec!["first", "second", "third"]);
+    assert_eq!(
+        w.up.last_auth().as_deref(),
+        Some(format!("Bearer {SECRET}").as_str())
+    );
+    assert!(!crate::util::js_stringify(&json!(hit.headers)).contains(&w.placeholder));
+}

@@ -459,21 +459,9 @@ impl Upstream for PinnedUpstream {
 pub async fn pinned_request(req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
     let url = url::Url::parse(&req.url)
         .map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid URL"))?;
-    // The caller's headers, read once.
-    let mut sent: Vec<(String, String)> = Vec::new();
-    for (n, v) in &req.headers {
-        if sent.iter().any(|(k, _)| k == n) {
-            return Err(UpstreamError {
-                vault: Some(Box::new(dr(
-                    C::PolicyDenied,
-                    "headers must be names with string values, each read once",
-                    "header_format",
-                ))),
-                ..Default::default()
-            });
-        }
-        sent.push((n.clone(), v.clone()));
-    }
+    // The caller's field lines, read once, in order. A name may repeat:
+    // each line is sent as its own line.
+    let sent: Vec<(String, String)> = req.headers.clone();
     let identity = identity_of(&url);
     if !sent
         .iter()

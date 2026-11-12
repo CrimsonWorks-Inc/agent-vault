@@ -2743,13 +2743,15 @@ to = ''''''
 
 [[mutation]]
 name = 'a repeated header reaches pinnedRequest as a list and the request is refused'
-file = "src/pipeline.rs"
-from = '''                v.join(if n.eq_ignore_ascii_case("cookie") {
-                    "; "
-                } else {
-                    ", "
-                }),'''
-to = '''                v.first().cloned().unwrap_or_default(),'''
+file = "src/connectors/pinning.rs"
+from = '''    let sent: Vec<(String, String)> = req.headers.clone();'''
+to = '''    let sent: Vec<(String, String)> = req.headers.clone();
+    if sent.iter().enumerate().any(|(i, (k, _))| sent[..i].iter().any(|(j, _)| j == k)) {
+        return Err(UpstreamError {
+            vault: Some(Box::new(dr(C::PolicyDenied, "headers must be names with string values, each read once", "header_format"))),
+            ..Default::default()
+        });
+    }'''
 
 [[mutation]]
 name = 'a denial row records the method the agent sent, whatever it is (C28)'
