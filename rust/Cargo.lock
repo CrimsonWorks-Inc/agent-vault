@@ -223,6 +223,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "p256",
+ "proptest",
  "rand",
  "rcgen",
  "rusqlite",

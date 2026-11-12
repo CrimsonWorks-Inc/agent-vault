@@ -2057,12 +2057,23 @@ async fn network_pipeline(
     method: &str,
     body: Option<Vec<u8>>,
 ) -> (av_daemon::pipeline::Pipeline, GatewayRequest) {
+    network_policy_pipeline(f, port, method, body, json!({})).await
+}
+async fn network_policy_pipeline(
+    f: &Fixture,
+    port: u16,
+    method: &str,
+    body: Option<Vec<u8>>,
+    policy_patch: Value,
+) -> (av_daemon::pipeline::Pipeline, GatewayRequest) {
     let (token,ph)=f.shared.run(move |core| {
         use av_core::secret::ExposeSecret;
         use av_store::vault::{NewCredential,CreateSessionOptions,CreateGrantOptions,IssueOptions};
         let credential=core.vault.add_credential(NewCredential {slug:"network".into(),kind:"http".into(),connector:serde_json::from_value(json!({"host":format!("127.0.0.1:{port}"),"scheme":"http"})).unwrap(),fields:vec![("key".into(),SECRET.to_string().into())],sites:std::collections::BTreeMap::from([("key".into(),vec!["header:x-key".into()])])}).unwrap();
         let session=core.vault.create_session(CreateSessionOptions::default()).unwrap();
-        let grant=core.vault.create_grant(CreateGrantOptions {session_id:session.session.id,credential_id:credential.id,policy:serde_json::from_value(json!({"hosts":["127.0.0.1"],"methods":["GET","DELETE"],"paths":["/**"],"budget":{"unit":"requests","limit":100},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+        let mut policy = json!({"hosts":["127.0.0.1"],"methods":["GET","DELETE"],"paths":["/**"],"budget":{"unit":"requests","limit":100},"approval":"auto"});
+        for (k,v) in policy_patch.as_object().unwrap() { policy[k] = v.clone(); }
+        let grant=core.vault.create_grant(CreateGrantOptions {session_id:session.session.id,credential_id:credential.id,policy:serde_json::from_value(policy).unwrap(),..Default::default()}).unwrap();
         let ph=core.vault.issue_placeholder(IssueOptions{grant_id:grant.id,..Default::default()}).unwrap();(session.token.expose_secret().to_string(),ph.placeholder)
     }).await.unwrap();
     let pipeline = av_daemon::pipeline::Pipeline::new(f.shared.clone(), PipelineOptions::default());
@@ -4337,4 +4348,1314 @@ async fn provider_version_headers_survive_hops_and_cookie_override_forwarding_he
         ]
     );
     f.clean(&r).await;
+}
+
+// Exact literal request tables extracted from gateway-w2-pipeline.test.js,
+// without importing or executing the test module.
+const PARSER_SHAPES: &str = r###"{"spellings":["_method=DELETE","%5Fmethod=DELETE","_METHOD=PUT","__method=DELETE",".method=DELETE","%2Emethod=DELETE","_method[]=DELETE","_method%5B%5D=DELETE","_method[0]=DELETE","+method=DELETE","%20method=DELETE","x-http-method-override=DELETE","X-HTTP-Method-Override=DELETE","x_http_method=DELETE","X-Method-Override=PATCH","a=1;_method=DELETE","a=1;__method=DELETE","__method=DELETE&__method=GET",".method=GET;force=1"],"stray":["force%00=1","+force=1","%20%20force=1","x%00=1","%00x=1","x%01=1","%1Fx=1","x%7F=1","%09x=1","x%09=1","+x=1","x+=1","%20x=1","x%20=1","x%0Ay=1","%C3%A9=1","caf%C3%A9=1","x%FF=1","=1","a=1&=2","a=1;%20b=2"],"php_payload":[["query","dry_run=true&force%00=true"],["query","dry_run=true&force%00x=true"],["query","dry_run=true&force%00[]=true"],["query","dry_run=true&+force=true"],["query","dry_run=true&%20force=true"],["query","dry_run=true&++force=true"],["form","amount=2000&force%00=1"],["form","amount=2000&+force=1"]],"php_method":[["query","_method%00=DELETE"],["form","a=1&_method%00=DELETE"],["form","a=1&%20%20_method=DELETE"]],"bracket_payload":[["query","dry_run=true&[force]=true"],["query","dry_run=true&%5Bforce%5D=true"],["query","dry_run=true&[force][]=true"],["form","amount=2000&[force]=1"]],"bracket_method":[["query","[_method]=DELETE"],["form","a=1&[_method]=DELETE"],["form","a=1&%5B_method%5D=DELETE"]],"foreign_override":[["query _method=DELETE",{"query":"_method=DELETE"}],["form body _method=DELETE",{"extra":[["content-type","application/x-www-form-urlencoded"]],"body":"a=1&_method=DELETE"}],["JSON {\"_method\":\"DELETE\"}",{"extra":[["content-type","application/json"]],"body":"{\"_method\":\"DELETE\"}"}],["lower case value",{"query":"x=1&_method=delete"}],["__method",{"query":"__method=DELETE"}],["percent-encoded name",{"query":"%5Fmethod=DELETE"}],["upper case name",{"extra":[["content-type","application/x-www-form-urlencoded"]],"body":"_METHOD=DELETE"}],["PHP reads .method as _method",{"query":".method=DELETE"}],["PHP reads \" method\" as _method",{"query":"+method=DELETE"}],["bracketed",{"extra":[["content-type","application/x-www-form-urlencoded"]],"body":"_method[]=DELETE"}],["semicolon-separated",{"query":"a=1;_method=DELETE"}],["override header spelled as a field",{"query":"X-HTTP-Method-Override=DELETE"}],["form copy after a matching one",{"extra":[["content-type","application/x-www-form-urlencoded"]],"body":"_method=POST&_method=DELETE"}],["JSON duplicate, last matches",{"extra":[["content-type","application/json"]],"body":"{\"_method\":\"DELETE\",\"_method\":\"POST\"}"}],["JSON duplicate, first matches",{"extra":[["content-type","application/json"]],"body":"{\"_method\":\"POST\", \"a\":{\"b\":[1,\"}\"]},\"_method\":\"DELETE\"}"}],["JSON non-string value",{"extra":[["content-type","application/json"]],"body":"{\"_method\":[\"DELETE\"]}"}],["JSON escaped key",{"extra":[["content-type","application/json"]],"body":" { \"a\" : \"x\\\",\" , \"\\u005fmethod\" : \"DELETE\" } "}],["JSON +json type",{"extra":[["content-type","application/vnd.api+json"]],"body":"{\"_method\":\"PUT\"}"}],["multipart",{"extra":[["content-type","multipart/form-data; boundary=XyZ"]],"body":"--XyZ\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--XyZ\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--XyZ--\r\n"}]],"own_override":[["query _method=POST",{"query":"_method=POST"}],["form _method=post",{"extra":[["content-type","application/x-www-form-urlencoded"]],"body":"_method=post&a=1"}],["JSON {\"_method\":\"POST\"}",{"extra":[["content-type","application/json"]],"body":"{\"_method\":\"POST\"}"}],["multipart",{"extra":[["content-type","multipart/form-data; boundary=XyZ"]],"body":"--XyZ\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nPOST\r\n--XyZ--\r\n"}],["nested JSON field",{"extra":[["content-type","application/json"]],"body":"{\"a\":{\"_method\":\"DELETE\"}}"}],["a value, not a name",{"query":"note=_method%3DDELETE"}],["another name",{"query":"my_method=DELETE"}],["a body no framework reads as form",{"extra":[["content-type","text/plain"]],"body":"_method=DELETE"}]],"multipart":[["folded","form-data;\r\n name=\"_method\"",403],["folded with a tab","form-data; name=\"a\";\r\n\tname=\"_method\"",403],["a second name","form-data; name=\"a\"; name=\"_method\"",403],["name*","form-data; name*=utf-8''_method",200]],"stray_bodies":[[["content-type","application/x-www-form-urlencoded"],"a=1&%09b=2","request_ambiguous"],[["content-type","application/x-www-form-urlencoded"],"a=1&b%C3%A9=2","request_ambiguous"],[["content-type","application/x-www-form-urlencoded"],"a=1&force%00=1","request_ambiguous"],[["content-type","multipart/form-data; boundary=XyZ"],"--XyZ\r\nContent-Disposition: form-data; name=\" force\"\r\n\r\n1\r\n--XyZ--\r\n","request_ambiguous"],[["content-type","multipart/form-data; boundary=XyZ"],"--XyZ\r\nContent-Disposition: form-data; name=\"a\u0001\"\r\n\r\n1\r\n--XyZ--\r\n","request_ambiguous"],[["content-type","multipart/form-data; boundary=XyZ"],"--XyZ\r\nContent-Disposition: form-data; name=\"a\"; name=\"bé\"\r\n\r\n1\r\n--XyZ--\r\n","request_ambiguous"],[["content-type","multipart/form-data; boundary=XyZ"],"--XyZ\r\nContent-Disposition: form-data;\r\n name=\"a\t\"\r\n\r\n1\r\n--XyZ--\r\n","request_ambiguous"],[["content-type","application/json"],"{\"a\":1,\" force\":true}","request_ambiguous"],[["content-type","application/json"],"{\"force\\u0000\":true}","request_ambiguous"],[["content-type","application/json"],"{\"model\":\"x\",\"\":1}","request_ambiguous"],[["content-type","application/json"],"{\"modèle\":\"x\"}","request_ambiguous"],[["content-type","multipart/form-data; boundary=XyZ"],"--XyZ\r\nContent-Disposition: form-data; name=\" _method\"\r\n\r\nDELETE\r\n--XyZ--\r\n","method_override"],[["content-type","application/json"],"{\"a\":1,\" _method\":\"DELETE\"}","method_override"],[["content-type","application/json"],"{\"_method\\u0000\":\"DELETE\"}","method_override"]]}"###;
+
+fn parser_shapes() -> Value {
+    serde_json::from_str(PARSER_SHAPES).unwrap()
+}
+fn shape_request(f: &Fixture, method: &str, shape: &Value) -> GatewayRequest {
+    let mut req = gateway_input(
+        f,
+        method,
+        "/ordinary",
+        shape["query"].as_str().unwrap_or(""),
+        None,
+        shape["body"].as_str().map(|s| s.as_bytes().to_vec()),
+    );
+    for header in shape["extra"].as_array().into_iter().flatten() {
+        req.headers.push((
+            header[0].as_str().unwrap().into(),
+            header[1].as_str().unwrap().into(),
+        ));
+    }
+    req
+}
+async fn assert_direct_refusal(f: &Fixture, req: GatewayRequest, rule: &str) {
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 403);
+    assert_eq!(r.error.as_ref().unwrap().code.as_str(), "AV_POLICY_DENIED");
+    assert_eq!(r.error.as_ref().unwrap().extra.rule.as_deref(), Some(rule));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    assert_eq!(grant_counters(f).await, (0, vec![0]));
+    f.clean(&r).await;
+}
+async fn assert_stopped_hop(policy: Value, location: &str, path: &str, query: &str) {
+    let f = hop_fixture(policy, location, 302).await;
+    let mut req = hop_request(&f, "GET", path);
+    req.query = query.into();
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 302, "{location}");
+    assert_eq!(r.header("av-redirect-stopped"), Some("path"), "{location}");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    assert_eq!(grant_counters(&f).await.0, 1);
+    f.clean(&r).await;
+}
+async fn ordinary_hop_control() {
+    let f = hop_fixture(json!({}), "/next?ordinary=1", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"done");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn method_override_field_shapes_refuse_other_methods_and_preserve_own_method_controls() {
+    let tables = parser_shapes();
+    for row in tables["foreign_override"].as_array().unwrap() {
+        let f = Fixture::configured(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({"methods":["GET","POST","DELETE"]}),
+        )
+        .await;
+        assert_direct_refusal(&f, shape_request(&f, "POST", &row[1]), "method_override").await;
+        let r = f.get().await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+    }
+    let f = Fixture::new(&["header:x-key"]).await;
+    assert_direct_refusal(
+        &f,
+        gateway_input(&f, "GET", "/ordinary", "_method=DELETE", None, None),
+        "method_override",
+    )
+    .await;
+    let before = store_snapshot(&f).await;
+    let predicted = f
+        .daemon
+        .pipeline()
+        .preflight(
+            gateway_input(&f, "GET", "/ordinary", "_method=DELETE", None, None),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(predicted["would"], "deny");
+    assert_eq!(
+        predicted["checks"].as_array().unwrap().last().unwrap()["rule"],
+        "method_override"
+    );
+    assert_eq!(store_snapshot(&f).await, before);
+    for row in tables["own_override"].as_array().unwrap() {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let req = shape_request(&f, "POST", &row[1]);
+        let expected = req.body.clone();
+        let r = f.daemon.pipeline().handle(req).await;
+        assert_eq!(r.status, 200, "{}", row[0]);
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        assert_eq!(f.last().method, "POST");
+        assert_eq!(f.last().body, expected);
+        f.clean(&r).await;
+    }
+}
+#[tokio::test]
+async fn every_override_spelling_is_denied_directly_and_on_redirect_with_own_method_control() {
+    for query in parser_shapes()["spellings"].as_array().unwrap() {
+        let query = query.as_str().unwrap();
+        let methods = json!({"methods":["GET","HEAD","POST","PUT","PATCH","DELETE"]});
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, methods.clone()).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", query, None, None),
+            "method_override",
+        )
+        .await;
+        assert_stopped_hop(methods, &format!("/next?{query}"), "/ordinary", "").await;
+    }
+    let f = Fixture::new(&["header:x-key"]).await;
+    let query = "a=1;.method=get";
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(&f, "GET", "/ordinary", query, None, None))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(f.last().url.ends_with(&format!("?{query}")));
+    f.clean(&r).await;
+    let f = hop_fixture(json!({}), "/next?_method[]=GET", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().url, "https://api.example.test/next?_method[]=GET");
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn folded_override_location_cannot_gain_a_method_or_skip_onwrite_approval() {
+    assert_stopped_hop(
+        json!({"routes":route_pairs()}),
+        "https://api.example.test/admin/keys?.method=DELETE",
+        "/public/start",
+        "",
+    )
+    .await;
+    for query in [
+        ".method=DELETE",
+        "a=1;_method=DELETE",
+        "_method[]=DELETE",
+        "__method=DELETE",
+    ] {
+        let f = hop_fixture(
+            json!({"methods":["GET","DELETE"],"approval":"on-write","redirects":{"max":1}}),
+            &format!("https://api.example.test/other?{query}"),
+            302,
+        )
+        .await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "GET", "/ordinary"))
+            .await;
+        assert_eq!(r.status, 302);
+        assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+        f.clean(&r).await;
+    }
+    ordinary_hop_control().await;
+}
+async fn registered_payload_rows(key: &str) {
+    for row in parser_shapes()[key].as_array().unwrap() {
+        let form = row[0] == "form";
+        let pairs = row[1].as_str().unwrap();
+        let policy = if form {
+            json!({"payload":{"form":{"force":{"absent":true},"amount":{"required":true}}}})
+        } else {
+            json!({"payload":{"query":{"force":{"absent":true},"dry_run":{"required":true}}}})
+        };
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, policy).await;
+        let req = if form {
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                Some(pairs.as_bytes().to_vec()),
+            )
+        } else {
+            gateway_input(&f, "GET", "/ordinary", pairs, None, None)
+        };
+        assert_direct_refusal(&f, req, "request_ambiguous").await;
+        let control = if form {
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                Some(b"amount=1".to_vec()),
+            )
+        } else {
+            gateway_input(&f, "GET", "/ordinary", "dry_run=true", None, None)
+        };
+        let r = f.daemon.pipeline().handle(control).await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+        let hop_policy = if form {
+            json!({"payload":{"query":{"force":{"absent":true},"amount":{"required":true}}}})
+        } else {
+            json!({"payload":{"query":{"force":{"absent":true},"dry_run":{"required":true}}}})
+        };
+        assert_stopped_hop(
+            hop_policy,
+            &format!("https://api.example.test/next?{pairs}"),
+            "/ordinary",
+            if form { "amount=1" } else { "dry_run=true" },
+        )
+        .await;
+    }
+}
+async fn registered_method_rows(key: &str) {
+    for row in parser_shapes()[key].as_array().unwrap() {
+        let form = row[0] == "form";
+        let pairs = row[1].as_str().unwrap();
+        let f = Fixture::new(&["header:x-key"]).await;
+        let req = if form {
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                Some(pairs.as_bytes().to_vec()),
+            )
+        } else {
+            gateway_input(&f, "POST", "/ordinary", pairs, None, None)
+        };
+        assert_direct_refusal(&f, req, "method_override").await;
+        let r = f.get().await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+        assert_stopped_hop(
+            json!({"routes":route_pairs()}),
+            &format!("https://api.example.test/admin/keys?{pairs}"),
+            "/public/start",
+            "",
+        )
+        .await;
+    }
+}
+#[tokio::test]
+async fn php_registered_payload_and_method_names_are_denied_on_direct_and_redirect_paths() {
+    registered_payload_rows("php_payload").await;
+    registered_method_rows("php_method").await;
+}
+#[tokio::test]
+async fn bracket_wrapped_payload_and_method_names_are_denied_on_direct_and_redirect_paths() {
+    registered_payload_rows("bracket_payload").await;
+    registered_method_rows("bracket_method").await;
+}
+#[tokio::test]
+async fn multipart_content_disposition_reads_every_folded_name_and_preserves_name_star_control() {
+    for row in parser_shapes()["multipart"].as_array().unwrap() {
+        let f = Fixture::configured(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({"methods":["GET","POST","DELETE"]}),
+        )
+        .await;
+        let body = format!(
+            "--XyZ\r\nContent-Disposition: {}\r\n\r\nDELETE\r\n--XyZ--\r\n",
+            row[1].as_str().unwrap()
+        );
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some("multipart/form-data; boundary=XyZ"),
+                Some(body.into_bytes()),
+            ))
+            .await;
+        let status = row[2].as_u64().unwrap() as u16;
+        assert_eq!(r.status, status, "{}", row[0]);
+        assert_eq!(f.up.hits.lock().unwrap().len(), usize::from(status == 200));
+        if status == 403 {
+            assert_eq!(
+                r.error.as_ref().unwrap().extra.rule.as_deref(),
+                Some("method_override")
+            );
+        }
+        f.clean(&r).await;
+    }
+}
+#[tokio::test]
+async fn stray_names_are_denied_in_queries_forms_json_multipart_and_redirects_without_preflight_changes(
+) {
+    for query in parser_shapes()["stray"].as_array().unwrap() {
+        let query = query.as_str().unwrap();
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", query, None, None),
+            "request_ambiguous",
+        )
+        .await;
+        assert_stopped_hop(json!({}), &format!("/next?{query}"), "/ordinary", "").await;
+        let r = f.get().await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+    }
+    for row in parser_shapes()["stray_bodies"].as_array().unwrap() {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some(row[0][1].as_str().unwrap()),
+                Some(row[1].as_str().unwrap().as_bytes().to_vec()),
+            ),
+            row[2].as_str().unwrap(),
+        )
+        .await;
+        let r = f.get().await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+    }
+    let f = Fixture::new(&["header:x-key"]).await;
+    let before = store_snapshot(&f).await;
+    let predicted = f
+        .daemon
+        .pipeline()
+        .preflight(
+            gateway_input(&f, "GET", "/ordinary", "+force=1", None, None),
+            true,
+        )
+        .await
+        .unwrap();
+    assert_eq!(predicted["would"], "deny");
+    assert_eq!(
+        predicted["checks"].as_array().unwrap().last().unwrap()["rule"],
+        "request_ambiguous"
+    );
+    assert_eq!(store_snapshot(&f).await, before);
+    ordinary_hop_control().await;
+}
+
+fn force_policy() -> Value {
+    json!({"payload":{"query":{"force":{"absent":true},"dry_run":{"required":true}}}})
+}
+#[tokio::test]
+async fn semicolon_queries_cannot_hide_ruled_parameters_and_unruled_queries_keep_exact_bytes() {
+    for strict in [false, true] {
+        let mut policy = force_policy();
+        if strict {
+            policy["payload"]["query_strict"] = json!(true);
+        }
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, policy).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(
+                &f,
+                "GET",
+                "/ordinary",
+                "dry_run=true;force=true",
+                None,
+                None,
+            ),
+            "request_ambiguous",
+        )
+        .await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(
+                &f,
+                "GET",
+                "/ordinary",
+                "dry_run=true",
+                None,
+                None,
+            ))
+            .await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+    }
+    assert_stopped_hop(
+        force_policy(),
+        "https://api.example.test/next?dry_run=true;force=true",
+        "/ordinary",
+        "dry_run=true",
+    )
+    .await;
+    let unrelated = json!({"payload":{"json":{"/model":{"max_length":64}}}});
+    let f = Fixture::configured(&["header:x-key"], SECRET, None, unrelated.clone()).await;
+    assert_direct_refusal(
+        &f,
+        gateway_input(&f, "GET", "/ordinary", "a=1;b=2", None, None),
+        "request_ambiguous",
+    )
+    .await;
+    assert_stopped_hop(unrelated, "/next?a=1;b=2", "/ordinary", "").await;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(&f, "GET", "/ordinary", "a=1;b=2", None, None))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(f.last().url.ends_with("/ordinary?a=1;b=2"));
+    f.clean(&r).await;
+    let f = hop_fixture(json!({}), "/next?a=1;b=2", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().url, "https://api.example.test/next?a=1;b=2");
+    f.clean(&r).await;
+    let f = Fixture::configured(&["header:x-key"], SECRET, None, force_policy()).await;
+    let query = "dry_run=true&note=a%3Bforce%3Dtrue";
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(&f, "GET", "/ordinary", query, None, None))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(f.last().url.ends_with(&format!("?{query}")));
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn names_folded_onto_payload_rules_are_ambiguous_and_plain_repeated_names_are_duplicates() {
+    for (query, rule) in [
+        ("dry_run=true&FORCE=true", "request_ambiguous"),
+        ("dry_run=true&%66orce=true", "request_ambiguous"),
+        ("dry_run=true&force[]=true", "payload:query:0:absent"),
+        ("dry_run=true&Force=1", "request_ambiguous"),
+        ("%64ry_run=true", "request_ambiguous"),
+        ("dry.run=true", "request_ambiguous"),
+        ("DRY_RUN=true", "request_ambiguous"),
+        ("dry_run=true&dry_run=false", "payload_duplicate_key"),
+        ("dry_run=true&%64ry_run=true", "payload_duplicate_key"),
+        ("dry_run=true&force=1&force=1", "payload_duplicate_key"),
+    ] {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, force_policy()).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", query, None, None),
+            rule,
+        )
+        .await;
+    }
+    for (policy, content_type, body) in [
+        (
+            json!({"payload":{"form":{"force":{"absent":true}}}}),
+            "application/x-www-form-urlencoded",
+            "a=1&FORCE=1",
+        ),
+        (
+            json!({"payload":{"form":{"force":{"absent":true}}}}),
+            "application/x-www-form-urlencoded",
+            "a=1;force=1",
+        ),
+        (
+            json!({"payload":{"json":{"/force":{"absent":true}}}}),
+            "application/json",
+            "{\"a\":1,\"Force\":true}",
+        ),
+        (
+            json!({"payload":{"json":{"/opts/force":{"absent":true}}}}),
+            "application/json",
+            "{\"opts\":{\"FORCE\":true}}",
+        ),
+    ] {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, policy).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some(content_type),
+                Some(body.as_bytes().to_vec()),
+            ),
+            "request_ambiguous",
+        )
+        .await;
+    }
+    let f = Fixture::configured(&["header:x-key"], SECRET, None, force_policy()).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "GET",
+            "/ordinary",
+            "dry_run=true&forced=1&my_force=1&force_x=1",
+            None,
+            None,
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    f.clean(&r).await;
+    let f = Fixture::configured(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({"payload":{"json":{"/force":{"absent":true}}}}),
+    )
+    .await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "POST",
+            "/ordinary",
+            "",
+            Some("application/json"),
+            Some(b"{\"forced\":true,\"opts\":{\"Force\":1}}".to_vec()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn rack_bracket_readings_and_punctuation_names_are_refused_with_plain_name_controls() {
+    for query in [
+        "dry_run=true&]force=true",
+        "dry_run=true&[]force=true",
+        "dry_run=true&[[force]]=true",
+        "dry_run=true&force]=true",
+        "dry_run=true&[force=true",
+    ] {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, force_policy()).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", query, None, None),
+            "request_ambiguous",
+        )
+        .await;
+    }
+    for query in ["_method]=DELETE", "]_method=DELETE"] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "POST", "/ordinary", query, None, None),
+            "method_override",
+        )
+        .await;
+    }
+    for query in [
+        "[x]=1",
+        "%5Bx%5D=1",
+        "]x=1",
+        "[]=1",
+        "[_method]=GET",
+        "@x=1",
+        "~x=1",
+        "!x=1",
+        "*x=1",
+        "%2Fx=1",
+        ":x=1",
+        "a=1&{x}=2",
+    ] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", query, None, None),
+            "request_ambiguous",
+        )
+        .await;
+        assert_stopped_hop(json!({}), &format!("/next?{query}"), "/ordinary", "").await;
+    }
+    for (content_type, body) in [
+        ("application/x-www-form-urlencoded", "a=1&[force]=1"),
+        (
+            "multipart/form-data; boundary=XyZ",
+            "--XyZ\r\nContent-Disposition: form-data; name=\"[force]\"\r\n\r\n1\r\n--XyZ--\r\n",
+        ),
+    ] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some(content_type),
+                Some(body.as_bytes().to_vec()),
+            ),
+            "request_ambiguous",
+        )
+        .await;
+    }
+    use av_core::request_view::{folded_names, is_override_field, is_stray_name};
+    for name in [
+        "[_method]",
+        "_method]",
+        "]_method",
+        "[]_method",
+        "[_METHOD][]",
+    ] {
+        assert!(is_override_field(name));
+    }
+    for name in ["[force]", "[force][]", "]force", "force]"] {
+        assert!(folded_names(name).contains(&"force".into()));
+    }
+    for query in [
+        "dry_run=true&[force]=true",
+        "dry_run=true&%5Bforce%5D=true",
+        "dry_run=true&[force][]=true",
+        "dry_run=true&force]=true",
+    ] {
+        let view = av_core::request_view::request_view(&av_core::request_view::RequestInput {
+            query: Some(query),
+            ..Default::default()
+        });
+        let sets = serde_json::from_value(json!([force_policy()["payload"]])).unwrap();
+        let e = av_core::payload::evaluate_payload(
+            Some(&sets),
+            &av_core::payload::PayloadInput {
+                view: &view,
+                path: "",
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.extra.rule.as_deref(), Some("request_ambiguous"));
+    }
+    for name in ["[x]", "]x", "@x", "~x", "!x"] {
+        assert!(is_stray_name(name));
+    }
+    for name in [
+        "x",
+        "0",
+        "_x",
+        "-x",
+        ".x",
+        "$filter",
+        "expand[]",
+        "items[0][price]",
+    ] {
+        assert!(!is_stray_name(name));
+    }
+    let f = Fixture::new(&["header:x-key"]).await;
+    let r = f.get().await;
+    assert_eq!(r.status, 200);
+    f.clean(&r).await;
+    ordinary_hop_control().await;
+}
+#[tokio::test]
+async fn dollar_query_names_and_dollar_or_at_json_keys_pass_without_rewriting() {
+    for query in [
+        "$select=displayName,mail&$filter=startswith(displayName,%27a%27)&$top=10",
+        "$expand=members&$count=true",
+    ] {
+        let f = Fixture::configured(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({"payload":{"query":{"$top":{"max_length":4}}}}),
+        )
+        .await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(&f, "GET", "/v1.0/users", query, None, None))
+            .await;
+        assert_eq!(r.status, 200);
+        assert!(f.last().url.ends_with(&format!("?{query}")));
+        f.clean(&r).await;
+    }
+    let f = hop_fixture(json!({}), "/v1.0/users?$skiptoken=abc&$top=10", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        f.last().url,
+        "https://api.example.test/v1.0/users?$skiptoken=abc&$top=10"
+    );
+    f.clean(&r).await;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let body=b"{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"@context\":\"https://schema.org\",\"name\":\"x\"}".to_vec();
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "POST",
+            "/ordinary",
+            "",
+            Some("application/json"),
+            Some(body.clone()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(body));
+    f.clean(&r).await;
+}
+
+// Literal provider/list-name controls from the read-only JS reference.
+const PROVIDER_LIST_SHAPES: &str = r###"{"list_good":[[{"payload":{"query":{"limit":{"required":true}}}},"/p/test/v1/charges","limit=10&expand[]=customer&expand[]=invoice"],[{"payload":{"query":{"limit":{"required":true}}}},"/p/test/v1/charges","limit=10&expand%5B%5D=customer&expand%5B%5D=invoice"],[{"payload":{"query":{"limit":{"required":true}}}},"/p/test/v1/charges","limit=10&created[gte]=1609459200&created[lte]=1640995200"],[{"payload":{"query":{"expand":{"one_of":["customer","invoice"]}}}},"/p/test/v1/charges","expand[]=customer&expand[]=invoice"],[{"payload":{"query":{"expand":{"required":true}}}},"/p/test/v1/charges","expand[]=customer"],[{"payload":{"query":{"expand":{}},"query_strict":true}},"/p/test/v1/charges","expand[]=customer&expand[]=invoice"]],"list_bad":[[{"payload":{"query":{"force":{"absent":true},"dry_run":{"required":true}}}},"dry_run=true&force=1&force=2","payload_duplicate_key"],[{"payload":{"query":{"limit":{"required":true}}}},"limit=10&limit=20","payload_duplicate_key"],[{"payload":{"query":{"expand":{"one_of":["customer","invoice"]}}}},"expand[]=customer&expand[]=balance_transaction","payload:query:0:one_of"],[{"payload":{"query":{"expand":{"one_of":["customer"]}}}},"expand=customer&expand[]=invoice","payload:query:0:one_of"],[{"payload":{"query":{"expand":{"one_of":["customer"]}}}},"expand%5B%5D=customer&expand%5B%5D=invoice","payload:query:0:one_of"],[{"payload":{"query":{"expand":{"one_of":["customer"]}}}},"expand[x]=invoice","payload:query:0:one_of"],[{"payload":{"query":{"expand":{"max_length":8}}}},"expand[]=customer&expand[]=balance_transaction","payload:query:0:max_length"],[{"payload":{"query":{"expand":{"absent":true}}}},"expand[]=customer","payload:query:0:absent"],[{"payload":{"query":{"expand":{"one_of":["customer"]}}}},"%65xpand[]=invoice","request_ambiguous"],[{"payload":{"query":{"expand":{}},"query_strict":true}},"expand[]=customer&other[]=x","payload:query:1:strict"]],"list_form":[["mode=payment&items[]=a&items[]=b",200],["mode=payment&items[]=a&items[]=c",403],["mode=payment&mode=setup",403]],"provider_queries":[[{},"/p/test/v1/models","limit=20&after_id=model_1"],[{},"/p/test/repos/o/r/contents","ref=main"],[{},"/p/test/search/issues","q=org%3Afoo+language%3Ago&per_page=30"],[{},"/p/test/search/code","q=caf%C3%A9+in%3Afile"],[{},"/p/test/v1/charges","limit=10&starting_after=ch_123&expand[]=data"],[{},"/p/test/v1/charges","expand[]=data.customer&expand[]=data.invoice"],[{"payload":{"query":{"starting_after":{"max_length":64}}}},"/p/test/v1/charges","limit=10&starting_after=ch_123&expand[]=data"]]}"###;
+
+#[tokio::test]
+async fn ordinary_ampersand_provider_and_versioned_redirect_traffic_is_unchanged() {
+    let f = Fixture::configured(&["header:x-key"], SECRET, None, force_policy()).await;
+    let query = "dry_run=true&limit=5&cursor=abc%3D%3D&tag=a+b&empty=&flag";
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(&f, "GET", "/ordinary", query, None, None))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(f.last().url.ends_with(&format!("/ordinary?{query}")));
+    f.clean(&r).await;
+    let f = model_fixture(json!({})).await;
+    let body = model_body();
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(model_request(&f, body.clone()))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(body));
+    f.clean(&r).await;
+    let f = Fixture::configured_kind(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({}),
+        "anthropic",
+        "api.anthropic.com",
+    )
+    .await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "GET",
+            "/v1/models",
+            "limit=20&after_id=model_1",
+            None,
+            None,
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        f.last().url,
+        "https://api.anthropic.com/v1/models?limit=20&after_id=model_1"
+    );
+    f.clean(&r).await;
+    let f = hop_fixture(json!({}), "/repos/o/r/contents?ref=main", 302).await;
+    let mut req = hop_request(&f, "GET", "/ordinary");
+    req.headers.extend([
+        ("X-GitHub-Api-Version".into(), "2022-11-28".into()),
+        ("accept".into(), "application/vnd.github+json".into()),
+    ]);
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        f.last().url,
+        "https://api.example.test/repos/o/r/contents?ref=main"
+    );
+    assert!(f
+        .last()
+        .headers
+        .iter()
+        .any(|(k, v)| k == "X-GitHub-Api-Version" && v == "2022-11-28"));
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn ordinary_nonascii_provider_values_bracket_queries_forms_and_filename_uploads_are_sent_unchanged(
+) {
+    let f = model_fixture(json!({})).await;
+    let body=serde_json::to_vec(&json!({"model":"gpt-4.1-mini","messages":[{"role":"user","content":"héllo ✓ 日本"}],"metadata":{"clé":"v"},"response_format":{"type":"json_object"}})).unwrap();
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(model_request(&f, body.clone()))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(body));
+    f.clean(&r).await;
+    let f = Fixture::configured_kind(
+        &["header:x-api-key"],
+        SECRET,
+        None,
+        json!({}),
+        "anthropic",
+        "api.anthropic.com",
+    )
+    .await;
+    let body=serde_json::to_vec(&json!({"model":"claude-sonnet-4-5","max_tokens":32,"system":"Réponds.","messages":[{"role":"user","content":"ping"}]})).unwrap();
+    let mut req = gateway_input(
+        &f,
+        "POST",
+        "/v1/messages",
+        "",
+        Some("application/json"),
+        Some(body.clone()),
+    );
+    req.headers.retain(|(k, _)| k != "x-key");
+    req.headers.extend([
+        ("x-api-key".into(), f.ph.clone()),
+        ("anthropic-version".into(), "2023-06-01".into()),
+    ]);
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(body));
+    assert!(f
+        .last()
+        .headers
+        .iter()
+        .any(|(k, v)| k == "anthropic-version" && v == "2023-06-01"));
+    assert!(f
+        .last()
+        .headers
+        .iter()
+        .any(|(k, v)| k == "x-api-key" && v == SECRET));
+    f.clean(&r).await;
+    let shapes: Value = serde_json::from_str(PROVIDER_LIST_SHAPES).unwrap();
+    for row in shapes["provider_queries"].as_array().unwrap() {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, row[0].clone()).await;
+        let path = row[1].as_str().unwrap().strip_prefix("/p/test").unwrap();
+        let query = row[2].as_str().unwrap();
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(&f, "GET", path, query, None, None))
+            .await;
+        assert_eq!(r.status, 200);
+        assert!(f.last().url.ends_with(&format!("?{query}")));
+        f.clean(&r).await;
+    }
+    for policy in [
+        json!({}),
+        json!({"payload":{"form":{"amount":{"required":true},"currency":{"one_of":["usd"]}}}}),
+    ] {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, policy).await;
+        let body=b"amount=2000&currency=usd&source=tok_visa&metadata[order_id]=6735&metadata[note]=caf%C3%A9&description=Order+6735".to_vec();
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(
+                &f,
+                "POST",
+                "/v1/charges",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                Some(body.clone()),
+            ))
+            .await;
+        assert_eq!(r.status, 200);
+        assert_eq!(f.last().body, Some(body));
+        f.clean(&r).await;
+    }
+    let f = Fixture::new(&["header:x-key"]).await;
+    let body="--XyZ\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nfine-tune\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"données.jsonl\"\r\nContent-Type: application/jsonl\r\n\r\n{\"é\":1}\r\n--XyZ--\r\n".as_bytes().to_vec();
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "POST",
+            "/ordinary",
+            "",
+            Some("multipart/form-data; boundary=XyZ"),
+            Some(body.clone()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(body));
+    f.clean(&r).await;
+    let f = hop_fixture(json!({}), "/v1/charges?limit=10&expand[]=data", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        f.last().url,
+        "https://api.example.test/v1/charges?limit=10&expand[]=data"
+    );
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn repeated_list_names_preserve_entries_and_apply_rules_to_each_base_entry() {
+    let shapes: Value = serde_json::from_str(PROVIDER_LIST_SHAPES).unwrap();
+    for row in shapes["list_good"].as_array().unwrap() {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, row[0].clone()).await;
+        let path = row[1].as_str().unwrap().strip_prefix("/p/test").unwrap();
+        let query = row[2].as_str().unwrap();
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(&f, "GET", path, query, None, None))
+            .await;
+        assert_eq!(r.status, 200, "{query}");
+        assert!(f.last().url.ends_with(&format!("?{query}")));
+        f.clean(&r).await;
+    }
+    let f = Fixture::configured(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({"payload":{"form":{"mode":{"one_of":["payment"]}}}}),
+    )
+    .await;
+    let items=b"mode=payment&line_items[0][price]=price_1&line_items[0][quantity]=1&line_items[1][price]=price_2&line_items[1][quantity]=2&payment_method_types[]=card&payment_method_types[]=link".to_vec();
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(gateway_input(
+            &f,
+            "POST",
+            "/v1/checkout/sessions",
+            "",
+            Some("application/x-www-form-urlencoded"),
+            Some(items.clone()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.last().body, Some(items));
+    f.clean(&r).await;
+    let f = hop_fixture(
+        json!({"payload":{"query":{"limit":{"required":true}}}}),
+        "/v1/charges?limit=10&expand[]=customer&expand[]=invoice",
+        302,
+    )
+    .await;
+    let mut req = hop_request(&f, "GET", "/ordinary");
+    req.query = "limit=1".into();
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        f.last().url,
+        "https://api.example.test/v1/charges?limit=10&expand[]=customer&expand[]=invoice"
+    );
+    f.clean(&r).await;
+    for row in shapes["list_bad"].as_array().unwrap() {
+        let f = Fixture::configured(&["header:x-key"], SECRET, None, row[0].clone()).await;
+        assert_direct_refusal(
+            &f,
+            gateway_input(&f, "GET", "/ordinary", row[1].as_str().unwrap(), None, None),
+            row[2].as_str().unwrap(),
+        )
+        .await;
+    }
+    for row in shapes["list_form"].as_array().unwrap() {
+        let f=Fixture::configured(&["header:x-key"],SECRET,None,json!({"payload":{"form":{"mode":{"one_of":["payment"]},"items":{"one_of":["a","b"]}}}})).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(gateway_input(
+                &f,
+                "POST",
+                "/ordinary",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                Some(row[0].as_str().unwrap().as_bytes().to_vec()),
+            ))
+            .await;
+        assert_eq!(u64::from(r.status), row[1].as_u64().unwrap());
+        f.clean(&r).await;
+    }
+    for (query, policy, rule) in [
+        (
+            "limit=1&expand[]=a&expand[]=b",
+            json!({"query":{"limit":{"required":true}}}),
+            None,
+        ),
+        (
+            "expand[]=a&expand[]=b",
+            json!({"query":{"expand":{"one_of":["a"]}}}),
+            Some("payload:query:0:one_of"),
+        ),
+    ] {
+        let view = av_core::request_view::request_view(&av_core::request_view::RequestInput {
+            query: Some(query),
+            ..Default::default()
+        });
+        let sets = serde_json::from_value(json!([policy])).unwrap();
+        let r = av_core::payload::evaluate_payload(
+            Some(&sets),
+            &av_core::payload::PayloadInput {
+                view: &view,
+                path: "",
+            },
+        );
+        if let Some(rule) = rule {
+            assert_eq!(r.unwrap_err().extra.rule.as_deref(), Some(rule));
+        } else {
+            r.unwrap();
+        }
+    }
+}
+
+fn reader_violations(query: &str, rules: bool) -> Vec<String> {
+    let mut violations = Vec::new();
+    for reader in ["whatwg", "rack", "qs", "php", "caseBlind"] {
+        let raw = if reader == "rack" {
+            query.replace(';', "&")
+        } else {
+            query.to_string()
+        };
+        let pairs = url::form_urlencoded::parse(raw.as_bytes())
+            .map(|(name, value)| {
+                let name = name.into_owned();
+                let folded = match reader {
+                    "rack" => name
+                        .trim_start_matches(['[', ']'])
+                        .split(['[', ']'])
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                    "qs" => {
+                        if let Some(rest) = name.strip_prefix('[') {
+                            rest.split_once(']')
+                                .filter(|(inside, _)| !inside.contains(['[', ']']))
+                                .map_or_else(|| name.clone(), |(inside, _)| inside.to_string())
+                        } else {
+                            name.split('[').next().unwrap_or("").to_string()
+                        }
+                    }
+                    "php" => name
+                        .split('\0')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches(' ')
+                        .replace([' ', '.'], "_")
+                        .split('[')
+                        .next()
+                        .unwrap_or("")
+                        .to_string(),
+                    "caseBlind" => name.to_lowercase(),
+                    _ => name,
+                };
+                (folded, value.into_owned())
+            })
+            .collect::<Vec<_>>();
+        if pairs.iter().any(|(k, v)| {
+            [
+                "_method",
+                "__method",
+                "x-http-method-override",
+                "x_http_method_override",
+                "x-http-method",
+                "x_http_method",
+                "x-method-override",
+                "x_method_override",
+            ]
+            .contains(&k.to_lowercase().as_str())
+                && v.to_uppercase() != "GET"
+        }) {
+            violations.push(format!("{reader}: override"));
+        }
+        if rules && pairs.iter().any(|(k, _)| k == "force") {
+            violations.push(format!("{reader}: force"));
+        }
+        if rules && !pairs.iter().any(|(k, _)| k == "dry_run") {
+            violations.push(format!("{reader}: no dry_run"));
+        }
+    }
+    violations
+}
+fn property_queries() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    let names = vec![
+        "a",
+        "dry_run",
+        "force",
+        "note",
+        "_method",
+        ".method",
+        "%5Fmethod",
+        "FORCE",
+        "%66orce",
+        "dry.run",
+        "force[]",
+        "x-http-method-override",
+        "__method",
+        "b+c",
+        "q%20x",
+        "%64ry_run",
+        "force%00",
+        "force%00x",
+        "_method%00",
+        "+force",
+        "++force",
+        "%20force",
+        "%20%20_method",
+        "+_method",
+        "force+",
+        "force%20",
+        "%09force",
+        "force%09",
+        "%01_method",
+        "%7Fforce",
+        "forc%C3%A9",
+        "%C3%A9",
+        "",
+        "[force]",
+        "%5Bforce%5D",
+        "[force][]",
+        "[_method]",
+        "%5B_method%5D",
+        "]force",
+        "[]force",
+        "force]",
+        "_method]",
+        "expand[]",
+        "items[0][price]",
+        "force[x]",
+    ];
+    let values = vec![
+        "1",
+        "true",
+        "GET",
+        "DELETE",
+        "x%3By",
+        "a+b",
+        "",
+        "%26force%3D1",
+    ];
+    (
+        any::<bool>(),
+        proptest::collection::vec(
+            (
+                proptest::sample::select(names),
+                proptest::sample::select(values),
+                any::<bool>(),
+                0u8..4,
+            ),
+            1..4,
+        ),
+    )
+        .prop_map(|(prefix, entries)| {
+            let mut q = if prefix {
+                "dry_run=true".to_string()
+            } else {
+                String::new()
+            };
+            for (name, value, assigned, separator) in entries {
+                if !q.is_empty() {
+                    q.push(if separator == 0 { ';' } else { '&' });
+                }
+                q.push_str(name);
+                if assigned {
+                    q.push('=');
+                    q.push_str(value);
+                }
+            }
+            q
+        })
+}
+async fn check_query_wire_property(
+    generated: &str,
+) -> Result<(), proptest::test_runner::TestCaseError> {
+    use proptest::prelude::*;
+    use tokio::io::AsyncWriteExt;
+    // A positive and a negative control ensure every generated case exercises
+    // both outcomes on the direct path and the redirect path.
+    for rules in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (headers, _) = read_wire_request(&mut socket).await;
+                let target = headers
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .to_string();
+                record.lock().unwrap().push(target.clone());
+                let parsed = url::Url::parse(&format!("http://upstream{target}")).unwrap();
+                let destination = parsed
+                    .query_pairs()
+                    .find(|(k, _)| k == "to")
+                    .map(|(_, v)| v.into_owned());
+                let response = if let ("/start", Some(destination)) = (parsed.path(), destination) {
+                    format!("HTTP/1.1 302 Found\r\nLocation: /next?{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",destination)
+                } else {
+                    let body = "ordinary-traffic-control";
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let f = Fixture::new(&["header:x-key"]).await;
+        let mut policy = if rules { force_policy() } else { json!({}) };
+        policy["redirects"] = json!({"max":1});
+        let (pipeline, base) = network_policy_pipeline(&f, port, "GET", None, policy).await;
+        let mut outcomes = [0usize; 4];
+        for query in ["dry_run=true&note=ordinary", "_method=DELETE", generated] {
+            let before = seen.lock().unwrap().len();
+            let mut req = base.clone();
+            req.path = "/p/network/ok".into();
+            req.query = query.into();
+            let r = pipeline.handle(req).await;
+            let arrived = seen.lock().unwrap()[before..].to_vec();
+            f.clean(&r).await;
+            if r.status == 200 {
+                outcomes[0] += 1;
+                prop_assert_eq!(arrived.len(), 1);
+                let sent = arrived[0]
+                    .strip_prefix("/ok")
+                    .unwrap()
+                    .strip_prefix('?')
+                    .unwrap_or("");
+                let view =
+                    av_core::request_view::request_view(&av_core::request_view::RequestInput {
+                        query: Some(query),
+                        ..Default::default()
+                    });
+                prop_assert_eq!(sent, &view.query);
+                let received =
+                    av_core::request_view::request_view(&av_core::request_view::RequestInput {
+                        query: Some(sent),
+                        ..Default::default()
+                    });
+                prop_assert_eq!(
+                    received
+                        .params
+                        .iter()
+                        .map(|p| (&p.raw_name, &p.name, &p.value))
+                        .collect::<Vec<_>>(),
+                    view.params
+                        .iter()
+                        .map(|p| (&p.raw_name, &p.name, &p.value))
+                        .collect::<Vec<_>>()
+                );
+                prop_assert!(reader_violations(sent, rules).is_empty(), "query={sent:?}");
+            } else {
+                outcomes[1] += 1;
+                prop_assert_eq!(r.status, 403);
+                prop_assert!(arrived.is_empty());
+            }
+            let before = seen.lock().unwrap().len();
+            let mut req = base.clone();
+            req.path = "/p/network/start".into();
+            req.query = format!(
+                "dry_run=true&to={}",
+                av_daemon::util::encode_uri_component(query)
+            );
+            let r = pipeline.handle(req).await;
+            let arrived = seen.lock().unwrap()[before..].to_vec();
+            f.clean(&r).await;
+            prop_assert!(arrived.first().is_some_and(|s| s.starts_with("/start?")));
+            if arrived.len() == 2 {
+                outcomes[2] += 1;
+                prop_assert_eq!(r.status, 200);
+                let sent = arrived[1]
+                    .strip_prefix("/next")
+                    .unwrap()
+                    .strip_prefix('?')
+                    .unwrap_or("");
+                let expected = url::Url::parse(&format!("http://x/next?{query}")).unwrap();
+                prop_assert_eq!(sent, expected.query().unwrap_or(""));
+                prop_assert!(
+                    reader_violations(sent, rules).is_empty(),
+                    "hop query={sent:?}"
+                );
+            } else {
+                outcomes[3] += 1;
+                prop_assert_eq!(arrived.len(), 1);
+                prop_assert!(r.header("av-redirect-stopped").is_some());
+            }
+        }
+        prop_assert!(outcomes.into_iter().all(|n| n >= 1));
+        server.abort();
+    }
+    Ok(())
+}
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config { cases: 64, failure_persistence: None, ..Default::default() })]
+    #[test]
+    fn generated_gateway_queries_match_real_wire_and_every_reader_with_positive_and_negative_controls(query in property_queries()) {
+        let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(check_query_wire_property(&query))?;
+    }
 }

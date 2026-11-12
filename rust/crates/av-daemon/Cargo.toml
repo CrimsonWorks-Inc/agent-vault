@@ -53,5 +53,6 @@ x509-parser = { version = "0.18", default-features = false }
 rustls-webpki = { version = "=0.103.16", default-features = false, features = ["std", "aws-lc-rs"] }
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true
 rusqlite.workspace = true

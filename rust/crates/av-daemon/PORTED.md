@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 221 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **759 not yet ported**.
+Totals: 1090 JS tests: 241 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **739 not yet ported**.
 
 ## Mutation check
 
@@ -611,29 +611,29 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | a Location carrying _method is not followed | tests/ported_gateway_core.rs::location_method_override_fields_are_not_followed |
 | gateway-w2-pipeline.test.js | a hop is checked as the method it is sent with: 307 and 308 keep it, 301 to 303 send a GET | tests/ported_gateway_core.rs::redirect_method_is_checked_and_post_is_never_followed_under_any_status |
 | gateway-w2-pipeline.test.js | a method override on a direct request is still refused, and an ordinary redirect still follows | tests/ported_gateway_core.rs::direct_route_override_is_denied_but_ordinary_redirect_still_follows |
-| gateway-w2-pipeline.test.js | a method-override field naming another method is refused, and nothing is sent | not yet ported |
-| gateway-w2-pipeline.test.js | a method-override field naming the request's own method is sent as it is | not yet ported |
+| gateway-w2-pipeline.test.js | a method-override field naming another method is refused, and nothing is sent | tests/ported_gateway_core.rs::method_override_field_shapes_refuse_other_methods_and_preserve_own_method_controls |
+| gateway-w2-pipeline.test.js | a method-override field naming the request's own method is sent as it is | tests/ported_gateway_core.rs::method_override_field_shapes_refuse_other_methods_and_preserve_own_method_controls |
 | gateway-w2-pipeline.test.js | a hop keeps the API-version headers a provider needs, and never a cookie, override or forwarding header | tests/ported_gateway_core.rs::provider_version_headers_survive_hops_and_cookie_override_forwarding_headers_do_not |
-| gateway-w2-pipeline.test.js | Grok round 5, finding 1: a Location naming another method in a folded spelling is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | Grok round 5, finding 2: a ; in the query cannot hide a parameter from the payload rules | not yet ported |
-| gateway-w2-pipeline.test.js | every override spelling is refused on a direct request and stops a hop | not yet ported |
-| gateway-w2-pipeline.test.js | a ; query is refused under any payload rule on both paths, and goes out unchanged under none | not yet ported |
-| gateway-w2-pipeline.test.js | a name a server could fold onto a rule's name is refused, and a repeated name is a duplicate | not yet ported |
-| gateway-w2-pipeline.test.js | generated requests: what the policy read is what a local upstream received, and every reader reads it within the policy | not yet ported |
-| gateway-w2-pipeline.test.js | ordinary traffic is untouched: & queries, provider APIs, and a redirect that keeps its version headers | not yet ported |
+| gateway-w2-pipeline.test.js | Grok round 5, finding 1: a Location naming another method in a folded spelling is not followed | tests/ported_gateway_core.rs::folded_override_location_cannot_gain_a_method_or_skip_onwrite_approval |
+| gateway-w2-pipeline.test.js | Grok round 5, finding 2: a ; in the query cannot hide a parameter from the payload rules | tests/ported_gateway_core.rs::semicolon_queries_cannot_hide_ruled_parameters_and_unruled_queries_keep_exact_bytes |
+| gateway-w2-pipeline.test.js | every override spelling is refused on a direct request and stops a hop | tests/ported_gateway_core.rs::every_override_spelling_is_denied_directly_and_on_redirect_with_own_method_control |
+| gateway-w2-pipeline.test.js | a ; query is refused under any payload rule on both paths, and goes out unchanged under none | tests/ported_gateway_core.rs::semicolon_queries_cannot_hide_ruled_parameters_and_unruled_queries_keep_exact_bytes |
+| gateway-w2-pipeline.test.js | a name a server could fold onto a rule's name is refused, and a repeated name is a duplicate | tests/ported_gateway_core.rs::names_folded_onto_payload_rules_are_ambiguous_and_plain_repeated_names_are_duplicates |
+| gateway-w2-pipeline.test.js | generated requests: what the policy read is what a local upstream received, and every reader reads it within the policy | tests/ported_gateway_core.rs::generated_gateway_queries_match_real_wire_and_every_reader_with_positive_and_negative_controls |
+| gateway-w2-pipeline.test.js | ordinary traffic is untouched: & queries, provider APIs, and a redirect that keeps its version headers | tests/ported_gateway_core.rs::ordinary_ampersand_provider_and_versioned_redirect_traffic_is_unchanged |
 | gateway-w2-pipeline.test.js | the view reads a query as the union of its readers | tests/ported_gateway_payload.rs::query_view_is_union_of_readers_and_payload_rejects_ambiguous_semicolons |
-| gateway-w2-pipeline.test.js | Grok round 6, payload: a name PHP reads as a ruled one is refused, and nothing is sent | not yet ported |
-| gateway-w2-pipeline.test.js | Grok round 6, method: a name PHP reads as _method is refused, and a hop to it is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | a stray name is refused on every path under any rules, and a hop to one is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | a multipart part is named by every name in its Content-Disposition, folded or not | not yet ported |
+| gateway-w2-pipeline.test.js | Grok round 6, payload: a name PHP reads as a ruled one is refused, and nothing is sent | tests/ported_gateway_core.rs::php_registered_payload_and_method_names_are_denied_on_direct_and_redirect_paths |
+| gateway-w2-pipeline.test.js | Grok round 6, method: a name PHP reads as _method is refused, and a hop to it is not followed | tests/ported_gateway_core.rs::php_registered_payload_and_method_names_are_denied_on_direct_and_redirect_paths |
+| gateway-w2-pipeline.test.js | a stray name is refused on every path under any rules, and a hop to one is not followed | tests/ported_gateway_core.rs::stray_names_are_denied_in_queries_forms_json_multipart_and_redirects_without_preflight_changes |
+| gateway-w2-pipeline.test.js | a multipart part is named by every name in its Content-Disposition, folded or not | tests/ported_gateway_core.rs::multipart_content_disposition_reads_every_folded_name_and_preserves_name_star_control |
 | gateway-w2-pipeline.test.js | a name is folded the way PHP registers it: cut at NUL, leading spaces dropped | tests/ported_gateway_payload.rs::php_name_folding_cuts_at_nul_drops_leading_spaces_and_marks_only_stray_names |
-| gateway-w2-pipeline.test.js | ordinary provider traffic is sent unchanged under the name check | not yet ported |
-| gateway-w2-pipeline.test.js | Grok round 7, payload: a bracket-wrapped name is refused, and a hop to it is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | Grok round 7, method: a bracket-wrapped _method is refused, and a hop to it is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | a name Rack 2.2 reads as a ruled one or as _method is refused | not yet ported |
-| gateway-w2-pipeline.test.js | a name that starts with punctuation is refused on every path, and a hop to it is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | ordinary traffic that opens a name with $ or a JSON key with $ or @ is sent | not yet ported |
-| gateway-w2-pipeline.test.js | a repeated list name is sent under unrelated rules, and a rule on its base checks every entry | not yet ported |
+| gateway-w2-pipeline.test.js | ordinary provider traffic is sent unchanged under the name check | tests/ported_gateway_core.rs::ordinary_nonascii_provider_values_bracket_queries_forms_and_filename_uploads_are_sent_unchanged |
+| gateway-w2-pipeline.test.js | Grok round 7, payload: a bracket-wrapped name is refused, and a hop to it is not followed | tests/ported_gateway_core.rs::bracket_wrapped_payload_and_method_names_are_denied_on_direct_and_redirect_paths |
+| gateway-w2-pipeline.test.js | Grok round 7, method: a bracket-wrapped _method is refused, and a hop to it is not followed | tests/ported_gateway_core.rs::bracket_wrapped_payload_and_method_names_are_denied_on_direct_and_redirect_paths |
+| gateway-w2-pipeline.test.js | a name Rack 2.2 reads as a ruled one or as _method is refused | tests/ported_gateway_core.rs::rack_bracket_readings_and_punctuation_names_are_refused_with_plain_name_controls |
+| gateway-w2-pipeline.test.js | a name that starts with punctuation is refused on every path, and a hop to it is not followed | tests/ported_gateway_core.rs::rack_bracket_readings_and_punctuation_names_are_refused_with_plain_name_controls |
+| gateway-w2-pipeline.test.js | ordinary traffic that opens a name with $ or a JSON key with $ or @ is sent | tests/ported_gateway_core.rs::dollar_query_names_and_dollar_or_at_json_keys_pass_without_rewriting |
+| gateway-w2-pipeline.test.js | a repeated list name is sent under unrelated rules, and a rule on its base checks every entry | tests/ported_gateway_core.rs::repeated_list_names_preserve_entries_and_apply_rules_to_each_base_entry |
 | gateway-w2-policy.test.js | route pairs bind methods to their own paths and every inherited set applies | tests/ported_gateway_core_units.rs::route_pairs_bind_methods_to_paths_and_every_inherited_set_applies |
 | gateway-w2-policy.test.js | stored effective route and payload policies retain all ancestor constraints | tests/ported_gateway_core_units.rs::reused_effective_route_and_payload_sets_retain_every_ancestor_constraint |
 | gateway-w2-policy.test.js | malformed stored route and payload constraints refuse before reaching upstream | tests/ported_gateway_core_units.rs::malformed_stored_route_payload_and_unknown_approval_modes_fail_closed |
