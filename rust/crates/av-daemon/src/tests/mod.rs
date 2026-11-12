@@ -17,6 +17,7 @@ mod control;
 mod gateway;
 mod guards;
 mod mcp;
+mod mutants;
 mod presence;
 mod ui;
 
