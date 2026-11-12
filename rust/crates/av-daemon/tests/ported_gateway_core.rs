@@ -11587,6 +11587,13 @@ async fn control_session_restart_after_seed(
     f: Fixture,
     seed: impl FnOnce(&std::path::Path),
 ) -> Fixture {
+    control_session_restart_with_pass(f, seed, None).await
+}
+async fn control_session_restart_with_pass(
+    f: Fixture,
+    seed: impl FnOnce(&std::path::Path),
+    pass: Option<&str>,
+) -> Fixture {
     let Fixture {
         _dir,
         shared,
@@ -11602,7 +11609,8 @@ async fn control_session_restart_after_seed(
     drop(shared);
     seed(_dir.path());
     let mut vault = av_store::vault::Vault::open(_dir.path()).unwrap();
-    vault.unlock(None).unwrap();
+    let pass = pass.map(|p| av_core::secret::SecretString::from(p.to_string()));
+    vault.unlock(pass.as_ref()).unwrap();
     let shared = Shared::new(vault);
     let daemon = Daemon::new(
         shared.clone(),
@@ -12518,4 +12526,1094 @@ async fn control_overrides_routes_and_payload_json_create_the_narrowed_grant_ins
         }
         let bad=av_store::pending::parse_overrides(json!({"routes":"[{\"methods\":"}).as_object().unwrap()).unwrap_err();assert_eq!(bad.field,"routes");assert!(bad.to_string().contains("routes"));assert_eq!(f.get().await.status,200);credential_finish(&f).await;
     }).await.expect("parsed JSON overrides timed out");
+}
+
+// Trust exactly this test vault's managed certificate, including its TLS
+// handshake signatures. Managed certificates are CA-capable (as in Node),
+// which the generic webpki end-entity chain verifier refuses.
+#[derive(Debug)]
+struct ExactManagedCertificate(Vec<u8>);
+impl rustls::client::danger::ServerCertVerifier for ExactManagedCertificate {
+    fn verify_server_cert(
+        &self,
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        name: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if cert.as_ref() != self.0.as_slice() || name.to_str() != "localhost" {
+            return Err(rustls::Error::General(
+                "wrong disposable managed certificate".into(),
+            ));
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        m: &[u8],
+        c: &rustls::pki_types::CertificateDer<'_>,
+        s: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            m,
+            c,
+            s,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        m: &[u8],
+        c: &rustls::pki_types::CertificateDer<'_>,
+        s: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            m,
+            c,
+            s,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+async fn c18_tls_json(
+    f: &Fixture,
+    port: u16,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (u16, Value) {
+    let paths = av_daemon::tls::tls_paths(f._dir.path());
+    let material = av_daemon::tls::load_material(&paths.cert, &paths.key).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    use base64::Engine;
+    let pem = String::from_utf8(material.cert).unwrap();
+    let encoded = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<String>();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(der.clone()))
+        .unwrap();
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config
+        .dangerous()
+        .set_certificate_verifier(Arc::new(ExactManagedCertificate(der)));
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap();
+    let (mut client, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let request = hyper::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("host", "localhost")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&body).unwrap())))
+        .unwrap();
+    let response = client.send_request(request).await.unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(!String::from_utf8_lossy(&bytes).contains(SECRET));
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn control_c18_real_tls_and_direct_tools_refuse_infinite_remote_peeks_without_mutation() {
+    tokio::time::timeout(std::time::Duration::from_secs(45),async {
+        let f=Fixture::new(&["header:x-key"]).await;let gid=f.grant_id.clone();let(infinite,marker)=f.shared.run(move|c|{use av_core::secret::ExposeSecret;let parent=c.vault.grant(&gid).unwrap().unwrap();let session=c.vault.create_session(av_store::vault::CreateSessionOptions{infinite:true,..Default::default()}).unwrap();let grant=c.vault.create_grant(av_store::vault::CreateGrantOptions{session_id:session.session.id,credential_id:parent.credential_id,policy:parent.policy,..Default::default()}).unwrap();let marker=c.vault.issue_placeholder(av_store::vault::IssueOptions{grant_id:grant.id,..Default::default()}).unwrap().placeholder;(session.token.expose_secret().to_string(),marker)}).await.unwrap();
+        let mut ports=Vec::new();for(id,address)in [("wild","0.0.0.0:0"),("loop","127.0.0.1:0")] {let(s,v)=credential_api(&f,"POST","/v1/listeners",json!({"id":id,"address":address,"surfaces":["gateway","mcp"],"tls":{"managed":true}})).await;assert_eq!(s,200,"{v}");let entry:av_store::model::ListenerRecord=serde_json::from_value(v).unwrap();ports.push(f.daemon.bind_listener(&entry).await.unwrap().1);}
+        let pre=|ph:&str|json!({"method":"GET","path":"/p/demo/x","headers":[["x-key",ph]]});let(s,v)=c18_tls_json(&f,ports[0],"/v1/preflight",&infinite,pre(&marker)).await;assert_eq!(s,403,"{v}");assert_eq!(v["code"],"AV_REMOTE_FORBIDDEN");assert_eq!(v["rule"],"infinite_remote");let(s,v)=c18_tls_json(&f,ports[0],"/v1/preflight",&f.token,pre(&f.ph)).await;assert_eq!(s,200,"{v}");assert_eq!(v["would"],"allow");assert_eq!(c18_tls_json(&f,ports[1],"/v1/preflight",&infinite,pre(&marker)).await.0,200);
+        let remote=av_daemon::pipeline::ListenerInfo{id:"wild".into(),kind:"tls".into(),remote:true,advertise:vec![]};
+        for(name,args)in [("vault_describe_access",json!({})),("vault_preflight",json!({"cred":"demo","method":"GET","path":"/x"}))] {
+            let message=json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});let(_,v)=c18_tls_json(&f,ports[0],"/mcp",&infinite,message.clone()).await;let v:Value=serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();assert_eq!(v["code"],"AV_REMOTE_FORBIDDEN");
+            let before=store_snapshot(&f).await;let audit=audit_records(&f).await;let token=infinite.clone();let session=f.shared.run(move|c|c.vault.session_by_token(&token).unwrap()).await.unwrap();let v=f.daemon.mcp().handle(message.clone(),session,Some(infinite.clone()),Some(remote.clone())).await.unwrap();let v:Value=serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();assert_eq!(v["code"],"AV_REMOTE_FORBIDDEN");assert_eq!(v["rule"],"infinite_remote");assert_eq!(store_snapshot(&f).await,before);assert_eq!(audit_records(&f).await,audit);
+            let(_,v)=c18_tls_json(&f,ports[0],"/mcp",&f.token,message.clone()).await;let v:Value=serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();if name=="vault_preflight" {assert_eq!(v["would"],"allow");} else {assert_eq!(v["session"]["id"],control_session_sid(&f).await);}
+            for(token,listener)in [(f.token.clone(),Some(remote.clone())),(infinite.clone(),None)] {let is_infinite=token==infinite;let t=token.clone();let session=f.shared.run(move|c|c.vault.session_by_token(&t).unwrap()).await.unwrap();let v=f.daemon.mcp().handle(message.clone(),session,Some(token),listener).await.unwrap();let v:Value=serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();if name=="vault_preflight" {assert_eq!(v["would"],"allow");}else{assert!(v["session"]["id"].is_string());assert_eq!(v["session"]["infinite"],is_infinite);}}
+        }
+        assert!(f.up.hits.lock().unwrap().is_empty());assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("C18 TLS surfaces timed out");
+}
+
+struct NotifyWatch {
+    status: u16,
+    body: hyper::body::Incoming,
+    connection: tokio::task::JoinHandle<()>,
+    buffer: String,
+}
+impl Drop for NotifyWatch {
+    fn drop(&mut self) {
+        self.connection.abort();
+    }
+}
+impl NotifyWatch {
+    async fn open(f: &Fixture, headers: Vec<(String, String)>) -> Self {
+        let stream = tokio::net::UnixStream::connect(f._dir.path().join("control.sock"))
+            .await
+            .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let mut req = hyper::Request::builder()
+            .uri("/v1/pending/stream")
+            .header("host", "localhost");
+        for (k, v) in headers {
+            req = req.header(k, v);
+        }
+        let response = sender
+            .send_request(req.body(Full::new(Bytes::new())).unwrap())
+            .await
+            .unwrap();
+        Self {
+            status: response.status().as_u16(),
+            body: response.into_body(),
+            connection,
+            buffer: String::new(),
+        }
+    }
+    async fn next(&mut self) -> (String, Value, String) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(end) = self.buffer.find("\n\n") {
+                    let raw = self.buffer[..end].to_string();
+                    self.buffer.drain(..end + 2);
+                    if let Some(event) = raw.lines().find_map(|l| l.strip_prefix("event: ")) {
+                        let data = raw.lines().find_map(|l| l.strip_prefix("data: ")).unwrap();
+                        return (event.to_string(), serde_json::from_str(data).unwrap(), raw);
+                    }
+                }
+                let frame = self
+                    .body
+                    .frame()
+                    .await
+                    .expect("notification stream ended")
+                    .unwrap();
+                if let Ok(bytes) = frame.into_data() {
+                    self.buffer.push_str(std::str::from_utf8(&bytes).unwrap());
+                }
+            }
+        })
+        .await
+        .expect("notification event timed out")
+    }
+}
+const NOTIFY_HOOK: &str = "https://hooks.example/services/T000/B000/SECRETPATH?token=QUERYSECRET";
+struct NotifyFixture {
+    f: Fixture,
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    status: Arc<std::sync::atomic::AtomicU16>,
+    peer: tokio::task::JoinHandle<()>,
+}
+impl NotifyFixture {
+    async fn new(each: bool) -> Self {
+        use tokio::io::AsyncWriteExt;
+        let mut f = if each {
+            approval_fixture("each", &["header:x-key"]).await
+        } else {
+            Fixture::new(&["header:x-key"]).await
+        };
+        f.daemon.stop().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let status = Arc::new(std::sync::atomic::AtomicU16::new(200));
+        let served = status.clone();
+        let peer = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (_, body) = read_wire_request(&mut socket).await;
+                let _: Value = serde_json::from_slice(&body).unwrap();
+                let code = served.load(std::sync::atomic::Ordering::SeqCst);
+                socket.write_all(format!("HTTP/1.1 {code} Fake\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+            }
+        });
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let send: av_daemon::notify::Sender = Arc::new(move |url, body| {
+            recorded
+                .lock()
+                .unwrap()
+                .push((url, serde_json::from_str(&body).unwrap()));
+            Box::pin(async move {
+                let (s, _, _) = loopback_http(
+                    port,
+                    "POST",
+                    "/fake-webhook",
+                    vec![("content-type".into(), "application/json".into())],
+                    body.into_bytes(),
+                )
+                .await;
+                Ok(s)
+            })
+        });
+        f.daemon = Daemon::new(
+            f.shared.clone(),
+            DaemonOptions {
+                port: 0,
+                socket_path: Some(f._dir.path().join("control.sock")),
+                pipeline: PipelineOptions {
+                    upstream: Some(f.up.clone()),
+                    ..Default::default()
+                },
+                notify: av_daemon::notify::NotifierOptions { send: Some(send) },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        f.daemon.start().await.unwrap();
+        Self {
+            f,
+            calls,
+            status,
+            peer,
+        }
+    }
+    async fn configure(&self, detail: av_store::model::NotifyDetail) {
+        self.f
+            .shared
+            .run(move |c| {
+                c.vault
+                    .set_notify_webhook(&NOTIFY_HOOK.to_string().into(), detail)
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+    }
+    async fn wait_calls(&self, n: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if self.calls.lock().unwrap().len() >= n {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("webhook not posted");
+    }
+    async fn finish(self) {
+        let log = serde_json::to_string(&audit_records(&self.f).await).unwrap();
+        for part in [SECRET, "SECRETPATH", "QUERYSECRET", "/services/"] {
+            assert!(!log.contains(part));
+        }
+        credential_finish(&self.f).await;
+        self.peer.abort();
+        let _ = self.peer.await;
+    }
+}
+
+#[tokio::test]
+async fn control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=approval_fixture("each",&["header:x-key"]).await;let first=f.send("GET","/before",vec![("x-key".into(),f.ph.clone())],None).await;let id=held_id(&first);let mut watch=NotifyWatch::open(&f,vec![]).await;assert_eq!(watch.status,200);let(event,v,_)=watch.next().await;assert_eq!(event,"snapshot");assert_eq!(v["items"].as_array().unwrap().len(),1);assert_eq!(v["items"][0]["kind"],"request");assert_eq!(f.send("GET","/later",vec![("x-key".into(),f.ph.clone()),("av-reason".into(),"<script>alert(1)</script>".into())],None).await.status,202);let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","paths":[format!("/x/{}",f.ph)],"reason":"<script>steal()</script>"})).await;assert_eq!(s,200,"{asked}");let(event,held,raw)=watch.next().await;assert_eq!(event,"pending");assert_eq!(held["kind"],"request");assert!(held["headline"].as_str().unwrap().starts_with("GET "));let(_,session,raw2)=watch.next().await;assert_eq!(session["kind"],"session");assert_eq!(session["id"],asked["id"]);let text=format!("{raw}\n{raw2}");for private in ["<script>",&f.ph,SECRET]{assert!(!text.contains(private));}assert!(session["headline"].as_str().unwrap().contains("«placeholder»"));let mut keys=session.as_object().unwrap().keys().cloned().collect::<Vec<_>>();keys.sort();assert_eq!(keys,vec!["created_at","headline","id","kind"]);drop(watch);
+        let before=store_snapshot(&f).await;let audit=audit_records(&f).await;for headers in [vec![("authorization".into(),format!("Bearer {}",f.token))],vec![("av-session".into(),f.token.clone())],vec![("av-session".into(),"avs1.garbage.token".into())],vec![]] {let mut w=NotifyWatch::open(&f,headers).await;assert_eq!(w.status,200);assert_eq!(w.next().await.0,"snapshot");drop(w);}assert_eq!(store_snapshot(&f).await,before);assert_eq!(audit_records(&f).await,audit);f.daemon.pipeline().decide_approval(id,true).await.unwrap();assert_eq!(f.send("GET","/before",vec![("x-key".into(),f.ph.clone())],None).await.status,200);credential_finish(&f).await;
+    }).await.expect("notification stream and C20 timed out");
+}
+
+#[tokio::test]
+async fn control_notify_stream_caps_eight_watchers_and_releases_closed_slot() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let mut open = Vec::new();
+        for _ in 0..8 {
+            let mut w = NotifyWatch::open(&f, vec![]).await;
+            assert_eq!(w.status, 200);
+            w.next().await;
+            open.push(w);
+        }
+        let ninth = NotifyWatch::open(&f, vec![]).await;
+        assert_eq!(ninth.status, 429);
+        drop(ninth);
+        drop(open.pop());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let again = NotifyWatch::open(&f, vec![]).await;
+        assert_eq!(again.status, 200);
+        drop(again);
+        drop(open);
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("notification watcher cap timed out");
+}
+
+#[tokio::test]
+async fn control_notify_webhook_configuration_is_gated_encrypted_and_only_host_is_public() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        credential_presence_refused(
+            credential_api(&f, "POST", "/v1/notify", json!({"webhook_url":NOTIFY_HOOK})).await,
+        );
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/notify", json!({})).await.1,
+            json!({"webhook":null})
+        );
+        credential_gate(&f, true).await;
+        for url in [
+            json!("http://example.com/hook"),
+            json!("https://user:pw@hooks.example/x"),
+            json!("not a url"),
+            json!(5),
+        ] {
+            assert_eq!(
+                credential_api(&f, "POST", "/v1/notify", json!({"webhook_url":url}))
+                    .await
+                    .1["rule"],
+                "webhook_url"
+            );
+        }
+        let (s, v) =
+            credential_api(&f, "POST", "/v1/notify", json!({"webhook_url":NOTIFY_HOOK})).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["webhook"]["host"], "hooks.example");
+        assert_eq!(v["webhook"]["detail"], "minimal");
+        let shown = credential_api(&f, "GET", "/v1/notify", json!({})).await.1;
+        let all = json!([v, shown, audit_records(&f).await]).to_string();
+        for part in ["SECRETPATH", "QUERYSECRET", "/services/"] {
+            assert!(!all.contains(part));
+        }
+        let f = control_session_restart_with_pass(
+            f,
+            move |dir| {
+                for file in ["vault.db", "vault.db-wal"] {
+                    if let Ok(disk) = std::fs::read(dir.join(file)) {
+                        for part in ["SECRETPATH", "QUERYSECRET", "/services/"] {
+                            assert!(!disk.windows(part.len()).any(|w| w == part.as_bytes()));
+                        }
+                    }
+                }
+            },
+            Some(WIDEN_PASS),
+        )
+        .await;
+        credential_presence_refused(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/expiry",
+                json!({"slug":"demo","expires_at":null}),
+            )
+            .await,
+        );
+        assert_eq!(
+            credential_api(&f, "DELETE", "/v1/notify", json!({}))
+                .await
+                .1,
+            json!({"ok":true,"removed":true})
+        );
+        assert_eq!(
+            audit_records(&f)
+                .await
+                .iter()
+                .filter(|r| r["kind"] == "notify.removed")
+                .count(),
+            1
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("webhook configuration timed out");
+}
+
+#[test]
+fn control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text(
+) {
+    use av_daemon::notify::{clean_headline, webhook_payload};
+    let ph = "av1.abcdefghijklmnopqrstuvwxyz.demo_token.ABCDEFGHIJKLMNOPQRSTUVWX.ABCD";
+    let items = vec![
+        json!({"kind":"request","id":"ap_1","headline":"POST api.example.com/repos/x","created_at":"2026-01-01T00:00:00Z"}),
+        json!({"kind":"session","id":"sr_1","headline":clean_headline(&format!("session for demo · GET · /x/{ph}\u{1b}[31m")),"created_at":"2026-01-01T00:00:01Z"}),
+    ];
+    let minimal = webhook_payload(&items, "minimal", "pending");
+    assert!(!minimal.contains("api.example.com"));
+    assert!(serde_json::from_str::<Value>(&minimal)
+        .unwrap()
+        .get("items")
+        .is_none());
+    let headline = webhook_payload(&items, "headline", "pending");
+    let v: Value = serde_json::from_str(&headline).unwrap();
+    assert_eq!(v["items"].as_array().unwrap().len(), 2);
+    assert_eq!(v["items"][1]["headline"], "POST api.example.com/repos/x");
+    assert!(!headline.contains('\u{1b}'));
+    let many=(0..50).map(|i|json!({"kind":"request","id":format!("ap_{i}"),"headline":"x".repeat(190),"created_at":format!("2026-01-01T00:00:{i:02}Z")})).collect::<Vec<_>>();
+    let big = webhook_payload(&many, "headline", "pending");
+    assert!(big.len() <= 2048);
+    assert_eq!(serde_json::from_str::<Value>(&big).unwrap()["waiting"], 50);
+    let secrets = vec![av_core::scrub::StoredSecret {
+        secret: SECRET.to_string().into(),
+        label: "demo".into(),
+    }];
+    assert_eq!(
+        av_core::scrub::redact_stored("session for demo · GET · /repos/x", &secrets),
+        "session for demo · GET · /repos/x"
+    );
+    assert_eq!(
+        av_core::scrub::redact_stored(&format!("a/{SECRET}/b"), &secrets),
+        "a/[[av:redacted:demo]]/b"
+    );
+    assert_eq!(
+        av_core::scrub::redact_stored(
+            "GET /abc",
+            &[av_core::scrub::StoredSecret {
+                secret: "abc".to_string().into(),
+                label: "short".into()
+            }]
+        ),
+        "GET /abc"
+    );
+}
+
+#[tokio::test]
+async fn control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let p=NotifyFixture::new(true).await;p.configure(av_store::model::NotifyDetail::Minimal).await;let held=p.f.send("GET","/a?q=QUERYTEXT",vec![("x-key".into(),p.f.ph.clone()),("av-reason".into(),"<script>x</script>".into())],None).await;let id=held_id(&held);assert_eq!(credential_api(&p.f,"POST","/v1/session-requests",json!({"cred":"demo","reason":"<script>y</script>","paths":[format!("/x/{}",p.f.ph)]})).await.0,200);p.wait_calls(1).await;tokio::time::sleep(std::time::Duration::from_millis(50)).await;let calls=p.calls.lock().unwrap().clone();assert_eq!(calls.len(),1);assert_eq!(calls[0].0,NOTIFY_HOOK);let body=&calls[0].1;let mut keys=body.as_object().unwrap().keys().cloned().collect::<Vec<_>>();keys.sort();assert_eq!(keys,vec!["event","ids","kinds","open","source","waiting"]);assert_eq!(body["event"],"pending");assert_eq!(body["kinds"]["request"],1);for part in ["<script>",&p.f.ph,"QUERYTEXT","headline","GET "] {assert!(!body.to_string().contains(part));}p.f.daemon.pipeline().decide_approval(id,true).await.unwrap();assert_eq!(p.f.send("GET","/a?q=QUERYTEXT",vec![("x-key".into(),p.f.ph.clone()),("av-reason".into(),"<script>x</script>".into())],None).await.status,200);p.finish().await;
+        let p=NotifyFixture::new(false).await;p.configure(av_store::model::NotifyDetail::Headline).await;let mut watch=NotifyWatch::open(&p.f,vec![]).await;watch.next().await;assert_eq!(control(&p.f._dir.path().join("control.sock"),"/v1/session-requests",json!({"cred":"demo","paths":[format!("/{SECRET}"),"/plain/path"],"reason":"x"})).await.0,200);let(_,_,streamed)=watch.next().await;p.wait_calls(1).await;let posted=p.calls.lock().unwrap()[0].1.to_string();for text in [&streamed,&posted] {assert!(!text.contains(SECRET));assert!(!text.contains(&SECRET[..12]));assert!(text.contains("[[av:redacted:demo]]"));assert!(text.contains("/plain/path"));}let mut late=NotifyWatch::open(&p.f,vec![]).await;assert!(!late.next().await.2.contains(SECRET));drop(late);drop(watch);assert_eq!(p.f.get().await.status,200);p.finish().await;
+    }).await.expect("webhook payload secrecy timed out");
+}
+
+#[tokio::test]
+async fn control_notify_test_route_throttles_and_real_http_500_failures_are_audited_once() {
+    tokio::time::timeout(std::time::Duration::from_secs(100), async {
+        let p = NotifyFixture::new(false).await;
+        assert_eq!(
+            credential_api(&p.f, "POST", "/v1/notify/test", json!({}))
+                .await
+                .0,
+            404
+        );
+        p.configure(av_store::model::NotifyDetail::Headline).await;
+        assert_eq!(
+            credential_api(&p.f, "POST", "/v1/notify/test", json!({}))
+                .await
+                .1,
+            json!({"sent":true,"status":200})
+        );
+        assert_eq!(p.calls.lock().unwrap()[0].1["event"], "test");
+        let (s, v) = credential_api(&p.f, "POST", "/v1/notify/test", json!({})).await;
+        assert_eq!(s, 429, "{v}");
+        assert_eq!(v["code"], "AV_QUOTA_EXCEEDED");
+        assert_eq!(p.calls.lock().unwrap().len(), 1);
+        p.status.store(500, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..2 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                av_daemon::notify::TEST_INTERVAL_MS + 50,
+            ))
+            .await;
+            assert_eq!(
+                credential_api(&p.f, "POST", "/v1/notify/test", json!({}))
+                    .await
+                    .1,
+                json!({"sent":false,"status":500})
+            );
+        }
+        let failed = audit_records(&p.f)
+            .await
+            .into_iter()
+            .filter(|r| r["kind"] == "notify.failed")
+            .collect::<Vec<_>>();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["host"], "hooks.example");
+        assert_eq!(failed[0]["reason"], "status_500");
+        assert_eq!(p.f.get().await.status, 200);
+        p.finish().await;
+    })
+    .await
+    .expect("real webhook status failure intervals timed out");
+}
+
+fn rpc_tool(name: &str, args: Value) -> Value {
+    json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})
+}
+fn rpc_body(v: &Value) -> Value {
+    serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+async fn mcp_wire(
+    f: &Fixture,
+    method: &str,
+    message: Value,
+    token: Option<&str>,
+    extra: Vec<(String, String)>,
+) -> (u16, Vec<(String, String)>, Value) {
+    let mut headers = vec![
+        ("content-type".into(), "application/json".into()),
+        (
+            "accept".into(),
+            "application/json, text/event-stream".into(),
+        ),
+    ];
+    if let Some(token) = token {
+        headers.push(("authorization".into(), format!("Bearer {token}")));
+    }
+    headers.extend(extra);
+    let (s, h, body) = loopback_http(
+        f.daemon.gateway_port().unwrap(),
+        method,
+        "/mcp",
+        headers,
+        serde_json::to_vec(&message).unwrap(),
+    )
+    .await;
+    assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+    (
+        s,
+        h,
+        if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        },
+    )
+}
+#[tokio::test]
+async fn mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:authorization:Bearer"]).await;let(s,headers,_)=mcp_wire(&f,"POST",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),Some(&f.token),vec![]).await;assert_eq!(s,200);let sid=headers.iter().find(|(k,_)|k.eq_ignore_ascii_case("mcp-session-id")).unwrap().1.clone();
+        for(name,args)in [("vault_list_creds",json!({})),("vault_get_placeholder",json!({"cred":"demo","reason":"x"})),("vault_http",json!({"cred":"demo","method":"GET","path":"/user","reason":"x"})),("vault_approval_status",json!({"approval_id":"ap_whatever"}))] {let(_,_,v)=mcp_wire(&f,"POST",rpc_tool(name,args),None,vec![("mcp-session-id".into(),sid.clone())]).await;assert_eq!(v["result"]["isError"],true,"{name}: {v}");}
+        let(s,_,v)=mcp_wire(&f,"POST",json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),Some(&f.token),vec![("mcp-session-id".into(),"not-a-real-session".into())]).await;assert_eq!(s,404);assert_eq!(v["code"],"AV_MCP_SESSION_UNKNOWN");let(s,_,v)=mcp_wire(&f,"POST",json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),Some(&f.token),vec![("mcp-protocol-version".into(),"1999-01-01".into())]).await;assert_eq!(s,400);assert_eq!(v["code"],"AV_MCP_PROTOCOL");assert!(v["supported"].is_array());
+        let(s,_,v)=mcp_wire(&f,"POST",json!([{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tools/list"}]),Some(&f.token),vec![]).await;assert_eq!(s,200);assert_eq!(v.as_array().unwrap().len(),2);assert_eq!(v[0]["id"],1);let(s,_,v)=mcp_wire(&f,"POST",json!({"jsonrpc":"2.0","method":"notifications/initialized"}),Some(&f.token),vec![]).await;assert_eq!(s,202);assert!(v.is_null());
+        assert_eq!(mcp_wire(&f,"DELETE",Value::Null,Some(&f.token),vec![("mcp-session-id".into(),sid)]).await.0,204);assert_eq!(mcp_wire(&f,"POST",json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),Some(&f.token),vec![]).await.0,200);assert_eq!(f.get().await.status,403); // its field is Authorization, not x-key
+        let(_,_,v)=mcp_wire(&f,"POST",rpc_tool("vault_http",json!({"cred":"demo","method":"GET","path":"/ordinary"})),Some(&f.token),vec![]).await;assert_eq!(rpc_body(&v)["status"],200);credential_finish(&f).await;
+    }).await.expect("MCP routing and transport lifetime timed out");
+}
+#[tokio::test]
+async fn mcp_transport_direct_handler_and_http_agree_on_status_and_usage_and_share_policy_denials()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::configured(
+            &["header:authorization:Bearer"],
+            SECRET,
+            None,
+            json!({"methods":["GET"]}),
+        )
+        .await;
+        for name in ["vault_status", "vault_list_creds"] {
+            let (_, direct) = control_mcp_call(&f, name, json!({}), true).await;
+            let (_, _, over) = mcp_wire(
+                &f,
+                "POST",
+                rpc_tool(name, json!({})),
+                Some(&f.token),
+                vec![],
+            )
+            .await;
+            assert_eq!(direct, rpc_body(&over), "{name} transport parity");
+            if name == "vault_list_creds" {
+                assert_eq!(direct[0]["slug"], "demo");
+                assert!(direct[0]["usage"][0]["put_placeholder_at"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("Authorization: Bearer"));
+            }
+        }
+        let (_, _, denied) = mcp_wire(
+            &f,
+            "POST",
+            rpc_tool(
+                "vault_http",
+                json!({"cred":"demo","method":"DELETE","path":"/user","reason":"x"}),
+            ),
+            Some(&f.token),
+            vec![],
+        )
+        .await;
+        assert_eq!(rpc_body(&denied)["status"], 403);
+        assert_eq!(rpc_body(&denied)["decision"], "deny");
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        let (_, _, ordinary) = mcp_wire(
+            &f,
+            "POST",
+            rpc_tool(
+                "vault_http",
+                json!({"cred":"demo","method":"GET","path":"/user","reason":"x"}),
+            ),
+            Some(&f.token),
+            vec![],
+        )
+        .await;
+        assert_eq!(rpc_body(&ordinary)["status"], 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("MCP parity timed out");
+}
+
+#[tokio::test]
+async fn mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::configured(&["header:authorization:Bearer"],SECRET,None,json!({"paths":["/safe/**"]})).await;assert_eq!(credential_api(&f,"POST","/v1/credentials",json!({"slug":"ungranted","kind":"http","host":"other.example.test","value":"UNGRANTED-SECRET-0044556","sites":["header:authorization:Bearer"]})).await.0,200);
+        let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x"}),true).await;assert_eq!(v["status"],200);{let hits=f.up.hits.lock().unwrap();assert_eq!(hits.len(),1);assert_eq!(url::Url::parse(&hits[0].url).unwrap().path(),"/safe/x");assert!(hits[0].headers.iter().any(|(k,v)|k.eq_ignore_ascii_case("authorization")&&v==&format!("Bearer {SECRET}")));}
+        for path in ["/forbidden/x","/safe/../forbidden/x","/../../etc/passwd","/safe/%2e%2e/forbidden/x","/safe/./../forbidden","/safe/x\r\nX-Injected: 1"] {f.up.hits.lock().unwrap().clear();let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"demo","method":"GET","path":path}),true).await;assert_ne!(v["status"],200,"{path}: {v}");assert!(f.up.hits.lock().unwrap().is_empty());}
+        let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"ungranted","method":"GET","path":"/safe/x"}),true).await;assert!(v.to_string().contains("no grant"));assert!(f.up.hits.lock().unwrap().is_empty());
+        let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x","headers":{"av-session":"forged","AV-Reason":"spoofed","host":"evil.test"}}),true).await;assert_eq!(v["status"],200);{let hits=f.up.hits.lock().unwrap();assert_eq!(hits.len(),1);assert!(hits[0].headers.iter().all(|(k,_)|!k.to_ascii_lowercase().starts_with("av-")));assert!(hits[0].headers.iter().filter(|(k,_)|k.eq_ignore_ascii_case("host")).all(|(_,v)|!v.contains("evil")));}
+        for(body,headers,want)in [("batch=%5B%5D",json!({"Content-Type":"application/x-www-form-urlencoded"}),"application/x-www-form-urlencoded"),("{\"a\":1}",json!({}),"application/json")] {f.up.hits.lock().unwrap().clear();let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"demo","method":"POST","path":"/safe/x","body":body,"headers":headers}),true).await;assert_eq!(v["status"],200,"{v}");let hits=f.up.hits.lock().unwrap();assert_eq!(hits.len(),1);assert_eq!(hits[0].headers.iter().filter(|(k,_)|k.eq_ignore_ascii_case("content-type")).map(|(_,v)|v.as_str()).collect::<Vec<_>>(),vec![want]);}credential_finish(&f).await;
+    }).await.expect("MCP argument attacks timed out");
+}
+
+#[tokio::test]
+async fn mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:authorization:Bearer"]).await;assert_eq!(credential_api(&f,"POST","/v1/credentials",json!({"slug":"ungranted","kind":"http","host":"other.example.test","value":"UNGRANTED-SECRET-0044556","sites":["header:authorization:Bearer"]})).await.0,200);let(error,ok)=control_mcp_call(&f,"vault_get_placeholder",json!({"cred":"demo","reason":"testing"}),true).await;assert!(!error);assert!(ok["placeholder"].as_str().unwrap().starts_with("av1."));let(_,no)=control_mcp_call(&f,"vault_get_placeholder",json!({"cred":"ungranted","reason":"testing"}),true).await;assert!(no.to_string().contains("no grant"));assert!(no.get("placeholder").is_none());
+        for(name,args)in [("vault_status",json!({})),("vault_list_creds",json!({})),("vault_get_placeholder",json!({"cred":"demo","reason":"x"})),("vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x"})),("vault_explain_denial",json!({"request_id":"nope"}))] {let(_,v)=control_mcp_call(&f,name,args,true).await;assert!(!v.to_string().contains("UNGRANTED-SECRET-0044556"));}
+        let tools=av_daemon::mcp::tools();let names=tools.as_array().unwrap().iter().map(|t|t["name"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();assert_eq!(names,std::collections::BTreeSet::from(["vault_approval_status","vault_describe_access","vault_explain_denial","vault_get_placeholder","vault_http","vault_list_creds","vault_preflight","vault_request_session","vault_status"]));let ask=tools.as_array().unwrap().iter().find(|t|t["name"]=="vault_request_session").unwrap();assert_eq!(ask["inputSchema"]["properties"]["ttl_minutes"]["type"],"number");for field in ["cred","methods","paths","budget"]{assert!(ask["inputSchema"]["properties"].get(field).is_some());}
+        let missing=control_mcp_call(&f,"vault_approval_status",json!({"approval_id":"ap_doesnotexist"}),true).await.1;assert!(missing["error"].as_str().unwrap().contains("no approval"));credential_finish(&f).await;
+    }).await.expect("MCP scoped outputs and schema timed out");
+}
+
+#[test]
+fn mcp_tools_every_production_error_string_tool_reference_names_an_advertised_tool() {
+    fn visit(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                if p.file_name().unwrap() != "tests" {
+                    visit(&p, files);
+                }
+            } else if p.extension().is_some_and(|s| s == "rs") {
+                files.push(p);
+            }
+        }
+    }
+    let tools = av_daemon::mcp::tools();
+    let names = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!names.contains("vault_id"));
+    let mut files = Vec::new();
+    visit(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let words = av_core::jsre::compile(r"\bvault_[a-z_]+").unwrap();
+    let strings = av_core::jsre::compile(r#""(?:\\.|[^"\\])*""#).unwrap();
+    for file in files {
+        let src = std::fs::read_to_string(&file).unwrap();
+        let src = src.split("#[cfg(test)]").next().unwrap();
+        for (line_no, line) in src.lines().enumerate() {
+            let line = line.trim();
+            if line.starts_with("//") || line.starts_with('*') {
+                continue;
+            }
+            for text in strings.find_iter(line) {
+                for word in words.find_iter(text.as_str()) {
+                    assert!(
+                        names.contains(word.as_str()) || word.as_str() == "vault_id",
+                        "{}:{} references unknown tool {}",
+                        file.display(),
+                        line_no + 1,
+                        word.as_str()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn mcp_tools_session_proposals_never_issue_capability_before_human_and_batch_cannot_switch_identity(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:authorization:Bearer"]).await;let count=f.shared.run(|c|c.vault.sessions().unwrap().len()).await.unwrap();let before=audit_records(&f).await;assert_eq!(control_mcp_call(&f,"vault_request_session",json!({"cred":"missing","reason":"testing"}),true).await.1["code"],"AV_NOT_FOUND");assert_eq!(audit_records(&f).await,before);assert!(credential_api(&f,"GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().is_empty());let(_,asked)=control_mcp_call(&f,"vault_request_session",json!({"cred":"demo","reason":"testing"}),true).await;assert_eq!(asked["state"],"pending");assert!(asked["request_id"].as_str().unwrap().starts_with("sr_"));assert!(!asked.to_string().contains("avs1."));assert_eq!(f.shared.run(|c|c.vault.sessions().unwrap().len()).await.unwrap(),count);let(_,poll)=control_mcp_call(&f,"vault_request_session",json!({"poll_id":asked["request_id"],"poll_secret":asked["poll_secret"],"reason":"checking"}),true).await;assert_eq!(poll["state"],"pending");assert!(poll.get("token").is_none());
+        let gid=f.grant_id.clone();let high=f.shared.run(move|c|{use av_core::secret::ExposeSecret;let cred=c.vault.add_credential(av_store::vault::NewCredential{slug:"high".into(),kind:"http".into(),connector:serde_json::from_value(json!({"host":"api.example.test"})).unwrap(),fields:vec![("token".into(),"HIGH-SECRET-PRODUCTION-99999".to_string().into())],sites:std::collections::BTreeMap::from([("token".into(),vec!["header:authorization:Bearer".into()])])}).unwrap();let s=c.vault.create_session(Default::default()).unwrap();let parent=c.vault.grant(&gid).unwrap().unwrap();c.vault.create_grant(av_store::vault::CreateGrantOptions{session_id:s.session.id,credential_id:cred.id,policy:parent.policy,..Default::default()}).unwrap();s.token.expose_secret().to_string()}).await.unwrap();
+        let gate=Arc::new(tokio::sync::Notify::new());*f.up.gate.lock().unwrap()=Some(gate.clone());let batch=json!([rpc_tool("vault_http",json!({"cred":"demo","method":"GET","path":"/slow"})),{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault_http","arguments":{"cred":"high","method":"GET","path":"/STOLEN"}}}]);let pending=mcp_wire(&f,"POST",batch,Some(&f.token),vec![]);tokio::pin!(pending);
+        tokio::select!{_= &mut pending=>panic!("slow batch unexpectedly finished"),_=async{loop{if !f.up.hits.lock().unwrap().is_empty(){break;}tokio::task::yield_now().await;}}=>{}}
+        assert_eq!(mcp_wire(&f,"POST",rpc_tool("vault_status",json!({})),Some(&high),vec![]).await.0,200);gate.notify_one();let(_,_,out)=pending.await;assert!(out.to_string().contains("no grant"));assert!(!out.to_string().contains("HIGH-SECRET-PRODUCTION-99999"));assert_eq!(f.up.hits.lock().unwrap().len(),1);*f.up.gate.lock().unwrap()=None;let(_,_,allowed)=mcp_wire(&f,"POST",rpc_tool("vault_http",json!({"cred":"high","method":"GET","path":"/ordinary"})),Some(&high),vec![]).await;assert_eq!(rpc_body(&allowed)["status"],200);assert!(!allowed.to_string().contains("HIGH-SECRET-PRODUCTION-99999"));credential_finish(&f).await;
+    }).await.expect("MCP proposal authority and batch race timed out");
+}
+
+#[tokio::test]
+async fn mcp_tools_crlf_path_and_header_are_refused_by_real_http_transport_without_smuggling() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use tokio::io::AsyncWriteExt;
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();let received=Arc::new(Mutex::new(Vec::new()));let hits=received.clone();let peer=tokio::spawn(async move{loop{let(mut socket,_)=listener.accept().await.unwrap();let mut first=[0u8;1];if socket.peek(&mut first).await.unwrap()==0 {continue;}let(h,_)=read_wire_request(&mut socket).await;hits.lock().unwrap().push(h.clone());let reply=json!({"echo":h}).to_string();socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",reply.len()).as_bytes()).await.unwrap();}});
+        let f=mcp_real_http_fixture(port).await;
+        for args in [json!({"cred":"demo","method":"GET","path":"/safe/x\r\nX-Injected: 1"}),json!({"cred":"demo","method":"GET","path":"/safe/x","headers":{"X-A":"v\r\nX-Injected: 1"}})] {let(_,v)=control_mcp_call(&f,"vault_http",args,true).await;assert_ne!(v["status"],200,"{v}");assert!(received.lock().unwrap().is_empty());}
+        let(_,v)=control_mcp_call(&f,"vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x","headers":{"X-A":"ordinary"}}),true).await;assert_eq!(v["status"],200,"{v}");assert!(!v.to_string().contains(SECRET));let wire=received.lock().unwrap().clone();assert_eq!(wire.len(),1);assert!(wire[0].contains("ordinary"));assert!(!wire[0].contains("X-Injected"));credential_finish(&f).await;peer.abort();let _=peer.await;
+    }).await.expect("MCP CRLF real wire timed out");
+}
+
+#[tokio::test]
+async fn approval_verdict_nonbooleans_never_settle_even_with_window_or_matching_signature() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let w = WidenFixture::new().await;
+        let gid = w.f.grant_id.clone();
+        w.f.shared
+            .run(move |c| {
+                c.vault
+                    .narrow_grant(&gid, &json!({"approval":"on-write"}))
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let send = |path: &'static str| {
+            w.f.send(
+                "POST",
+                path,
+                vec![("authorization".into(), format!("Bearer {}", w.f.ph))],
+                Some("x".into()),
+            )
+        };
+        let id = held_id(&send("/verdict/invalid").await);
+        let invalid = [
+            Some(json!("false")),
+            Some(json!(0)),
+            Some(json!(1)),
+            Some(Value::Null),
+            Some(json!("true")),
+            Some(json!("no")),
+            None,
+        ];
+        for window in [false, true] {
+            if window {
+                credential_gate(&w.f, true).await;
+            }
+            for granted in &invalid {
+                let mut body = json!({"id":id});
+                if let Some(granted) = granted {
+                    body["granted"] = granted.clone();
+                }
+                let (s, v) = w.ctl("POST", "/v1/approvals", body).await;
+                assert_eq!(s, 403, "{v}");
+                assert_eq!(v["code"], "AV_POLICY_DENIED");
+                assert_eq!(v["rule"], "bulk_decision");
+            }
+        }
+        credential_gate(&w.f, false).await;
+        for granted in &invalid {
+            let mut body = json!({"id":id});
+            if let Some(granted) = granted {
+                body["granted"] = granted.clone();
+            }
+            body["presence"] = w.proof("approval.approve", &body).await;
+            let (s, v) = w.ctl("POST", "/v1/approvals", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["rule"], "bulk_decision");
+        }
+        assert!(w
+            .f
+            .daemon
+            .pipeline()
+            .pending_approvals()
+            .await
+            .iter()
+            .any(|r| r["id"] == id));
+        let before = w.f.up.hits.lock().unwrap().len();
+        assert_eq!(send("/verdict/invalid").await.status, 202);
+        assert_eq!(w.f.up.hits.lock().unwrap().len(), before);
+        for (granted, path, op, state) in [
+            (true, "/verdict/yes", "approval.approve", "granted"),
+            (false, "/verdict/no", "approval.deny", "denied"),
+        ] {
+            let id = held_id(&send(path).await);
+            let mut body = json!({"id":id,"granted":granted});
+            assert_eq!(w.ctl("POST", "/v1/approvals", body.clone()).await.0, 401);
+            body["presence"] = w.proof(op, &body).await;
+            let (s, v) = w.ctl("POST", "/v1/approvals", body).await;
+            assert_eq!(s, 200, "{v}");
+            assert_eq!(v["state"], state);
+            if granted {
+                assert_eq!(send(path).await.status, 200);
+            }
+        }
+        w.stop().await;
+    })
+    .await
+    .expect("strict approval verdict and signed refusals timed out");
+}
+
+async fn mcp_real_http_fixture(port: u16) -> Fixture {
+    use av_core::secret::ExposeSecret;
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    let cred = vault
+        .add_credential(av_store::vault::NewCredential {
+            slug: "demo".into(),
+            kind: "http".into(),
+            connector: serde_json::from_value(
+                json!({"host":format!("127.0.0.1:{port}"),"scheme":"http"}),
+            )
+            .unwrap(),
+            fields: vec![("token".into(), SECRET.to_string().into())],
+            sites: std::collections::BTreeMap::from([(
+                "token".into(),
+                vec!["header:authorization:Bearer".into()],
+            )]),
+        })
+        .unwrap();
+    let session = vault.create_session(Default::default()).unwrap();
+    let grant=vault.create_grant(av_store::vault::CreateGrantOptions{session_id:session.session.id,credential_id:cred.id,policy:serde_json::from_value(json!({"hosts":["127.0.0.1"],"methods":["GET","POST"],"paths":["/safe/**"],"approval":"auto","budget":{"unit":"requests","limit":100}})).unwrap(),..Default::default()}).unwrap();
+    let ph = vault
+        .issue_placeholder(av_store::vault::IssueOptions {
+            grant_id: grant.id.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+    let token = session.token.expose_secret().to_string();
+    let shared = Shared::new(vault);
+    let daemon = Daemon::new(
+        shared.clone(),
+        DaemonOptions {
+            port: 0,
+            socket_path: Some(dir.path().join("control.sock")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    daemon.start().await.unwrap();
+    Fixture {
+        _dir: dir,
+        shared,
+        daemon,
+        up: Arc::new(RecordingUpstream::default()),
+        token,
+        ph: ph.placeholder,
+        secret: SECRET.into(),
+        grant_id: grant.id,
+    }
+}
+
+#[tokio::test]
+async fn session_requests_presence_never_authorizes_new_hosts_denial_cannot_flip_and_flood_cannot_evict(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let (s, asked) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","methods":["GET"],"paths":["/**"]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{asked}");
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id":asked["id"],"granted":true,"overrides":{"hosts":["evil.test"]}}),
+        )
+        .await;
+        assert_eq!(s, 403, "{v}");
+        assert!(v.to_string().contains("hosts"));
+        assert!(!store_snapshot(&f).await["grants"]
+            .to_string()
+            .contains("evil.test"));
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id":asked["id"],"granted":true}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let p = control_session_policy(&f, v["session"]["grant_id"].as_str().unwrap()).await;
+        assert!(!p["hosts"].to_string().contains("evil.test"));
+        assert!(p["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h.as_str().unwrap().contains("api.example.test")));
+        credential_gate(&f, false).await;
+        let (_, asked) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","methods":["GET"],"paths":["/user"]}),
+        )
+        .await;
+        let before = store_snapshot(&f).await;
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id":asked["id"],"granted":false}),
+        )
+        .await;
+        assert_eq!(s, 200);
+        assert_eq!(v["state"], "denied");
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests/decide",
+                json!({"id":asked["id"],"granted":true})
+            )
+            .await
+            .0,
+            403
+        );
+        assert_eq!(store_snapshot(&f).await, before);
+        credential_gate(&f, false).await;
+        let (_, v) = credential_api(
+            &f,
+            "GET",
+            &format!(
+                "/v1/session-requests/collect?id={}&secret={}",
+                asked["id"].as_str().unwrap(),
+                asked["collect_secret"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await;
+        assert_eq!(v["state"], "denied");
+        assert!(v.get("token").is_none());
+        let (_, first) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","methods":["GET"],"paths":["/reading"]}),
+        )
+        .await;
+        let mut refused = 0;
+        for i in 0..90 {
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","methods":["GET"],"paths":[format!("/u/{i}")]}),
+            )
+            .await;
+            if s != 200 {
+                refused += 1;
+                assert!(v["detail"].as_str().unwrap().contains("too many"));
+            }
+        }
+        assert!(refused > 0);
+        let (_, pending) = credential_api(&f, "GET", "/v1/session-requests", json!({})).await;
+        assert!(pending.as_array().unwrap().len() <= 64);
+        assert!(pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == first["id"]));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("session request scope denial and flooding timed out");
+}
+
+#[tokio::test]
+async fn session_requests_started_locked_reacquires_audit_on_every_unlock() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let Fixture {
+            _dir,
+            shared,
+            daemon,
+            up,
+            token,
+            ph,
+            secret,
+            grant_id,
+        } = f;
+        daemon.stop().await;
+        drop(daemon);
+        drop(shared);
+        let mut vault = av_store::vault::Vault::open(_dir.path()).unwrap();
+        vault.start_in_recorded_state(None).unwrap();
+        assert!(vault.locked());
+        assert!(vault.audit().is_none());
+        let shared = Shared::new(vault);
+        let daemon = Daemon::new(
+            shared.clone(),
+            DaemonOptions {
+                port: 0,
+                socket_path: Some(_dir.path().join("control.sock")),
+                pipeline: PipelineOptions {
+                    upstream: Some(up.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        daemon.start().await.unwrap();
+        let f = Fixture {
+            _dir,
+            shared,
+            daemon,
+            up,
+            token,
+            ph,
+            secret,
+            grant_id,
+        };
+        for path in ["/user", "/repos"] {
+            assert_eq!(
+                credential_api(&f, "POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                    .await
+                    .0,
+                200
+            );
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","methods":["GET"],"paths":[path],"reason":"after an unlock"}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            assert!(audit_records(&f)
+                .await
+                .iter()
+                .any(|r| r["kind"] == "session_request.opened" && r["request_id"] == v["id"]));
+            assert_eq!(
+                credential_api(&f, "POST", "/v1/lock", json!({})).await.0,
+                200
+            );
+            f.shared
+                .run(|c| assert!(c.vault.audit().is_none()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                .await
+                .0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("session request locked start audit timed out");
 }

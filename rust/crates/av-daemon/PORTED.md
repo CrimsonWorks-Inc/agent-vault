@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 541 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **555 not yet ported**.
+Totals: 1207 JS tests: 553 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **543 not yet ported**.
 
 ## Mutation check
 
@@ -123,10 +123,10 @@ the vault on every call instead of caching an audit handle.
 | control-api-backup-audit.test.js | inspect is open, but a wrong recovery passphrase is counted, and a right one does not clear the count | `ported_gateway_core::control_backup_inspection_is_open_and_real_auth_failures_survive_success_until_backoff` |
 | control-api-backup-audit.test.js | restore needs a human, and gives back credentials but never a session | `ported_gateway_core::control_backup_restore_is_gated_renames_credentials_but_never_imports_sessions` |
 | control-api-backup-audit.test.js | audit export, checkpoint and witness check are open reads, refused while locked (F9) | `ported_gateway_core::control_audit_pages_validate_ranges_and_witnesses_are_open_but_refused_while_locked` |
-| control-api-c18.test.js | gateway POST /v1/preflight: an infinite token on a network listener is refused, a finite one works (C18) | not yet ported |
-| control-api-c18.test.js | MCP vault_describe_access: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
-| control-api-c18.test.js | MCP vault_preflight: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
-| control-api-c18.test.js | a refused peek records nothing and changes nothing | not yet ported |
+| control-api-c18.test.js | gateway POST /v1/preflight: an infinite token on a network listener is refused, a finite one works (C18) | `ported_gateway_core::control_c18_real_tls_and_direct_tools_refuse_infinite_remote_peeks_without_mutation` |
+| control-api-c18.test.js | MCP vault_describe_access: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | `ported_gateway_core::control_c18_real_tls_and_direct_tools_refuse_infinite_remote_peeks_without_mutation` |
+| control-api-c18.test.js | MCP vault_preflight: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | `ported_gateway_core::control_c18_real_tls_and_direct_tools_refuse_infinite_remote_peeks_without_mutation` |
+| control-api-c18.test.js | a refused peek records nothing and changes nothing | `ported_gateway_core::control_c18_real_tls_and_direct_tools_refuse_infinite_remote_peeks_without_mutation` |
 | control-api-containment.test.js | panic is open, revokes every session including infinite ones, and denies everything waiting (C1) | `ported_gateway_core::control_containment_panic_is_open_and_revokes_finite_infinite_and_waiting_work` |
 | control-api-containment.test.js | panic with lock locks the vault and closes the passphrase window; panicking a locked vault revokes nothing | `ported_gateway_core::control_containment_invalid_panic_changes_nothing_and_panic_lock_closes_the_window` |
 | control-api-containment.test.js | panic reads its inputs strictly | `ported_gateway_core::control_containment_invalid_panic_changes_nothing_and_panic_lock_closes_the_window` |
@@ -155,15 +155,15 @@ the vault on every call instead of caching an audit handle.
 | control-api-mcp.test.js | vault_request_session forwards routes, uses and a grant lifetime, and nothing it does not offer | `ported_gateway_core::control_mcp_session_proposal_whitelists_fields_and_invalid_dry_runs_leave_no_state_or_audit` |
 | control-api-mcp.test.js | the existing tools show lifetimes; the preview stays with the human (F13) | `ported_gateway_core::control_mcp_status_shows_lifetimes_but_only_human_pending_views_receive_scrubbed_preview` |
 | control-api-mcp.test.js | the server instructions point at the two new tools | `ported_gateway_core::control_mcp_access_description_is_read_only_and_instructions_name_both_advisory_tools` |
-| control-api-notify.test.js | the stream sends a snapshot, then each new item, without the agent's words | not yet ported |
+| control-api-notify.test.js | the stream sends a snapshot, then each new item, without the agent's words | `ported_gateway_core::control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words` |
 | control-api-notify.test.js | a ninth watcher is refused | not yet ported |
-| control-api-notify.test.js | the stream resolves no session: a token sent to it is ignored and touches nothing (C20) | not yet ported |
-| control-api-notify.test.js | setting a webhook needs the owner; only its host is ever shown or recorded | not yet ported |
-| control-api-notify.test.js | the minimal webhook is counts and ids only; one POST per interval | not yet ported |
-| control-api-notify.test.js | the headline webhook adds the gateway's summary, never the agent's words | not yet ported |
-| control-api-notify.test.js | a test notification is throttled, a failure is recorded once, and no webhook is not found | not yet ported |
-| control-api-notify.test.js | a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14) | not yet ported |
-| control-api-notify.test.js | a headline with no secret in it is sent as the summary, unchanged (F14) | not yet ported |
+| control-api-notify.test.js | the stream resolves no session: a token sent to it is ignored and touches nothing (C20) | `ported_gateway_core::control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words` |
+| control-api-notify.test.js | setting a webhook needs the owner; only its host is ever shown or recorded | `ported_gateway_core::control_notify_webhook_configuration_is_gated_encrypted_and_only_host_is_public` |
+| control-api-notify.test.js | the minimal webhook is counts and ids only; one POST per interval | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot` |
+| control-api-notify.test.js | the headline webhook adds the gateway's summary, never the agent's words | `ported_gateway_core::control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text` |
+| control-api-notify.test.js | a test notification is throttled, a failure is recorded once, and no webhook is not found | `ported_gateway_core::control_notify_test_route_throttles_and_real_http_500_failures_are_audited_once` |
+| control-api-notify.test.js | a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14) | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot` |
+| control-api-notify.test.js | a headline with no secret in it is sent as the summary, unchanged (F14) | `ported_gateway_core::control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text` |
 | control-api-overrides.test.js | parseOverrides is self-contained: built from its source in a fresh scope, it agrees on every field (C21, C23) | not yet ported |
 | control-api-overrides.test.js | routes and payload as JSON strings are parsed; a value passes through; bad JSON throws (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | a numeric narrowing is Number(v), and anything not finite throws, naming the field (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
