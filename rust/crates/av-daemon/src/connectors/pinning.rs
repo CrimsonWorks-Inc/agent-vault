@@ -196,7 +196,19 @@ fn check_chain(chain: &[Vec<u8>], name: &ServerName<'_>, anchors: &[TrustAnchor<
     let algs = provider().signature_verification_algorithms;
     let now = UnixTime::now();
     match ee.verify_for_usage(algs.all, anchors, &inter, now, webpki::KeyUsage::server_auth(), None, None) {
-        Err(e) => ChainCheck { authorized: Err(node_code(&e, chain)), verified: Vec::new() },
+        Err(e) => match anchor_leaf(leaf, anchors) {
+            // OpenSSL accepts a leaf that is itself in the trust store (a
+            // self-signed certificate trusted through NODE_EXTRA_CA_CERTS),
+            // CA flag or not; webpki will not build a path from it. Such a
+            // leaf is authorized when it is in date and names the host, and
+            // its own key is the only pin it proves.
+            Some(pin) => {
+                let named = ee.verify_is_valid_for_subject_name(name).map_err(|e| node_code(&e, chain));
+                let dated = in_date(leaf).map_err(|_| "CERT_HAS_EXPIRED".to_string());
+                ChainCheck { authorized: dated.and(named), verified: vec![pin] }
+            }
+            None => ChainCheck { authorized: Err(node_code(&e, chain)), verified: Vec::new() },
+        },
         Ok(path) => {
             let mut verified = Vec::new();
             let mut push = |p: String| {
@@ -215,6 +227,29 @@ fn check_chain(chain: &[Vec<u8>], name: &ServerName<'_>, anchors: &[TrustAnchor<
             ChainCheck { authorized: named, verified }
         }
     }
+}
+
+/// The leaf's pin when the leaf is itself a trust anchor: the same subject
+/// and the same key as one in the store, and signed by that key.
+fn anchor_leaf(leaf: &[u8], anchors: &[TrustAnchor<'_>]) -> Option<String> {
+    let (_, c) = x509_parser::parse_x509_certificate(leaf).ok()?;
+    let subject = c.tbs_certificate.subject.as_raw();
+    let spki = c.tbs_certificate.subject_pki.raw;
+    let found = anchors.iter().any(|a| wrap_sequence(a.subject.as_ref()) == subject && wrap_sequence(a.subject_public_key_info.as_ref()) == spki);
+    if !found || c.tbs_certificate.issuer.as_raw() != subject {
+        return None;
+    }
+    Some(spki_pin(spki))
+}
+
+/// Whether a certificate is inside its validity window now.
+fn in_date(der: &[u8]) -> Result<(), ()> {
+    let (_, c) = x509_parser::parse_x509_certificate(der).map_err(|_| ())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    if now < c.validity().not_before.timestamp() || now > c.validity().not_after.timestamp() {
+        return Err(());
+    }
+    Ok(())
 }
 
 /// `chainPins(socket)`: every presented certificate's pin, leaf first.
