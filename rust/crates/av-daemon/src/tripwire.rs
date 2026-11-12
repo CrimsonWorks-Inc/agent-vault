@@ -37,23 +37,48 @@ pub struct TripwireRule {
 #[allow(clippy::type_complexity)]
 pub const DEFAULT_RULES: [(&str, &[&str], Option<&str>, u32, u32, &str); 4] = [
     ("replay", &["AV_PH_REPLAY"], None, 1, 600, "revoke_session"),
-    ("bad_location", &["AV_BAD_LOCATION"], None, 3, 600, "revoke_session"),
-    ("cross_session", &["AV_PH_CROSS_SESSION", "AV_PH_WRONG_CONNECTOR"], None, 3, 600, "revoke_session"),
-    ("deny_paths", &[], Some("deny_paths:"), 5, 600, "revoke_session"),
+    (
+        "bad_location",
+        &["AV_BAD_LOCATION"],
+        None,
+        3,
+        600,
+        "revoke_session",
+    ),
+    (
+        "cross_session",
+        &["AV_PH_CROSS_SESSION", "AV_PH_WRONG_CONNECTOR"],
+        None,
+        3,
+        600,
+        "revoke_session",
+    ),
+    (
+        "deny_paths",
+        &[],
+        Some("deny_paths:"),
+        5,
+        600,
+        "revoke_session",
+    ),
 ];
 
 /// [`DEFAULT_RULES`] as rule values.
 pub fn default_rules() -> Vec<TripwireRule> {
     DEFAULT_RULES
         .iter()
-        .map(|(id, codes, prefix, threshold, window_s, action)| TripwireRule {
-            id: id.to_string(),
-            codes: prefix.is_none().then(|| codes.iter().map(|c| c.to_string()).collect()),
-            rule_prefix: prefix.map(str::to_string),
-            threshold: *threshold,
-            window_s: *window_s,
-            action: action.to_string(),
-        })
+        .map(
+            |(id, codes, prefix, threshold, window_s, action)| TripwireRule {
+                id: id.to_string(),
+                codes: prefix
+                    .is_none()
+                    .then(|| codes.iter().map(|c| c.to_string()).collect()),
+                rule_prefix: prefix.map(str::to_string),
+                threshold: *threshold,
+                window_s: *window_s,
+                action: action.to_string(),
+            },
+        )
         .collect()
 }
 
@@ -103,10 +128,17 @@ impl Core {
 
     /// `Tripwires.observe(...)`: count one denial, and fire the rule that
     /// trips. Returns the rule that fired.
-    pub fn tw_observe(&mut self, o: &Observation) -> Result<Option<Value>, av_core::errors::VaultError> {
+    pub fn tw_observe(
+        &mut self,
+        o: &Observation,
+    ) -> Result<Option<Value>, av_core::errors::VaultError> {
         let settings = self.vault.get_settings().v()?;
         let t = settings.get("tripwires").cloned().unwrap_or(Value::Null);
-        if t.get("enabled") != Some(&Value::Bool(true)) || o.session_id.is_empty() || o.preflight || self.vault.locked() {
+        if t.get("enabled") != Some(&Value::Bool(true))
+            || o.session_id.is_empty()
+            || o.preflight
+            || self.vault.locked()
+        {
             return Ok(None);
         }
         let session = self.vault.session(&o.session_id).v()?;
@@ -116,7 +148,11 @@ impl Core {
         }
         let tracked: Vec<String> = self.tw.counts.keys().cloned().collect();
         for sid in tracked {
-            let live = self.vault.session(&sid).v()?.is_some_and(|s| s.state == SessionState::Active);
+            let live = self
+                .vault
+                .session(&sid)
+                .v()?
+                .is_some_and(|s| s.state == SessionState::Active);
             if !live {
                 self.tw_reset(&sid);
             }
@@ -132,11 +168,16 @@ impl Core {
             }
             let threshold = item.get("threshold").and_then(as_integer);
             let window_s = item.get("window_s").and_then(as_integer);
-            let (Some(threshold), Some(window_s)) = (threshold, window_s) else { continue };
+            let (Some(threshold), Some(window_s)) = (threshold, window_s) else {
+                continue;
+            };
             if !(1..=1000).contains(&threshold) || !(10..=86400).contains(&window_s) {
                 continue;
             }
-            let by_code = item.get("codes").and_then(Value::as_array).is_some_and(|c| c.iter().any(|x| x.as_str() == Some(o.code.as_str())));
+            let by_code = item
+                .get("codes")
+                .and_then(Value::as_array)
+                .is_some_and(|c| c.iter().any(|x| x.as_str() == Some(o.code.as_str())));
             let by_rule = item
                 .get("rule_prefix")
                 .and_then(Value::as_str)
@@ -165,7 +206,11 @@ impl Core {
                 Some(c) => self.vault.credential(c).v()?,
                 None => None,
             };
-            let action = item.get("action").and_then(Value::as_str).unwrap_or("").to_string();
+            let action = item
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let record = json!({
                 "rule_id": item.get("id").cloned().unwrap_or(Value::Null),
                 "session_id": o.session_id,
@@ -176,16 +221,37 @@ impl Core {
             });
             match action.as_str() {
                 "revoke_session" => {
-                    self.vault.revoke_session(&o.session_id, &format!("tripwire:{id}")).v()?;
-                    self.pl_deny_approvals(&ApprovalFilter { session_id: Some(o.session_id.clone()), ..Default::default() }, "tripwire")?;
+                    self.vault
+                        .revoke_session(&o.session_id, &format!("tripwire:{id}"))
+                        .v()?;
+                    self.pl_deny_approvals(
+                        &ApprovalFilter {
+                            session_id: Some(o.session_id.clone()),
+                            ..Default::default()
+                        },
+                        "tripwire",
+                    )?;
                     self.tw_reset(&o.session_id);
                 }
                 "quarantine_credential" => {
                     let Some(cred) = cred else { continue };
                     self.vault
-                        .set_quarantine(&cred.slug, QuarantineOptions { by: QuarantineBy::Tripwire, rule_id: Some(id.clone()), reason: None })
+                        .set_quarantine(
+                            &cred.slug,
+                            QuarantineOptions {
+                                by: QuarantineBy::Tripwire,
+                                rule_id: Some(id.clone()),
+                                reason: None,
+                            },
+                        )
                         .v()?;
-                    self.pl_deny_approvals(&ApprovalFilter { credential_id: Some(cred.id.clone()), ..Default::default() }, "quarantined")?;
+                    self.pl_deny_approvals(
+                        &ApprovalFilter {
+                            credential_id: Some(cred.id.clone()),
+                            ..Default::default()
+                        },
+                        "quarantined",
+                    )?;
                 }
                 "panic" => {
                     let result = self.pl_panic(None, false)?;

@@ -42,7 +42,8 @@ pub fn parse_iso_ms(text: &str) -> Option<i64> {
     let t = text.trim();
     // Date-only: midnight UTC, as JS reads `YYYY-MM-DD`.
     if t.len() == 10 && t.as_bytes()[4] == b'-' && t.as_bytes()[7] == b'-' {
-        let d = time::Date::parse(t, time::macros::format_description!("[year]-[month]-[day]")).ok()?;
+        let d =
+            time::Date::parse(t, time::macros::format_description!("[year]-[month]-[day]")).ok()?;
         return Some(d.midnight().assume_utc().unix_timestamp() * 1000);
     }
     let parsed = time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339)
@@ -312,7 +313,11 @@ pub fn js_f64(x: f64) -> String {
         return "NaN".into();
     }
     if x.is_infinite() {
-        return if x > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if x > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     if x == 0.0 {
         return "0".into();
@@ -333,7 +338,11 @@ pub fn js_f64(x: f64) -> String {
         format!("0.{}{digits}", "0".repeat((-n) as usize))
     } else {
         let e = n - 1;
-        let es = if e >= 0 { format!("+{e}") } else { e.to_string() };
+        let es = if e >= 0 {
+            format!("+{e}")
+        } else {
+            e.to_string()
+        };
         if k == 1 {
             format!("{digits}e{es}")
         } else {
@@ -349,7 +358,9 @@ pub fn num(x: f64) -> Value {
     if x.fract() == 0.0 && x.abs() < 9.007_199_254_740_992e15 {
         Value::from(x as i64)
     } else {
-        serde_json::Number::from_f64(x).map(Value::Number).unwrap_or(Value::Null)
+        serde_json::Number::from_f64(x)
+            .map(Value::Number)
+            .unwrap_or(Value::Null)
     }
 }
 
@@ -425,7 +436,13 @@ pub fn js_string(v: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(a) => a
             .iter()
-            .map(|x| if x.is_null() { String::new() } else { js_string(x) })
+            .map(|x| {
+                if x.is_null() {
+                    String::new()
+                } else {
+                    js_string(x)
+                }
+            })
             .collect::<Vec<_>>()
             .join(","),
         Value::Object(_) => "[object Object]".into(),
@@ -449,7 +466,10 @@ pub fn encode_uri_component(s: &str) -> String {
 /// `URLSearchParams.get(name)` over a raw query string (no leading `?`):
 /// the first value, `+` read as space, percent-decoded leniently.
 pub fn search_param(query: &str, name: &str) -> Option<String> {
-    search_params(query).into_iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    search_params(query)
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
 }
 
 /// Every `(name, value)` of a raw query string, as `URLSearchParams` reads it.
@@ -462,7 +482,11 @@ pub fn search_params(query: &str) -> Vec<(String, String)> {
 
 /// `URLSearchParams.getAll(name)`.
 pub fn search_all(query: &str, name: &str) -> Vec<String> {
-    search_params(query).into_iter().filter(|(k, _)| k == name).map(|(_, v)| v).collect()
+    search_params(query)
+        .into_iter()
+        .filter(|(k, _)| k == name)
+        .map(|(_, v)| v)
+        .collect()
 }
 
 /// `URLSearchParams.toString()` for pairs.
@@ -544,14 +568,20 @@ mod tests {
         assert_eq!(js_f64(1.5e-7), "1.5e-7");
         assert_eq!(js_f64(123456.789), "123456.789");
         assert_eq!(js_f64(-0.000001), "-0.000001");
-        assert_eq!(js_pretty(&json!({"a":[1,{}],"b":[]})), "{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": []\n}");
+        assert_eq!(
+            js_pretty(&json!({"a":[1,{}],"b":[]})),
+            "{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": []\n}"
+        );
     }
 
     #[test]
     fn array_replacer_filters_every_depth() {
         let v = json!({"b":{"a":1,"z":2},"a":[{"b":1,"q":2}]});
         let keys = vec!["a".to_string(), "b".to_string()];
-        assert_eq!(js_stringify_keys(&v, &keys), r#"{"a":[{"b":1}],"b":{"a":1}}"#);
+        assert_eq!(
+            js_stringify_keys(&v, &keys),
+            r#"{"a":[{"b":1}],"b":{"a":1}}"#
+        );
     }
 
     #[test]
@@ -572,7 +602,10 @@ mod tests {
         h.append("cookie", "x=1".parse().unwrap());
         h.append("cookie", "y=2".parse().unwrap());
         let got = node_headers(&h);
-        assert_eq!(got[0], ("authorization".to_string(), "Bearer first".to_string()));
+        assert_eq!(
+            got[0],
+            ("authorization".to_string(), "Bearer first".to_string())
+        );
         assert_eq!(got[1].1, "a, b");
         assert_eq!(got[2].1, "x=1; y=2");
     }

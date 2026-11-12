@@ -63,24 +63,42 @@ pub fn run_from_env() -> Exit {
     };
     let enrolled = env("AV_ENROLLED_UID").and_then(|u| u.parse().ok());
     let group = env("AV_CLIENT_GROUP");
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("agent-vault-daemon: {e}");
             return Exit::Internal;
         }
     };
-    rt.block_on(run(PathBuf::from(vault_dir), PathBuf::from(run_dir), port, enrolled, group))
+    rt.block_on(run(
+        PathBuf::from(vault_dir),
+        PathBuf::from(run_dir),
+        port,
+        enrolled,
+        group,
+    ))
 }
 
-async fn run(vault_dir: PathBuf, run_dir: PathBuf, port: u16, enrolled: Option<u32>, group: Option<String>) -> Exit {
+async fn run(
+    vault_dir: PathBuf,
+    run_dir: PathBuf,
+    port: u16,
+    enrolled: Option<u32>,
+    group: Option<String>,
+) -> Exit {
     use av_store::vault::{CreateOptions, Vault};
     let db = vault_dir.join(av_store::vault::VAULT_DB_FILE);
     let (vault, unlocked) = if db.exists() {
         let mut v = match Vault::open(&vault_dir) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("agent-vault-daemon: cannot open the vault in {}: {e}", vault_dir.display());
+                eprintln!(
+                    "agent-vault-daemon: cannot open the vault in {}: {e}",
+                    vault_dir.display()
+                );
                 return Exit::Failure;
             }
         };
@@ -94,7 +112,10 @@ async fn run(vault_dir: PathBuf, run_dir: PathBuf, port: u16, enrolled: Option<u
         return Exit::Failure;
     } else {
         if let Err(e) = std::fs::create_dir_all(&vault_dir) {
-            eprintln!("agent-vault-daemon: cannot create {}: {e}", vault_dir.display());
+            eprintln!(
+                "agent-vault-daemon: cannot create {}: {e}",
+                vault_dir.display()
+            );
             return Exit::Failure;
         }
         {
@@ -104,7 +125,10 @@ async fn run(vault_dir: PathBuf, run_dir: PathBuf, port: u16, enrolled: Option<u
         match Vault::create(&vault_dir, CreateOptions::default()) {
             Ok(v) => (v, true),
             Err(e) => {
-                eprintln!("agent-vault-daemon: cannot create the vault in {}: {e}", vault_dir.display());
+                eprintln!(
+                    "agent-vault-daemon: cannot create the vault in {}: {e}",
+                    vault_dir.display()
+                );
                 return Exit::Failure;
             }
         }
@@ -131,9 +155,15 @@ async fn run(vault_dir: PathBuf, run_dir: PathBuf, port: u16, enrolled: Option<u
         eprintln!("agent-vault-daemon: {e}");
         return Exit::Failure;
     }
-    println!("agent-vault daemon ready as uid {}", peercred::effective_uid());
+    println!(
+        "agent-vault daemon ready as uid {}",
+        peercred::effective_uid()
+    );
     println!("  vault    {}", vault_dir.display());
-    println!("  gateway  http://127.0.0.1:{}", daemon.gateway_port().unwrap_or(port));
+    println!(
+        "  gateway  http://127.0.0.1:{}",
+        daemon.gateway_port().unwrap_or(port)
+    );
     println!("  control  {}", socket.display());
     if !unlocked {
         println!("  vault is LOCKED; run: agent-vault unlock");

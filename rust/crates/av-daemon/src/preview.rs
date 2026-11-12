@@ -54,7 +54,13 @@ pub fn preview_part(region: Region) -> &'static str {
     }
 }
 
-const PREVIEW_OMITTED: &[&str] = &["authorization", "proxy-authorization", "cookie", "x-api-key", "x-goog-api-key"];
+const PREVIEW_OMITTED: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "x-api-key",
+    "x-goog-api-key",
+];
 
 /// `text.slice(0, n)` in UTF-16 units.
 fn slice16(text: &str, n: usize) -> String {
@@ -89,11 +95,15 @@ pub fn approval_preview(
     subs: &[PreviewSub],
     scrub: &mut dyn FnMut(&str) -> String,
 ) -> Value {
-    let session_re = av_core::jsre::compile(r"avs1\.[0-9a-z]{12}\.[A-Za-z0-9_-]{20,}").expect("token pattern");
+    let session_re =
+        av_core::jsre::compile(r"avs1\.[0-9a-z]{12}\.[A-Za-z0-9_-]{20,}").expect("token pattern");
     let mut clean = |value: &str, part: &str| -> String {
         let mut text = value.to_string();
         let hits = av_core::detect::detect_all(&text);
-        let ordered = subs.iter().filter(|s| s.part == part).chain(subs.iter().filter(|s| s.part != part));
+        let ordered = subs
+            .iter()
+            .filter(|s| s.part == part)
+            .chain(subs.iter().filter(|s| s.part != part));
         for s in ordered {
             if !s.text.is_empty() {
                 text = text.replace(&s.text, &format!("«{} @ {}»", s.label, s.location));
@@ -121,7 +131,9 @@ pub fn approval_preview(
                 Err(_) => "«placeholder»".into(),
             };
         }
-        text = session_re.replace_all(&text, "«session token»").into_owned();
+        text = session_re
+            .replace_all(&text, "«session token»")
+            .into_owned();
         scrub(&text)
     };
 
@@ -133,16 +145,21 @@ pub fn approval_preview(
         .map(|(_, v)| v.clone())
         .filter(|v| !v.is_empty());
     let mut kind = if raw.is_empty() { "none" } else { "text" };
-    let mut text: Option<String> = (!raw.is_empty()).then(|| String::from_utf8_lossy(raw).into_owned());
+    let mut text: Option<String> =
+        (!raw.is_empty()).then(|| String::from_utf8_lossy(raw).into_owned());
     if let Some(t) = &text {
-        let controls = t.chars().any(|c| matches!(c as u32, 0..=8 | 0x0b | 0x0c | 0x0e..=0x1f));
+        let controls = t
+            .chars()
+            .any(|c| matches!(c as u32, 0..=8 | 0x0b | 0x0c | 0x0e..=0x1f));
         if t.as_bytes() != raw || controls {
             kind = "binary";
             text = None;
         }
     }
-    let json_re = av_core::jsre::compile(r"(?i)^application/(?:json|[^/;]+\+json)\s*(?:;|$)").expect("json type");
-    let form_re = av_core::jsre::compile(r"(?i)^application/x-www-form-urlencoded\s*(?:;|$)").expect("form type");
+    let json_re = av_core::jsre::compile(r"(?i)^application/(?:json|[^/;]+\+json)\s*(?:;|$)")
+        .expect("json type");
+    let form_re = av_core::jsre::compile(r"(?i)^application/x-www-form-urlencoded\s*(?:;|$)")
+        .expect("form type");
     let ty_s = ty.clone().unwrap_or_default();
     if text.is_some() && json_re.is_match(&ty_s) {
         kind = "json";
@@ -161,7 +178,10 @@ pub fn approval_preview(
     let mut headers: Vec<Value> = Vec::new();
     for (name, value) in req.headers {
         let lower = name.to_lowercase();
-        if PREVIEW_OMITTED.contains(&lower.as_str()) || HOP_BY_HOP.contains(&lower.as_str()) || lower.starts_with("av-") {
+        if PREVIEW_OMITTED.contains(&lower.as_str())
+            || HOP_BY_HOP.contains(&lower.as_str())
+            || lower.starts_with("av-")
+        {
             continue;
         }
         if headers.len() == 32 {
@@ -188,7 +208,12 @@ pub fn approval_preview(
     let truncated = full.is_some() && full != shown;
     let placeholders: Vec<Value> = subs
         .iter()
-        .map(|s| obj([("label", s.label.clone().into()), ("location", s.location.clone().into())]))
+        .map(|s| {
+            obj([
+                ("label", s.label.clone().into()),
+                ("location", s.location.clone().into()),
+            ])
+        })
         .collect();
 
     let mut p = Preview {
@@ -245,13 +270,19 @@ impl Preview {
             ("path", self.path.clone().into()),
             ("query", Value::Array(self.query.clone())),
             ("headers", Value::Array(self.headers.clone())),
-            ("content_type", self.content_type.clone().map_or(Value::Null, Value::from)),
+            (
+                "content_type",
+                self.content_type.clone().map_or(Value::Null, Value::from),
+            ),
             (
                 "body",
                 obj([
                     ("text", self.shown.clone().map_or(Value::Null, Value::from)),
                     ("bytes", Value::from(self.bytes as u64)),
-                    ("shown_bytes", Value::from(self.shown.as_ref().map_or(0, |s| s.len()) as u64)),
+                    (
+                        "shown_bytes",
+                        Value::from(self.shown.as_ref().map_or(0, |s| s.len()) as u64),
+                    ),
                     ("truncated", Value::Bool(self.truncated)),
                     ("kind", Value::from(self.kind)),
                 ]),

@@ -99,7 +99,9 @@ impl EventScrub {
         let mut out = Vec::new();
         loop {
             let from = self.scanned.min(self.pending.len());
-            let Some(rel) = self.pending[from..].find("\n\n") else { break };
+            let Some(rel) = self.pending[from..].find("\n\n") else {
+                break;
+            };
             let boundary = from + rel;
             let rest = self.pending.split_off(boundary + 2);
             out.push(std::mem::replace(&mut self.pending, rest));
@@ -293,7 +295,8 @@ fn tail(s: &str, keep: usize) -> String {
 
 /// `jsonValues(text)`: every JSON string literal that is not a key, joined.
 fn json_values(text: &str) -> String {
-    let re = av_core::jsre::compile(r#""((?:[^"\\]|\\[^\n\r])*)"(\s*:)?"#).expect("literal pattern");
+    let re =
+        av_core::jsre::compile(r#""((?:[^"\\]|\\[^\n\r])*)"(\s*:)?"#).expect("literal pattern");
     let mut out = String::new();
     for caps in re.captures_iter(text) {
         if caps.get(2).is_some() {
@@ -354,7 +357,11 @@ fn parse_event_json(payload: &str) -> Parsed {
             i += 1;
             continue;
         }
-        let end = if i > 0 && chars[i - 1] == '-' { i - 1 } else { i };
+        let end = if i > 0 && chars[i - 1] == '-' {
+            i - 1
+        } else {
+            i
+        };
         swapped.extend(&chars[from..end.max(from)]);
         swapped.push_str("null");
         i += word;
@@ -396,7 +403,7 @@ fn fix_surrogates(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let mut last = 0;
-    while i + 5 < b.len() + 0 && i + 6 <= b.len() {
+    while i + 5 < b.len() && i + 6 <= b.len() {
         if b[i] == b'\\' {
             if b[i + 1] == b'u' {
                 let hex = &text[i + 2..i + 6];
@@ -461,7 +468,12 @@ pub fn js_key_order(m: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)
 }
 
 /// `jsonStringsByPath(value)`.
-fn strings_by_path(value: &Value, path: &mut Vec<Seg>, indexes: &[Slot], out: &mut Vec<(Vec<Seg>, Vec<Slot>, String)>) {
+fn strings_by_path(
+    value: &Value,
+    path: &mut Vec<Seg>,
+    indexes: &[Slot],
+    out: &mut Vec<(Vec<Seg>, Vec<Slot>, String)>,
+) {
     match value {
         Value::String(s) => out.push((path.clone(), indexes.to_vec(), s.clone())),
         Value::Array(a) => {
@@ -513,21 +525,92 @@ enum P {
 
 /// `CONTINUES`.
 const CONTINUES: &[(&str, &[P], &str)] = &[
-    ("content_block_start", &[P::K("content_block"), P::K("text")], "text"),
-    ("content_block_start", &[P::K("content_block"), P::K("thinking")], "thinking"),
-    ("content_block_delta", &[P::K("delta"), P::K("text")], "text"),
-    ("content_block_delta", &[P::K("delta"), P::K("thinking")], "thinking"),
-    ("response.output_item.added", &[P::K("item"), P::K("content"), P::At("content_index"), P::K("text")], "output_text"),
-    ("response.content_part.added", &[P::K("part"), P::K("text")], "output_text"),
-    ("response.output_text.delta", &[P::K("delta")], "output_text"),
-    ("response.output_item.added", &[P::K("item"), P::K("content"), P::At("content_index"), P::K("refusal")], "refusal"),
-    ("response.content_part.added", &[P::K("part"), P::K("refusal")], "refusal"),
+    (
+        "content_block_start",
+        &[P::K("content_block"), P::K("text")],
+        "text",
+    ),
+    (
+        "content_block_start",
+        &[P::K("content_block"), P::K("thinking")],
+        "thinking",
+    ),
+    (
+        "content_block_delta",
+        &[P::K("delta"), P::K("text")],
+        "text",
+    ),
+    (
+        "content_block_delta",
+        &[P::K("delta"), P::K("thinking")],
+        "thinking",
+    ),
+    (
+        "response.output_item.added",
+        &[
+            P::K("item"),
+            P::K("content"),
+            P::At("content_index"),
+            P::K("text"),
+        ],
+        "output_text",
+    ),
+    (
+        "response.content_part.added",
+        &[P::K("part"), P::K("text")],
+        "output_text",
+    ),
+    (
+        "response.output_text.delta",
+        &[P::K("delta")],
+        "output_text",
+    ),
+    (
+        "response.output_item.added",
+        &[
+            P::K("item"),
+            P::K("content"),
+            P::At("content_index"),
+            P::K("refusal"),
+        ],
+        "refusal",
+    ),
+    (
+        "response.content_part.added",
+        &[P::K("part"), P::K("refusal")],
+        "refusal",
+    ),
     ("response.refusal.delta", &[P::K("delta")], "refusal"),
-    ("response.output_item.added", &[P::K("item"), P::K("arguments")], "arguments"),
-    ("response.function_call_arguments.delta", &[P::K("delta")], "arguments"),
-    ("response.output_item.added", &[P::K("item"), P::K("summary"), P::At("summary_index"), P::K("text")], "summary"),
-    ("response.reasoning_summary_part.added", &[P::K("part"), P::K("text")], "summary"),
-    ("response.reasoning_summary_text.delta", &[P::K("delta")], "summary"),
+    (
+        "response.output_item.added",
+        &[P::K("item"), P::K("arguments")],
+        "arguments",
+    ),
+    (
+        "response.function_call_arguments.delta",
+        &[P::K("delta")],
+        "arguments",
+    ),
+    (
+        "response.output_item.added",
+        &[
+            P::K("item"),
+            P::K("summary"),
+            P::At("summary_index"),
+            P::K("text"),
+        ],
+        "summary",
+    ),
+    (
+        "response.reasoning_summary_part.added",
+        &[P::K("part"), P::K("text")],
+        "summary",
+    ),
+    (
+        "response.reasoning_summary_text.delta",
+        &[P::K("delta")],
+        "summary",
+    ),
 ];
 
 struct Way {
@@ -652,7 +735,13 @@ impl Runs {
             Value::Array(
                 chosen
                     .iter()
-                    .map(|(d, k, v)| Value::Array(vec![Value::from(*d as u64), Value::from(k.clone()), v.clone()]))
+                    .map(|(d, k, v)| {
+                        Value::Array(vec![
+                            Value::from(*d as u64),
+                            Value::from(k.clone()),
+                            v.clone(),
+                        ])
+                    })
                     .collect(),
             ),
         ]);
@@ -677,7 +766,10 @@ impl Runs {
         if way.appended {
             self.seen.entry(way.gathering.clone()).or_default();
             for (depth, key, _) in &way.indexes {
-                let id = js_stringify(&Value::Array(vec![Value::from(*depth as u64), Value::from(key.clone())]));
+                let id = js_stringify(&Value::Array(vec![
+                    Value::from(*depth as u64),
+                    Value::from(key.clone()),
+                ]));
                 let here = self.seen.get(&way.gathering).expect("seen");
                 if here.fields.iter().any(|(i, _)| *i == id) {
                     continue;
@@ -761,7 +853,10 @@ impl Runs {
     }
 
     fn add(&mut self, payload: &Value, scrubber: &mut Scrubber) -> Option<&'static str> {
-        let ty = payload.get("type").and_then(Value::as_str).map(str::to_string);
+        let ty = payload
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let mut strings = Vec::new();
         strings_by_path(payload, &mut Vec::new(), &[], &mut strings);
         for (path, indexes, value) in strings {
@@ -793,29 +888,50 @@ mod tests {
 
     fn scrubber() -> Scrubber {
         Scrubber::new(
-            &[ScrubEntry { secret: av_core::secret::SecretString::from(SECRET.to_string()), label: "demo".into(), replacement: None, always: true }],
+            &[ScrubEntry {
+                secret: av_core::secret::SecretString::from(SECRET.to_string()),
+                label: "demo".into(),
+                replacement: None,
+                always: true,
+            }],
             &ScrubberOptions::default(),
         )
         .unwrap()
     }
 
     fn drive(chunks: &[&str]) -> (String, Vec<String>, bool) {
-        let mut input: Vec<Input> = chunks.iter().map(|c| Input::Chunk(c.as_bytes().to_vec())).collect();
+        let mut input: Vec<Input> = chunks
+            .iter()
+            .map(|c| Input::Chunk(c.as_bytes().to_vec()))
+            .collect();
         input.push(Input::End);
         let mut it = input.into_iter();
         let mut out = Vec::new();
         let mut cuts = Vec::new();
-        let complete = run(scrubber(), scrubber(), usize::MAX, || it.next().unwrap_or(Input::End), |f| {
-            out.extend(f);
-            true
-        }, |r| cuts.push(r.to_string()));
+        let complete = run(
+            scrubber(),
+            scrubber(),
+            usize::MAX,
+            || it.next().unwrap_or(Input::End),
+            |f| {
+                out.extend(f);
+                true
+            },
+            |r| cuts.push(r.to_string()),
+        );
         (String::from_utf8_lossy(&out).into_owned(), cuts, complete)
     }
 
     #[test]
     fn hardening_a_secret_split_across_events_cuts_the_stream_and_ordinary_events_survive() {
         let (a, b) = SECRET.split_at(16);
-        let (text, cuts, complete) = drive(&["data: ordinary-traffic-control\n\n", "data: lookalike\n\n", &format!("data: {a}\n\n"), &format!("data: {b}\n\n"), "data: after-cut-marker\n\n"]);
+        let (text, cuts, complete) = drive(&[
+            "data: ordinary-traffic-control\n\n",
+            "data: lookalike\n\n",
+            &format!("data: {a}\n\n"),
+            &format!("data: {b}\n\n"),
+            "data: after-cut-marker\n\n",
+        ]);
         assert!(text.contains("ordinary-traffic-control"), "{text}");
         assert!(text.contains("lookalike"), "{text}");
         assert!(!text.contains("after-cut-marker"), "{text}");

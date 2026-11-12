@@ -59,8 +59,12 @@ pub fn clean_headline(text: &str) -> String {
 }
 
 fn is_item(e: &Value) -> bool {
-    e.get("kind").and_then(Value::as_str).is_some_and(|k| KINDS.contains(&k))
-        && e.get("id").and_then(Value::as_str).is_some_and(|i| !i.is_empty())
+    e.get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| KINDS.contains(&k))
+        && e.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|i| !i.is_empty())
 }
 
 fn cut16(s: &str, n: usize) -> String {
@@ -74,7 +78,10 @@ fn item_of(e: &Value, secrets: Option<&[av_core::scrub::StoredSecret]>) -> Optio
         return None;
     }
     let headline = match secrets {
-        Some(s) => clean_headline(&av_core::scrub::redact_stored(e.get("headline").and_then(Value::as_str).unwrap_or(""), s)),
+        Some(s) => clean_headline(&av_core::scrub::redact_stored(
+            e.get("headline").and_then(Value::as_str).unwrap_or(""),
+            s,
+        )),
         None => String::new(),
     };
     Some(json!({
@@ -100,8 +107,12 @@ pub fn webhook_payload(items: &[Value], detail: &str, event: &str) -> String {
     });
     newest.truncate(MAX_IDS);
     let mut ids: Vec<Value> = newest.iter().map(|i| i["id"].clone()).collect();
-    let mut its: Option<Vec<Value>> = (detail == "headline")
-        .then(|| newest.iter().map(|i| json!({"kind": i["kind"], "id": i["id"], "headline": i["headline"]})).collect());
+    let mut its: Option<Vec<Value>> = (detail == "headline").then(|| {
+        newest
+            .iter()
+            .map(|i| json!({"kind": i["kind"], "id": i["id"], "headline": i["headline"]}))
+            .collect()
+    });
     let body = |ids: &[Value], its: &Option<Vec<Value>>| {
         let mut b = json!({
             "source": "agent-vault", "event": event, "waiting": items.len(), "kinds": kinds,
@@ -113,7 +124,9 @@ pub fn webhook_payload(items: &[Value], detail: &str, event: &str) -> String {
         js_stringify(&b)
     };
     let mut text = body(&ids, &its);
-    while text.len() > MAX_PAYLOAD_BYTES && (its.as_ref().is_some_and(|x| !x.is_empty()) || !ids.is_empty()) {
+    while text.len() > MAX_PAYLOAD_BYTES
+        && (its.as_ref().is_some_and(|x| !x.is_empty()) || !ids.is_empty())
+    {
         if let Some(x) = its.as_mut().filter(|x| !x.is_empty()) {
             x.pop();
         } else {
@@ -126,7 +139,8 @@ pub fn webhook_payload(items: &[Value], detail: &str, event: &str) -> String {
 
 /// The webhook sender: `(url, body) → status`, or an error code. Ports
 /// `defaultSend` / the `fetchImpl` option.
-pub type Sender = Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<u16, String>> + Send + Sync>;
+pub type Sender =
+    Arc<dyn Fn(String, String) -> BoxFuture<'static, Result<u16, String>> + Send + Sync>;
 
 /// Options for [`Notifier::new`]. Ports `{ fetchImpl }`.
 #[derive(Default, Clone)]
@@ -153,10 +167,14 @@ pub struct Notifier {
 }
 
 fn secrets_of(core: &Core) -> Option<Vec<av_core::scrub::StoredSecret>> {
-    core.vault
-        .all_secrets()
-        .ok()
-        .map(|v| v.into_iter().map(|s| av_core::scrub::StoredSecret { secret: s.secret, label: s.label }).collect())
+    core.vault.all_secrets().ok().map(|v| {
+        v.into_iter()
+            .map(|s| av_core::scrub::StoredSecret {
+                secret: s.secret,
+                label: s.label,
+            })
+            .collect()
+    })
 }
 
 impl Notifier {
@@ -181,8 +199,14 @@ impl Notifier {
     /// `#waiting()`: what is waiting now, cleaned.
     pub fn waiting(core: &mut Core) -> Vec<Value> {
         let rows = core.dm_waiting_items();
-        let secrets = if rows.is_empty() { None } else { secrets_of(core) };
-        rows.iter().filter_map(|r| item_of(r, secrets.as_deref())).collect()
+        let secrets = if rows.is_empty() {
+            None
+        } else {
+            secrets_of(core)
+        };
+        rows.iter()
+            .filter_map(|r| item_of(r, secrets.as_deref()))
+            .collect()
     }
 
     /// `Notifier.pending(event)`: tell every subscriber, schedule the
@@ -194,8 +218,13 @@ impl Notifier {
         let has_subs = !self.inner().subscribers.is_empty();
         if has_subs {
             let secrets = secrets_of(core);
-            let frame = format!("event: pending\ndata: {}\n\n", js_stringify(&item_of(event, secrets.as_deref()).unwrap_or(Value::Null)));
-            self.inner().subscribers.retain(|s| s.send(frame.clone()).is_ok());
+            let frame = format!(
+                "event: pending\ndata: {}\n\n",
+                js_stringify(&item_of(event, secrets.as_deref()).unwrap_or(Value::Null))
+            );
+            self.inner()
+                .subscribers
+                .retain(|s| s.send(frame.clone()).is_ok());
         }
         let configured = core.vault.notify_config().ok().flatten().is_some();
         self.schedule(configured);
@@ -214,7 +243,9 @@ impl Notifier {
             wait
         };
         let me = Arc::clone(self);
-        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
         rt.spawn(async move {
             if wait > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
@@ -225,7 +256,14 @@ impl Notifier {
     }
 
     async fn send_webhook(self: &Arc<Self>) {
-        let Some(shared) = self.shared.lock().unwrap_or_else(|p| p.into_inner()).upgrade() else { return };
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
         let got = shared
             .run(|core| {
                 let hook = webhook_of(core)?;
@@ -235,7 +273,9 @@ impl Notifier {
             .await
             .ok()
             .flatten();
-        let Some(((url, host, detail), items)) = got else { return };
+        let Some(((url, host, detail), items)) = got else {
+            return;
+        };
         if self.inner().closed || items.is_empty() {
             return;
         }
@@ -244,12 +284,23 @@ impl Notifier {
         let _ = self.post(&shared, url, host, body, items.len()).await;
     }
 
-    async fn post(self: &Arc<Self>, shared: &Arc<Shared>, url: String, host: String, body: String, count: usize) -> Value {
+    async fn post(
+        self: &Arc<Self>,
+        shared: &Arc<Shared>,
+        url: String,
+        host: String,
+        body: String,
+        count: usize,
+    ) -> Value {
         let res = (self.send)(url, body).await;
         match res {
             Ok(status) if (200..300).contains(&status) => {
                 let h = host.clone();
-                let _ = shared.run(move |core| record(core, "notify.sent", json!({"host": h, "items": count}))).await;
+                let _ = shared
+                    .run(move |core| {
+                        record(core, "notify.sent", json!({"host": h, "items": count}))
+                    })
+                    .await;
                 json!({"sent": true, "status": status})
             }
             Ok(status) => {
@@ -257,7 +308,12 @@ impl Notifier {
                 json!({"sent": false, "status": status})
             }
             Err(code) => {
-                let ok = code.starts_with('E') && code.len() <= 40 && code.len() >= 2 && code[1..].bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+                let ok = code.starts_with('E')
+                    && code.len() <= 40
+                    && code.len() >= 2
+                    && code[1..]
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
                 let reason = if ok { code } else { "error".into() };
                 self.failed(shared, host, reason.clone()).await;
                 json!({"sent": false, "error": reason})
@@ -274,22 +330,41 @@ impl Notifier {
             }
             i.last_failure_recorded = now;
         }
-        let _ = shared.run(move |core| record(core, "notify.failed", json!({"host": host, "reason": reason}))).await;
+        let _ = shared
+            .run(move |core| {
+                record(
+                    core,
+                    "notify.failed",
+                    json!({"host": host, "reason": reason}),
+                )
+            })
+            .await;
     }
 
     /// `Notifier.subscribe(res)`: the receiver yields SSE frames, snapshot
     /// first, with a keep-alive comment every [`KEEPALIVE_MS`].
-    pub fn subscribe(&self, snapshot: Vec<Value>) -> Result<mpsc::UnboundedReceiver<String>, VaultError> {
+    pub fn subscribe(
+        &self,
+        snapshot: Vec<Value>,
+    ) -> Result<mpsc::UnboundedReceiver<String>, VaultError> {
         let mut i = self.inner();
         if i.closed {
             return Err(d(C::NotFound, "the daemon is stopping"));
         }
         i.subscribers.retain(|s| !s.is_closed());
         if i.subscribers.len() >= MAX_SUBSCRIBERS {
-            return Err(dr(C::QuotaExceeded, format!("at most {MAX_SUBSCRIBERS} watchers at once"), "stream_limit").retry(30));
+            return Err(dr(
+                C::QuotaExceeded,
+                format!("at most {MAX_SUBSCRIBERS} watchers at once"),
+                "stream_limit",
+            )
+            .retry(30));
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(format!("event: snapshot\ndata: {}\n\n", js_stringify(&json!({"items": snapshot}))));
+        let _ = tx.send(format!(
+            "event: snapshot\ndata: {}\n\n",
+            js_stringify(&json!({"items": snapshot}))
+        ));
         i.subscribers.push(tx.clone());
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             rt.spawn(async move {
@@ -306,7 +381,12 @@ impl Notifier {
 
     /// `Notifier.test()`.
     pub async fn test(self: &Arc<Self>) -> Result<Value, VaultError> {
-        let Some(shared) = self.shared.lock().unwrap_or_else(|p| p.into_inner()).upgrade() else {
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
             return Err(d(C::NotFound, "no webhook is configured"));
         };
         let (hook, items) = shared
@@ -314,7 +394,8 @@ impl Notifier {
                 if core.vault.locked() {
                     return Err(d(C::Locked, "unlock the vault to use the webhook"));
                 }
-                let hook = webhook_of(core).ok_or_else(|| d(C::NotFound, "no webhook is configured"))?;
+                let hook =
+                    webhook_of(core).ok_or_else(|| d(C::NotFound, "no webhook is configured"))?;
                 Ok((hook, Notifier::waiting(core)))
             })
             .await??;
@@ -322,8 +403,14 @@ impl Notifier {
             let mut i = self.inner();
             let now = now_ms();
             if now - i.last_test < TEST_INTERVAL_MS as i64 {
-                let wait = ((i.last_test + TEST_INTERVAL_MS as i64 - now) as f64 / 1000.0).ceil().max(1.0) as u64;
-                return Err(d(C::QuotaExceeded, "a test notification was sent less than 30 seconds ago").retry(wait));
+                let wait = ((i.last_test + TEST_INTERVAL_MS as i64 - now) as f64 / 1000.0)
+                    .ceil()
+                    .max(1.0) as u64;
+                return Err(d(
+                    C::QuotaExceeded,
+                    "a test notification was sent less than 30 seconds ago",
+                )
+                .retry(wait));
             }
             i.last_test = now;
         }
@@ -353,7 +440,10 @@ fn webhook_of(core: &Core) -> Option<(String, String, String)> {
         return None;
     }
     let hook = core.vault.get_notify_webhook().ok().flatten()?;
-    let detail = serde_json::to_value(hook.detail).ok().and_then(|d| d.as_str().map(str::to_string)).unwrap_or_else(|| "minimal".into());
+    let detail = serde_json::to_value(hook.detail)
+        .ok()
+        .and_then(|d| d.as_str().map(str::to_string))
+        .unwrap_or_else(|| "minimal".into());
     let url = hook_url(&hook)?;
     Some((url, hook.host.clone(), detail))
 }
@@ -369,7 +459,7 @@ pub fn default_sender() -> Sender {
     Arc::new(|url: String, body: String| {
         Box::pin(async move {
             use crate::upstream::{Pins, Upstream, UpstreamRequest};
-            let up = crate::connectors::pinning::PinnedUpstream::default();
+            let up = crate::connectors::pinning::PinnedUpstream;
             let req = UpstreamRequest {
                 url,
                 method: "POST".into(),
@@ -382,14 +472,24 @@ pub fn default_sender() -> Sender {
                 pins: Pins::None,
             };
             let fut = up.send(req);
-            match tokio::time::timeout(std::time::Duration::from_millis(WEBHOOK_TIMEOUT_MS), fut).await {
+            match tokio::time::timeout(std::time::Duration::from_millis(WEBHOOK_TIMEOUT_MS), fut)
+                .await
+            {
                 Err(_) => Err("timeout".into()),
-                Ok(Err(e)) => Err(if e.code.is_empty() { "error".into() } else { e.code }),
+                Ok(Err(e)) => Err(if e.code.is_empty() {
+                    "error".into()
+                } else {
+                    e.code
+                }),
                 Ok(Ok(res)) => {
                     let status = res.status;
                     if let crate::upstream::Body::Stream(mut rx) = res.body {
                         let drain = async { while rx.recv().await.is_some() {} };
-                        let _ = tokio::time::timeout(std::time::Duration::from_millis(WEBHOOK_TIMEOUT_MS), drain).await;
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(WEBHOOK_TIMEOUT_MS),
+                            drain,
+                        )
+                        .await;
                     }
                     Ok(status)
                 }

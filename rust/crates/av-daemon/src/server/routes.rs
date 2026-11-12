@@ -4,9 +4,12 @@
 use std::sync::Arc;
 
 use av_core::policy::{self, Checked};
-use av_core::secret::{ExposeSecret, SecretString};
+use av_core::secret::SecretString;
 use av_store::model::{QuarantineBy, SessionState};
-use av_store::vault::{IssueOptions, NewCredential, NewListener, QuarantineOptions, RotateMode, RotateOptions, UnlockMaterial};
+use av_store::vault::{
+    IssueOptions, NewCredential, NewListener, QuarantineOptions, RotateMode, RotateOptions,
+    UnlockMaterial,
+};
 use serde_json::{json, Map, Value};
 
 use super::*;
@@ -32,34 +35,57 @@ fn report_since(raw: Option<String>) -> R<String> {
     let text = raw.unwrap_or_else(|| "7d".into());
     if let Some(unit) = text.chars().last().filter(|c| *c == 'd' || *c == 'h') {
         let n = &text[..text.len() - 1];
-        if !n.is_empty() && n.len() <= 5 && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit()) {
+        if !n.is_empty()
+            && n.len() <= 5
+            && !n.starts_with('0')
+            && n.bytes().all(|b| b.is_ascii_digit())
+        {
             let n: i64 = n.parse().unwrap_or(0);
             let ms = n * if unit == 'd' { 86_400_000 } else { 3_600_000 };
             return Ok(iso_of_ms(now_ms() - ms));
         }
     }
     let b = text.as_bytes();
-    let dated = b.len() >= 10 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-' && b[5..7].iter().all(u8::is_ascii_digit) && b[7] == b'-' && b[8..10].iter().all(u8::is_ascii_digit);
+    let dated = b.len() >= 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit);
     if dated {
         if let Some(ms) = crate::util::parse_iso_ms(&text) {
             return Ok(iso_of_ms(ms));
         }
     }
-    Err(dr(C::PolicyDenied, "since is an ISO date, or a span like 7d or 24h", "report_since"))
+    Err(dr(
+        C::PolicyDenied,
+        "since is an ISO date, or a span like 7d or 24h",
+        "report_since",
+    ))
 }
 
 /// `wholeParam(raw, fallback, name)`.
 fn whole_param(raw: Option<String>, fallback: u64, name: &str) -> R<u64> {
     let Some(raw) = raw else { return Ok(fallback) };
-    let ok = raw == "0" || (!raw.is_empty() && raw.len() <= 16 && !raw.starts_with('0') && raw.bytes().all(|b| b.is_ascii_digit()));
+    let ok = raw == "0"
+        || (!raw.is_empty()
+            && raw.len() <= 16
+            && !raw.starts_with('0')
+            && raw.bytes().all(|b| b.is_ascii_digit()));
     if !ok {
-        return Err(dr(C::PolicyDenied, format!("{name} must be a whole number"), "audit_range"));
+        return Err(dr(
+            C::PolicyDenied,
+            format!("{name} must be a whole number"),
+            "audit_range",
+        ));
     }
     Ok(raw.parse().unwrap_or(0))
 }
 
 fn audit_kind_ok(k: &str) -> bool {
-    !k.is_empty() && k.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    !k.is_empty()
+        && k.split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
 }
 
 /// `auditRows(audit, params)`.
@@ -67,38 +93,79 @@ fn audit_rows(core: &mut Core, query: &str) -> R<Value> {
     let p = |k: &str| search_param(query, k);
     let kind = p("kind");
     if kind.as_deref().is_some_and(|k| !audit_kind_ok(k)) {
-        return Err(dr(C::PolicyDenied, "kind is a record kind, like tripwire.fired", "audit_range"));
+        return Err(dr(
+            C::PolicyDenied,
+            "kind is a record kind, like tripwire.fired",
+            "audit_range",
+        ));
     }
     let (before, after) = (p("before"), p("after"));
-    let log = core.vault.audit().ok_or_else(|| d(C::Locked, "the audit log is encrypted; unlock the vault to read it"))?;
+    let log = core.vault.audit().ok_or_else(|| {
+        d(
+            C::Locked,
+            "the audit log is encrypted; unlock the vault to read it",
+        )
+    })?;
     let read = |limit: usize| -> R<Vec<Value>> {
-        let rows = log.read(&av_store::audit::ReadFilter { limit, ..Default::default() }).v()?;
-        Ok(rows.into_iter().map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect())
+        let rows = log
+            .read(&av_store::audit::ReadFilter {
+                limit,
+                ..Default::default()
+            })
+            .v()?;
+        Ok(rows
+            .into_iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+            .collect())
     };
     let of_kind = |rows: Vec<Value>| -> Vec<Value> {
         match &kind {
             None => rows,
             Some(k) => rows
                 .into_iter()
-                .filter(|r| r["kind"].as_str().is_some_and(|rk| rk == k || rk.starts_with(&format!("{k}."))))
+                .filter(|r| {
+                    r["kind"]
+                        .as_str()
+                        .is_some_and(|rk| rk == k || rk.starts_with(&format!("{k}.")))
+                })
                 .collect(),
         }
     };
     if before.is_none() && after.is_none() && kind.is_none() {
         // The old lenient reading: Number(limit || 30).
-        let raw = p("limit").filter(|s| !s.is_empty()).unwrap_or_else(|| "30".into());
+        let raw = p("limit")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "30".into());
         let n = raw.trim().parse::<f64>().unwrap_or(f64::NAN);
-        let limit = if n.is_nan() { 0 } else if n.is_infinite() { usize::MAX } else { n.max(0.0) as usize };
+        let limit = if n.is_nan() {
+            0
+        } else if n.is_infinite() {
+            usize::MAX
+        } else {
+            n.max(0.0) as usize
+        };
         return Ok(Value::Array(read(limit)?));
     }
     if before.is_some() && after.is_some() {
-        return Err(dr(C::PolicyDenied, "give before or after, not both", "audit_range"));
+        return Err(dr(
+            C::PolicyDenied,
+            "give before or after, not both",
+            "audit_range",
+        ));
     }
     let limit_raw = p("limit");
     if let Some(l) = &limit_raw {
-        let ok = !l.is_empty() && l.len() <= 3 && !l.starts_with('0') && l.bytes().all(|b| b.is_ascii_digit()) && l.parse::<usize>().is_ok_and(|n| n <= AUDIT_PAGE_MAX);
+        let ok = !l.is_empty()
+            && l.len() <= 3
+            && !l.starts_with('0')
+            && l.bytes().all(|b| b.is_ascii_digit())
+            && l.parse::<usize>().is_ok_and(|n| n <= AUDIT_PAGE_MAX);
         if !ok {
-            return Err(dr(C::PolicyDenied, format!("limit must be a whole number from 1 to {AUDIT_PAGE_MAX}"), "audit_range"));
+            return Err(dr(
+                C::PolicyDenied,
+                format!("limit must be a whole number from 1 to {AUDIT_PAGE_MAX}"),
+                "audit_range",
+            ));
         }
     }
     let all = of_kind(read(usize::MAX)?);
@@ -107,16 +174,29 @@ fn audit_rows(core: &mut Core, query: &str) -> R<Value> {
         let start = all.len().saturating_sub(n);
         return Ok(Value::Array(all[start..].to_vec()));
     }
-    let limit = limit_raw.as_deref().map_or(100, |l| l.parse().unwrap_or(100));
+    let limit = limit_raw
+        .as_deref()
+        .map_or(100, |l| l.parse().unwrap_or(100));
     let name = if before.is_some() { "before" } else { "after" };
     let at = whole_param(before.clone().or(after.clone()), 0, name)?;
-    let rows: Vec<Value> = all.into_iter().filter(|r| r["seq"].as_u64().is_some()).collect();
+    let rows: Vec<Value> = all
+        .into_iter()
+        .filter(|r| r["seq"].as_u64().is_some())
+        .collect();
     if before.is_some() {
-        let older: Vec<Value> = rows.into_iter().filter(|r| r["seq"].as_u64().unwrap_or(0) < at).collect();
+        let older: Vec<Value> = rows
+            .into_iter()
+            .filter(|r| r["seq"].as_u64().unwrap_or(0) < at)
+            .collect();
         let start = older.len().saturating_sub(limit);
         Ok(Value::Array(older[start..].to_vec()))
     } else {
-        Ok(Value::Array(rows.into_iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > at).take(limit).collect()))
+        Ok(Value::Array(
+            rows.into_iter()
+                .filter(|r| r["seq"].as_u64().unwrap_or(0) > at)
+                .take(limit)
+                .collect(),
+        ))
     }
 }
 
@@ -126,7 +206,12 @@ fn whole_session_fields(s: &av_store::model::SessionRecord) -> Value {
 
 impl Daemon {
     /// One control route.
-    pub(crate) async fn control_route(self: &Arc<Self>, route: &str, query: &str, input: Value) -> R<(u16, Value)> {
+    pub(crate) async fn control_route(
+        self: &Arc<Self>,
+        route: &str,
+        query: &str,
+        input: Value,
+    ) -> R<(u16, Value)> {
         let q = |k: &str| search_param(query, k);
         let presence = input.get("presence").cloned();
         let op = Daemon::widening_operation(route, query, &input);
@@ -951,7 +1036,7 @@ impl Daemon {
                         let log = core.vault.audit_mut().ok_or_else(|| d(C::Locked, "the audit log is encrypted; unlock the vault to read it"))?;
                         let since = whole_param(s, 0, "since_seq")?;
                         let limit = whole_param(l, 5000, "limit")?;
-                        Ok(json!(log.export(av_store::audit::ExportOptions { since_seq: since, limit: limit as usize, ..Default::default() }).v()?))
+                        Ok(json!(log.export(av_store::audit::ExportOptions { since_seq: since, limit: limit as usize }).v()?))
                     })
                     .await??;
                 Ok((200, v))
@@ -1014,7 +1099,9 @@ impl Daemon {
     /// `POST /v1/unlock`.
     async fn unlock(&self, input: Value) -> R<(u16, Value)> {
         let _gate = self.passphrase_gate.lock().await;
-        let pass = field(&input, "passphrase")?.filter(|p| !p.is_null()).map(js_string);
+        let pass = field(&input, "passphrase")?
+            .filter(|p| !p.is_null())
+            .map(js_string);
         let prf = truthy_str(input.get("prf_secret"));
         let guessing = pass.is_some();
         let state = self.shared.run(move |core| -> R<bool> {
@@ -1032,9 +1119,15 @@ impl Daemon {
         // An Argon2 check off the lock first: a wrong guess never holds it.
         let pre_ok = match &pass {
             Some(p) if prf.is_none() => {
-                let ok = self.shared.verify_passphrase(SecretString::from(p.clone())).await;
+                let ok = self
+                    .shared
+                    .verify_passphrase(SecretString::from(p.clone()))
+                    .await;
                 if !ok {
-                    let has = self.shared.run(|core| core.vault.has_passphrase().unwrap_or(false)).await?;
+                    let has = self
+                        .shared
+                        .run(|core| core.vault.has_passphrase().unwrap_or(false))
+                        .await?;
                     if has {
                         // Fall through to the real unlock, which refuses with the
                         // store's own error and records the attempt.
@@ -1075,7 +1168,10 @@ impl Daemon {
     /// `POST /v1/presence/window`.
     async fn presence_window(&self, input: Value) -> R<(u16, Value)> {
         let _gate = self.passphrase_gate.lock().await;
-        let pass = field(&input, "passphrase")?.filter(|p| crate::util::truthy(p)).map(js_string).unwrap_or_default();
+        let pass = field(&input, "passphrase")?
+            .filter(|p| crate::util::truthy(p))
+            .map(js_string)
+            .unwrap_or_default();
         let pre = self
             .shared
             .run(|core| -> R<Option<Value>> {
@@ -1103,7 +1199,10 @@ impl Daemon {
         if let Some(v) = pre {
             return Ok((200, v));
         }
-        let ok = self.shared.verify_passphrase(SecretString::from(pass)).await;
+        let ok = self
+            .shared
+            .verify_passphrase(SecretString::from(pass))
+            .await;
         let v = self
             .shared
             .run(move |core| -> R<Value> {
@@ -1122,13 +1221,29 @@ impl Daemon {
 
     /// `POST /v1/passphrase`.
     async fn passphrase(&self, input: Value) -> R<(u16, Value)> {
-        let (locked, has) = self.shared.run(|core| (core.vault.locked(), core.vault.has_passphrase().unwrap_or(false))).await?;
+        let (locked, has) = self
+            .shared
+            .run(|core| {
+                (
+                    core.vault.locked(),
+                    core.vault.has_passphrase().unwrap_or(false),
+                )
+            })
+            .await?;
         if locked {
-            return Err(d(C::Locked, "unlock the vault before changing its passphrase"));
+            return Err(d(
+                C::Locked,
+                "unlock the vault before changing its passphrase",
+            ));
         }
         let presence = field(&input, "presence")?.cloned();
         if !has {
-            self.require_human("first passphrase", Some(json!({"op": "passphrase.first"})), presence).await?;
+            self.require_human(
+                "first passphrase",
+                Some(json!({"op": "passphrase.first"})),
+                presence,
+            )
+            .await?;
         }
         let _gate = self.passphrase_gate.lock().await;
         if has {
@@ -1142,11 +1257,17 @@ impl Daemon {
             .run(move |core| -> R<Value> {
                 let attempt = if remove {
                     let cur = SecretString::from(current.clone().unwrap_or_default());
-                    core.vault.remove_passphrase(&cur).v().map(|removed| json!({"ok": true, "removed": removed}))
+                    core.vault
+                        .remove_passphrase(&cur)
+                        .v()
+                        .map(|removed| json!({"ok": true, "removed": removed}))
                 } else {
                     let n = SecretString::from(newp.unwrap_or_default());
                     let c = current.clone().map(SecretString::from);
-                    core.vault.set_passphrase(&n, c.as_ref()).v().map(|_| json!({"ok": true, "has_passphrase": true}))
+                    core.vault
+                        .set_passphrase(&n, c.as_ref())
+                        .v()
+                        .map(|_| json!({"ok": true, "has_passphrase": true}))
                 };
                 match attempt {
                     Ok(v) => {
@@ -1179,11 +1300,17 @@ impl Daemon {
             })
             .await??;
         let bundle = field(&input, "bundle")?.cloned().unwrap_or(Value::Null);
-        let pass = SecretString::from(input.get("recovery_passphrase").map(js_string).unwrap_or_default());
+        let pass = SecretString::from(
+            input
+                .get("recovery_passphrase")
+                .map(js_string)
+                .unwrap_or_default(),
+        );
         let b2 = bundle.clone();
-        let inspected = tokio::task::spawn_blocking(move || av_store::backup::inspect_backup(&b2, &pass).v())
-            .await
-            .map_err(|_| internal("the backup could not be read"))?;
+        let inspected =
+            tokio::task::spawn_blocking(move || av_store::backup::inspect_backup(&b2, &pass).v())
+                .await
+                .map_err(|_| internal("the backup could not be read"))?;
         let v = self
             .shared
             .run(move |core| -> R<Value> {
@@ -1219,22 +1346,43 @@ fn without_presence(input: &Value) -> Value {
 /// `POST /v1/credentials` after its gate.
 fn add_credential(core: &mut Core, input: &Value) -> R<Value> {
     let kind = truthy_str(input.get("kind")).unwrap_or_else(|| "http".into());
-    let profile = av_core::profiles::get_profile(&kind).map_err(|e| d(C::NotFound, e.to_string()))?;
+    let profile =
+        av_core::profiles::get_profile(&kind).map_err(|e| d(C::NotFound, e.to_string()))?;
     if !profile.implemented {
         return Err(dr(C::PolicyDenied, format!("the {kind} connector is not implemented yet"), "connector_implemented")
             .hinted("Its profile exists but the proxy that would carry it does not, so a credential of this kind could not be used. Do not store one here yet."));
     }
-    let field_name = truthy_str(input.get("field")).unwrap_or_else(|| av_core::profiles::default_field(&kind).to_string());
+    let field_name = truthy_str(input.get("field"))
+        .unwrap_or_else(|| av_core::profiles::default_field(&kind).to_string());
     let exp = input.get("expires_at").filter(|v| !v.is_null());
-    if exp.is_some_and(|e| !e.as_str().is_some_and(|s| crate::util::parse_iso_ms(s).is_some())) {
-        return Err(dr(C::PolicyDenied, "expires_at must be an ISO date", "expires_at"));
+    if exp.is_some_and(|e| {
+        !e.as_str()
+            .is_some_and(|s| crate::util::parse_iso_ms(s).is_some())
+    }) {
+        return Err(dr(
+            C::PolicyDenied,
+            "expires_at must be an ISO date",
+            "expires_at",
+        ));
     }
     let mut connector = Map::new();
-    connector.insert("host".into(), truthy_str(input.get("host")).map_or_else(|| Value::from(profile.hosts.first().copied().unwrap_or("")), Value::from));
-    connector.insert("scheme".into(), Value::from(truthy_str(input.get("scheme")).unwrap_or_else(|| "https".into())));
+    connector.insert(
+        "host".into(),
+        truthy_str(input.get("host")).map_or_else(
+            || Value::from(profile.hosts.first().copied().unwrap_or("")),
+            Value::from,
+        ),
+    );
+    connector.insert(
+        "scheme".into(),
+        Value::from(truthy_str(input.get("scheme")).unwrap_or_else(|| "https".into())),
+    );
     let sites: Vec<String> = match input.get("sites").filter(|s| crate::util::truthy(s)) {
         Some(Value::Array(a)) => a.iter().map(js_string).collect(),
-        _ => av_core::profiles::default_sites(&kind, &field_name).iter().map(|s| s.to_string()).collect(),
+        _ => av_core::profiles::default_sites(&kind, &field_name)
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
     let value = input.get("value").map(js_string).unwrap_or_default();
     let value_len = value.encode_utf16().count();
@@ -1243,7 +1391,10 @@ fn add_credential(core: &mut Core, input: &Value) -> R<Value> {
     let cred = core
         .vault
         .add_credential(NewCredential {
-            slug: input.get("slug").map(js_string).unwrap_or_else(|| "undefined".into()),
+            slug: input
+                .get("slug")
+                .map(js_string)
+                .unwrap_or_else(|| "undefined".into()),
             kind,
             connector,
             fields: vec![(field_name, SecretString::from(value))],
@@ -1268,8 +1419,15 @@ fn add_credential(core: &mut Core, input: &Value) -> R<Value> {
 
 /// `POST /v1/placeholders` after its gate.
 fn issue_one(core: &mut Core, input: &Value) -> R<Value> {
-    let slug = input.get("cred").map(js_string).unwrap_or_else(|| "undefined".into());
-    let cred = core.vault.find_credential(&slug).v()?.ok_or_else(|| d(C::NotFound, format!("no credential {slug}")))?;
+    let slug = input
+        .get("cred")
+        .map(js_string)
+        .unwrap_or_else(|| "undefined".into());
+    let cred = core
+        .vault
+        .find_credential(&slug)
+        .v()?
+        .ok_or_else(|| d(C::NotFound, format!("no credential {slug}")))?;
     let now = now_ms() as f64;
     let active: Vec<_> = core
         .vault
@@ -1278,10 +1436,27 @@ fn issue_one(core: &mut Core, input: &Value) -> R<Value> {
         .into_iter()
         .filter(|s| s.state == SessionState::Active && av_store::vault::session_expiry_ms(s) > now)
         .collect();
-    let sid = input.get("sid").filter(|s| crate::util::truthy(s)).map(js_string);
+    let sid = input
+        .get("sid")
+        .filter(|s| crate::util::truthy(s))
+        .map(js_string);
     if sid.is_none() && active.len() > 1 {
-        return Err(dr(C::SessionRequired, format!("{} sessions are active; name the one to issue for", active.len()), "explicit_session")
-            .hinted(format!("Pass sid. Active: {}", active.iter().map(|s| s.id.clone()).collect::<Vec<_>>().join(", "))));
+        return Err(dr(
+            C::SessionRequired,
+            format!(
+                "{} sessions are active; name the one to issue for",
+                active.len()
+            ),
+            "explicit_session",
+        )
+        .hinted(format!(
+            "Pass sid. Active: {}",
+            active
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     let session = match &sid {
         Some(s) => core.vault.session(s).v()?,
@@ -1291,29 +1466,79 @@ fn issue_one(core: &mut Core, input: &Value) -> R<Value> {
         return Err(d(C::NotFound, format!("no session {s}")));
     }
     let Some(session) = session else {
-        return Err(d(C::SessionRequired, "no session is active to issue a placeholder for").next(json!({"cli": [format!("agent-vault session create --cred {}", cred.slug)]})));
+        return Err(d(
+            C::SessionRequired,
+            "no session is active to issue a placeholder for",
+        )
+        .next(json!({"cli": [format!("agent-vault session create --cred {}", cred.slug)]})));
     };
     core.vault.assert_session_live(Some(&session)).v()?;
-    let grant = core.vault.grants_for_session(&session.id).v()?.into_iter().find(|g| g.credential_id == cred.id);
+    let grant = core
+        .vault
+        .grants_for_session(&session.id)
+        .v()?
+        .into_iter()
+        .find(|g| g.credential_id == cred.id);
     let Some(grant) = grant else {
-        return Err(d(C::NoGrant, format!("no grant for {slug} in session {}", session.id)));
+        return Err(d(
+            C::NoGrant,
+            format!("no grant for {slug} in session {}", session.id),
+        ));
     };
-    let field = cred.fields.first().ok_or_else(|| internal("Cannot read properties of undefined (reading 'name')"))?;
-    let uses = input.get("uses").filter(|u| !u.is_null()).map(|u| as_whole(u).ok_or_else(|| dr(C::PolicyDenied, "uses must be a whole number, 1 or more", "policy_invalid"))).transpose()?;
-    let issued = core.vault.issue_placeholder(IssueOptions { grant_id: grant.id, field: Some(field.name.clone()), uses, ttl_ms: None }).v()?;
-    Ok(json!({"placeholder": issued.placeholder, "usage": field.sites.iter().map(|s| describe(s, Some(&issued.placeholder))).collect::<Vec<_>>()}))
+    let field = cred
+        .fields
+        .first()
+        .ok_or_else(|| internal("Cannot read properties of undefined (reading 'name')"))?;
+    let uses = input
+        .get("uses")
+        .filter(|u| !u.is_null())
+        .map(|u| {
+            as_whole(u).ok_or_else(|| {
+                dr(
+                    C::PolicyDenied,
+                    "uses must be a whole number, 1 or more",
+                    "policy_invalid",
+                )
+            })
+        })
+        .transpose()?;
+    let issued = core
+        .vault
+        .issue_placeholder(IssueOptions {
+            grant_id: grant.id,
+            field: Some(field.name.clone()),
+            uses,
+            ttl_ms: None,
+        })
+        .v()?;
+    Ok(
+        json!({"placeholder": issued.placeholder, "usage": field.sites.iter().map(|s| describe(s, Some(&issued.placeholder))).collect::<Vec<_>>()}),
+    )
 }
 
 fn batch_shape(input: &Value) -> R<()> {
     let shape = |detail: &str| {
         dr(C::PolicyDenied, detail, "batch_shape").hinted(format!("Send {{ sid, items: [{{ cred, field?, uses? }}] }} with 1 to {MAX_BATCH} items, one per credential field."))
     };
-    if !field(input, "sid")?.and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+    if !field(input, "sid")?
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+    {
         return Err(shape("name the session: sid"));
     }
-    let items = input.get("items").and_then(Value::as_array).filter(|a| !a.is_empty() && a.len() <= MAX_BATCH);
-    let Some(items) = items else { return Err(shape(&format!("items is a list of 1 to {MAX_BATCH} entries"))) };
-    if input.get("purpose").is_some_and(|p| !p.is_null() && !matches!(p.as_str(), Some("env") | Some("exec"))) {
+    let items = input
+        .get("items")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty() && a.len() <= MAX_BATCH);
+    let Some(items) = items else {
+        return Err(shape(&format!(
+            "items is a list of 1 to {MAX_BATCH} entries"
+        )));
+    };
+    if input
+        .get("purpose")
+        .is_some_and(|p| !p.is_null() && !matches!(p.as_str(), Some("env") | Some("exec")))
+    {
         return Err(shape("purpose is env, exec or null"));
     }
     let mut pairs = std::collections::HashSet::new();
@@ -1321,16 +1546,30 @@ fn batch_shape(input: &Value) -> R<()> {
         if !item.is_object() {
             return Err(shape("each item must be an object"));
         }
-        if !item.get("cred").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+        if !item
+            .get("cred")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+        {
             return Err(shape("each item names a credential: cred"));
         }
-        if item.get("field").is_some_and(|f| !f.is_null() && !f.as_str().is_some_and(|s| !s.is_empty())) {
+        if item
+            .get("field")
+            .is_some_and(|f| !f.is_null() && !f.as_str().is_some_and(|s| !s.is_empty()))
+        {
             return Err(shape("field is a field name"));
         }
-        if item.get("uses").is_some_and(|u| !u.is_null() && !as_integer(u).is_some_and(|n| n >= 1)) {
+        if item
+            .get("uses")
+            .is_some_and(|u| !u.is_null() && !as_integer(u).is_some_and(|n| n >= 1))
+        {
             return Err(shape("uses is a whole number, 1 or more"));
         }
-        let key = format!("{}\u{0}{}", js_string(&item["cred"]), item.get("field").and_then(Value::as_str).unwrap_or(""));
+        let key = format!(
+            "{}\u{0}{}",
+            js_string(&item["cred"]),
+            item.get("field").and_then(Value::as_str).unwrap_or("")
+        );
         if !pairs.insert(key) {
             return Err(shape("each credential field appears once"));
         }
@@ -1344,22 +1583,47 @@ fn issue_batch(core: &mut Core, input: &Value, port: u16) -> R<Value> {
         return Err(d(C::Locked, "the vault is locked"));
     }
     let sid = input["sid"].as_str().unwrap_or("").to_string();
-    let session = core.vault.session(&sid).v()?.ok_or_else(|| d(C::NotFound, format!("no session {sid}")))?;
+    let session = core
+        .vault
+        .session(&sid)
+        .v()?
+        .ok_or_else(|| d(C::NotFound, format!("no session {sid}")))?;
     core.vault.assert_session_live(Some(&session)).v()?;
     let grants = core.vault.grants_for_session(&session.id).v()?;
     let mut resolved = Vec::new();
     for item in input["items"].as_array().cloned().unwrap_or_default() {
         let slug = js_string(&item["cred"]);
-        let cred = core.vault.find_credential(&slug).v()?.ok_or_else(|| d(C::NotFound, format!("no credential {slug}")))?;
+        let cred = core
+            .vault
+            .find_credential(&slug)
+            .v()?
+            .ok_or_else(|| d(C::NotFound, format!("no credential {slug}")))?;
         if cred.quarantine.is_some() {
             return Err(quarantined(&cred.slug));
         }
-        let grant = grants.iter().find(|g| g.credential_id == cred.id).cloned().ok_or_else(|| d(C::NoGrant, format!("no grant for {} in session {}", cred.slug, session.id)))?;
+        let grant = grants
+            .iter()
+            .find(|g| g.credential_id == cred.id)
+            .cloned()
+            .ok_or_else(|| {
+                d(
+                    C::NoGrant,
+                    format!("no grant for {} in session {}", cred.slug, session.id),
+                )
+            })?;
         let grant = core.vault.assert_grant_live(Some(&grant)).v()?;
-        let name = item.get("field").and_then(Value::as_str).map(str::to_string).or_else(|| grant.fields.first().cloned()).unwrap_or_default();
+        let name = item
+            .get("field")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| grant.fields.first().cloned())
+            .unwrap_or_default();
         let f = cred.fields.iter().find(|f| f.name == name).cloned();
         let Some(f) = f.filter(|_| grant.fields.contains(&name)) else {
-            return Err(d(C::NoGrant, format!("the grant for {} does not cover that field", cred.slug)));
+            return Err(d(
+                C::NoGrant,
+                format!("the grant for {} does not cover that field", cred.slug),
+            ));
         };
         let max = match &grant.policy.placeholder_policy {
             Some(Checked::Valid(p)) => p.max_uses,
@@ -1374,7 +1638,15 @@ fn issue_batch(core: &mut Core, input: &Value, port: u16) -> R<Value> {
     }
     let mut items = Vec::new();
     for (cred, grant, f, uses) in resolved {
-        let issued = core.vault.issue_placeholder(IssueOptions { grant_id: grant.id.clone(), field: Some(f.name.clone()), uses, ttl_ms: None }).v()?;
+        let issued = core
+            .vault
+            .issue_placeholder(IssueOptions {
+                grant_id: grant.id.clone(),
+                field: Some(f.name.clone()),
+                uses,
+                ttl_ms: None,
+            })
+            .v()?;
         let profile = av_core::profiles::get_profile(&cred.connector_kind).ok();
         items.push(json!({
             "cred": cred.slug, "field": f.name, "placeholder": issued.placeholder,
@@ -1393,22 +1665,32 @@ fn issue_batch(core: &mut Core, input: &Value, port: u16) -> R<Value> {
         "placeholder.issued_batch",
         json!({"session_id": session.id, "count": items.len(), "credential_slugs": slugs, "purpose": input.get("purpose").cloned().unwrap_or(Value::Null)}),
     )?;
-    Ok(json!({"session_id": session.id, "gateway_url": format!("http://127.0.0.1:{port}"), "items": items}))
+    Ok(
+        json!({"session_id": session.id, "gateway_url": format!("http://127.0.0.1:{port}"), "items": items}),
+    )
 }
 
 /// `POST /v1/credentials/rotate` after its gate.
 fn rotate(core: &mut Core, input: &Value) -> R<Value> {
     if let Some(h) = input.get("retire_hours") {
         if !as_integer(h).is_some_and(|n| (0..=168).contains(&n)) {
-            return Err(dr(C::PolicyDenied, "retire_hours is a whole number from 0 to 168", "retire_window"));
+            return Err(dr(
+                C::PolicyDenied,
+                "retire_hours is a whole number from 0 to 168",
+                "retire_window",
+            ));
         }
     }
-    let slug = input.get("slug").map(js_string).unwrap_or_else(|| "undefined".into());
+    let slug = input
+        .get("slug")
+        .map(js_string)
+        .unwrap_or_else(|| "undefined".into());
     let value = input.get("value").map(js_string).unwrap_or_default();
     let short = value.encode_utf16().count() < MIN_SECRET_LEN;
     let mode: RotateMode = match input.get("mode").filter(|m| !m.is_null()) {
         None => RotateMode::Keep,
-        Some(m) => serde_json::from_value(m.clone()).map_err(|_| dr(C::PolicyDenied, "mode is keep or revoke", "rotate_mode"))?,
+        Some(m) => serde_json::from_value(m.clone())
+            .map_err(|_| dr(C::PolicyDenied, "mode is keep or revoke", "rotate_mode"))?,
     };
     let result = core
         .vault
@@ -1418,13 +1700,29 @@ fn rotate(core: &mut Core, input: &Value) -> R<Value> {
                 field: input.get("field").filter(|f| !f.is_null()).map(js_string),
                 value: SecretString::from(value),
                 mode,
-                retire_ms: input.get("retire_hours").and_then(as_integer).map_or(av_store::vault::DAY_MS, |h| h * 3_600_000),
-                expires_at: input.get("expires_at").and_then(Value::as_str).map(str::to_string),
+                retire_ms: input
+                    .get("retire_hours")
+                    .and_then(as_integer)
+                    .map_or(av_store::vault::DAY_MS, |h| h * 3_600_000),
+                expires_at: input
+                    .get("expires_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             },
         )
         .v()?;
-    let cred = core.vault.find_credential(&slug).v()?.ok_or_else(|| internal("Cannot read properties of null (reading 'id')"))?;
-    let invalidated = core.pl_deny_approvals(&ApprovalFilter { credential_id: Some(cred.id), ..Default::default() }, "credential_rotated")?;
+    let cred = core
+        .vault
+        .find_credential(&slug)
+        .v()?
+        .ok_or_else(|| internal("Cannot read properties of null (reading 'id')"))?;
+    let invalidated = core.pl_deny_approvals(
+        &ApprovalFilter {
+            credential_id: Some(cred.id),
+            ..Default::default()
+        },
+        "credential_rotated",
+    )?;
     let mut out = serde_json::to_value(&result).unwrap_or(json!({}));
     out["invalidated_approvals"] = invalidated.into();
     if short {
@@ -1437,32 +1735,56 @@ fn rotate(core: &mut Core, input: &Value) -> R<Value> {
 fn narrow_session(core: &mut Core, input: &Value) -> R<Value> {
     let bad = |detail: &str, rule: &str| dr(C::PolicyDenied, detail, rule);
     if !input.is_object() {
-        return Err(bad("send { sid, cred?, narrow, session_ttl_minutes?, grant_ttl_minutes? }", "policy_invalid"));
+        return Err(bad(
+            "send { sid, cred?, narrow, session_ttl_minutes?, grant_ttl_minutes? }",
+            "policy_invalid",
+        ));
     }
-    let Some(sid) = input.get("sid").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+    let Some(sid) = input
+        .get("sid")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
         return Err(d(C::NotFound, "name the session: sid"));
     };
     if core.vault.locked() {
         return Err(d(C::Locked, "unlock the vault to narrow a session"));
     }
-    let session = core.vault.session(sid).v()?.ok_or_else(|| d(C::NotFound, format!("no session {sid}")))?;
-    if input.get("cred").is_some_and(|c| !c.as_str().is_some_and(|s| !s.is_empty())) {
+    let session = core
+        .vault
+        .session(sid)
+        .v()?
+        .ok_or_else(|| d(C::NotFound, format!("no session {sid}")))?;
+    if input
+        .get("cred")
+        .is_some_and(|c| !c.as_str().is_some_and(|s| !s.is_empty()))
+    {
         return Err(bad("cred is a credential slug", "policy_invalid"));
     }
     if input.get("narrow").is_some_and(|n| !n.is_object()) {
         return Err(bad("narrow is an object of grant limits", "policy_invalid"));
     }
-    let narrow = input.get("narrow").and_then(Value::as_object).cloned().unwrap_or_default();
+    let narrow = input
+        .get("narrow")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let allowed = narrow_fields();
     if let Some(k) = narrow.keys().find(|k| !allowed.contains(&k.as_str())) {
-        return Err(bad(&format!("a narrowing cannot carry {k}"), "policy_invalid"));
+        return Err(bad(
+            &format!("a narrowing cannot carry {k}"),
+            "policy_invalid",
+        ));
     }
     let minutes = |v: Option<&Value>, rule: &str| -> R<Option<i64>> {
         match v {
             None => Ok(None),
             Some(x) => match as_integer(x).filter(|n| *n >= 1) {
                 Some(n) => Ok(Some(n)),
-                None => Err(bad("a lifetime is a whole number of minutes, 1 or more", rule)),
+                None => Err(bad(
+                    "a lifetime is a whole number of minutes, 1 or more",
+                    rule,
+                )),
             },
         }
     };
@@ -1470,44 +1792,97 @@ fn narrow_session(core: &mut Core, input: &Value) -> R<Value> {
     if input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {
         return Err(bad("grant_ttl_minutes given twice", "policy_invalid"));
     }
-    let grant_ttl = minutes(input.get("grant_ttl_minutes").or(narrow.get("grant_ttl_minutes")), "grant_ttl")?;
-    let fields: Vec<String> = narrow.keys().filter(|k| *k != "grant_ttl_minutes").cloned().collect();
+    let grant_ttl = minutes(
+        input
+            .get("grant_ttl_minutes")
+            .or(narrow.get("grant_ttl_minutes")),
+        "grant_ttl",
+    )?;
+    let fields: Vec<String> = narrow
+        .keys()
+        .filter(|k| *k != "grant_ttl_minutes")
+        .cloned()
+        .collect();
     if fields.is_empty() && session_ttl.is_none() && grant_ttl.is_none() {
-        return Err(bad("name at least one limit or lifetime to narrow", "narrow_empty"));
+        return Err(bad(
+            "name at least one limit or lifetime to narrow",
+            "narrow_empty",
+        ));
     }
     if narrow.contains_key("redirects") && narrow["redirects"] != json!(0) {
-        return Err(bad("a narrowing can only turn redirect following off: redirects 0", "narrow_widens"));
+        return Err(bad(
+            "a narrowing can only turn redirect following off: redirects 0",
+            "narrow_widens",
+        ));
     }
-    if narrow.get("approval").is_some_and(|a| !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s))) {
-        return Err(dr(C::PolicyDenied, "approval is not one of the four modes", "approval").hinted("approval is one of: each, on-write, first-use, auto"));
+    if narrow
+        .get("approval")
+        .is_some_and(|a| !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s)))
+    {
+        return Err(dr(
+            C::PolicyDenied,
+            "approval is not one of the four modes",
+            "approval",
+        )
+        .hinted("approval is one of: each, on-write, first-use, auto"));
     }
-    if narrow.get("budget").is_some_and(|b| policy::budget_integer(b).is_none()) {
-        return Err(bad("budget must be a whole number of requests, 0 or more", "policy_invalid"));
+    if narrow
+        .get("budget")
+        .is_some_and(|b| policy::budget_integer(b).is_none())
+    {
+        return Err(bad(
+            "budget must be a whole number of requests, 0 or more",
+            "policy_invalid",
+        ));
     }
-    core.vault.assert_session_usable(Some(&session), None, Default::default()).v()?;
+    core.vault
+        .assert_session_usable(Some(&session), None, Default::default())
+        .v()?;
     let mut grants = core.vault.grants_for_session(&session.id).v()?;
     if let Some(c) = input.get("cred").and_then(Value::as_str) {
         let mut kept = Vec::new();
         for g in grants {
-            if core.vault.credential(&g.credential_id).v()?.is_some_and(|cr| cr.slug == c) {
+            if core
+                .vault
+                .credential(&g.credential_id)
+                .v()?
+                .is_some_and(|cr| cr.slug == c)
+            {
                 kept.push(g);
             }
         }
         grants = kept;
         if grants.is_empty() {
-            return Err(d(C::NotFound, format!("session {} has no grant for {c}", session.id)));
+            return Err(d(
+                C::NotFound,
+                format!("session {} has no grant for {c}", session.id),
+            ));
         }
     }
-    let describe_g = |g: &av_store::model::GrantRecord, profile: &av_core::profiles::Profile, s: &av_store::model::SessionRecord| {
+    let describe_g = |g: &av_store::model::GrantRecord,
+                      profile: &av_core::profiles::Profile,
+                      s: &av_store::model::SessionRecord| {
         let ceiling = profile.policy_ceiling();
-        json!(policy::describe_effective(&policy::intersect(&[Some(&ceiling), Some(&s.policy), Some(&g.policy)])))
+        json!(policy::describe_effective(&policy::intersect(&[
+            Some(&ceiling),
+            Some(&s.policy),
+            Some(&g.policy)
+        ])))
     };
     let mut planned = Vec::new();
     for g in &grants {
-        let cred = core.vault.credential(&g.credential_id).v()?.ok_or_else(|| internal("no credential"))?;
-        let profile = av_core::profiles::get_profile(&cred.connector_kind).map_err(|e| internal(e.to_string()))?;
+        let cred = core
+            .vault
+            .credential(&g.credential_id)
+            .v()?
+            .ok_or_else(|| internal("no credential"))?;
+        let profile = av_core::profiles::get_profile(&cred.connector_kind)
+            .map_err(|e| internal(e.to_string()))?;
         let hosts: Vec<String> = profile.hosts.iter().map(|s| s.to_string()).collect();
-        let ceiling = policy::credential_host_ceiling(cred.connector.get("host").and_then(Value::as_str), &hosts);
+        let ceiling = policy::credential_host_ceiling(
+            cred.connector.get("host").and_then(Value::as_str),
+            &hosts,
+        );
         let mut spec = Map::new();
         for k in &fields {
             spec.insert(k.clone(), narrow[k].clone());
@@ -1515,9 +1890,22 @@ fn narrow_session(core: &mut Core, input: &Value) -> R<Value> {
         let layer = if fields.is_empty() {
             None
         } else {
-            Some(policy::grant_policy_from_input(&Value::Object(spec), &policy::GrantPolicyOptions { profile: Some(profile), ceiling: policy::GrantCeiling::Hosts(ceiling), defaults: false })?)
+            Some(policy::grant_policy_from_input(
+                &Value::Object(spec),
+                &policy::GrantPolicyOptions {
+                    profile: Some(profile),
+                    ceiling: policy::GrantCeiling::Hosts(ceiling),
+                    defaults: false,
+                },
+            )?)
         };
-        planned.push((g.clone(), cred, profile, layer, describe_g(g, profile, &session)));
+        planned.push((
+            g.clone(),
+            cred,
+            profile,
+            layer,
+            describe_g(g, profile, &session),
+        ));
     }
     if let Some(m) = session_ttl {
         core.vault.shorten_session(&session.id, m * 60_000).v()?;
@@ -1525,58 +1913,108 @@ fn narrow_session(core: &mut Core, input: &Value) -> R<Value> {
     let mut out = Vec::new();
     for (g, cred, profile, layer, before) in planned {
         if let Some(l) = layer {
-            core.vault.narrow_grant(&g.id, &serde_json::to_value(l).unwrap_or(json!({}))).v()?;
+            core.vault
+                .narrow_grant(&g.id, &serde_json::to_value(l).unwrap_or(json!({})))
+                .v()?;
         }
         if let Some(m) = grant_ttl {
             core.vault.shorten_grant(&g.id, m * 60_000).v()?;
         }
-        let now_g = core.vault.grant(&g.id).v()?.ok_or_else(|| internal("no grant"))?;
-        let s_now = core.vault.session(&session.id).v()?.unwrap_or(session.clone());
+        let now_g = core
+            .vault
+            .grant(&g.id)
+            .v()?
+            .ok_or_else(|| internal("no grant"))?;
+        let s_now = core
+            .vault
+            .session(&session.id)
+            .v()?
+            .unwrap_or(session.clone());
         out.push(json!({"cred": cred.slug, "grant_id": g.id, "before": before, "after": describe_g(&now_g, profile, &s_now), "expires_at": now_g.expires_at}));
     }
     let s_now = core.vault.session(&session.id).v()?.unwrap_or(session);
-    Ok(json!({"session_id": s_now.id, "expires_at": s_now.expires_at, "infinite": s_now.infinite, "grants": out}))
+    Ok(
+        json!({"session_id": s_now.id, "expires_at": s_now.expires_at, "infinite": s_now.infinite, "grants": out}),
+    )
 }
 
 /// `#sessionDetail(sid)`.
 fn session_detail(core: &mut Core, sid: Option<&str>) -> R<Value> {
     if core.vault.audit().is_none() {
-        return Err(d(C::Locked, "the audit log is encrypted; unlock the vault to read it"));
+        return Err(d(
+            C::Locked,
+            "the audit log is encrypted; unlock the vault to read it",
+        ));
     }
     let session = match sid {
         Some(s) => core.vault.session(s).v()?,
         None => None,
     };
     let Some(session) = session else {
-        return Err(d(C::NotFound, format!("no session {}", sid.unwrap_or("null"))));
+        return Err(d(
+            C::NotFound,
+            format!("no session {}", sid.unwrap_or("null")),
+        ));
     };
-    let grants: Vec<_> = core.vault.grants().v()?.into_iter().filter(|g| g.session_id == session.id).collect();
-    let rows = core.vault.audit().map(|l| l.read(&av_store::audit::ReadFilter { limit: 100_000, ..Default::default() })).transpose().v()?.unwrap_or_default();
+    let grants: Vec<_> = core
+        .vault
+        .grants()
+        .v()?
+        .into_iter()
+        .filter(|g| g.session_id == session.id)
+        .collect();
+    let rows = core
+        .vault
+        .audit()
+        .map(|l| {
+            l.read(&av_store::audit::ReadFilter {
+                limit: 100_000,
+                ..Default::default()
+            })
+        })
+        .transpose()
+        .v()?
+        .unwrap_or_default();
     let placeholders = core.vault.list_placeholders(None).v()?;
     let mut gout = Vec::new();
     for g in &grants {
         let cred = core.vault.credential(&g.credential_id).v()?;
-        let profile = cred.as_ref().and_then(|c| av_core::profiles::get_profile(&c.connector_kind).ok());
+        let profile = cred
+            .as_ref()
+            .and_then(|c| av_core::profiles::get_profile(&c.connector_kind).ok());
         let ceiling = profile.map(|p| p.policy_ceiling());
-        let effective = policy::intersect(&[ceiling.as_ref(), Some(&session.policy), Some(&g.policy)]);
+        let effective =
+            policy::intersect(&[ceiling.as_ref(), Some(&session.policy), Some(&g.policy)]);
         let used = g.budget_used;
         let budget = match policy::budget_limit(effective.budget.as_ref()) {
-            policy::BudgetLimit::Limit(l) => json!({"limit": l, "used": used, "remaining": l.saturating_sub(used)}),
+            policy::BudgetLimit::Limit(l) => {
+                json!({"limit": l, "used": used, "remaining": l.saturating_sub(used)})
+            }
             policy::BudgetLimit::Unlimited => json!({"limit": null, "used": used, "remaining": 0}),
-            policy::BudgetLimit::Unreadable => json!({"limit": null, "used": used, "remaining": null, "invalid": true}),
+            policy::BudgetLimit::Unreadable => {
+                json!({"limit": null, "used": used, "remaining": null, "invalid": true})
+            }
         };
         let budget = match policy::budget_limit(effective.budget.as_ref()) {
             // JS: no limit is null with remaining null; an unreadable one is
             // `limit: null` too, flagged invalid, with nothing remaining.
-            policy::BudgetLimit::Unlimited => json!({"limit": null, "used": used, "remaining": null}),
-            policy::BudgetLimit::Unreadable => json!({"limit": null, "used": used, "remaining": 0, "invalid": true}),
+            policy::BudgetLimit::Unlimited => {
+                json!({"limit": null, "used": used, "remaining": null})
+            }
+            policy::BudgetLimit::Unreadable => {
+                json!({"limit": null, "used": used, "remaining": 0, "invalid": true})
+            }
             _ => budget,
         };
         let spend = match core.pl_spend_for(&g.id) {
             Ok(s) => s.unwrap_or(Value::Null),
             Err(_) => json!({"invalid": true}),
         };
-        let limits = core.pl_limits_for(&g.id).ok().flatten().unwrap_or(Value::Null);
+        let limits = core
+            .pl_limits_for(&g.id)
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null);
         let phs: Vec<Value> = placeholders
             .iter()
             .filter(|p| p.grant_id == g.id)

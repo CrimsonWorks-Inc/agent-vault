@@ -9,7 +9,9 @@ use serde_json::{json, Value};
 use crate::pipeline::{GatewayRequest, GatewayResponse, PipelineOptions};
 use crate::server::{Daemon, DaemonOptions};
 use crate::state::{Shared, VaultRef};
-use crate::upstream::{Body, BoxFuture, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse};
+use crate::upstream::{
+    Body, BoxFuture, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 
 mod control;
 mod gateway;
@@ -22,7 +24,8 @@ mod ui;
 pub const SECRET: &str = "test-secret-daemon-0123456789abcdef";
 
 /// What the fake upstream answers with.
-pub type Handler = Box<dyn Fn(&UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> + Send + Sync>;
+pub type Handler =
+    Box<dyn Fn(&UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> + Send + Sync>;
 
 /// A fake upstream that records every request it is sent.
 pub struct FakeUp {
@@ -32,7 +35,10 @@ pub struct FakeUp {
 
 impl FakeUp {
     pub fn new() -> Arc<FakeUp> {
-        Arc::new(FakeUp { hits: Mutex::new(Vec::new()), handler: Mutex::new(Box::new(|_| Ok(json_response(200, &json!({"ok": true}))))) })
+        Arc::new(FakeUp {
+            hits: Mutex::new(Vec::new()),
+            handler: Mutex::new(Box::new(|_| Ok(json_response(200, &json!({"ok": true}))))),
+        })
     }
 
     pub fn answer(&self, h: Handler) {
@@ -44,7 +50,12 @@ impl FakeUp {
     }
 
     pub fn last_auth(&self) -> Option<String> {
-        self.hits.lock().unwrap().last().and_then(|r| r.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("authorization")).map(|(_, v)| v.clone()))
+        self.hits.lock().unwrap().last().and_then(|r| {
+            r.headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+                .map(|(_, v)| v.clone())
+        })
     }
 }
 
@@ -57,11 +68,11 @@ impl Upstream for FakeUp {
 }
 
 pub fn json_response(status: u16, v: &Value) -> UpstreamResponse {
-    UpstreamResponse { status, headers: vec![("content-type".into(), "application/json".into())], body: Body::Full(crate::util::js_stringify(v).into_bytes()) }
-}
-
-pub fn text_response(status: u16, ty: &str, body: &str) -> UpstreamResponse {
-    UpstreamResponse { status, headers: vec![("content-type".into(), ty.into())], body: Body::Full(body.as_bytes().to_vec()) }
+    UpstreamResponse {
+        status,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: Body::Full(crate::util::js_stringify(v).into_bytes()),
+    }
 }
 
 /// One daemon over one temp vault.
@@ -87,13 +98,25 @@ impl World {
             shared.clone(),
             DaemonOptions {
                 port: 0,
-                pipeline: PipelineOptions { upstream: Some(up.clone()), ..Default::default() },
+                pipeline: PipelineOptions {
+                    upstream: Some(up.clone()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
         .unwrap();
         daemon.start().await.unwrap();
-        World { _dir: dir, shared, daemon, up, slug: String::new(), token: String::new(), placeholder: String::new(), session_id: String::new() }
+        World {
+            _dir: dir,
+            shared,
+            daemon,
+            up,
+            slug: String::new(),
+            token: String::new(),
+            placeholder: String::new(),
+            session_id: String::new(),
+        }
     }
 
     /// A daemon with credential `demo` (host api.example.test, Bearer
@@ -120,7 +143,11 @@ impl World {
     /// One control call; `path` may carry a query.
     pub async fn control(&self, method: &str, path: &str, body: Value) -> (u16, Value) {
         let (p, q) = path.split_once('?').unwrap_or((path, ""));
-        match self.daemon.control_route(&format!("{method} {p}"), q, body).await {
+        match self
+            .daemon
+            .control_route(&format!("{method} {p}"), q, body)
+            .await
+        {
             Ok((s, v)) => (s, v),
             Err(e) => (e.http(), e.to_problem()),
         }
@@ -129,16 +156,41 @@ impl World {
     /// A gateway request with the session token and the placeholder at the
     /// credential's site.
     pub async fn get(&self, path: &str) -> GatewayResponse {
-        self.send("GET", path, vec![("authorization".into(), format!("Bearer {}", self.placeholder))], None).await
+        self.send(
+            "GET",
+            path,
+            vec![(
+                "authorization".into(),
+                format!("Bearer {}", self.placeholder),
+            )],
+            None,
+        )
+        .await
     }
 
-    pub async fn send(&self, method: &str, path: &str, headers: Vec<(String, String)>, body: Option<&str>) -> GatewayResponse {
+    pub async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        headers: Vec<(String, String)>,
+        body: Option<&str>,
+    ) -> GatewayResponse {
         let (p, q) = path.split_once('?').unwrap_or((path, ""));
-        let mut h = vec![("host".to_string(), "127.0.0.1".to_string()), ("av-session".to_string(), self.token.clone())];
+        let mut h = vec![
+            ("host".to_string(), "127.0.0.1".to_string()),
+            ("av-session".to_string(), self.token.clone()),
+        ];
         h.extend(headers);
         self.daemon
             .pipeline
-            .handle(GatewayRequest { method: method.into(), path: format!("/p/{}{p}", self.slug), query: q.into(), headers: h, body: body.map(|b| b.as_bytes().to_vec()), listener: None })
+            .handle(GatewayRequest {
+                method: method.into(),
+                path: format!("/p/{}{p}", self.slug),
+                query: q.into(),
+                headers: h,
+                body: body.map(|b| b.as_bytes().to_vec()),
+                listener: None,
+            })
             .await
     }
 
@@ -148,7 +200,13 @@ impl World {
             .run(|core| {
                 core.vault
                     .audit()
-                    .map(|l| l.read(&av_store::audit::ReadFilter { limit: usize::MAX, ..Default::default() }).unwrap())
+                    .map(|l| {
+                        l.read(&av_store::audit::ReadFilter {
+                            limit: usize::MAX,
+                            ..Default::default()
+                        })
+                        .unwrap()
+                    })
                     .unwrap_or_default()
                     .into_iter()
                     .map(|r| serde_json::to_value(r).unwrap())
@@ -168,12 +226,21 @@ impl World {
 pub fn secret_forms(secret: &str) -> Vec<String> {
     let hex = crate::util::hex(secret.as_bytes());
     let b64 = crate::util::b64(secret.as_bytes());
-    vec![secret.to_string(), crate::util::encode_uri_component(secret), b64.clone(), b64.replace('+', "-").replace('/', "_"), hex.clone(), hex.to_uppercase()]
+    vec![
+        secret.to_string(),
+        crate::util::encode_uri_component(secret),
+        b64.clone(),
+        b64.replace('+', "-").replace('/', "_"),
+        hex.clone(),
+        hex.to_uppercase(),
+    ]
 }
 
 /// Whether text carries the secret in any form.
 pub fn leaks(text: &str) -> bool {
-    secret_forms(SECRET).iter().any(|f| text.contains(f.as_str()))
+    secret_forms(SECRET)
+        .iter()
+        .any(|f| text.contains(f.as_str()))
 }
 
 /// The body of a response, streamed or not.

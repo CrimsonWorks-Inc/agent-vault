@@ -15,7 +15,8 @@ fn main() {
         .unwrap_or_else(|| manifest.join("../../../src/ui/dist"));
     println!("cargo:rerun-if-env-changed=AV_UI_DIST");
     println!("cargo:rerun-if-changed={}", dist.display());
-    let mut out = String::from("/// The built UI embedded at compile time: (path under dist, bytes).\n");
+    let mut out =
+        String::from("/// The built UI embedded at compile time: (path under dist, bytes).\n");
     out.push_str("pub static EMBEDDED: &[(&str, &[u8])] = &[\n");
     for (name, path) in files(&dist) {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -33,7 +34,11 @@ fn main() {
 
 fn files(dist: &Path) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
-    let regular = |p: &Path| std::fs::symlink_metadata(p).map(|m| m.file_type().is_file()).unwrap_or(false);
+    let regular = |p: &Path| {
+        std::fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false)
+    };
     let index = dist.join("index.html");
     if !regular(&index) {
         return found;

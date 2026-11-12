@@ -34,9 +34,14 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::err::{dr, C};
-use crate::upstream::{Body, BoxFuture, Pins, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse};
+use crate::upstream::{
+    Body, BoxFuture, Pins, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse,
+};
 
-pub use av_core::pins::{host_header_matches, pin_list_state, pins_for, url_host_of, url_identity, PinListState, PIN_PATTERN};
+pub use av_core::pins::{
+    host_header_matches, pin_list_state, pins_for, url_host_of, url_identity, PinListState,
+    PIN_PATTERN,
+};
 
 /// Idle timeout on an upstream request. Ports `UPSTREAM_TIMEOUT_MS`.
 pub const UPSTREAM_TIMEOUT_MS: u64 = 30_000;
@@ -103,7 +108,12 @@ fn wrap_sequence(content: &[u8]) -> Vec<u8> {
     if n < 0x80 {
         out.push(n as u8);
     } else {
-        let bytes: Vec<u8> = n.to_be_bytes().iter().copied().skip_while(|b| *b == 0).collect();
+        let bytes: Vec<u8> = n
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .skip_while(|b| *b == 0)
+            .collect();
         out.push(0x80 | bytes.len() as u8);
         out.extend(bytes);
     }
@@ -133,15 +143,27 @@ impl ServerCertVerifier for Recorder {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let mut s = self.seen.lock().unwrap_or_else(|p| p.into_inner());
-        s.chain = std::iter::once(end_entity.to_vec()).chain(intermediates.iter().map(|c| c.to_vec())).collect();
+        s.chain = std::iter::once(end_entity.to_vec())
+            .chain(intermediates.iter().map(|c| c.to_vec()))
+            .collect();
         Ok(ServerCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algs)
     }
 
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> {
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algs)
     }
 
@@ -167,7 +189,9 @@ fn node_code(e: &webpki::Error, chain: &[Vec<u8>]) -> String {
         E::CertNotValidForName(_) => "ERR_TLS_CERT_ALTNAME_INVALID".into(),
         E::UnknownIssuer => {
             let self_signed = |der: &[u8]| {
-                x509_parser::parse_x509_certificate(der).is_ok_and(|(_, c)| c.tbs_certificate.issuer.as_raw() == c.tbs_certificate.subject.as_raw())
+                x509_parser::parse_x509_certificate(der).is_ok_and(|(_, c)| {
+                    c.tbs_certificate.issuer.as_raw() == c.tbs_certificate.subject.as_raw()
+                })
             };
             if chain.len() == 1 && self_signed(&chain[0]) {
                 "DEPTH_ZERO_SELF_SIGNED_CERT".into()
@@ -184,18 +208,40 @@ fn node_code(e: &webpki::Error, chain: &[Vec<u8>]) -> String {
     }
 }
 
-fn check_chain(chain: &[Vec<u8>], name: &ServerName<'_>, anchors: &[TrustAnchor<'_>]) -> ChainCheck {
+fn check_chain(
+    chain: &[Vec<u8>],
+    name: &ServerName<'_>,
+    anchors: &[TrustAnchor<'_>],
+) -> ChainCheck {
     let Some(leaf) = chain.first() else {
-        return ChainCheck { authorized: Err("UNABLE_TO_VERIFY_LEAF_SIGNATURE".into()), verified: Vec::new() };
+        return ChainCheck {
+            authorized: Err("UNABLE_TO_VERIFY_LEAF_SIGNATURE".into()),
+            verified: Vec::new(),
+        };
     };
     let leaf_der = CertificateDer::from(leaf.as_slice());
-    let inter: Vec<CertificateDer<'_>> = chain[1..].iter().take(CHAIN_HOPS).map(|c| CertificateDer::from(c.as_slice())).collect();
+    let inter: Vec<CertificateDer<'_>> = chain[1..]
+        .iter()
+        .take(CHAIN_HOPS)
+        .map(|c| CertificateDer::from(c.as_slice()))
+        .collect();
     let Ok(ee) = webpki::EndEntityCert::try_from(&leaf_der) else {
-        return ChainCheck { authorized: Err("UNABLE_TO_VERIFY_LEAF_SIGNATURE".into()), verified: Vec::new() };
+        return ChainCheck {
+            authorized: Err("UNABLE_TO_VERIFY_LEAF_SIGNATURE".into()),
+            verified: Vec::new(),
+        };
     };
     let algs = provider().signature_verification_algorithms;
     let now = UnixTime::now();
-    match ee.verify_for_usage(algs.all, anchors, &inter, now, webpki::KeyUsage::server_auth(), None, None) {
+    match ee.verify_for_usage(
+        algs.all,
+        anchors,
+        &inter,
+        now,
+        webpki::KeyUsage::server_auth(),
+        None,
+        None,
+    ) {
         Err(e) => match anchor_leaf(leaf, anchors) {
             // OpenSSL accepts a leaf that is itself in the trust store (a
             // self-signed certificate trusted through NODE_EXTRA_CA_CERTS),
@@ -203,11 +249,19 @@ fn check_chain(chain: &[Vec<u8>], name: &ServerName<'_>, anchors: &[TrustAnchor<
             // leaf is authorized when it is in date and names the host, and
             // its own key is the only pin it proves.
             Some(pin) => {
-                let named = ee.verify_is_valid_for_subject_name(name).map_err(|e| node_code(&e, chain));
+                let named = ee
+                    .verify_is_valid_for_subject_name(name)
+                    .map_err(|e| node_code(&e, chain));
                 let dated = in_date(leaf).map_err(|_| "CERT_HAS_EXPIRED".to_string());
-                ChainCheck { authorized: dated.and(named), verified: vec![pin] }
+                ChainCheck {
+                    authorized: dated.and(named),
+                    verified: vec![pin],
+                }
             }
-            None => ChainCheck { authorized: Err(node_code(&e, chain)), verified: Vec::new() },
+            None => ChainCheck {
+                authorized: Err(node_code(&e, chain)),
+                verified: Vec::new(),
+            },
         },
         Ok(path) => {
             let mut verified = Vec::new();
@@ -222,9 +276,16 @@ fn check_chain(chain: &[Vec<u8>], name: &ServerName<'_>, anchors: &[TrustAnchor<
             for c in path.intermediate_certificates() {
                 push(spki_pin(c.subject_public_key_info().as_ref()));
             }
-            push(spki_pin(&wrap_sequence(path.anchor().subject_public_key_info.as_ref())));
-            let named = ee.verify_is_valid_for_subject_name(name).map_err(|e| node_code(&e, chain));
-            ChainCheck { authorized: named, verified }
+            push(spki_pin(&wrap_sequence(
+                path.anchor().subject_public_key_info.as_ref(),
+            )));
+            let named = ee
+                .verify_is_valid_for_subject_name(name)
+                .map_err(|e| node_code(&e, chain));
+            ChainCheck {
+                authorized: named,
+                verified,
+            }
         }
     }
 }
@@ -235,7 +296,10 @@ fn anchor_leaf(leaf: &[u8], anchors: &[TrustAnchor<'_>]) -> Option<String> {
     let (_, c) = x509_parser::parse_x509_certificate(leaf).ok()?;
     let subject = c.tbs_certificate.subject.as_raw();
     let spki = c.tbs_certificate.subject_pki.raw;
-    let found = anchors.iter().any(|a| wrap_sequence(a.subject.as_ref()) == subject && wrap_sequence(a.subject_public_key_info.as_ref()) == spki);
+    let found = anchors.iter().any(|a| {
+        wrap_sequence(a.subject.as_ref()) == subject
+            && wrap_sequence(a.subject_public_key_info.as_ref()) == spki
+    });
     if !found || c.tbs_certificate.issuer.as_raw() != subject {
         return None;
     }
@@ -245,7 +309,10 @@ fn anchor_leaf(leaf: &[u8], anchors: &[TrustAnchor<'_>]) -> Option<String> {
 /// Whether a certificate is inside its validity window now.
 fn in_date(der: &[u8]) -> Result<(), ()> {
     let (_, c) = x509_parser::parse_x509_certificate(der).map_err(|_| ())?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     if now < c.validity().not_before.timestamp() || now > c.validity().not_after.timestamp() {
         return Err(());
     }
@@ -281,10 +348,26 @@ fn pin_error(presented: Vec<String>, reason: Option<&str>) -> UpstreamError {
 }
 
 /// `pinVerdict(socket, hostname, pinList)`: `None` to send.
-fn verdict(chain: &[Vec<u8>], name: &ServerName<'_>, pins: Option<&[String]>) -> Option<UpstreamError> {
-    let check = check_chain(chain, name, trust_anchors());
+fn verdict(
+    chain: &[Vec<u8>],
+    name: &ServerName<'_>,
+    pins: Option<&[String]>,
+) -> Option<UpstreamError> {
+    verdict_with(chain, name, pins, trust_anchors())
+}
+
+/// [`verdict`] against a given trust store (tests build their own).
+pub fn verdict_with(
+    chain: &[Vec<u8>],
+    name: &ServerName<'_>,
+    pins: Option<&[String]>,
+    anchors: &[TrustAnchor<'_>],
+) -> Option<UpstreamError> {
+    let check = check_chain(chain, name, anchors);
     let Some(pins) = pins else {
-        return check.authorized.err().map(|code| UpstreamError::new(&code, format!("upstream certificate not trusted: {code}")));
+        return check.authorized.err().map(|code| {
+            UpstreamError::new(&code, format!("upstream certificate not trusted: {code}"))
+        });
     };
     if check.authorized.is_ok() {
         if check.verified.iter().any(|p| pins.contains(p)) {
@@ -296,19 +379,48 @@ fn verdict(chain: &[Vec<u8>], name: &ServerName<'_>, pins: Option<&[String]>) ->
     let leaf_pin = spki_of(leaf);
     let leaf_pinned = leaf_pin.as_ref().is_some_and(|p| pins.contains(p));
     if !leaf_pinned {
-        let code = check.authorized.err().unwrap_or_else(|| "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into());
-        return Some(UpstreamError::new(&code, format!("upstream certificate not trusted: {code}")));
+        let code = check
+            .authorized
+            .err()
+            .unwrap_or_else(|| "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into());
+        return Some(UpstreamError::new(
+            &code,
+            format!("upstream certificate not trusted: {code}"),
+        ));
     }
     let leaf_der = CertificateDer::from(leaf.as_slice());
-    let named = webpki::EndEntityCert::try_from(&leaf_der).map_err(|e| node_code(&e, chain)).and_then(|ee| ee.verify_is_valid_for_subject_name(name).map_err(|e| node_code(&e, chain)));
+    let named = webpki::EndEntityCert::try_from(&leaf_der)
+        .map_err(|e| node_code(&e, chain))
+        .and_then(|ee| {
+            ee.verify_is_valid_for_subject_name(name)
+                .map_err(|e| node_code(&e, chain))
+        });
     if let Err(code) = named {
-        return Some(UpstreamError::new(&code, format!("upstream certificate does not name the host: {code}")));
+        return Some(UpstreamError::new(
+            &code,
+            format!("upstream certificate does not name the host: {code}"),
+        ));
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    let validity = x509_parser::parse_x509_certificate(leaf).ok().map(|(_, c)| (c.validity().not_before.timestamp(), c.validity().not_after.timestamp()));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let validity = x509_parser::parse_x509_certificate(leaf)
+        .ok()
+        .map(|(_, c)| {
+            (
+                c.validity().not_before.timestamp(),
+                c.validity().not_after.timestamp(),
+            )
+        });
     match validity {
-        Some((_, not_after)) if now > not_after => Some(pin_error(chain_pins(chain, &[]), Some("leaf_expired"))),
-        Some((not_before, _)) if now < not_before => Some(pin_error(chain_pins(chain, &[]), Some("leaf_not_yet_valid"))),
+        Some((_, not_after)) if now > not_after => {
+            Some(pin_error(chain_pins(chain, &[]), Some("leaf_expired")))
+        }
+        Some((not_before, _)) if now < not_before => Some(pin_error(
+            chain_pins(chain, &[]),
+            Some("leaf_not_yet_valid"),
+        )),
         None => Some(pin_error(chain_pins(chain, &[]), Some("leaf_expired"))),
         _ => None,
     }
@@ -345,41 +457,70 @@ impl Upstream for PinnedUpstream {
 
 /// `pinnedRequest({ url, method, headers, body, pins })`.
 pub async fn pinned_request(req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-    let url = url::Url::parse(&req.url).map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid URL"))?;
+    let url = url::Url::parse(&req.url)
+        .map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid URL"))?;
     // The caller's headers, read once.
     let mut sent: Vec<(String, String)> = Vec::new();
     for (n, v) in &req.headers {
         if sent.iter().any(|(k, _)| k == n) {
-            return Err(UpstreamError { vault: Some(dr(C::PolicyDenied, "headers must be names with string values, each read once", "header_format")), ..Default::default() });
+            return Err(UpstreamError {
+                vault: Some(Box::new(dr(
+                    C::PolicyDenied,
+                    "headers must be names with string values, each read once",
+                    "header_format",
+                ))),
+                ..Default::default()
+            });
         }
         sent.push((n.clone(), v.clone()));
     }
     let identity = identity_of(&url);
-    if !sent.iter().filter(|(n, _)| n.eq_ignore_ascii_case("host")).all(|(_, v)| host_header_matches(v, &url)) {
-        return Err(UpstreamError { vault: Some(dr(C::PolicyDenied, "the Host header names a different host than the URL", "host_mismatch")), ..Default::default() });
+    if !sent
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+        .all(|(_, v)| host_header_matches(v, &url))
+    {
+        return Err(UpstreamError {
+            vault: Some(Box::new(dr(
+                C::PolicyDenied,
+                "the Host header names a different host than the URL",
+                "host_mismatch",
+            ))),
+            ..Default::default()
+        });
     }
     let state = pin_list_state(Some(&req.pins.as_value()));
     if state == PinListState::Invalid {
         return Err(pin_error(Vec::new(), Some("pin_format")));
     }
     let pin_list: Option<Vec<String>> = (state == PinListState::Pinned).then(|| match &req.pins {
-        Pins::List(v) => v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+        Pins::List(v) => v
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
         _ => Vec::new(),
     });
     let https = url.scheme() == "https";
     if pin_list.is_some() && !https {
         return Err(pin_error(Vec::new(), Some("plaintext")));
     }
-    let port = url.port_or_known_default().unwrap_or(if https { 443 } else { 80 });
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if https { 443 } else { 80 });
     let timeout = Duration::from_millis(UPSTREAM_TIMEOUT_MS);
 
     let connect = async {
         let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((identity.as_str(), port))
             .await
-            .map_err(|_| UpstreamError::new("ENOTFOUND", format!("getaddrinfo ENOTFOUND {identity}")))?
+            .map_err(|_| {
+                UpstreamError::new("ENOTFOUND", format!("getaddrinfo ENOTFOUND {identity}"))
+            })?
             .collect();
         if addrs.is_empty() {
-            return Err(UpstreamError::new("ENOTFOUND", format!("getaddrinfo ENOTFOUND {identity}")));
+            return Err(UpstreamError::new(
+                "ENOTFOUND",
+                format!("getaddrinfo ENOTFOUND {identity}"),
+            ));
         }
         let mut last = None;
         for a in &addrs {
@@ -392,12 +533,21 @@ pub async fn pinned_request(req: UpstreamRequest) -> Result<UpstreamResponse, Up
         let code = io_code(&e);
         Err(UpstreamError::new(code, format!("connect {code} {a}")))
     };
-    let tcp = tokio::time::timeout(timeout, connect).await.map_err(|_| UpstreamError::new("", "upstream timeout"))??;
+    let tcp = tokio::time::timeout(timeout, connect)
+        .await
+        .map_err(|_| UpstreamError::new("", "upstream timeout"))??;
     let _ = tcp.set_nodelay(true);
 
-    let path = format!("{}{}", url.path(), url.query().map(|q| format!("?{q}")).unwrap_or_default());
+    let path = format!(
+        "{}{}",
+        url.path(),
+        url.query().map(|q| format!("?{q}")).unwrap_or_default()
+    );
     if https {
-        let recorder = Arc::new(Recorder { seen: Mutex::new(Seen::default()), algs: provider().signature_verification_algorithms });
+        let recorder = Arc::new(Recorder {
+            seen: Mutex::new(Seen::default()),
+            algs: provider().signature_verification_algorithms,
+        });
         let config = rustls::ClientConfig::builder_with_provider(provider())
             .with_safe_default_protocol_versions()
             .map_err(|e| UpstreamError::new("ERR_SSL", e.to_string()))?
@@ -406,14 +556,20 @@ pub async fn pinned_request(req: UpstreamRequest) -> Result<UpstreamResponse, Up
             .with_no_client_auth();
         let name: ServerName<'static> = match identity.parse::<IpAddr>() {
             Ok(ip) => ServerName::IpAddress(ip.into()),
-            Err(_) => ServerName::try_from(identity.clone()).map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid URL"))?,
+            Err(_) => ServerName::try_from(identity.clone())
+                .map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid URL"))?,
         };
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
         let tls = tokio::time::timeout(timeout, connector.connect(name.clone(), tcp))
             .await
             .map_err(|_| UpstreamError::new("", "upstream timeout"))?
             .map_err(|e| UpstreamError::new("ECONNRESET", format!("Client network socket disconnected before secure TLS connection was established: {e}")))?;
-        let chain = recorder.seen.lock().unwrap_or_else(|p| p.into_inner()).chain.clone();
+        let chain = recorder
+            .seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .chain
+            .clone();
         // The decision, before a byte of the request is written.
         if let Some(err) = verdict(&chain, &name, pin_list.as_deref()) {
             drop(tls);
@@ -425,7 +581,14 @@ pub async fn pinned_request(req: UpstreamRequest) -> Result<UpstreamResponse, Up
     }
 }
 
-async fn exchange<S>(io: S, method: &str, path: &str, headers: &[(String, String)], body: Option<Vec<u8>>, url: &url::Url) -> Result<UpstreamResponse, UpstreamError>
+async fn exchange<S>(
+    io: S,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+    url: &url::Url,
+) -> Result<UpstreamResponse, UpstreamError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -438,16 +601,27 @@ where
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    let mut b = hyper::Request::builder().method(method).uri(if path.is_empty() { "/" } else { path });
+    let mut b = hyper::Request::builder()
+        .method(method)
+        .uri(if path.is_empty() { "/" } else { path });
     let mut has_host = false;
     for (n, v) in headers {
         if n.eq_ignore_ascii_case("host") {
             has_host = true;
         }
-        b = b.header(n.as_str(), hyper::header::HeaderValue::from_bytes(&crate::util::latin1_bytes(v)).map_err(|_| UpstreamError {
-            vault: Some(dr(C::PolicyDenied, "headers must be names with string values, each read once", "header_format")),
-            ..Default::default()
-        })?);
+        b = b.header(
+            n.as_str(),
+            hyper::header::HeaderValue::from_bytes(&crate::util::latin1_bytes(v)).map_err(
+                |_| UpstreamError {
+                    vault: Some(Box::new(dr(
+                        C::PolicyDenied,
+                        "headers must be names with string values, each read once",
+                        "header_format",
+                    ))),
+                    ..Default::default()
+                },
+            )?,
+        );
     }
     if !has_host {
         let h = match url.port() {
@@ -457,7 +631,9 @@ where
         b = b.header("host", h);
     }
     let request = b
-        .body(http_body_util::Full::new(hyper::body::Bytes::from(body.unwrap_or_default())))
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(
+            body.unwrap_or_default(),
+        )))
         .map_err(|e| UpstreamError::new("ERR_INVALID_HTTP_TOKEN", e.to_string()))?;
     let res = tokio::time::timeout(timeout, sender.send_request(request))
         .await
@@ -489,7 +665,11 @@ where
             }
         }
     });
-    Ok(UpstreamResponse { status, headers, body: Body::Stream(rx) })
+    Ok(UpstreamResponse {
+        status,
+        headers,
+        body: Body::Stream(rx),
+    })
 }
 
 /// One certificate as `fetchChainPins` describes it.
@@ -508,12 +688,21 @@ pub fn describe_cert(der: &[u8]) -> Option<Value> {
 /// Sends no credential and no HTTP request. Ports `fetchChainPins(host, port)`.
 pub async fn fetch_chain_pins(host: &str, port: u16) -> Result<Vec<Value>, UpstreamError> {
     let timeout = Duration::from_millis(UPSTREAM_TIMEOUT_MS);
-    let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
-    let tcp = tokio::time::timeout(timeout, tokio::net::TcpStream::connect((bare.as_str(), port)))
-        .await
-        .map_err(|_| UpstreamError::new("", "upstream timeout"))?
-        .map_err(|e| UpstreamError::new(io_code(&e), e.to_string()))?;
-    let recorder = Arc::new(Recorder { seen: Mutex::new(Seen::default()), algs: provider().signature_verification_algorithms });
+    let bare = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let tcp = tokio::time::timeout(
+        timeout,
+        tokio::net::TcpStream::connect((bare.as_str(), port)),
+    )
+    .await
+    .map_err(|_| UpstreamError::new("", "upstream timeout"))?
+    .map_err(|e| UpstreamError::new(io_code(&e), e.to_string()))?;
+    let recorder = Arc::new(Recorder {
+        seen: Mutex::new(Seen::default()),
+        algs: provider().signature_verification_algorithms,
+    });
     let config = rustls::ClientConfig::builder_with_provider(provider())
         .with_safe_default_protocol_versions()
         .map_err(|e| UpstreamError::new("ERR_SSL", e.to_string()))?
@@ -522,13 +711,26 @@ pub async fn fetch_chain_pins(host: &str, port: u16) -> Result<Vec<Value>, Upstr
         .with_no_client_auth();
     let name: ServerName<'static> = match bare.parse::<IpAddr>() {
         Ok(ip) => ServerName::IpAddress(ip.into()),
-        Err(_) => ServerName::try_from(bare.clone()).map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid host"))?,
+        Err(_) => ServerName::try_from(bare.clone())
+            .map_err(|_| UpstreamError::new("ERR_INVALID_URL", "Invalid host"))?,
     };
-    let tls = tokio::time::timeout(timeout, tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp))
-        .await
-        .map_err(|_| UpstreamError::new("", "upstream timeout"))?
-        .map_err(|e| UpstreamError::new("ECONNRESET", e.to_string()))?;
+    let tls = tokio::time::timeout(
+        timeout,
+        tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp),
+    )
+    .await
+    .map_err(|_| UpstreamError::new("", "upstream timeout"))?
+    .map_err(|e| UpstreamError::new("ECONNRESET", e.to_string()))?;
     drop(tls);
-    let chain = recorder.seen.lock().unwrap_or_else(|p| p.into_inner()).chain.clone();
-    Ok(chain.iter().take(CHAIN_HOPS).filter_map(|c| describe_cert(c)).collect())
+    let chain = recorder
+        .seen
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .chain
+        .clone();
+    Ok(chain
+        .iter()
+        .take(CHAIN_HOPS)
+        .filter_map(|c| describe_cert(c))
+        .collect())
 }

@@ -84,7 +84,11 @@ impl Core {
             _ => Map::new(),
         };
         let Some(log) = self.vault.audit_mut() else {
-            return Err(deny(ErrorCode::Locked, "the vault is locked", DenyExtra::default()));
+            return Err(deny(
+                ErrorCode::Locked,
+                "the vault is locked",
+                DenyExtra::default(),
+            ));
         };
         log.write(kind, map).map(|_| ()).map_err(store_err)
     }
@@ -154,7 +158,13 @@ impl Shared {
             f(&mut guard)
         })
         .await
-        .map_err(|_| deny(ErrorCode::Internal, "the request could not be handled", DenyExtra::default()))
+        .map_err(|_| {
+            deny(
+                ErrorCode::Internal,
+                "the request could not be handled",
+                DenyExtra::default(),
+            )
+        })
     }
 
     /// The same, for code already on a blocking thread (tests, startup).
@@ -167,7 +177,10 @@ impl Shared {
     /// Argon2id is deliberately slow, and holding the lock across it would
     /// make every guess a stall of the whole daemon. Runs on the blocking
     /// pool on a second, read-only handle to the same database.
-    pub async fn verify_passphrase(self: &Arc<Self>, passphrase: av_core::secret::SecretString) -> bool {
+    pub async fn verify_passphrase(
+        self: &Arc<Self>,
+        passphrase: av_core::secret::SecretString,
+    ) -> bool {
         let me = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
             let mut side = me.verifier.lock().unwrap_or_else(|p| p.into_inner());

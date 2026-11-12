@@ -11,8 +11,8 @@ use serde_json::{json, Map, Value};
 use crate::err::{d, dr, DenyExt, C};
 use crate::state::{Core, StoreResult};
 use crate::util::{
-    as_finite, as_integer, ct_eq, iso_now, js_number, js_string, js_stringify, js_stringify_keys, now_ms, num,
-    parse_iso_ms, random_b64url, sha256_hex,
+    as_finite, as_integer, ct_eq, iso_now, js_number, js_string, js_stringify, js_stringify_keys,
+    now_ms, num, parse_iso_ms, random_b64url, sha256_hex,
 };
 
 /// Session requests pending at once. Ports `MAX_PENDING`.
@@ -102,12 +102,22 @@ pub fn overrides_problem(input: Option<&Value>) -> Option<String> {
         .filter(|k| !FIELDS.contains(&k.as_str()) && !OWNER_FIELDS.contains(&k.as_str()))
         .map(|k| js_stringify(&Value::from(k.clone())))
         .collect();
-    (!unread.is_empty()).then(|| format!("a decision cannot narrow {}; nothing was decided", unread.join(", ")))
+    (!unread.is_empty()).then(|| {
+        format!(
+            "a decision cannot narrow {}; nothing was decided",
+            unread.join(", ")
+        )
+    })
 }
 
 /// `shapeOf(p)`: `{ fields, counts }`.
 pub fn shape_of(p: &Value) -> Value {
-    let fields: Vec<&str> = FIELDS.iter().chain(OWNER_FIELDS.iter()).copied().filter(|f| set(p, f)).collect();
+    let fields: Vec<&str> = FIELDS
+        .iter()
+        .chain(OWNER_FIELDS.iter())
+        .copied()
+        .filter(|f| set(p, f))
+        .collect();
     let mut counts = Map::new();
     for f in &fields {
         if let Some(a) = p.get(*f).and_then(Value::as_array) {
@@ -141,7 +151,8 @@ fn readable(g: &Value) -> bool {
     }
     if set(g, "routes") {
         let ok = g["routes"].as_array().is_some_and(|rs| {
-            rs.iter().all(|r| crate::util::truthy(r) && r.get("methods").is_some_and(names))
+            rs.iter()
+                .all(|r| crate::util::truthy(r) && r.get("methods").is_some_and(names))
         });
         if !ok {
             return false;
@@ -152,7 +163,14 @@ fn readable(g: &Value) -> bool {
 
 fn permits_write(g: &Value) -> bool {
     let mut named: Vec<String> = if set(g, "methods") {
-        g["methods"].as_array().map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default()
+        g["methods"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
     } else {
         vec!["GET".into(), "HEAD".into()]
     };
@@ -163,7 +181,9 @@ fn permits_write(g: &Value) -> bool {
             }
         }
     }
-    named.iter().any(|m| !["GET", "HEAD", "OPTIONS"].contains(&m.to_uppercase().as_str()))
+    named
+        .iter()
+        .any(|m| !["GET", "HEAD", "OPTIONS"].contains(&m.to_uppercase().as_str()))
 }
 
 /// `elevationOf(spec)`: why a session spec needs fresh presence. Fail-closed.
@@ -185,8 +205,16 @@ pub fn elevation_of(spec: &Value) -> Vec<String> {
         Some(Value::Array(a)) => a.clone(),
         _ => vec![spec.clone()],
     };
-    let unasked = |g: &Value| matches!(g.get("approval").and_then(Value::as_str), Some("auto") | Some("first-use"));
-    if grants.iter().any(|g| !readable(g) || (unasked(g) && permits_write(g))) {
+    let unasked = |g: &Value| {
+        matches!(
+            g.get("approval").and_then(Value::as_str),
+            Some("auto") | Some("first-use")
+        )
+    };
+    if grants
+        .iter()
+        .any(|g| !readable(g) || (unasked(g) && permits_write(g)))
+    {
         out.push("approval_auto_writes".into());
     }
     out
@@ -194,7 +222,10 @@ pub fn elevation_of(spec: &Value) -> Vec<String> {
 
 /// `fingerprint(proposal)`.
 pub fn fingerprint(proposal: &Value) -> String {
-    let mut keys: Vec<String> = proposal.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let mut keys: Vec<String> = proposal
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
     keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
     sha256_hex(js_stringify_keys(proposal, &keys).as_bytes())[..16].to_string()
 }
@@ -237,7 +268,13 @@ pub fn summarize(p: &Value) -> String {
     if let Some(Value::Array(routes)) = p.get("routes") {
         let rs: Vec<String> = routes
             .iter()
-            .map(|r| format!("{} {}", list_of(r.get("methods"), &[]).join(","), list_of(r.get("paths"), &[]).join(" ")))
+            .map(|r| {
+                format!(
+                    "{} {}",
+                    list_of(r.get("methods"), &[]).join(","),
+                    list_of(r.get("paths"), &[]).join(" ")
+                )
+            })
             .collect();
         bits.push(format!("routes {}", rs.join(" | ")));
     }
@@ -283,71 +320,157 @@ pub fn summarize(p: &Value) -> String {
 pub type BudgetDefault<'a> = &'a dyn Fn(&Value) -> Option<u64>;
 
 fn is_names(v: &Value) -> bool {
-    v.as_array().is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())))
+    v.as_array()
+        .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())))
 }
 
 /// `resolveTemplate(template, overrides, { budgetDefault })`: narrowing only.
-pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default: Option<BudgetDefault<'_>>) -> Result<Value, VaultError> {
+pub fn resolve_template(
+    template_spec: &Value,
+    overrides: &Value,
+    budget_default: Option<BudgetDefault<'_>>,
+) -> Result<Value, VaultError> {
     let refuse = |detail: &str, rule: &str| {
-        dr(C::PolicyDenied, detail, rule).hinted(format!("A template can only be narrowed. Overrides are: {}.", TEMPLATE_OVERRIDES.join(", ")))
+        dr(C::PolicyDenied, detail, rule).hinted(format!(
+            "A template can only be narrowed. Overrides are: {}.",
+            TEMPLATE_OVERRIDES.join(", ")
+        ))
     };
     if !template_spec.is_object() {
-        return Err(refuse("that template has no readable spec", "session_shape"));
+        return Err(refuse(
+            "that template has no readable spec",
+            "session_shape",
+        ));
     }
     let Value::Object(o) = overrides else {
         return Err(refuse("overrides must be an object", "template_override"));
     };
     for k in o.keys() {
         if !TEMPLATE_OVERRIDES.contains(&k.as_str()) {
-            return Err(refuse(&format!("a template cannot be overridden with {k}"), "template_override"));
+            return Err(refuse(
+                &format!("a template cannot be overridden with {k}"),
+                "template_override",
+            ));
         }
     }
     let has = |k: &str| o.get(k).is_some();
     let mut spec = template_spec.clone();
     let single = spec.get("grants").is_none();
     {
-        let grants_ok = if single { true } else { spec["grants"].as_array().is_some_and(|a| a.iter().all(Value::is_object)) };
+        let grants_ok = if single {
+            true
+        } else {
+            spec["grants"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(Value::is_object))
+        };
         if !grants_ok {
-            return Err(refuse("the template's grants cannot be read", "session_shape"));
+            return Err(refuse(
+                "the template's grants cannot be read",
+                "session_shape",
+            ));
         }
     }
     if has("methods") && !is_names(&o["methods"]) {
-        return Err(refuse("methods must be a list of method names", "policy_invalid"));
+        return Err(refuse(
+            "methods must be a list of method names",
+            "policy_invalid",
+        ));
     }
     if has("paths") && !is_names(&o["paths"]) {
-        return Err(refuse("paths must be a list of path globs", "policy_invalid"));
+        return Err(refuse(
+            "paths must be a list of path globs",
+            "policy_invalid",
+        ));
     }
-    if has("approval") && !o["approval"].as_str().is_some_and(|a| APPROVAL_MODES.contains(&a)) {
-        return Err(dr(C::PolicyDenied, "approval is not one of the four modes", "approval").hinted("approval is one of: each, on-write, first-use, auto"));
+    if has("approval")
+        && !o["approval"]
+            .as_str()
+            .is_some_and(|a| APPROVAL_MODES.contains(&a))
+    {
+        return Err(dr(
+            C::PolicyDenied,
+            "approval is not one of the four modes",
+            "approval",
+        )
+        .hinted("approval is one of: each, on-write, first-use, auto"));
     }
-    let budget = if has("budget") { policy::budget_integer(&o["budget"]) } else { None };
+    let budget = if has("budget") {
+        policy::budget_integer(&o["budget"])
+    } else {
+        None
+    };
     if has("budget") && budget.is_none() {
-        return Err(refuse("budget must be a whole number of requests, 0 or more", "policy_invalid"));
+        return Err(refuse(
+            "budget must be a whole number of requests, 0 or more",
+            "policy_invalid",
+        ));
     }
     for k in ["uses", "grant_ttl_minutes"] {
-        if has(k) && !o[k].as_i64().filter(|n| *n >= 1).is_some() && !as_integer(&o[k]).is_some_and(|n| n >= 1) {
-            return Err(refuse(&format!("{k} must be a whole number, 1 or more"), if k == "uses" { "policy_invalid" } else { "grant_ttl" }));
+        if has(k)
+            && !o[k].as_i64().filter(|n| *n >= 1).is_some()
+            && !as_integer(&o[k]).is_some_and(|n| n >= 1)
+        {
+            return Err(refuse(
+                &format!("{k} must be a whole number, 1 or more"),
+                if k == "uses" {
+                    "policy_invalid"
+                } else {
+                    "grant_ttl"
+                },
+            ));
         }
     }
-    let grant_count = if single { 1 } else { spec["grants"].as_array().map_or(0, Vec::len) };
+    let grant_count = if single {
+        1
+    } else {
+        spec["grants"].as_array().map_or(0, Vec::len)
+    };
     for i in 0..grant_count {
-        let g: &mut Value = if single { &mut spec } else { &mut spec["grants"][i] };
+        let g: &mut Value = if single {
+            &mut spec
+        } else {
+            &mut spec["grants"][i]
+        };
         if has("methods") {
-            let base = if set(g, "methods") { g["methods"].clone() } else { json!(["GET", "HEAD"]) };
+            let base = if set(g, "methods") {
+                g["methods"].clone()
+            } else {
+                json!(["GET", "HEAD"])
+            };
             if !is_names(&base) {
-                return Err(refuse("the template's methods cannot be read", "policy_invalid"));
+                return Err(refuse(
+                    "the template's methods cannot be read",
+                    "policy_invalid",
+                ));
             }
             let base: Vec<Value> = base.as_array().cloned().unwrap_or_default();
-            let kept: Vec<Value> = o["methods"].as_array().map(|a| a.iter().filter(|m| base.contains(m)).cloned().collect()).unwrap_or_default();
+            let kept: Vec<Value> = o["methods"]
+                .as_array()
+                .map(|a| a.iter().filter(|m| base.contains(m)).cloned().collect())
+                .unwrap_or_default();
             g["methods"] = Value::Array(kept);
         }
         if has("paths") {
-            let base = if set(g, "paths") { g["paths"].clone() } else { json!(["/**"]) };
+            let base = if set(g, "paths") {
+                g["paths"].clone()
+            } else {
+                json!(["/**"])
+            };
             if !is_names(&base) {
-                return Err(refuse("the template's paths cannot be read", "policy_invalid"));
+                return Err(refuse(
+                    "the template's paths cannot be read",
+                    "policy_invalid",
+                ));
             }
-            let a = Policy { paths: Some(Checked::Valid(strings(&base))), ..Default::default() };
-            let b = Policy { paths: Some(Checked::Valid(strings(&o["paths"]))), ..Default::default() };
+            let a = Policy {
+                paths: Some(Checked::Valid(strings(&base))),
+                ..Default::default()
+            };
+            let b = Policy {
+                paths: Some(Checked::Valid(strings(&o["paths"]))),
+                ..Default::default()
+            };
             let both = policy::intersect(&[Some(&a), Some(&b)]);
             g["paths"] = serde_json::to_value(&both.paths).unwrap_or(Value::Null);
         }
@@ -357,10 +480,16 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
                 let dflt = budget_default.and_then(|f| f(g));
                 match dflt {
                     Some(n) => base = Some(Value::from(n)),
-                    None => return Err(refuse("this template names no budget to narrow", "policy_invalid")),
+                    None => {
+                        return Err(refuse(
+                            "this template names no budget to narrow",
+                            "policy_invalid",
+                        ))
+                    }
                 }
             }
-            let base_int = policy::budget_integer(base.as_ref().expect("base")).ok_or_else(|| refuse("the template's budget cannot be read", "policy_invalid"))?;
+            let base_int = policy::budget_integer(base.as_ref().expect("base"))
+                .ok_or_else(|| refuse("the template's budget cannot be read", "policy_invalid"))?;
             g["budget"] = Value::from(base_int.min(budget.expect("budget")));
         }
         for k in ["uses", "grant_ttl_minutes"] {
@@ -368,7 +497,10 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
                 continue;
             }
             if set(g, k) && !as_integer(&g[k]).is_some_and(|n| n >= 1) {
-                return Err(refuse(&format!("the template's {k} cannot be read"), "policy_invalid"));
+                return Err(refuse(
+                    &format!("the template's {k} cannot be read"),
+                    "policy_invalid",
+                ));
             }
             let ov = as_integer(&o[k]).unwrap_or(1);
             g[k] = Value::from(match g.get(k).and_then(as_integer) {
@@ -377,17 +509,27 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
             });
         }
         if has("approval") {
-            let base = g.get("approval").and_then(Value::as_str).unwrap_or("on-write").to_string();
+            let base = g
+                .get("approval")
+                .and_then(Value::as_str)
+                .unwrap_or("on-write")
+                .to_string();
             let base_raw = g.get("approval").filter(|v| !v.is_null()).cloned();
             let order = policy::APPROVAL_ORDER;
             let ov = o["approval"].as_str().unwrap_or("each");
-            let known = base_raw.as_ref().map_or(true, |b| b.as_str().is_some_and(|s| order.contains(&s)));
+            let known = base_raw
+                .as_ref()
+                .is_none_or(|b| b.as_str().is_some_and(|s| order.contains(&s)));
             g["approval"] = Value::from(if !known {
                 "each".to_string()
             } else {
                 let bi = order.iter().position(|m| *m == base).unwrap_or(0);
                 let oi = order.iter().position(|m| *m == ov).unwrap_or(0);
-                if oi > bi { ov.to_string() } else { base }
+                if oi > bi {
+                    ov.to_string()
+                } else {
+                    base
+                }
             });
         }
     }
@@ -396,7 +538,10 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
             return Err(refuse("infinite is true or false", "ttl"));
         };
         if inf && spec.get("infinite") != Some(&Value::Bool(true)) {
-            return Err(refuse("an override cannot remove a template's lifetime", "template_override"));
+            return Err(refuse(
+                "an override cannot remove a template's lifetime",
+                "template_override",
+            ));
         }
         if !inf {
             if let Some(m) = spec.as_object_mut() {
@@ -406,7 +551,11 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
     }
     if has("ttl_hours") {
         let Some(ov) = as_finite(&o["ttl_hours"]).filter(|h| *h > 0.0) else {
-            return Err(dr(C::PolicyDenied, "ttl_hours must be a positive number of hours", "ttl"));
+            return Err(dr(
+                C::PolicyDenied,
+                "ttl_hours must be a positive number of hours",
+                "ttl",
+            ));
         };
         if spec.get("infinite") == Some(&Value::Bool(true)) {
             if let Some(m) = spec.as_object_mut() {
@@ -425,9 +574,14 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
         }
     }
     if has("label") {
-        let ok = o["label"].as_str().is_some_and(|l| l.encode_utf16().count() <= 80);
+        let ok = o["label"]
+            .as_str()
+            .is_some_and(|l| l.encode_utf16().count() <= 80);
         if !ok {
-            return Err(refuse("label is a string of at most 80 characters", "policy_invalid"));
+            return Err(refuse(
+                "label is a string of at most 80 characters",
+                "policy_invalid",
+            ));
         }
         spec["label"] = o["label"].clone();
     }
@@ -435,7 +589,13 @@ pub fn resolve_template(template_spec: &Value, overrides: &Value, budget_default
 }
 
 fn strings(v: &Value) -> Vec<String> {
-    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `grantSpecsOf(spec)`.
@@ -452,7 +612,10 @@ pub fn grant_specs_of(spec: &Value) -> Vec<Value> {
 
 /// `templateCreds(spec)`.
 pub fn template_creds(spec: &Value) -> Vec<String> {
-    grant_specs_of(spec).iter().filter_map(|g| g.get("cred").and_then(Value::as_str).map(str::to_string)).collect()
+    grant_specs_of(spec)
+        .iter()
+        .filter_map(|g| g.get("cred").and_then(Value::as_str).map(str::to_string))
+        .collect()
 }
 
 /// `templateSummary(spec)`.
@@ -467,7 +630,9 @@ pub fn template_summary(spec: &Value) -> String {
                 m.remove("infinite");
             }
             match spec.get("ttl_hours").and_then(Value::as_f64) {
-                Some(h) if spec["ttl_hours"].is_number() => x["ttl_minutes"] = num((h * 60.0 + 0.5).floor()),
+                Some(h) if spec["ttl_hours"].is_number() => {
+                    x["ttl_minutes"] = num((h * 60.0 + 0.5).floor())
+                }
                 _ => {
                     if let Some(m) = x.as_object_mut() {
                         m.remove("ttl_minutes");
@@ -540,11 +705,16 @@ impl SrRecord {
 
     /// `SessionRequests.mayCollect(record, secret)`.
     pub fn may_collect(&self, secret: Option<&str>) -> bool {
-        let Some(secret) = secret.filter(|s| !s.is_empty()) else { return false };
+        let Some(secret) = secret.filter(|s| !s.is_empty()) else {
+            return false;
+        };
         if self.collect_hash.is_empty() {
             return false;
         }
-        ct_eq(self.collect_hash.as_bytes(), sha256_hex(secret.as_bytes()).as_bytes())
+        ct_eq(
+            self.collect_hash.as_bytes(),
+            sha256_hex(secret.as_bytes()).as_bytes(),
+        )
     }
 }
 
@@ -587,7 +757,12 @@ impl SessionRequestStore {
     }
 
     fn snapshot(&self) -> String {
-        let keep: Vec<Value> = self.items.iter().filter_map(SrRecord::stored).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect();
+        let keep: Vec<Value> = self
+            .items
+            .iter()
+            .filter_map(SrRecord::stored)
+            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+            .collect();
         js_stringify(&Value::Array(keep))
     }
 
@@ -604,7 +779,8 @@ impl Core {
         if self.sr.saved.as_deref() == Some(now.as_str()) {
             return;
         }
-        let rows: Vec<SessionRequestRecord> = self.sr.items.iter().filter_map(SrRecord::stored).collect();
+        let rows: Vec<SessionRequestRecord> =
+            self.sr.items.iter().filter_map(SrRecord::stored).collect();
         if self.vault.save_session_requests(&rows).is_ok() {
             self.sr.saved = Some(now);
         }
@@ -612,18 +788,28 @@ impl Core {
 
     fn sr_sweep(&mut self) {
         let now = now_ms();
-        let before: Vec<(String, String)> = self.sr.items.iter().map(|r| (r.id.clone(), r.state.clone())).collect();
+        let before: Vec<(String, String)> = self
+            .sr
+            .items
+            .iter()
+            .map(|r| (r.id.clone(), r.state.clone()))
+            .collect();
         let mut uncollected = Vec::new();
         self.sr.items.retain_mut(|r| {
             let age = now - parse_iso_ms(&r.created_at).unwrap_or(0);
             if r.state == "pending" && age > PENDING_TTL_MS as i64 {
                 return false;
             }
-            let settled_for = now - parse_iso_ms(r.decided_at.as_deref().unwrap_or(&r.created_at)).unwrap_or(0);
+            let settled_for =
+                now - parse_iso_ms(r.decided_at.as_deref().unwrap_or(&r.created_at)).unwrap_or(0);
             if r.state != "pending" && r.result.is_none() && settled_for > SETTLED_TTL_MS as i64 {
                 return false;
             }
-            if r.state == "approved" && r.result.is_some() && now - parse_iso_ms(r.decided_at.as_deref().unwrap_or("")).unwrap_or(0) > COLLECT_TTL_MS as i64 {
+            if r.state == "approved"
+                && r.result.is_some()
+                && now - parse_iso_ms(r.decided_at.as_deref().unwrap_or("")).unwrap_or(0)
+                    > COLLECT_TTL_MS as i64
+            {
                 r.result = None;
                 r.state = "expired".into();
                 uncollected.push(r.id.clone());
@@ -633,7 +819,12 @@ impl Core {
         for id in uncollected {
             self.audit_opt("session_request.uncollected", json!({"request_id": id}));
         }
-        let after: Vec<(String, String)> = self.sr.items.iter().map(|r| (r.id.clone(), r.state.clone())).collect();
+        let after: Vec<(String, String)> = self
+            .sr
+            .items
+            .iter()
+            .map(|r| (r.id.clone(), r.state.clone()))
+            .collect();
         if before != after {
             self.sr_save();
         }
@@ -641,18 +832,36 @@ impl Core {
 
     /// `SessionRequests.propose({ proposal, reason, fromTemplate })`:
     /// returns the record and the one-time collect secret.
-    pub fn sr_propose(&mut self, proposal: Value, reason: Option<String>, from_template: bool) -> Result<(SrRecord, String), VaultError> {
+    pub fn sr_propose(
+        &mut self,
+        proposal: Value,
+        reason: Option<String>,
+        from_template: bool,
+    ) -> Result<(SrRecord, String), VaultError> {
         let templated = from_template && proposal.get("template").is_some_and(Value::is_string);
         if !templated && OWNER_FIELDS.iter().any(|f| proposal.get(*f).is_some()) {
-            return Err(d(C::OwnerOnly, "only the owner can choose the approval mode or an unlimited lifetime"));
+            return Err(d(
+                C::OwnerOnly,
+                "only the owner can choose the approval mode or an unlimited lifetime",
+            ));
         }
         self.sr_sweep();
-        let waiting = self.sr.items.iter().filter(|r| r.state == "pending").count();
+        let waiting = self
+            .sr
+            .items
+            .iter()
+            .filter(|r| r.state == "pending")
+            .count();
         if waiting >= MAX_PENDING {
-            return Err(d(C::TooManyRequests, "too many session requests are already waiting"));
+            return Err(d(
+                C::TooManyRequests,
+                "too many session requests are already waiting",
+            ));
         }
         while self.sr.items.len() >= MAX_ITEMS {
-            let Some(pos) = self.sr.items.iter().position(|r| r.state != "pending") else { break };
+            let Some(pos) = self.sr.items.iter().position(|r| r.state != "pending") else {
+                break;
+            };
             self.sr.items.remove(pos);
         }
         let secret = random_b64url(24);
@@ -704,7 +913,12 @@ impl Core {
     /// `SessionRequests.pending()`.
     pub fn sr_pending(&mut self) -> Vec<SrRecord> {
         self.sr_sweep();
-        self.sr.items.iter().filter(|r| r.state == "pending").cloned().collect()
+        self.sr
+            .items
+            .iter()
+            .filter(|r| r.state == "pending")
+            .cloned()
+            .collect()
     }
 }
 
@@ -720,17 +934,32 @@ mod tests {
     #[test]
     fn summary_reads_like_the_js() {
         let p = json!({"cred": "gh", "methods": ["GET", "POST"], "budget": 5, "ttl_minutes": 30});
-        assert_eq!(summarize(&p), "session for gh · GET,POST · /** · 5 requests · 30m");
+        assert_eq!(
+            summarize(&p),
+            "session for gh · GET,POST · /** · 5 requests · 30m"
+        );
         let p = json!({"cred": "gh", "rate": {"count": 2, "per": "minute"}, "template": "t", "template_version": 3});
-        assert_eq!(summarize(&p), "template t v3 · session for gh · GET · /** · rate 2/minute");
+        assert_eq!(
+            summarize(&p),
+            "template t v3 · session for gh · GET · /** · rate 2/minute"
+        );
     }
 
     #[test]
     fn elevation_is_fail_closed() {
-        assert_eq!(elevation_of(&json!({"cred": "a", "approval": "auto", "methods": ["POST"]})), vec!["approval_auto_writes"]);
+        assert_eq!(
+            elevation_of(&json!({"cred": "a", "approval": "auto", "methods": ["POST"]})),
+            vec!["approval_auto_writes"]
+        );
         assert!(elevation_of(&json!({"cred": "a", "approval": "auto"})).is_empty());
-        assert_eq!(elevation_of(&json!({"cred": "a", "methods": "GET"})), vec!["approval_auto_writes"]);
-        assert_eq!(elevation_of(&json!({"infinite": true, "grants": 1})), vec!["infinite", "approval_auto_writes"]);
+        assert_eq!(
+            elevation_of(&json!({"cred": "a", "methods": "GET"})),
+            vec!["approval_auto_writes"]
+        );
+        assert_eq!(
+            elevation_of(&json!({"infinite": true, "grants": 1})),
+            vec!["infinite", "approval_auto_writes"]
+        );
         assert_eq!(elevation_of(&json!(null)), vec!["approval_auto_writes"]);
     }
 
@@ -744,11 +973,18 @@ mod tests {
     #[test]
     fn templates_only_narrow() {
         let spec = json!({"cred": "gh", "methods": ["GET", "POST"], "budget": 10, "ttl_hours": 4});
-        let out = resolve_template(&spec, &json!({"methods": ["GET", "DELETE"], "budget": 50, "ttl_hours": 12}), None).unwrap();
+        let out = resolve_template(
+            &spec,
+            &json!({"methods": ["GET", "DELETE"], "budget": 50, "ttl_hours": 12}),
+            None,
+        )
+        .unwrap();
         assert_eq!(out["methods"], json!(["GET"]));
         assert_eq!(out["budget"], json!(10));
         assert_eq!(out["ttl_hours"], json!(4));
         assert!(resolve_template(&spec, &json!({"hosts": ["x"]}), None).is_err());
-        assert!(resolve_template(&json!({"cred": "gh"}), &json!({"infinite": true}), None).is_err());
+        assert!(
+            resolve_template(&json!({"cred": "gh"}), &json!({"infinite": true}), None).is_err()
+        );
     }
 }

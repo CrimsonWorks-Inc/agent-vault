@@ -26,7 +26,11 @@ pub fn decompress_capped(buf: &[u8], encoding: &str, cap: usize) -> Result<Vec<u
         "gzip" | "x-gzip" => Box::new(flate2::read::MultiGzDecoder::new(buf)),
         "deflate" => Box::new(flate2::read::ZlibDecoder::new(buf)),
         "br" => Box::new(brotli_decompressor::Decompressor::new(buf, 4096)),
-        "zstd" => return Err(DecodeError("zstd is not supported by this Node build".into())),
+        "zstd" => {
+            return Err(DecodeError(
+                "zstd is not supported by this Node build".into(),
+            ))
+        }
         other => return Err(DecodeError(format!("unknown content-encoding {other}"))),
     };
     read_capped(reader, cap)
@@ -40,7 +44,9 @@ fn read_capped(reader: impl Read, cap: usize) -> Result<Vec<u8>, DecodeError> {
         .read_to_end(&mut out)
         .map_err(|e| DecodeError(e.to_string()))?;
     if out.len() > cap {
-        return Err(DecodeError("Cannot create a Buffer larger than maxOutputLength".into()));
+        return Err(DecodeError(
+            "Cannot create a Buffer larger than maxOutputLength".into(),
+        ));
     }
     Ok(out)
 }
@@ -62,7 +68,7 @@ pub struct StreamDecoder {
 enum Inner {
     Gzip(flate2::write::MultiGzDecoder<Vec<u8>>),
     Deflate(flate2::write::ZlibDecoder<Vec<u8>>),
-    Brotli(brotli_decompressor::DecompressorWriter<Vec<u8>>),
+    Brotli(Box<brotli_decompressor::DecompressorWriter<Vec<u8>>>),
 }
 
 impl StreamDecoder {
@@ -71,10 +77,17 @@ impl StreamDecoder {
         let inner = match encoding {
             "gzip" | "x-gzip" => Inner::Gzip(flate2::write::MultiGzDecoder::new(Vec::new())),
             "deflate" => Inner::Deflate(flate2::write::ZlibDecoder::new(Vec::new())),
-            "br" => Inner::Brotli(brotli_decompressor::DecompressorWriter::new(Vec::new(), 4096)),
+            "br" => Inner::Brotli(Box::new(brotli_decompressor::DecompressorWriter::new(
+                Vec::new(),
+                4096,
+            ))),
             _ => return None,
         };
-        Some(StreamDecoder { inner, cap, total: 0 })
+        Some(StreamDecoder {
+            inner,
+            cap,
+            total: 0,
+        })
     }
 
     fn take(&mut self) -> Vec<u8> {
@@ -145,7 +158,10 @@ mod tests {
         assert!(bomb.len() < 16 * 1024, "the bomb is small: {}", bomb.len());
         assert!(decompress_capped(&bomb, "gzip", 1024 * 1024).is_err());
         let ok = gzip(b"{\"ok\":true}");
-        assert_eq!(decompress_capped(&ok, "gzip", 1024 * 1024).unwrap(), b"{\"ok\":true}");
+        assert_eq!(
+            decompress_capped(&ok, "gzip", 1024 * 1024).unwrap(),
+            b"{\"ok\":true}"
+        );
     }
 
     #[test]
@@ -168,7 +184,10 @@ mod tests {
     }
 
     fn unhex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // Made with Node's zlib.brotliCompressSync: 4 MiB of 'a' in 14 bytes, and
@@ -177,7 +196,12 @@ mod tests {
     fn hardening_brotli_bomb_is_refused_and_ordinary_body_decodes() {
         let bomb = unhex("9bffff3ff825c2e2b14020f7fe07");
         assert!(decompress_capped(&bomb, "br", 1024 * 1024).is_err());
-        assert_eq!(decompress_capped(&bomb, "br", 8 * 1024 * 1024).unwrap().len(), 4 * 1024 * 1024);
+        assert_eq!(
+            decompress_capped(&bomb, "br", 8 * 1024 * 1024)
+                .unwrap()
+                .len(),
+            4 * 1024 * 1024
+        );
         let ok = unhex("0b05807b226f6b223a747275657d03");
         assert_eq!(decompress(&ok, "br").unwrap(), b"{\"ok\":true}");
         let mut d = StreamDecoder::new("br", 1024 * 1024).unwrap();
@@ -192,7 +216,10 @@ mod tests {
 
     #[test]
     fn zstd_and_unknown_encodings_are_refused() {
-        assert_eq!(decompress(b"x", "zstd").unwrap_err().0, "zstd is not supported by this Node build");
+        assert_eq!(
+            decompress(b"x", "zstd").unwrap_err().0,
+            "zstd is not supported by this Node build"
+        );
         assert!(stream_decoder("zstd").is_none());
         assert!(decompress(b"x", "compress").is_err());
     }

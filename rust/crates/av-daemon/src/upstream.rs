@@ -108,7 +108,10 @@ pub struct UpstreamResponse {
 impl UpstreamResponse {
     /// The first header named `name` (lower-case).
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -127,7 +130,7 @@ pub struct UpstreamError {
     /// Pin refusals: the SPKI pins the peer presented.
     pub presented: Vec<String>,
     /// A refusal the connector made before connecting.
-    pub vault: Option<VaultError>,
+    pub vault: Option<Box<VaultError>>,
 }
 
 impl UpstreamError {

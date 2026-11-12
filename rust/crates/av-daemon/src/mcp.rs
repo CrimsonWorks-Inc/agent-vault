@@ -36,7 +36,18 @@ On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry. \
 On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives. \
 Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access.";
 /// What `vault_request_session` forwards.
-pub const REQUEST_ARGS: [&str; 10] = ["cred", "methods", "paths", "budget", "uses", "ttl_minutes", "routes", "grant_ttl_minutes", "template", "reason"];
+pub const REQUEST_ARGS: [&str; 10] = [
+    "cred",
+    "methods",
+    "paths",
+    "budget",
+    "uses",
+    "ttl_minutes",
+    "routes",
+    "grant_ttl_minutes",
+    "template",
+    "reason",
+];
 /// Largest tool-call body `vault_http` returns, in characters.
 pub const MAX_TOOL_BODY: usize = 256 * 1024;
 
@@ -98,7 +109,14 @@ fn error_text(v: Value) -> Value {
 /// `#refusal(e)`.
 fn refusal(e: &VaultError) -> Value {
     let mut body = Map::new();
-    body.insert("error".into(), Value::from(if e.detail.is_empty() { e.to_string() } else { e.detail.clone() }));
+    body.insert(
+        "error".into(),
+        Value::from(if e.detail.is_empty() {
+            e.to_string()
+        } else {
+            e.detail.clone()
+        }),
+    );
     body.insert("code".into(), e.code.as_str().into());
     if let Some(r) = rule_of(e) {
         body.insert("rule".into(), r.into());
@@ -128,13 +146,22 @@ pub struct McpServer {
 }
 
 fn lctx(l: Option<&ListenerInfo>) -> Option<ListenerContext> {
-    l.map(|l| ListenerContext { id: Some(l.id.clone()), kind: Some(l.kind.clone()), remote: l.remote })
+    l.map(|l| ListenerContext {
+        id: Some(l.id.clone()),
+        kind: Some(l.kind.clone()),
+        remote: l.remote,
+    })
 }
 
 impl McpServer {
     /// Ports `new McpServer(vault, pipeline, resolveSession, daemon)`.
     pub fn new(shared: VaultRef, pipeline: Arc<Pipeline>) -> McpServer {
-        McpServer { shared, pipeline, daemon: Mutex::new(Weak::new()), transport: Mutex::new(Transport::default()) }
+        McpServer {
+            shared,
+            pipeline,
+            daemon: Mutex::new(Weak::new()),
+            transport: Mutex::new(Transport::default()),
+        }
     }
 
     /// The daemon that owns the session-request store.
@@ -143,7 +170,10 @@ impl McpServer {
     }
 
     fn daemon(&self) -> Option<Arc<Daemon>> {
-        self.daemon.lock().unwrap_or_else(|p| p.into_inner()).upgrade()
+        self.daemon
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
     }
 
     /// `openSession({ record })`.
@@ -158,7 +188,10 @@ impl McpServer {
         }
         if record {
             let s = sid.clone();
-            let _ = self.shared.run(move |core| core.audit_opt("mcp.session_opened", json!({"mcp_session_id": s}))).await;
+            let _ = self
+                .shared
+                .run(move |core| core.audit_opt("mcp.session_opened", json!({"mcp_session_id": s})))
+                .await;
         }
         sid
     }
@@ -167,19 +200,32 @@ impl McpServer {
     pub async fn close_session(&self, sid: &str, record: bool) -> bool {
         let entry = {
             let mut t = self.transport.lock().unwrap_or_else(|p| p.into_inner());
-            t.sessions.iter().position(|(s, _)| s == sid).map(|i| t.sessions.remove(i))
+            t.sessions
+                .iter()
+                .position(|(s, _)| s == sid)
+                .map(|i| t.sessions.remove(i))
         };
-        let Some((_, recorded)) = entry else { return false };
+        let Some((_, recorded)) = entry else {
+            return false;
+        };
         if recorded || record {
             let s = sid.to_string();
-            let _ = self.shared.run(move |core| core.audit_opt("mcp.session_closed", json!({"mcp_session_id": s}))).await;
+            let _ = self
+                .shared
+                .run(move |core| core.audit_opt("mcp.session_closed", json!({"mcp_session_id": s})))
+                .await;
         }
         true
     }
 
     /// `hasSession(sid)`.
     pub fn has_session(&self, sid: &str) -> bool {
-        self.transport.lock().unwrap_or_else(|p| p.into_inner()).sessions.iter().any(|(s, _)| s == sid)
+        self.transport
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .sessions
+            .iter()
+            .any(|(s, _)| s == sid)
     }
 
     /// The `tools/list` array.
@@ -189,11 +235,20 @@ impl McpServer {
 
     /// Handle one JSON-RPC message; `None` for a notification. Ports
     /// `handle(message, forSession, forToken, forListener)`.
-    pub async fn handle(&self, message: Value, session: Option<SessionRecord>, token: Option<String>, listener: Option<ListenerInfo>) -> Option<Value> {
+    pub async fn handle(
+        &self,
+        message: Value,
+        session: Option<SessionRecord>,
+        token: Option<String>,
+        listener: Option<ListenerInfo>,
+    ) -> Option<Value> {
         let id = message.get("id").cloned();
         let method = message.get("method").cloned().unwrap_or(Value::Null);
         let params = message.get("params").cloned().unwrap_or(Value::Null);
-        let ok = |result: Value| id.clone().map(|id| json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        let ok = |result: Value| {
+            id.clone()
+                .map(|id| json!({"jsonrpc": "2.0", "id": id, "result": result}))
+        };
         let token = token.unwrap_or_default();
         let r: R<Option<Value>> = async {
             Ok(match method.as_str() {
@@ -249,7 +304,12 @@ impl McpServer {
     }
 
     /// `#status(session, token, listener)`.
-    async fn status(&self, session: Option<&SessionRecord>, token: &str, listener: Option<&ListenerInfo>) -> R<Value> {
+    async fn status(
+        &self,
+        session: Option<&SessionRecord>,
+        token: &str,
+        listener: Option<&ListenerInfo>,
+    ) -> R<Value> {
         let (s, t, l) = (session.cloned(), token.to_string(), listener.cloned());
         self.shared
             .run(move |core| -> R<Value> {
@@ -275,10 +335,15 @@ impl McpServer {
 
     async fn needs_session(&self, token: &str, listener: Option<&ListenerInfo>) -> R<Value> {
         let (t, l) = (token.to_string(), listener.cloned());
-        let problem = self.shared.run(move |core| session_problem(core, &t, l.as_ref(), true)).await?;
+        let problem = self
+            .shared
+            .run(move |core| session_problem(core, &t, l.as_ref(), true))
+            .await?;
         if let Some((_, Some(e))) = &problem {
             if e.code == C::RemoteForbidden {
-                return Ok(error_text(json!({"code": e.code.as_str(), "rule": rule_of(e), "detail": e.detail, "hint": e.hint()})));
+                return Ok(error_text(
+                    json!({"code": e.code.as_str(), "rule": rule_of(e), "detail": e.detail, "hint": e.hint()}),
+                ));
             }
         }
         Ok(error_text(json!({
@@ -288,11 +353,23 @@ impl McpServer {
         })))
     }
 
-    async fn call_tool(&self, name: &str, args: Value, session: Option<SessionRecord>, token: &str, listener: Option<ListenerInfo>) -> R<Value> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: Value,
+        session: Option<SessionRecord>,
+        token: &str,
+        listener: Option<ListenerInfo>,
+    ) -> R<Value> {
         match name {
-            "vault_status" => Ok(text(self.status(session.as_ref(), token, listener.as_ref()).await?)),
+            "vault_status" => Ok(text(
+                self.status(session.as_ref(), token, listener.as_ref())
+                    .await?,
+            )),
             "vault_list_creds" => {
-                let Some(s) = session else { return self.needs_session(token, listener.as_ref()).await };
+                let Some(s) = session else {
+                    return self.needs_session(token, listener.as_ref()).await;
+                };
                 let v = self
                     .shared
                     .run(move |core| -> R<Value> {
@@ -323,7 +400,9 @@ impl McpServer {
             }
             "vault_request_session" => self.request_session(args).await,
             "vault_get_placeholder" => {
-                let Some(s) = session else { return self.needs_session(token, listener.as_ref()).await };
+                let Some(s) = session else {
+                    return self.needs_session(token, listener.as_ref()).await;
+                };
                 let v = self
                     .shared
                     .run(move |core| -> R<Value> {
@@ -369,21 +448,33 @@ impl McpServer {
                 if session.is_none() {
                     return self.needs_session(token, listener.as_ref()).await;
                 }
-                let id = args.get("approval_id").map(js_string).unwrap_or_else(|| "undefined".into());
+                let id = args
+                    .get("approval_id")
+                    .map(js_string)
+                    .unwrap_or_else(|| "undefined".into());
                 match self.pipeline.approval_status(id.clone()).await {
                     Some(s) => Ok(text(s)),
-                    None => Ok(text(json!({"error": format!("no approval {id}"), "detail": "it may have expired, or already been spent"}))),
+                    None => Ok(text(
+                        json!({"error": format!("no approval {id}"), "detail": "it may have expired, or already been spent"}),
+                    )),
                 }
             }
             "vault_http" => {
-                let Some(s) = session else { return self.needs_session(token, listener.as_ref()).await };
+                let Some(s) = session else {
+                    return self.needs_session(token, listener.as_ref()).await;
+                };
                 self.vault_http(args, s, token, listener).await
             }
             "vault_explain_denial" => {
                 let sid = session.as_ref().map(|s| s.id.clone());
-                let rid = args.get("request_id").and_then(Value::as_str).map(str::to_string);
+                let rid = args
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 let explained = match &rid {
-                    Some(r) if sid.is_some() => self.pipeline.explain_denial(r.clone(), sid.clone()).await,
+                    Some(r) if sid.is_some() => {
+                        self.pipeline.explain_denial(r.clone(), sid.clone()).await
+                    }
                     _ => None,
                 };
                 let v = self
@@ -425,12 +516,25 @@ impl McpServer {
                 Ok(v)
             }
             "vault_describe_access" => {
-                let Some(s) = session else { return self.needs_session(token, listener.as_ref()).await };
+                let Some(s) = session else {
+                    return self.needs_session(token, listener.as_ref()).await;
+                };
                 let l = lctx(listener.as_ref());
                 let v = self
                     .shared
                     .run(move |core| -> R<Value> {
-                        if let Err(e) = core.vault.assert_session_usable(Some(&s), l.as_ref(), UsableOptions { peek: true, record: true }).v() {
+                        if let Err(e) = core
+                            .vault
+                            .assert_session_usable(
+                                Some(&s),
+                                l.as_ref(),
+                                UsableOptions {
+                                    peek: true,
+                                    record: true,
+                                },
+                            )
+                            .v()
+                        {
                             return Ok(refusal(&e));
                         }
                         Ok(text(describe_access(core, &s)?))
@@ -439,7 +543,9 @@ impl McpServer {
                 Ok(v)
             }
             "vault_preflight" => {
-                let Some(s) = session else { return self.needs_session(token, listener.as_ref()).await };
+                let Some(s) = session else {
+                    return self.needs_session(token, listener.as_ref()).await;
+                };
                 self.preflight(args, s, token, listener).await
             }
             other => Ok(text(json!({"error": format!("unknown tool {other}")}))),
@@ -450,7 +556,10 @@ impl McpServer {
         let daemon = self.daemon();
         if let Some(poll) = args.get("poll_id").filter(|p| crate::util::truthy(p)) {
             let poll = js_string(poll);
-            let secret = args.get("poll_secret").and_then(Value::as_str).map(str::to_string);
+            let secret = args
+                .get("poll_secret")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             return self
                 .shared
                 .run(move |core| -> R<Value> {
@@ -489,15 +598,23 @@ impl McpServer {
                 .await?;
         }
         let Some(daemon) = daemon else {
-            return Ok(text(json!({"error": "session requests are not available on this daemon"})));
+            return Ok(text(
+                json!({"error": "session requests are not available on this daemon"}),
+            ));
         };
-        let owned: Vec<&str> = OWNER_FIELDS.iter().copied().filter(|f| args.get(*f).is_some()).collect();
+        let owned: Vec<&str> = OWNER_FIELDS
+            .iter()
+            .copied()
+            .filter(|f| args.get(*f).is_some())
+            .collect();
         if !owned.is_empty() {
             return Ok(refusal(&crate::err::dr(C::PolicyDenied, format!("a session request cannot carry {}", owned.join(" or ")), "owner_only_field").hint_s(
                 "Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason.",
             )));
         }
-        if !args.get("cred").is_some_and(crate::util::truthy) && !args.get("template").is_some_and(crate::util::truthy) {
+        if !args.get("cred").is_some_and(crate::util::truthy)
+            && !args.get("template").is_some_and(crate::util::truthy)
+        {
             let v = self
                 .shared
                 .run(|core| -> R<Value> {
@@ -523,52 +640,96 @@ impl McpServer {
         }
     }
 
-    async fn vault_http(&self, args: Value, s: SessionRecord, token: &str, listener: Option<ListenerInfo>) -> R<Value> {
+    async fn vault_http(
+        &self,
+        args: Value,
+        s: SessionRecord,
+        token: &str,
+        listener: Option<ListenerInfo>,
+    ) -> R<Value> {
         let sid = s.id.clone();
         let a2 = args.clone();
         let prep = self
             .shared
-            .run(move |core| -> R<Result<(String, String, av_core::sites::Site, String), Value>> {
-                let slug = a2.get("cred").map(js_string).unwrap_or_else(|| "undefined".into());
-                let Some(cred) = core.vault.find_credential(&slug).v()? else {
-                    return Ok(Err(text(json!({"error": format!("no credential {slug}")}))));
-                };
-                let grant = match grant_for(core, &s, &cred)? {
-                    Ok(g) => g,
-                    Err(r) => return Ok(Err(r)),
-                };
-                let field = cred.fields.first().cloned().ok_or_else(|| crate::err::internal("no field"))?;
-                let site = av_core::sites::parse_site(field.sites.first().map(String::as_str).unwrap_or("")).map_err(|e| crate::err::internal(e.0))?;
-                match core.vault.issue_placeholder(IssueOptions { grant_id: grant.id.clone(), field: Some(field.name.clone()), uses: None, ttl_ms: None }).v() {
-                    Ok(i) => Ok(Ok((cred.slug.clone(), i.placeholder, site, i.row.id))),
-                    Err(e) => Ok(Err(refusal(&e))),
-                }
-            })
+            .run(
+                move |core| -> R<Result<(String, String, av_core::sites::Site, String), Value>> {
+                    let slug = a2
+                        .get("cred")
+                        .map(js_string)
+                        .unwrap_or_else(|| "undefined".into());
+                    let Some(cred) = core.vault.find_credential(&slug).v()? else {
+                        return Ok(Err(text(json!({"error": format!("no credential {slug}")}))));
+                    };
+                    let grant = match grant_for(core, &s, &cred)? {
+                        Ok(g) => g,
+                        Err(r) => return Ok(Err(r)),
+                    };
+                    let field = cred
+                        .fields
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| crate::err::internal("no field"))?;
+                    let site = av_core::sites::parse_site(
+                        field.sites.first().map(String::as_str).unwrap_or(""),
+                    )
+                    .map_err(|e| crate::err::internal(e.0))?;
+                    match core
+                        .vault
+                        .issue_placeholder(IssueOptions {
+                            grant_id: grant.id.clone(),
+                            field: Some(field.name.clone()),
+                            uses: None,
+                            ttl_ms: None,
+                        })
+                        .v()
+                    {
+                        Ok(i) => Ok(Ok((cred.slug.clone(), i.placeholder, site, i.row.id))),
+                        Err(e) => Ok(Err(refusal(&e))),
+                    }
+                },
+            )
             .await??;
         let (slug, placeholder, site, row_id) = match prep {
             Ok(x) => x,
             Err(v) => return Ok(v),
         };
         let mut headers = vec![("host".to_string(), "127.0.0.1".to_string())];
-        let user_headers: Vec<(String, String)> = args.get("headers").and_then(Value::as_object).map(|m| m.iter().map(|(k, v)| (k.clone(), js_string(v))).collect()).unwrap_or_default();
+        let user_headers: Vec<(String, String)> = args
+            .get("headers")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), js_string(v))).collect())
+            .unwrap_or_default();
         for (k, v) in &user_headers {
-            if (k.len() >= 3 && k[..3].eq_ignore_ascii_case("av-")) || k.eq_ignore_ascii_case("host") {
+            if (k.len() >= 3 && k[..3].eq_ignore_ascii_case("av-"))
+                || k.eq_ignore_ascii_case("host")
+            {
                 continue;
             }
             headers.push((k.clone(), v.clone()));
         }
-        let mut query = args.get("query").filter(|q| crate::util::truthy(q)).map(js_string).unwrap_or_default();
+        let mut query = args
+            .get("query")
+            .filter(|q| crate::util::truthy(q))
+            .map(js_string)
+            .unwrap_or_default();
         match site.kind {
             av_core::sites::SiteKind::Header => {
                 let name = site.name.clone().unwrap_or_default();
-                headers.push((name, match &site.scheme {
-                    Some(s) => format!("{s} {placeholder}"),
-                    None => placeholder.clone(),
-                }));
+                headers.push((
+                    name,
+                    match &site.scheme {
+                        Some(s) => format!("{s} {placeholder}"),
+                        None => placeholder.clone(),
+                    },
+                ));
             }
             av_core::sites::SiteKind::Query => {
                 let k = crate::util::encode_uri_component(site.key.as_deref().unwrap_or(""));
-                query = if query.is_empty() { format!("{k}={placeholder}") } else { format!("{query}&{k}={placeholder}") };
+                query = if query.is_empty() {
+                    format!("{k}={placeholder}")
+                } else {
+                    format!("{query}&{k}={placeholder}")
+                };
             }
             _ => {}
         }
@@ -576,12 +737,20 @@ impl McpServer {
         if let Some(r) = args.get("reason").filter(|r| crate::util::truthy(r)) {
             headers.push(("av-reason".into(), js_string(r)));
         }
-        let body = args.get("body").filter(|b| crate::util::truthy(b)).map(js_string);
-        let caller_type = user_headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+        let body = args
+            .get("body")
+            .filter(|b| crate::util::truthy(b))
+            .map(js_string);
+        let caller_type = user_headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
         if body.is_some() && !caller_type {
             headers.push(("content-type".into(), "application/json".into()));
         }
-        let path = format!("/p/{slug}{}", args.get("path").map_or("undefined".into(), js_string));
+        let path = format!(
+            "/p/{slug}{}",
+            args.get("path").map_or("undefined".into(), js_string)
+        );
         let mut res = self
             .pipeline
             .handle(GatewayRequest {
@@ -608,8 +777,14 @@ impl McpServer {
         let _ = self
             .shared
             .run(move |core| {
-                let live = core.vault.list_placeholders(Some(&sid)).ok().and_then(|rows| rows.into_iter().find(|r| r.id == row_id));
-                if live.is_some_and(|r| r.state == av_store::model::PlaceholderState::Active) && !core.vault.locked() {
+                let live = core
+                    .vault
+                    .list_placeholders(Some(&sid))
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|r| r.id == row_id));
+                if live.is_some_and(|r| r.state == av_store::model::PlaceholderState::Active)
+                    && !core.vault.locked()
+                {
                     let _ = core.vault.burn_placeholder(&row_id, "spent");
                 }
             })
@@ -624,47 +799,99 @@ impl McpServer {
         })))
     }
 
-    async fn preflight(&self, args: Value, s: SessionRecord, token: &str, listener: Option<ListenerInfo>) -> R<Value> {
-        let shape = |detail: &str| refusal(&crate::err::dr(C::PolicyDenied, detail, "preflight_shape"));
-        let cred = args.get("cred").and_then(Value::as_str).filter(|c| !c.is_empty());
-        let Some(cred) = cred.map(str::to_string) else { return Ok(shape("cred is a credential slug")) };
-        let method = args.get("method").and_then(Value::as_str).filter(|m| !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_alphabetic()));
-        let Some(method) = method.map(str::to_string) else { return Ok(shape("method is an HTTP method name")) };
-        let path = args.get("path").and_then(Value::as_str).filter(|p| p.starts_with('/'));
-        let Some(path) = path.map(str::to_string) else { return Ok(shape("path is the upstream path, starting with /")) };
-        if args.get("query").is_some_and(|q| !q.is_null() && !q.is_string()) {
+    async fn preflight(
+        &self,
+        args: Value,
+        s: SessionRecord,
+        token: &str,
+        listener: Option<ListenerInfo>,
+    ) -> R<Value> {
+        let shape =
+            |detail: &str| refusal(&crate::err::dr(C::PolicyDenied, detail, "preflight_shape"));
+        let cred = args
+            .get("cred")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty());
+        let Some(cred) = cred.map(str::to_string) else {
+            return Ok(shape("cred is a credential slug"));
+        };
+        let method = args.get("method").and_then(Value::as_str).filter(|m| {
+            !m.is_empty() && m.len() <= 16 && m.bytes().all(|b| b.is_ascii_alphabetic())
+        });
+        let Some(method) = method.map(str::to_string) else {
+            return Ok(shape("method is an HTTP method name"));
+        };
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| p.starts_with('/'));
+        let Some(path) = path.map(str::to_string) else {
+            return Ok(shape("path is the upstream path, starting with /"));
+        };
+        if args
+            .get("query")
+            .is_some_and(|q| !q.is_null() && !q.is_string())
+        {
             return Ok(shape("query is a string"));
         }
-        if args.get("body").is_some_and(|q| !q.is_null() && !q.is_string()) {
+        if args
+            .get("body")
+            .is_some_and(|q| !q.is_null() && !q.is_string())
+        {
             return Ok(shape("body is a string"));
         }
-        if args.get("headers").is_some_and(|h| !h.is_null() && !h.is_object()) {
+        if args
+            .get("headers")
+            .is_some_and(|h| !h.is_null() && !h.is_object())
+        {
             return Ok(shape("headers is an object"));
         }
         let c2 = cred.clone();
-        let found = self.shared.run(move |core| core.vault.find_credential(&c2).ok().flatten().map(|c| c.slug)).await?;
+        let found = self
+            .shared
+            .run(move |core| {
+                core.vault
+                    .find_credential(&c2)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.slug)
+            })
+            .await?;
         let Some(slug) = found else {
-            return Ok(refusal(&crate::err::d(C::NotFound, format!("no credential {cred}"))));
+            return Ok(refusal(&crate::err::d(
+                C::NotFound,
+                format!("no credential {cred}"),
+            )));
         };
         let _ = s;
         let mut headers = vec![("host".to_string(), "127.0.0.1".to_string())];
         if let Some(m) = args.get("headers").and_then(Value::as_object) {
             for (k, v) in m {
-                if (k.len() >= 3 && k[..3].eq_ignore_ascii_case("av-")) || k.eq_ignore_ascii_case("host") {
+                if (k.len() >= 3 && k[..3].eq_ignore_ascii_case("av-"))
+                    || k.eq_ignore_ascii_case("host")
+                {
                     continue;
                 }
                 headers.push((k.clone(), js_string(v)));
             }
         }
         headers.push(("av-session".into(), token.to_string()));
-        let body = args.get("body").filter(|b| crate::util::truthy(b)).map(js_string).map(String::into_bytes);
+        let body = args
+            .get("body")
+            .filter(|b| crate::util::truthy(b))
+            .map(js_string)
+            .map(String::into_bytes);
         match self
             .pipeline
             .preflight(
                 GatewayRequest {
                     method: method.to_uppercase(),
                     path: format!("/p/{slug}{path}"),
-                    query: args.get("query").filter(|q| crate::util::truthy(q)).map(js_string).unwrap_or_default(),
+                    query: args
+                        .get("query")
+                        .filter(|q| crate::util::truthy(q))
+                        .map(js_string)
+                        .unwrap_or_default(),
                     headers,
                     body,
                     listener,
@@ -695,25 +922,62 @@ impl HintS for VaultError {
 }
 
 /// `#sessionProblem(token, listener, { record })`: `(detail, error)`.
-fn session_problem(core: &mut crate::state::Core, token: &str, listener: Option<&ListenerInfo>, record: bool) -> Option<(String, Option<VaultError>)> {
+fn session_problem(
+    core: &mut crate::state::Core,
+    token: &str,
+    listener: Option<&ListenerInfo>,
+    record: bool,
+) -> Option<(String, Option<VaultError>)> {
     if token.is_empty() {
-        return Some(("no session token was sent with this connection".into(), None));
+        return Some((
+            "no session token was sent with this connection".into(),
+            None,
+        ));
     }
     let Some(found) = core.vault.session_by_token(token).ok().flatten() else {
-        return Some(("that session token is not recognised; it may belong to a vault that was reset".into(), None));
+        return Some((
+            "that session token is not recognised; it may belong to a vault that was reset".into(),
+            None,
+        ));
     };
-    match core.vault.assert_session_usable(Some(&found), lctx(listener).as_ref(), UsableOptions { peek: false, record }).v() {
+    match core
+        .vault
+        .assert_session_usable(
+            Some(&found),
+            lctx(listener).as_ref(),
+            UsableOptions {
+                peek: false,
+                record,
+            },
+        )
+        .v()
+    {
         Ok(_) => None,
         Err(e) => Some((e.detail.clone(), Some(e))),
     }
 }
 
 /// `#grantFor(session, cred)`.
-fn grant_for(core: &mut crate::state::Core, s: &SessionRecord, cred: &av_store::model::CredentialRecord) -> R<Result<av_store::model::GrantRecord, Value>> {
-    if let Some(g) = core.vault.grants_for_session(&s.id).v()?.into_iter().find(|g| g.credential_id == cred.id) {
+fn grant_for(
+    core: &mut crate::state::Core,
+    s: &SessionRecord,
+    cred: &av_store::model::CredentialRecord,
+) -> R<Result<av_store::model::GrantRecord, Value>> {
+    if let Some(g) = core
+        .vault
+        .grants_for_session(&s.id)
+        .v()?
+        .into_iter()
+        .find(|g| g.credential_id == cred.id)
+    {
         return Ok(Ok(g));
     }
-    if core.vault.find_grant(&s.id, &cred.id).v()?.is_some_and(|g| g.state == av_store::model::GrantState::Expired) {
+    if core
+        .vault
+        .find_grant(&s.id, &cred.id)
+        .v()?
+        .is_some_and(|g| g.state == av_store::model::GrantState::Expired)
+    {
         let e = crate::err::d(C::GrantExpired, format!("this session's grant for {} expired", cred.slug))
             .hint_s("This grant's lifetime ran out; the session may still hold others. Ask a human for a new grant.");
         let mut body = Map::new();
@@ -722,15 +986,22 @@ fn grant_for(core: &mut crate::state::Core, s: &SessionRecord, cred: &av_store::
         body.insert("hint".into(), e.hint().into());
         return Ok(Err(error_text(Value::Object(body))));
     }
-    Ok(Err(json!({"content": [{"type": "text", "text": js_pretty(&json!({"error": format!("this session has no grant for {}", cred.slug)}))}]})))
+    Ok(Err(
+        json!({"content": [{"type": "text", "text": js_pretty(&json!({"error": format!("this session has no grant for {}", cred.slug)}))}]}),
+    ))
 }
 
 /// `#describeAccess(session)`.
 fn describe_access(core: &mut crate::state::Core, s: &SessionRecord) -> R<Value> {
     let mut grants = Vec::new();
     for g in core.vault.grants_for_session(&s.id).v()? {
-        let cred = core.vault.credential(&g.credential_id).v()?.ok_or_else(|| crate::err::internal("no credential"))?;
-        let profile = av_core::profiles::get_profile(&cred.connector_kind).map_err(|e| crate::err::internal(e.to_string()))?;
+        let cred = core
+            .vault
+            .credential(&g.credential_id)
+            .v()?
+            .ok_or_else(|| crate::err::internal("no credential"))?;
+        let profile = av_core::profiles::get_profile(&cred.connector_kind)
+            .map_err(|e| crate::err::internal(e.to_string()))?;
         let ceiling = profile.policy_ceiling();
         let effective = policy::intersect(&[Some(&ceiling), Some(&s.policy), Some(&g.policy)]);
         let remaining = match policy::budget_limit(effective.budget.as_ref()) {
@@ -742,17 +1013,39 @@ fn describe_access(core: &mut crate::state::Core, s: &SessionRecord) -> R<Value>
             Ok(Some(sp)) => {
                 let mut m = Map::new();
                 if !sp["limit_tokens"].is_null() {
-                    m.insert("tokens".into(), json!((sp["limit_tokens"].as_i64().unwrap_or(0) - sp["tokens_used"].as_i64().unwrap_or(0) - sp["reserved_tokens"].as_i64().unwrap_or(0)).max(0)));
+                    m.insert(
+                        "tokens".into(),
+                        json!((sp["limit_tokens"].as_i64().unwrap_or(0)
+                            - sp["tokens_used"].as_i64().unwrap_or(0)
+                            - sp["reserved_tokens"].as_i64().unwrap_or(0))
+                        .max(0)),
+                    );
                 }
                 if !sp["limit_usd_micros"].is_null() {
-                    m.insert("usd_micros".into(), json!((sp["limit_usd_micros"].as_i64().unwrap_or(0) - sp["usd_micros_used"].as_i64().unwrap_or(0) - sp["reserved_usd_micros"].as_i64().unwrap_or(0)).max(0)));
+                    m.insert(
+                        "usd_micros".into(),
+                        json!((sp["limit_usd_micros"].as_i64().unwrap_or(0)
+                            - sp["usd_micros_used"].as_i64().unwrap_or(0)
+                            - sp["reserved_usd_micros"].as_i64().unwrap_or(0))
+                        .max(0)),
+                    );
                 }
                 Value::Object(m)
             }
             Ok(None) => Value::Null,
             Err(_) => json!({"tokens": 0, "usd_micros": 0}),
         };
-        let put: Vec<String> = cred.fields.iter().filter(|f| g.fields.contains(&f.name)).flat_map(|f| f.sites.iter().map(|x| describe(x, None)).collect::<Vec<_>>()).collect();
+        let put: Vec<String> = cred
+            .fields
+            .iter()
+            .filter(|f| g.fields.contains(&f.name))
+            .flat_map(|f| {
+                f.sites
+                    .iter()
+                    .map(|x| describe(x, None))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         grants.push(json!({
             "cred": cred.slug, "kind": cred.connector_kind, "base_url": format!("/p/{}", cred.slug),
             "put_it_at": put, "quarantined": cred.quarantine.is_some(), "expires_at": g.expires_at,
@@ -773,13 +1066,25 @@ fn uuid4() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h = crate::util::hex(&b);
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 /// Serve the MCP server over newline-delimited JSON-RPC. Ports
 /// `serveStdio(server, input, output)`; the session and token come from
 /// `resolve` for each message (the bridge re-reads its state file).
-pub async fn serve_stdio<Rd, W, F>(server: Arc<McpServer>, input: Rd, output: W, resolve: F) -> std::io::Result<()>
+pub async fn serve_stdio<Rd, W, F>(
+    server: Arc<McpServer>,
+    input: Rd,
+    output: W,
+    resolve: F,
+) -> std::io::Result<()>
 where
     Rd: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
@@ -793,10 +1098,14 @@ where
         if line.is_empty() {
             continue;
         }
-        let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let (session, token) = resolve();
         if let Some(r) = server.handle(message, session, token, None).await {
-            output.write_all(format!("{}\n", crate::util::js_stringify(&r)).as_bytes()).await?;
+            output
+                .write_all(format!("{}\n", crate::util::js_stringify(&r)).as_bytes())
+                .await?;
             output.flush().await?;
         }
     }

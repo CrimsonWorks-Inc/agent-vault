@@ -15,20 +15,38 @@ use serde_json::json;
 
 use crate::http::{read_body, Resp};
 use crate::pipeline::ListenerInfo;
-use crate::server::{is_loopback_host, parse_address, parse_allow_cidr, Bound, Daemon, Incoming, MAX_BODY};
+use crate::server::{
+    is_loopback_host, parse_address, parse_allow_cidr, Bound, Daemon, Incoming, MAX_BODY,
+};
 use crate::state::VaultRef;
 
-async fn incoming(req: hyper::Request<hyper::body::Incoming>) -> Result<Incoming, Resp> {
+async fn incoming(req: hyper::Request<hyper::body::Incoming>) -> Result<Incoming, Box<Resp>> {
     let (parts, body) = req.into_parts();
-    let target = parts.uri.path_and_query().map_or_else(|| parts.uri.to_string(), |p| p.as_str().to_string());
-    let target = if parts.uri.scheme().is_some() { parts.uri.to_string() } else { target };
+    let target = parts
+        .uri
+        .path_and_query()
+        .map_or_else(|| parts.uri.to_string(), |p| p.as_str().to_string());
+    let target = if parts.uri.scheme().is_some() {
+        parts.uri.to_string()
+    } else {
+        target
+    };
     let headers = crate::util::node_headers(&parts.headers);
     let body = read_body(body, MAX_BODY).await?;
-    Ok(Incoming { method: parts.method.as_str().to_string(), target, headers, body })
+    Ok(Incoming {
+        method: parts.method.as_str().to_string(),
+        target,
+        headers,
+        body,
+    })
 }
 
+/// The future a guarded handler returns.
+type Answer =
+    std::pin::Pin<Box<dyn Future<Output = Result<Resp, std::convert::Infallible>> + Send>>;
+
 /// `#guard`: a handler that panics answers 500, never ends the daemon.
-fn guarded<F, Fut>(f: F) -> impl Fn(hyper::Request<hyper::body::Incoming>) -> std::pin::Pin<Box<dyn Future<Output = Result<Resp, std::convert::Infallible>> + Send>> + Clone
+fn guarded<F, Fut>(f: F) -> impl Fn(hyper::Request<hyper::body::Incoming>) -> Answer + Clone
 where
     F: Fn(Incoming) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Resp> + Send + 'static,
@@ -38,7 +56,7 @@ where
         Box::pin(async move {
             let inc = match incoming(req).await {
                 Ok(i) => i,
-                Err(r) => return Ok(r),
+                Err(r) => return Ok(*r),
             };
             let task = tokio::spawn(f(inc));
             Ok(match task.await {
@@ -70,18 +88,21 @@ where
 }
 
 /// Serve HTTP on a TCP listener.
-pub fn serve_tcp<F, Fut>(listener: tokio::net::TcpListener, _info: Option<ListenerInfo>, handler: F) -> impl Future<Output = ()> + Send
-where
+pub async fn serve_tcp<F, Fut>(
+    listener: tokio::net::TcpListener,
+    _info: Option<ListenerInfo>,
+    handler: F,
+) where
     F: Fn(Incoming, Option<String>) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Resp> + Send + 'static,
 {
-    async move {
-        loop {
-            let Ok((stream, peer)) = listener.accept().await else { continue };
-            let h = handler.clone();
-            let peer_s = peer.ip().to_string();
-            tokio::spawn(serve_conn(stream, move |inc| h(inc, Some(peer_s.clone()))));
-        }
+    loop {
+        let Ok((stream, peer)) = listener.accept().await else {
+            continue;
+        };
+        let h = handler.clone();
+        let peer_s = peer.ip().to_string();
+        tokio::spawn(serve_conn(stream, move |inc| h(inc, Some(peer_s.clone()))));
     }
 }
 
@@ -96,7 +117,11 @@ pub fn bind_unix(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
 
 /// Serve the control API. With an enrolled uid, a peer that is not this
 /// process's uid, the enrolled uid or root is refused before a byte is read.
-pub fn serve_unix<F, Fut>(listener: tokio::net::UnixListener, enrolled: Option<u32>, handler: F) -> impl Future<Output = ()> + Send
+pub fn serve_unix<F, Fut>(
+    listener: tokio::net::UnixListener,
+    enrolled: Option<u32>,
+    handler: F,
+) -> impl Future<Output = ()> + Send
 where
     F: Fn(Incoming) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Resp> + Send + 'static,
@@ -104,12 +129,17 @@ where
     let me = crate::peercred::effective_uid();
     async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { continue };
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
             if let Some(uid) = enrolled {
                 match crate::peercred::peer_cred(&stream) {
                     Ok(c) if c.uid == me || c.uid == uid || c.uid == 0 => {}
                     Ok(c) => {
-                        eprintln!("agent-vault: refused a control connection from uid {}", c.uid);
+                        eprintln!(
+                            "agent-vault: refused a control connection from uid {}",
+                            c.uid
+                        );
                         continue;
                     }
                     Err(_) => continue,
@@ -121,7 +151,12 @@ where
 }
 
 /// `#secureSocket()`.
-pub async fn secure_socket(shared: &VaultRef, path: &Path, group: Option<&str>, enrolled: Option<u32>) {
+pub async fn secure_socket(
+    shared: &VaultRef,
+    path: &Path,
+    group: Option<&str>,
+    enrolled: Option<u32>,
+) {
     let audit = |kind: &'static str, fields: serde_json::Value| {
         let s = shared.clone();
         async move {
@@ -135,17 +170,27 @@ pub async fn secure_socket(shared: &VaultRef, path: &Path, group: Option<&str>, 
     let gid = lookup_gid(group);
     let Some(gid) = gid else {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        audit("daemon.socket_group_failed", json!({"group": group, "reason": "group not found"})).await;
+        audit(
+            "daemon.socket_group_failed",
+            json!({"group": group, "reason": "group not found"}),
+        )
+        .await;
         eprintln!("agent-vault: group {group} does not exist; the socket is 0600 and only this user can connect");
         return;
     };
     use std::os::unix::fs::MetadataExt;
     let current = std::fs::metadata(path).map(|m| m.gid()).unwrap_or(u32::MAX);
     if current != gid {
-        if let Err(e) = std::os::unix::fs::chown(path, Some(crate::peercred::effective_uid()), Some(gid)) {
+        if let Err(e) =
+            std::os::unix::fs::chown(path, Some(crate::peercred::effective_uid()), Some(gid))
+        {
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             let code = e.raw_os_error().map(errno_name).unwrap_or("EPERM");
-            audit("daemon.socket_group_failed", json!({"group": group, "reason": code})).await;
+            audit(
+                "daemon.socket_group_failed",
+                json!({"group": group, "reason": code}),
+            )
+            .await;
             eprintln!("agent-vault: cannot set the socket group to {group} ({code}).\n  The socket is 0600, so the CLI cannot reach it. Re-run the installer to repair group membership.");
             return;
         }
@@ -154,9 +199,13 @@ pub async fn secure_socket(shared: &VaultRef, path: &Path, group: Option<&str>, 
     if let Some(uid) = enrolled {
         let p = path.display().to_string();
         let ok = if cfg!(target_os = "macos") {
-            std::process::Command::new("chmod").args(["+a", &format!("user:{uid} allow read,write"), &p]).status()
+            std::process::Command::new("chmod")
+                .args(["+a", &format!("user:{uid} allow read,write"), &p])
+                .status()
         } else {
-            std::process::Command::new("setfacl").args(["-m", &format!("u:{uid}:rw"), &p]).status()
+            std::process::Command::new("setfacl")
+                .args(["-m", &format!("u:{uid}:rw"), &p])
+                .status()
         };
         if !ok.is_ok_and(|s| s.success()) {
             audit("daemon.socket_acl_failed", json!({"uid": uid})).await;
@@ -175,15 +224,28 @@ fn errno_name(n: i32) -> &'static str {
 
 /// The group's gid, as `getent group` (or `dscl` on macOS) reports it.
 fn lookup_gid(group: &str) -> Option<u32> {
-    let out = std::process::Command::new("getent").args(["group", group]).output().ok().filter(|o| o.status.success());
+    let out = std::process::Command::new("getent")
+        .args(["group", group])
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
     if let Some(o) = out {
-        return String::from_utf8_lossy(&o.stdout).split(':').nth(2).and_then(|g| g.trim().parse().ok());
+        return String::from_utf8_lossy(&o.stdout)
+            .split(':')
+            .nth(2)
+            .and_then(|g| g.trim().parse().ok());
     }
-    let o = std::process::Command::new("dscl").args([".", "-read", &format!("/Groups/{group}"), "PrimaryGroupID"]).output().ok()?;
+    let o = std::process::Command::new("dscl")
+        .args([".", "-read", &format!("/Groups/{group}"), "PrimaryGroupID"])
+        .output()
+        .ok()?;
     if !o.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&o.stdout).split(':').next_back().and_then(|g| g.trim().parse().ok())
+    String::from_utf8_lossy(&o.stdout)
+        .split(':')
+        .next_back()
+        .and_then(|g| g.trim().parse().ok())
 }
 
 /// A bind failure: the system code for the audit log, and the message.
@@ -192,32 +254,45 @@ pub struct BindError(pub String, pub String);
 fn tls_acceptor(cert_pem: &[u8], key_pem: &[u8]) -> Result<tokio_rustls::TlsAcceptor, String> {
     use rustls::pki_types::pem::PemObject;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem).filter_map(Result::ok).collect();
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
+        .filter_map(Result::ok)
+        .collect();
     let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("tls key: {e}"))?;
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| e.to_string())?;
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| e.to_string())?;
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
 /// `#bindListener(entry)`.
-pub(crate) async fn bind_listener(daemon: &Arc<Daemon>, entry: &av_store::model::ListenerRecord) -> Result<Bound, BindError> {
+pub(crate) async fn bind_listener(
+    daemon: &Arc<Daemon>,
+    entry: &av_store::model::ListenerRecord,
+) -> Result<Bound, BindError> {
     let other = |m: String| BindError("other".into(), m);
     let (host, port) = parse_address(&entry.address).map_err(other)?;
     let surfaces = entry.surfaces.clone();
     let remote = !is_loopback_host(&host);
-    let allow_v = serde_json::to_value(&entry.allow_cidr).ok().filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+    let allow_v = serde_json::to_value(&entry.allow_cidr)
+        .ok()
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
     let allow = parse_allow_cidr(allow_v.as_ref()).map_err(other)?;
     let acceptor = match &entry.tls {
         Some(t) => {
             let material = if t.managed == Some(true) {
-                let info = crate::tls::ensure_certificate(daemon.shared.dir(), false).map_err(|e| other(e.to_string()))?;
+                let info = crate::tls::ensure_certificate(daemon.shared.dir(), false)
+                    .map_err(|e| other(e.to_string()))?;
                 crate::tls::load_material(&info.cert, &info.key)
             } else {
-                crate::tls::load_material(Path::new(t.cert.as_deref().unwrap_or("")), Path::new(t.key.as_deref().unwrap_or("")))
+                crate::tls::load_material(
+                    Path::new(t.cert.as_deref().unwrap_or("")),
+                    Path::new(t.key.as_deref().unwrap_or("")),
+                )
             }
             .map_err(|e| other(e.to_string()))?;
             use av_core::secret::ExposeSecret;
@@ -225,25 +300,36 @@ pub(crate) async fn bind_listener(daemon: &Arc<Daemon>, entry: &av_store::model:
         }
         None => {
             if remote {
-                return Err(other("a listener on a network address must configure TLS".into()));
+                return Err(other(
+                    "a listener on a network address must configure TLS".into(),
+                ));
             }
             None
         }
     };
-    let bind_host = host.trim_start_matches('[').trim_end_matches(']').to_string();
-    let listener = tokio::net::TcpListener::bind((bind_host.as_str(), port)).await.map_err(|e| {
-        let code = match e.kind() {
-            std::io::ErrorKind::AddrInUse => "EADDRINUSE",
-            std::io::ErrorKind::PermissionDenied => "EACCES",
-            std::io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
-            _ => "other",
-        };
-        BindError(code.into(), e.to_string())
-    })?;
+    let bind_host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let listener = tokio::net::TcpListener::bind((bind_host.as_str(), port))
+        .await
+        .map_err(|e| {
+            let code = match e.kind() {
+                std::io::ErrorKind::AddrInUse => "EADDRINUSE",
+                std::io::ErrorKind::PermissionDenied => "EACCES",
+                std::io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
+                _ => "other",
+            };
+            BindError(code.into(), e.to_string())
+        })?;
     let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let info = ListenerInfo {
         id: entry.id.clone(),
-        kind: if entry.tls.is_some() { "tls".into() } else { "tcp".into() },
+        kind: if entry.tls.is_some() {
+            "tls".into()
+        } else {
+            "tcp".into()
+        },
         remote,
         advertise: entry.advertise.clone(),
     };
@@ -258,7 +344,9 @@ pub(crate) async fn bind_listener(daemon: &Arc<Daemon>, entry: &av_store::model:
                 a = listener.accept() => a,
                 _ = stop.changed() => break,
             };
-            let Ok((stream, peer)) = accepted else { continue };
+            let Ok((stream, peer)) = accepted else {
+                continue;
+            };
             let addr = peer.ip().to_string();
             if let Some(allow) = &allow {
                 if !allow.allows(&addr) {
@@ -268,7 +356,8 @@ pub(crate) async fn bind_listener(daemon: &Arc<Daemon>, entry: &av_store::model:
                     continue;
                 }
             }
-            let (d2, info2, surfaces2, acceptor2) = (d.clone(), info.clone(), surfaces.clone(), acceptor.clone());
+            let (d2, info2, surfaces2, acceptor2) =
+                (d.clone(), info.clone(), surfaces.clone(), acceptor.clone());
             let mut revoked = stop_rx.clone();
             conns.spawn(async move {
                 let handler = move |inc: Incoming| {
@@ -295,22 +384,49 @@ pub(crate) async fn bind_listener(daemon: &Arc<Daemon>, entry: &av_store::model:
         conns.abort_all();
     });
     let surf = entry.surfaces.clone();
-    let (lid, tls, addr) = (entry.id.clone(), entry.tls.is_some(), format!("{host}:{bound_port}"));
+    let (lid, tls, addr) = (
+        entry.id.clone(),
+        entry.tls.is_some(),
+        format!("{host}:{bound_port}"),
+    );
     let s2 = surf.clone();
     daemon
         .shared
-        .run(move |core| core.audit_opt("listen.bound", json!({"listener_id": lid, "address": addr, "tls": tls, "surfaces": s2})))
+        .run(move |core| {
+            core.audit_opt(
+                "listen.bound",
+                json!({"listener_id": lid, "address": addr, "tls": tls, "surfaces": s2}),
+            )
+        })
         .await
         .ok();
-    Ok(Bound { id: entry.id.clone(), host, port: bound_port, tls, surfaces: surf, stop: stop_tx, task })
+    Ok(Bound {
+        id: entry.id.clone(),
+        host,
+        port: bound_port,
+
+        stop: stop_tx,
+        task,
+    })
 }
 
 /// The handler of a configured listener: only the surfaces it declares.
-async fn on_listener(d: &Arc<Daemon>, inc: Incoming, info: ListenerInfo, surfaces: &[String]) -> Resp {
-    let path = crate::http::parse_target(&inc.target, "http://placeholder").map(|(p, _)| p).unwrap_or_default();
+async fn on_listener(
+    d: &Arc<Daemon>,
+    inc: Incoming,
+    info: ListenerInfo,
+    surfaces: &[String],
+) -> Resp {
+    let path = crate::http::parse_target(&inc.target, "http://placeholder")
+        .map(|(p, _)| p)
+        .unwrap_or_default();
     let wanted = if path == "/mcp" { "mcp" } else { "gateway" };
     if !surfaces.iter().any(|s| s == wanted) {
-        let list = if surfaces.is_empty() { "nothing".to_string() } else { surfaces.join(", ") };
+        let list = if surfaces.is_empty() {
+            "nothing".to_string()
+        } else {
+            surfaces.join(", ")
+        };
         return crate::http::json_compact(
             404,
             &json!({"code": "AV_NOT_FOUND", "detail": format!("listener {} does not serve the {wanted} surface", info.id), "hint": format!("it serves: {list}")}),

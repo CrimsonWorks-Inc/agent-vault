@@ -7,7 +7,9 @@
 
 use serde_json::Value;
 
-pub use av_core::operation::{canonical_operation, challenge_for_operation, operation_for, DIGESTED};
+pub use av_core::operation::{
+    canonical_operation, challenge_for_operation, operation_for, DIGESTED,
+};
 
 use crate::util::{b64_lenient, ct_eq};
 
@@ -16,7 +18,16 @@ pub const ES256: i64 = -7;
 /// Deepest CBOR nesting read. Ports `CBOR_MAX_DEPTH`.
 pub const CBOR_MAX_DEPTH: usize = 16;
 /// Failure codes an audit record may carry. Ports `FAILURES`.
-pub const FAILURES: [&str; 8] = ["client_data_type", "origin", "challenge", "signature", "credential", "malformed", "size", "other"];
+pub const FAILURES: [&str; 8] = [
+    "client_data_type",
+    "origin",
+    "challenge",
+    "signature",
+    "credential",
+    "malformed",
+    "size",
+    "other",
+];
 
 /// A decoded CBOR item. Ports the JS values `decodeCbor` returns.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +60,10 @@ impl Cbor {
     /// `map.get(key)` for a text key.
     pub fn get_text(&self, key: &str) -> Option<&Cbor> {
         match self {
-            Cbor::Map(m) => m.iter().find(|(k, _)| matches!(k, Cbor::Text(t) if t == key)).map(|(_, v)| v),
+            Cbor::Map(m) => m
+                .iter()
+                .find(|(k, _)| matches!(k, Cbor::Text(t) if t == key))
+                .map(|(_, v)| v),
             _ => None,
         }
     }
@@ -67,7 +81,10 @@ pub struct WebauthnError {
 }
 
 fn fail(failure: &'static str, message: impl Into<String>) -> WebauthnError {
-    WebauthnError { failure, message: message.into() }
+    WebauthnError {
+        failure,
+        message: message.into(),
+    }
 }
 
 fn plain(message: impl Into<String>) -> WebauthnError {
@@ -231,13 +248,22 @@ pub fn cose_to_public_key(cose: &Cbor) -> Result<Vec<u8>, WebauthnError> {
         Some(_) => "[object]".into(),
     };
     if int(1) != Some(2) {
-        return Err(plain(format!("unsupported COSE key type {}; only EC2 is accepted", show(1))));
+        return Err(plain(format!(
+            "unsupported COSE key type {}; only EC2 is accepted",
+            show(1)
+        )));
     }
     if int(3) != Some(ES256 as i128) {
-        return Err(plain(format!("unsupported algorithm {}; only ES256 is accepted", show(3))));
+        return Err(plain(format!(
+            "unsupported algorithm {}; only ES256 is accepted",
+            show(3)
+        )));
     }
     if int(-1) != Some(1) {
-        return Err(plain(format!("unsupported curve {}; only P-256 is accepted", show(-1))));
+        return Err(plain(format!(
+            "unsupported curve {}; only P-256 is accepted",
+            show(-1)
+        )));
     }
     let coord = |k| match cose.get_int(k) {
         Some(Cbor::Bytes(b)) if b.len() == 32 => Some(b.clone()),
@@ -256,7 +282,10 @@ pub fn cose_to_public_key(cose: &Cbor) -> Result<Vec<u8>, WebauthnError> {
 }
 
 fn hex_bytes(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0)).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0))
+        .collect()
 }
 
 /// Ports `newChallenge()`.
@@ -278,25 +307,41 @@ pub fn failure_of(e: &WebauthnError) -> &'static str {
     }
 }
 
-fn parse_client_data(client_data_json: &Value, expected_type: &str, expected_challenge: &[u8], expected_origins: &[String]) -> Result<Value, WebauthnError> {
+fn parse_client_data(
+    client_data_json: &Value,
+    expected_type: &str,
+    expected_challenge: &[u8],
+    expected_origins: &[String],
+) -> Result<Value, WebauthnError> {
     let raw = b64_lenient(client_data_json.as_str().unwrap_or(""));
-    let data: Value = serde_json::from_slice(&raw).map_err(|e| fail("malformed", format!("clientDataJSON is not JSON: {e}")))?;
+    let data: Value = serde_json::from_slice(&raw)
+        .map_err(|e| fail("malformed", format!("clientDataJSON is not JSON: {e}")))?;
     if !(data.is_object() || data.is_array()) {
         return Err(fail("malformed", "clientDataJSON is not an object"));
     }
     if data.get("type").and_then(Value::as_str) != Some(expected_type) {
-        let t = data.get("type").map_or("undefined".to_string(), crate::util::js_string);
-        return Err(fail("client_data_type", format!("client data type is {t}, expected {expected_type}")));
+        let t = data
+            .get("type")
+            .map_or("undefined".to_string(), crate::util::js_string);
+        return Err(fail(
+            "client_data_type",
+            format!("client data type is {t}, expected {expected_type}"),
+        ));
     }
     let Some(challenge) = data.get("challenge").and_then(Value::as_str) else {
         return Err(fail("malformed", "clientDataJSON has no challenge"));
     };
     if !ct_eq(&b64_lenient(challenge), expected_challenge) {
-        return Err(fail("challenge", "challenge does not match; this assertion was made for a different operation"));
+        return Err(fail(
+            "challenge",
+            "challenge does not match; this assertion was made for a different operation",
+        ));
     }
     let origin = data.get("origin").and_then(Value::as_str);
     if !origin.is_some_and(|o| expected_origins.iter().any(|e| e == o)) {
-        let o = data.get("origin").map_or("undefined".to_string(), crate::util::js_string);
+        let o = data
+            .get("origin")
+            .map_or("undefined".to_string(), crate::util::js_string);
         return Err(fail("origin", format!("origin {o} is not this server")));
     }
     Ok(data)
@@ -355,12 +400,26 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 /// Ports `verifyRegistration(...)`.
-pub fn verify_registration(input: &RegistrationInput<'_>) -> Result<EnrolledCredential, WebauthnError> {
-    parse_client_data(input.client_data_json, "webauthn.create", input.expected_challenge, input.expected_origins)?;
-    let (attestation, _) = decode_cbor(&b64_lenient(input.attestation_object.as_str().unwrap_or("")), 0)?;
+pub fn verify_registration(
+    input: &RegistrationInput<'_>,
+) -> Result<EnrolledCredential, WebauthnError> {
+    parse_client_data(
+        input.client_data_json,
+        "webauthn.create",
+        input.expected_challenge,
+        input.expected_origins,
+    )?;
+    let (attestation, _) = decode_cbor(
+        &b64_lenient(input.attestation_object.as_str().unwrap_or("")),
+        0,
+    )?;
     let auth = match attestation.get_text("authData") {
         Some(Cbor::Bytes(b)) => b.clone(),
-        _ => return Err(plain("Cannot read properties of undefined (reading 'length')")),
+        _ => {
+            return Err(plain(
+                "Cannot read properties of undefined (reading 'length')",
+            ))
+        }
     };
     let a = parse_auth_data(&auth)?;
     if !ct_eq(&a.rp_id_hash, &sha256(input.rp_id.as_bytes())) {
@@ -410,7 +469,10 @@ pub struct AssertionInput<'a> {
 /// Ports `verifyAssertion(...)`: the new signature counter.
 pub fn verify_assertion(input: &AssertionInput<'_>) -> Result<u32, WebauthnError> {
     if input.credential_id.as_str() != Some(input.enrolled.credential_id.as_str()) {
-        return Err(fail("credential", "this assertion is from a credential that was never enrolled"));
+        return Err(fail(
+            "credential",
+            "this assertion is from a credential that was never enrolled",
+        ));
     }
     for (field, value, limit) in [
         ("authenticatorData", input.authenticator_data, 8 * 1024),
@@ -418,14 +480,25 @@ pub fn verify_assertion(input: &AssertionInput<'_>) -> Result<u32, WebauthnError
         ("signature", input.signature, 2 * 1024),
     ] {
         let Some(s) = value.as_str() else {
-            return Err(fail("malformed", format!("{field} must be a base64url string")));
+            return Err(fail(
+                "malformed",
+                format!("{field} must be a base64url string"),
+            ));
         };
         let n = s.encode_utf16().count();
         if n > limit {
-            return Err(fail("size", format!("{field} is {n} characters; a real assertion is under {limit}")));
+            return Err(fail(
+                "size",
+                format!("{field} is {n} characters; a real assertion is under {limit}"),
+            ));
         }
     }
-    parse_client_data(input.client_data_json, "webauthn.get", input.expected_challenge, input.expected_origins)?;
+    parse_client_data(
+        input.client_data_json,
+        "webauthn.get",
+        input.expected_challenge,
+        input.expected_origins,
+    )?;
     let auth = b64_lenient(input.authenticator_data.as_str().unwrap_or(""));
     let a = parse_auth_data(&auth).map_err(|e| fail("malformed", e.message))?;
     if !ct_eq(&a.rp_id_hash, &sha256(input.rp_id.as_bytes())) {
@@ -435,7 +508,9 @@ pub fn verify_assertion(input: &AssertionInput<'_>) -> Result<u32, WebauthnError
         return Err(plain("no user presence"));
     }
     if !a.user_verified {
-        return Err(plain("the authenticator did not verify a human for this operation"));
+        return Err(plain(
+            "the authenticator did not verify a human for this operation",
+        ));
     }
     let client_hash = sha256(&b64_lenient(input.client_data_json.as_str().unwrap_or("")));
     let mut signed = auth.clone();
@@ -445,7 +520,9 @@ pub fn verify_assertion(input: &AssertionInput<'_>) -> Result<u32, WebauthnError
         use p256::pkcs8::DecodePublicKey;
         let spki = base64_std(&input.enrolled.public_key_spki)?;
         let key = p256::ecdsa::VerifyingKey::from_public_key_der(&spki).ok()?;
-        let sig = p256::ecdsa::Signature::from_der(&b64_lenient(input.signature.as_str().unwrap_or(""))).ok()?;
+        let sig =
+            p256::ecdsa::Signature::from_der(&b64_lenient(input.signature.as_str().unwrap_or("")))
+                .ok()?;
         let sig = sig.normalize_s();
         Some(key.verify(&signed, &sig).is_ok())
     })()
@@ -453,8 +530,14 @@ pub fn verify_assertion(input: &AssertionInput<'_>) -> Result<u32, WebauthnError
     if !verified {
         return Err(fail("signature", "signature does not verify"));
     }
-    if a.sign_count > 0 && input.enrolled.sign_count > 0 && a.sign_count <= input.enrolled.sign_count {
-        return Err(fail("signature", "signature counter did not advance; the credential may have been cloned"));
+    if a.sign_count > 0
+        && input.enrolled.sign_count > 0
+        && a.sign_count <= input.enrolled.sign_count
+    {
+        return Err(fail(
+            "signature",
+            "signature counter did not advance; the credential may have been cloned",
+        ));
     }
     Ok(a.sign_count)
 }
@@ -482,14 +565,25 @@ pub(crate) mod testkit {
     impl SoftKey {
         /// A fresh key.
         pub fn new() -> SoftKey {
-            let key = p256::ecdsa::SigningKey::from_slice(&crate::util::random_bytes::<32>()).expect("key");
-            SoftKey { key, id: b64url(&crate::util::random_bytes::<16>()), count: 1 }
+            let key = p256::ecdsa::SigningKey::from_slice(&crate::util::random_bytes::<32>())
+                .expect("key");
+            SoftKey {
+                key,
+                id: b64url(&crate::util::random_bytes::<16>()),
+                count: 1,
+            }
         }
 
         /// The SPKI, base64.
         pub fn spki(&self) -> String {
             use p256::pkcs8::EncodePublicKey;
-            crate::util::b64(self.key.verifying_key().to_public_key_der().expect("der").as_bytes())
+            crate::util::b64(
+                self.key
+                    .verifying_key()
+                    .to_public_key_der()
+                    .expect("der")
+                    .as_bytes(),
+            )
         }
 
         /// The enrolment record.
@@ -523,7 +617,12 @@ mod tests {
     use super::testkit::SoftKey;
     use super::*;
 
-    fn input<'a>(p: &'a Value, ch: &'a [u8], origins: &'a [String], enrolled: &'a EnrolledCredential) -> AssertionInput<'a> {
+    fn input<'a>(
+        p: &'a Value,
+        ch: &'a [u8],
+        origins: &'a [String],
+        enrolled: &'a EnrolledCredential,
+    ) -> AssertionInput<'a> {
         AssertionInput {
             credential_id: &p["credentialId"],
             authenticator_data: &p["authenticatorData"],
@@ -539,37 +638,83 @@ mod tests {
     #[test]
     fn a_real_assertion_verifies_and_each_tamper_is_refused_with_its_code() {
         let mut k = SoftKey::new();
-        let enrolled = EnrolledCredential { credential_id: k.id.clone(), public_key_spki: k.spki(), sign_count: 0, enrolled_at: String::new() };
+        let enrolled = EnrolledCredential {
+            credential_id: k.id.clone(),
+            public_key_spki: k.spki(),
+            sign_count: 0,
+            enrolled_at: String::new(),
+        };
         let origins = vec!["http://localhost:7412".to_string()];
         let ch = [7u8; 32];
         let p = k.assert(&ch, "http://localhost:7412");
-        assert_eq!(verify_assertion(&input(&p, &ch, &origins, &enrolled)).unwrap(), 1);
+        assert_eq!(
+            verify_assertion(&input(&p, &ch, &origins, &enrolled)).unwrap(),
+            1
+        );
         // Another operation's challenge.
         let other = [8u8; 32];
-        assert_eq!(verify_assertion(&input(&p, &other, &origins, &enrolled)).unwrap_err().failure, "challenge");
+        assert_eq!(
+            verify_assertion(&input(&p, &other, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "challenge"
+        );
         // A look-alike page on another port.
         let p2 = k.assert(&ch, "http://localhost:9999");
-        assert_eq!(verify_assertion(&input(&p2, &ch, &origins, &enrolled)).unwrap_err().failure, "origin");
+        assert_eq!(
+            verify_assertion(&input(&p2, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "origin"
+        );
         // A tampered signature.
         let mut p3 = k.assert(&ch, "http://localhost:7412");
         p3["signature"] = Value::from(b64url(&[0x30, 0x06, 2, 1, 1, 2, 1, 1]));
-        assert_eq!(verify_assertion(&input(&p3, &ch, &origins, &enrolled)).unwrap_err().failure, "signature");
+        assert_eq!(
+            verify_assertion(&input(&p3, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "signature"
+        );
         // A counter that did not advance.
-        let used = EnrolledCredential { sign_count: 100, ..enrolled.clone() };
+        let used = EnrolledCredential {
+            sign_count: 100,
+            ..enrolled.clone()
+        };
         let p4 = k.assert(&ch, "http://localhost:7412");
-        assert_eq!(verify_assertion(&input(&p4, &ch, &origins, &used)).unwrap_err().failure, "signature");
+        assert_eq!(
+            verify_assertion(&input(&p4, &ch, &origins, &used))
+                .unwrap_err()
+                .failure,
+            "signature"
+        );
         // Not a string.
         let mut p5 = k.assert(&ch, "http://localhost:7412");
         p5["signature"] = Value::from(5);
-        assert_eq!(verify_assertion(&input(&p5, &ch, &origins, &enrolled)).unwrap_err().failure, "malformed");
+        assert_eq!(
+            verify_assertion(&input(&p5, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "malformed"
+        );
         // Oversized.
         let mut p6 = k.assert(&ch, "http://localhost:7412");
         p6["clientDataJSON"] = Value::from("A".repeat(9000));
-        assert_eq!(verify_assertion(&input(&p6, &ch, &origins, &enrolled)).unwrap_err().failure, "size");
+        assert_eq!(
+            verify_assertion(&input(&p6, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "size"
+        );
         // A credential never enrolled.
         let mut p7 = k.assert(&ch, "http://localhost:7412");
         p7["credentialId"] = Value::from("other");
-        assert_eq!(verify_assertion(&input(&p7, &ch, &origins, &enrolled)).unwrap_err().failure, "credential");
+        assert_eq!(
+            verify_assertion(&input(&p7, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "credential"
+        );
     }
 
     #[test]
@@ -578,7 +723,13 @@ mod tests {
         assert!(decode_cbor(&[0xbb], 0).is_err());
         let mut deep = vec![0x81u8; 40];
         deep.push(0x01);
-        assert_eq!(decode_cbor(&deep, 0).unwrap_err().message, "cbor: nested too deeply");
-        assert_eq!(decode_cbor(&[0xa1, 0x01, 0x02], 0).unwrap().0.get_int(1), Some(&Cbor::Int(2)));
+        assert_eq!(
+            decode_cbor(&deep, 0).unwrap_err().message,
+            "cbor: nested too deeply"
+        );
+        assert_eq!(
+            decode_cbor(&[0xa1, 0x01, 0x02], 0).unwrap().0.get_int(1),
+            Some(&Cbor::Int(2))
+        );
     }
 }

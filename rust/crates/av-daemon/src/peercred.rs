@@ -26,7 +26,12 @@ pub struct PeerCred {
 /// `getpeereid(2)` on macOS and the BSDs, `SO_PEERCRED` on Linux.
 pub fn peer_cred(socket: &impl AsRawFd) -> std::io::Result<PeerCred> {
     let fd = socket.as_raw_fd();
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     {
         let mut uid: libc::uid_t = 0;
         let mut gid: libc::gid_t = 0;
@@ -42,17 +47,32 @@ pub fn peer_cred(socket: &impl AsRawFd) -> std::io::Result<PeerCred> {
     }
     #[cfg(target_os = "linux")]
     {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         // SAFETY: `fd` is a live descriptor borrowed from `socket`; `cred` is
         // a valid, aligned `ucred` and `len` is exactly its size, as
         // `SO_PEERCRED` requires. The return value and the returned length
         // are checked before `cred` is read.
-        let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) };
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
         if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(PeerCred { uid: cred.uid, gid: cred.gid })
+        Ok(PeerCred {
+            uid: cred.uid,
+            gid: cred.gid,
+        })
     }
 }
 

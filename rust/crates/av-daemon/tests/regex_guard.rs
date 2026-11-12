@@ -18,7 +18,9 @@ fn bypasses_jsre(source: &str) -> bool {
 
 fn unsupported(line: &str) -> bool {
     line.contains("jsre::compile")
-        && ["(?m)", "(?s)", "(?x)", "(?=", "(?!", "(?<", "(?u)"].iter().any(|f| line.contains(f))
+        && ["(?m)", "(?s)", "(?x)", "(?=", "(?!", "(?<", "(?u)"]
+            .iter()
+            .any(|f| line.contains(f))
 }
 
 fn visit(dir: &std::path::Path, bad: &mut Vec<String>) {
@@ -26,14 +28,20 @@ fn visit(dir: &std::path::Path, bad: &mut Vec<String>) {
         let path = entry.unwrap().path();
         if path.is_dir() {
             visit(&path, bad);
-        } else if path.extension().is_some_and(|e| e == "rs") && path.file_name().unwrap() != "regex_guard.rs" {
+        } else if path.extension().is_some_and(|e| e == "rs")
+            && path.file_name().unwrap() != "regex_guard.rs"
+        {
             let text = std::fs::read_to_string(&path).unwrap();
             if bypasses_jsre(&text) {
                 bad.push(format!("{} bypasses jsre", path.display()));
             }
             for (i, l) in text.lines().enumerate() {
                 if unsupported(l) {
-                    bad.push(format!("{}:{} uses a flag or lookaround jsre does not translate", path.display(), i + 1));
+                    bad.push(format!(
+                        "{}:{} uses a flag or lookaround jsre does not translate",
+                        path.display(),
+                        i + 1
+                    ));
                 }
             }
         }

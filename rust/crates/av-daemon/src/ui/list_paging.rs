@@ -29,7 +29,10 @@ pub struct PagingError {
 impl PagingError {
     /// Ports the constructor.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        PagingError { code, message: message.into() }
+        PagingError {
+            code,
+            message: message.into(),
+        }
     }
     /// Always 400.
     pub fn status(&self) -> u16 {
@@ -42,11 +45,17 @@ impl PagingError {
 }
 
 fn bad_limit(why: &str) -> PagingError {
-    PagingError::new("AV_BAD_LIMIT", format!("limit {why}; give a whole number from 1 to {LIMIT_MAX}"))
+    PagingError::new(
+        "AV_BAD_LIMIT",
+        format!("limit {why}; give a whole number from 1 to {LIMIT_MAX}"),
+    )
 }
 
 fn bad_cursor(why: &str) -> PagingError {
-    PagingError::new("AV_BAD_CURSOR", format!("that cursor {why}; start the list again from the first page"))
+    PagingError::new(
+        "AV_BAD_CURSOR",
+        format!("that cursor {why}; start the list again from the first page"),
+    )
 }
 
 /// A paged request. Ports the result of `pagingOf`.
@@ -62,7 +71,13 @@ pub struct Paging {
 
 /// Ports `pagingOf(params)`.
 pub fn paging_of(params: &[(String, String)]) -> Result<Option<Paging>, PagingError> {
-    let all = |k: &str| params.iter().filter(|(n, _)| n == k).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+    let all = |k: &str| {
+        params
+            .iter()
+            .filter(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .collect::<Vec<_>>()
+    };
     let paged = all("paged");
     if paged.is_empty() {
         if params.iter().any(|(n, _)| n == "cursor") {
@@ -79,7 +94,10 @@ pub fn paging_of(params: &[(String, String)]) -> Result<Option<Paging>, PagingEr
     }
     let mut limit = LIMIT_DEFAULT;
     if let Some(l) = limits.first() {
-        let plain = !l.is_empty() && l.len() <= 3 && !l.starts_with('0') && l.bytes().all(|b| b.is_ascii_digit());
+        let plain = !l.is_empty()
+            && l.len() <= 3
+            && !l.starts_with('0')
+            && l.bytes().all(|b| b.is_ascii_digit());
         if !plain {
             return Err(bad_limit("is not a whole number written plainly"));
         }
@@ -94,7 +112,10 @@ pub fn paging_of(params: &[(String, String)]) -> Result<Option<Paging>, PagingEr
     }
     let qs = all("q");
     if qs.len() > 1 {
-        return Err(PagingError::new("AV_BAD_LIMIT", "q was given more than once"));
+        return Err(PagingError::new(
+            "AV_BAD_LIMIT",
+            "q was given more than once",
+        ));
     }
     Ok(Some(Paging {
         limit,
@@ -133,9 +154,15 @@ fn js_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// `digestOf(filters)`.
 fn digest_of(filters: &Value) -> String {
-    let mut keys: Vec<&String> = filters.as_object().map(|m| m.keys().collect()).unwrap_or_default();
+    let mut keys: Vec<&String> = filters
+        .as_object()
+        .map(|m| m.keys().collect())
+        .unwrap_or_default();
     keys.sort_by(|a, b| js_cmp(a, b));
-    let flat: Vec<Value> = keys.iter().map(|k| json!([k, filters[k.as_str()].clone()])).collect();
+    let flat: Vec<Value> = keys
+        .iter()
+        .map(|k| json!([k, filters[k.as_str()].clone()]))
+        .collect();
     let d = Sha256::digest(js_stringify(&Value::Array(flat)).as_bytes());
     b64url(&d)[..22].to_string()
 }
@@ -143,7 +170,9 @@ fn digest_of(filters: &Value) -> String {
 impl Cursors {
     /// A fresh random key.
     pub fn new() -> Self {
-        Cursors { key: av_core::secret::Key32::from_bytes(crate::util::random_bytes::<32>()) }
+        Cursors {
+            key: av_core::secret::Key32::from_bytes(crate::util::random_bytes::<32>()),
+        }
     }
 
     /// A given key (tests).
@@ -152,7 +181,8 @@ impl Cursors {
     }
 
     fn mac(&self, body: &[u8]) -> Vec<u8> {
-        let mut m = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.expose()).expect("hmac key");
+        let mut m =
+            <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(self.key.expose()).expect("hmac key");
         m.update(b"agent-vault ui cursor\n");
         m.update(body);
         m.finalize().into_bytes()[..MAC_BYTES].to_vec()
@@ -160,16 +190,27 @@ impl Cursors {
 
     /// Ports `seal(list, filters, dir, key)`.
     pub fn seal(&self, list: &str, filters: &Value, dir: &str, key: &[Value]) -> String {
-        let body = js_stringify(&json!({"v": 1, "l": list, "f": digest_of(filters), "d": dir, "k": key}));
+        let body =
+            js_stringify(&json!({"v": 1, "l": list, "f": digest_of(filters), "d": dir, "k": key}));
         let mut out = self.mac(body.as_bytes());
         out.extend_from_slice(body.as_bytes());
         b64url(&out)
     }
 
     /// Ports `open(text, list, filters)`.
-    pub fn open(&self, text: &str, list: &str, filters: &Value) -> Result<OpenedCursor, PagingError> {
+    pub fn open(
+        &self,
+        text: &str,
+        list: &str,
+        filters: &Value,
+    ) -> Result<OpenedCursor, PagingError> {
         let made = || bad_cursor("is not one this server made");
-        if text.encode_utf16().count() > CURSOR_MAX_CHARS || text.is_empty() || !text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        if text.encode_utf16().count() > CURSOR_MAX_CHARS
+            || text.is_empty()
+            || !text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
             return Err(made());
         }
         let raw = b64url_lenient(text);
@@ -190,8 +231,16 @@ impl Cursors {
         if c["f"].as_str() != Some(digest_of(filters).as_str()) {
             return Err(bad_cursor("was made for a different search or filter"));
         }
-        let dir = c["d"].as_str().filter(|d| *d == "next" || *d == "prev").ok_or_else(made)?.to_string();
-        let key = c["k"].as_array().filter(|k| !k.is_empty() && k.len() <= 4 && k.iter().all(is_key_part)).cloned().ok_or_else(made)?;
+        let dir = c["d"]
+            .as_str()
+            .filter(|d| *d == "next" || *d == "prev")
+            .ok_or_else(made)?
+            .to_string();
+        let key = c["k"]
+            .as_array()
+            .filter(|k| !k.is_empty() && k.len() <= 4 && k.iter().all(is_key_part))
+            .cloned()
+            .ok_or_else(made)?;
         Ok(OpenedCursor { dir, key })
     }
 }
@@ -226,15 +275,67 @@ fn slugs_of(v: &Value) -> Value {
 }
 
 static LISTS: [ListSpec; 9] = [
-    ListSpec { name: "credentials", key: |c, _| vec![g(c, "slug"), g(c, "id")], dirs: &[1, 1], fields: |c| vec![g(c, "slug"), g(c, "id"), g(c, "kind"), g(c, "label")] },
-    ListSpec { name: "sessions", key: |s, _| vec![g(s, "created_at"), g(s, "id")], dirs: &[-1, -1], fields: |s| vec![g(s, "id"), g(s, "label"), g(s, "state"), slugs_of(s)] },
-    ListSpec { name: "pending", key: |p, _| vec![g(p, "created_at"), g(p, "kind"), g(p, "id")], dirs: &[-1, 1, -1], fields: |p| vec![g(p, "id"), g(p, "kind"), g(p, "headline"), g(p, "grant_id")] },
-    ListSpec { name: "templates", key: |t, _| vec![g(t, "name")], dirs: &[1], fields: |t| vec![g(t, "name"), g(t, "creds")] },
-    ListSpec { name: "listeners", key: |l, _| vec![g(l, "id"), g(l, "address")], dirs: &[1, 1], fields: |l| vec![g(l, "id"), g(l, "address"), g(l, "state"), g(l, "surfaces")] },
-    ListSpec { name: "tripwires", key: |_, i| vec![Value::from(i as u64)], dirs: &[1], fields: |r| vec![g(r, "id"), g(r, "action"), g(r, "codes"), g(r, "rule_prefix")] },
-    ListSpec { name: "sessions/detail", key: |x, _| vec![g(x, "cred"), g(x, "grant_id")], dirs: &[1, 1], fields: |x| vec![g(x, "grant_id"), g(x, "cred"), g(x, "state")] },
-    ListSpec { name: "report/access:sessions", key: |s, _| vec![g(s, "last_seen_at"), g(s, "id")], dirs: &[-1, 1], fields: |s| vec![g(s, "id"), g(s, "label"), g(s, "state"), g(s, "creds")] },
-    ListSpec { name: "report/access:credentials", key: |c, _| vec![g(c, "slug")], dirs: &[1], fields: |c| vec![g(c, "slug")] },
+    ListSpec {
+        name: "credentials",
+        key: |c, _| vec![g(c, "slug"), g(c, "id")],
+        dirs: &[1, 1],
+        fields: |c| vec![g(c, "slug"), g(c, "id"), g(c, "kind"), g(c, "label")],
+    },
+    ListSpec {
+        name: "sessions",
+        key: |s, _| vec![g(s, "created_at"), g(s, "id")],
+        dirs: &[-1, -1],
+        fields: |s| vec![g(s, "id"), g(s, "label"), g(s, "state"), slugs_of(s)],
+    },
+    ListSpec {
+        name: "pending",
+        key: |p, _| vec![g(p, "created_at"), g(p, "kind"), g(p, "id")],
+        dirs: &[-1, 1, -1],
+        fields: |p| vec![g(p, "id"), g(p, "kind"), g(p, "headline"), g(p, "grant_id")],
+    },
+    ListSpec {
+        name: "templates",
+        key: |t, _| vec![g(t, "name")],
+        dirs: &[1],
+        fields: |t| vec![g(t, "name"), g(t, "creds")],
+    },
+    ListSpec {
+        name: "listeners",
+        key: |l, _| vec![g(l, "id"), g(l, "address")],
+        dirs: &[1, 1],
+        fields: |l| vec![g(l, "id"), g(l, "address"), g(l, "state"), g(l, "surfaces")],
+    },
+    ListSpec {
+        name: "tripwires",
+        key: |_, i| vec![Value::from(i as u64)],
+        dirs: &[1],
+        fields: |r| {
+            vec![
+                g(r, "id"),
+                g(r, "action"),
+                g(r, "codes"),
+                g(r, "rule_prefix"),
+            ]
+        },
+    },
+    ListSpec {
+        name: "sessions/detail",
+        key: |x, _| vec![g(x, "cred"), g(x, "grant_id")],
+        dirs: &[1, 1],
+        fields: |x| vec![g(x, "grant_id"), g(x, "cred"), g(x, "state")],
+    },
+    ListSpec {
+        name: "report/access:sessions",
+        key: |s, _| vec![g(s, "last_seen_at"), g(s, "id")],
+        dirs: &[-1, 1],
+        fields: |s| vec![g(s, "id"), g(s, "label"), g(s, "state"), g(s, "creds")],
+    },
+    ListSpec {
+        name: "report/access:credentials",
+        key: |c, _| vec![g(c, "slug")],
+        dirs: &[1],
+        fields: |c| vec![g(c, "slug")],
+    },
 ];
 
 /// The spec for a JS `LISTS` key (`credentials`, `sessions`, `pending`,
@@ -258,10 +359,23 @@ pub fn list_spec(name: &str) -> Option<&'static ListSpec> {
 
 /// Ports `AUDIT_FIELDS(r)`.
 pub fn audit_fields(r: &Value) -> Vec<Value> {
-    ["kind", "seq", "session_id", "request_id", "grant_id", "approval_id", "credential_slug", "reason_code", "code", "rule", "rule_id", "actor"]
-        .iter()
-        .map(|k| g(r, k))
-        .collect()
+    [
+        "kind",
+        "seq",
+        "session_id",
+        "request_id",
+        "grant_id",
+        "approval_id",
+        "credential_slug",
+        "reason_code",
+        "code",
+        "rule",
+        "rule_id",
+        "actor",
+    ]
+    .iter()
+    .map(|k| g(r, k))
+    .collect()
 }
 
 /// Ports `matches(item, fields, q)`.
@@ -294,10 +408,21 @@ pub fn matches(item: &Value, fields: fn(&Value) -> Vec<Value>, q: &str) -> bool 
 pub fn compare_keys(a: &[Value], b: &[Value], dirs: &[i8]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     for (i, d) in dirs.iter().enumerate() {
-        let x = a.get(i).filter(|v| !v.is_null()).cloned().unwrap_or(Value::from(""));
-        let y = b.get(i).filter(|v| !v.is_null()).cloned().unwrap_or(Value::from(""));
+        let x = a
+            .get(i)
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or(Value::from(""));
+        let y = b
+            .get(i)
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or(Value::from(""));
         let c = match (&x, &y) {
-            (Value::Number(p), Value::Number(q)) => p.as_f64().partial_cmp(&q.as_f64()).unwrap_or(Ordering::Equal),
+            (Value::Number(p), Value::Number(q)) => p
+                .as_f64()
+                .partial_cmp(&q.as_f64())
+                .unwrap_or(Ordering::Equal),
             _ => js_cmp(&crate::util::js_string(&x), &crate::util::js_string(&y)),
         };
         if c != Ordering::Equal {
@@ -308,14 +433,23 @@ pub fn compare_keys(a: &[Value], b: &[Value], dirs: &[i8]) -> std::cmp::Ordering
 }
 
 /// Ports `pageList(items, spec, paging, filters, cursors)`.
-pub fn page_list(items: &[Value], spec: &ListSpec, paging: &Paging, filters: &Value, cursors: &Cursors) -> Result<Value, PagingError> {
+pub fn page_list(
+    items: &[Value],
+    spec: &ListSpec,
+    paging: &Paging,
+    filters: &Value,
+    cursors: &Cursors,
+) -> Result<Value, PagingError> {
     let empty = json!({});
     let mut sorted: Vec<(Value, Vec<Value>)> = items
         .iter()
         .enumerate()
         .map(|(i, it)| {
             let base = if it.is_null() { &empty } else { it };
-            let k = (spec.key)(base, i).into_iter().map(|p| if is_key_part(&p) { p } else { Value::Null }).collect();
+            let k = (spec.key)(base, i)
+                .into_iter()
+                .map(|p| if is_key_part(&p) { p } else { Value::Null })
+                .collect();
             (it.clone(), k)
         })
         .filter(|(it, _)| matches(it, spec.fields, &paging.q))
@@ -328,15 +462,23 @@ pub fn page_list(items: &[Value], spec: &ListSpec, paging: &Paging, filters: &Va
     if let Some(c) = &paging.cursor {
         let c = cursors.open(c, spec.name, &f)?;
         if c.dir == "next" {
-            start = sorted.iter().position(|e| compare_keys(&e.1, &c.key, spec.dirs).is_gt()).unwrap_or(sorted.len());
+            start = sorted
+                .iter()
+                .position(|e| compare_keys(&e.1, &c.key, spec.dirs).is_gt())
+                .unwrap_or(sorted.len());
         } else {
-            let end = sorted.iter().position(|e| compare_keys(&e.1, &c.key, spec.dirs).is_ge()).unwrap_or(sorted.len());
+            let end = sorted
+                .iter()
+                .position(|e| compare_keys(&e.1, &c.key, spec.dirs).is_ge())
+                .unwrap_or(sorted.len());
             start = end.saturating_sub(paging.limit);
         }
     }
     let page: Vec<&(Value, Vec<Value>)> = sorted.iter().skip(start).take(paging.limit).collect();
-    let next = (!page.is_empty() && start + paging.limit < sorted.len()).then(|| cursors.seal(spec.name, &f, "next", &page[page.len() - 1].1));
-    let prev = (!page.is_empty() && start > 0).then(|| cursors.seal(spec.name, &f, "prev", &page[0].1));
+    let next = (!page.is_empty() && start + paging.limit < sorted.len())
+        .then(|| cursors.seal(spec.name, &f, "next", &page[page.len() - 1].1));
+    let prev =
+        (!page.is_empty() && start > 0).then(|| cursors.seal(spec.name, &f, "prev", &page[0].1));
     Ok(json!({
         "items": page.iter().map(|e| e.0.clone()).collect::<Vec<_>>(),
         "next_cursor": next, "prev_cursor": prev, "total": sorted.len(),
@@ -344,7 +486,15 @@ pub fn page_list(items: &[Value], spec: &ListSpec, paging: &Paging, filters: &Va
 }
 
 /// Ports `pageAnswer(shown, spec, paging, { within, drop, filters }, cursors)`.
-pub fn page_answer(shown: &Value, spec: &ListSpec, paging: &Paging, within: Option<&str>, drop: &[&str], filters: &Value, cursors: &Cursors) -> Result<Value, PagingError> {
+pub fn page_answer(
+    shown: &Value,
+    spec: &ListSpec,
+    paging: &Paging,
+    within: Option<&str>,
+    drop: &[&str],
+    filters: &Value,
+    cursors: &Cursors,
+) -> Result<Value, PagingError> {
     let Some(within) = within else {
         let items = shown.as_array().cloned().unwrap_or_default();
         return page_list(&items, spec, paging, filters, cursors);
@@ -357,7 +507,11 @@ pub fn page_answer(shown: &Value, spec: &ListSpec, paging: &Paging, within: Opti
                 beside.insert(k.clone(), v.clone());
             }
         }
-        inner = m.get(within).and_then(Value::as_array).cloned().unwrap_or_default();
+        inner = m
+            .get(within)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
     }
     let page = page_list(&inner, spec, paging, filters, cursors)?;
     if let Value::Object(p) = page {
@@ -378,7 +532,9 @@ mod tests {
 
     #[test]
     fn walks_a_list_both_ways_and_refuses_foreign_cursors() {
-        let items: Vec<Value> = (0..7).map(|i| json!({"slug": format!("c{i}"), "id": format!("cr_{i}")})).collect();
+        let items: Vec<Value> = (0..7)
+            .map(|i| json!({"slug": format!("c{i}"), "id": format!("cr_{i}")}))
+            .collect();
         let c = Cursors::new();
         let spec = list_spec("credentials").unwrap();
         let p = paging_of(&params("paged=1&limit=3")).unwrap().unwrap();
@@ -387,26 +543,86 @@ mod tests {
         assert_eq!(first["total"], 7);
         assert!(first["prev_cursor"].is_null());
         let next = first["next_cursor"].as_str().unwrap().to_string();
-        let p2 = Paging { cursor: Some(next), ..p.clone() };
+        let p2 = Paging {
+            cursor: Some(next),
+            ..p.clone()
+        };
         let second = page_list(&items, spec, &p2, &json!({}), &c).unwrap();
         assert_eq!(second["items"][0]["slug"], "c3");
         let prev = second["prev_cursor"].as_str().unwrap().to_string();
-        let back = page_list(&items, spec, &Paging { cursor: Some(prev.clone()), ..p.clone() }, &json!({}), &c).unwrap();
+        let back = page_list(
+            &items,
+            spec,
+            &Paging {
+                cursor: Some(prev.clone()),
+                ..p.clone()
+            },
+            &json!({}),
+            &c,
+        )
+        .unwrap();
         assert_eq!(back["items"][0]["slug"], "c0");
         // Another process's key, another list, another search.
-        assert_eq!(page_list(&items, spec, &Paging { cursor: Some(prev.clone()), ..p.clone() }, &json!({}), &Cursors::new()).unwrap_err().code, "AV_BAD_CURSOR");
-        assert!(page_list(&items, list_spec("templates").unwrap(), &Paging { cursor: Some(prev.clone()), ..p.clone() }, &json!({}), &c).is_err());
-        assert!(page_list(&items, spec, &Paging { cursor: Some(prev), q: "c1".into(), ..p }, &json!({}), &c).is_err());
+        assert_eq!(
+            page_list(
+                &items,
+                spec,
+                &Paging {
+                    cursor: Some(prev.clone()),
+                    ..p.clone()
+                },
+                &json!({}),
+                &Cursors::new()
+            )
+            .unwrap_err()
+            .code,
+            "AV_BAD_CURSOR"
+        );
+        assert!(page_list(
+            &items,
+            list_spec("templates").unwrap(),
+            &Paging {
+                cursor: Some(prev.clone()),
+                ..p.clone()
+            },
+            &json!({}),
+            &c
+        )
+        .is_err());
+        assert!(page_list(
+            &items,
+            spec,
+            &Paging {
+                cursor: Some(prev),
+                q: "c1".into(),
+                ..p
+            },
+            &json!({}),
+            &c
+        )
+        .is_err());
     }
 
     #[test]
     fn paging_params_are_strict() {
         assert!(paging_of(&params("")).unwrap().is_none());
-        assert_eq!(paging_of(&params("cursor=x")).unwrap_err().code, "AV_BAD_CURSOR");
-        assert_eq!(paging_of(&params("paged=2")).unwrap_err().code, "AV_BAD_LIMIT");
+        assert_eq!(
+            paging_of(&params("cursor=x")).unwrap_err().code,
+            "AV_BAD_CURSOR"
+        );
+        assert_eq!(
+            paging_of(&params("paged=2")).unwrap_err().code,
+            "AV_BAD_LIMIT"
+        );
         assert!(paging_of(&params("paged=1&limit=01")).is_err());
         assert!(paging_of(&params("paged=1&limit=201")).is_err());
         assert!(paging_of(&params("paged=1&limit=1&limit=2")).is_err());
-        assert_eq!(paging_of(&params("paged=1&q=%20ABC%20")).unwrap().unwrap().q, "abc");
+        assert_eq!(
+            paging_of(&params("paged=1&q=%20ABC%20"))
+                .unwrap()
+                .unwrap()
+                .q,
+            "abc"
+        );
     }
 }

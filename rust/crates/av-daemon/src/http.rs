@@ -27,11 +27,18 @@ impl hyper::body::Body for AvBody {
     type Data = Bytes;
     type Error = Infallible;
 
-    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
         match self.get_mut() {
             AvBody::Full(b) => Poll::Ready(b.take().map(|b| Ok(Frame::data(b)))),
-            AvBody::Frames(rx) => rx.poll_recv(cx).map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
-            AvBody::Text(rx) => rx.poll_recv(cx).map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
+            AvBody::Frames(rx) => rx
+                .poll_recv(cx)
+                .map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
+            AvBody::Text(rx) => rx
+                .poll_recv(cx)
+                .map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
         }
     }
 
@@ -54,9 +61,13 @@ pub type Resp = hyper::Response<AvBody>;
 /// A whole response.
 pub fn response(status: u16, headers: &[(String, String)], body: Vec<u8>) -> Resp {
     let mut r = hyper::Response::new(AvBody::Full(Some(Bytes::from(body))));
-    *r.status_mut() = hyper::StatusCode::from_u16(status).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
+    *r.status_mut() =
+        hyper::StatusCode::from_u16(status).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
     for (n, v) in headers {
-        if let (Ok(n), Ok(v)) = (hyper::header::HeaderName::from_bytes(n.as_bytes()), hyper::header::HeaderValue::from_bytes(&crate::util::latin1_bytes(v))) {
+        if let (Ok(n), Ok(v)) = (
+            hyper::header::HeaderName::from_bytes(n.as_bytes()),
+            hyper::header::HeaderValue::from_bytes(&crate::util::latin1_bytes(v)),
+        ) {
             r.headers_mut().append(n, v);
         }
     }
@@ -81,18 +92,21 @@ pub fn json_pretty(status: u16, obj: &Value, extra: &[(String, String)]) -> Resp
 }
 
 /// `readBody(req, res)`: the body, or the 413 to answer with past `max`.
-pub async fn read_body(body: Incoming, max: usize) -> Result<Vec<u8>, Resp> {
+pub async fn read_body(body: Incoming, max: usize) -> Result<Vec<u8>, Box<Resp>> {
     let mut body = body;
     let mut out = Vec::new();
     loop {
         match body.frame().await {
             None => return Ok(out),
-            Some(Err(_)) => return Err(response(400, &[], Vec::new())),
+            Some(Err(_)) => return Err(Box::new(response(400, &[], Vec::new()))),
             Some(Ok(f)) => {
                 if let Ok(d) = f.into_data() {
                     out.extend_from_slice(&d);
                     if out.len() > max {
-                        return Err(json_compact(413, &serde_json::json!({"code": "AV_UNSCANNABLE", "detail": "body exceeds 16 MiB"})));
+                        return Err(Box::new(json_compact(
+                            413,
+                            &serde_json::json!({"code": "AV_UNSCANNABLE", "detail": "body exceeds 16 MiB"}),
+                        )));
                     }
                 }
             }
@@ -102,7 +116,11 @@ pub async fn read_body(body: Incoming, max: usize) -> Result<Vec<u8>, Resp> {
 
 /// `res.end(JSON.stringify(obj))` with `content-type: application/json`.
 pub fn json_compact(status: u16, obj: &Value) -> Resp {
-    response(status, &[("content-type".into(), "application/json".into())], crate::util::js_stringify(obj).into_bytes())
+    response(
+        status,
+        &[("content-type".into(), "application/json".into())],
+        crate::util::js_stringify(obj).into_bytes(),
+    )
 }
 
 /// `new URL(req.url, base)`: `(pathname, search without '?')`, or `None`

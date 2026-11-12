@@ -24,7 +24,11 @@ pub struct TlsPaths {
 /// Ports `tlsPaths(dir)`.
 pub fn tls_paths(dir: &Path) -> TlsPaths {
     let d = dir.join("tls");
-    TlsPaths { key: d.join("localhost-key.pem"), cert: d.join("localhost.pem"), dir: d }
+    TlsPaths {
+        key: d.join("localhost-key.pem"),
+        cert: d.join("localhost.pem"),
+        dir: d,
+    }
 }
 
 /// What [`ensure_certificate`] reports. Ports the result of
@@ -80,7 +84,8 @@ fn describe(cert: &Path) -> std::io::Result<(String, String, Option<String>)> {
 /// True when the certificate is gone, unreadable, or within 30 days of expiry.
 fn is_expiring(cert: &Path) -> bool {
     match describe(cert) {
-        Ok((_, _, Some(na))) => crate::util::parse_iso_ms(&na).is_none_or(|ms| ms - crate::util::now_ms() < 30 * 86_400_000),
+        Ok((_, _, Some(na))) => crate::util::parse_iso_ms(&na)
+            .is_none_or(|ms| ms - crate::util::now_ms() < 30 * 86_400_000),
         _ => true,
     }
 }
@@ -91,20 +96,35 @@ pub fn ensure_certificate(dir: &Path, force: bool) -> std::io::Result<Certificat
     let p = tls_paths(dir);
     if !force && p.cert.exists() && p.key.exists() && !is_expiring(&p.cert) {
         let (pem, fingerprint, not_after) = describe(&p.cert)?;
-        return Ok(CertificateInfo { cert: p.cert, key: p.key, pem, fingerprint, not_after, created: false });
+        return Ok(CertificateInfo {
+            cert: p.cert,
+            key: p.key,
+            pem,
+            fingerprint,
+            not_after,
+            created: false,
+        });
     }
     std::fs::create_dir_all(&p.dir)?;
     let _ = std::fs::set_permissions(&p.dir, std::fs::Permissions::from_mode(0o700));
-    let fail = |e: rcgen::Error| std::io::Error::other(format!("could not generate a certificate: {e}"));
+    let fail =
+        |e: rcgen::Error| std::io::Error::other(format!("could not generate a certificate: {e}"));
     let key = rcgen::KeyPair::generate().map_err(fail)?;
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).map_err(fail)?;
-    params.subject_alt_names.push(rcgen::SanType::IpAddress("127.0.0.1".parse().expect("ip")));
-    params.subject_alt_names.push(rcgen::SanType::IpAddress("::1".parse().expect("ip")));
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress("127.0.0.1".parse().expect("ip")));
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress("::1".parse().expect("ip")));
     let mut dn = rcgen::DistinguishedName::new();
     dn.push(rcgen::DnType::CommonName, "agent-vault localhost");
     params.distinguished_name = dn;
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature, rcgen::KeyUsagePurpose::KeyCertSign];
+    params.key_usages = vec![
+        rcgen::KeyUsagePurpose::DigitalSignature,
+        rcgen::KeyUsagePurpose::KeyCertSign,
+    ];
     params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::minutes(1);
@@ -116,14 +136,25 @@ pub fn ensure_certificate(dir: &Path, force: bool) -> std::io::Result<Certificat
     std::fs::write(&p.cert, cert.pem())?;
     std::fs::set_permissions(&p.cert, std::fs::Permissions::from_mode(0o644))?;
     let (pem, fingerprint, not_after) = describe(&p.cert)?;
-    Ok(CertificateInfo { cert: p.cert, key: p.key, pem, fingerprint, not_after, created: true })
+    Ok(CertificateInfo {
+        cert: p.cert,
+        key: p.key,
+        pem,
+        fingerprint,
+        not_after,
+        created: true,
+    })
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::remove_file(path);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
     f.write_all(bytes)?;
     f.sync_all()
 }
@@ -141,7 +172,10 @@ pub struct TlsMaterial {
 pub fn load_material(cert: &Path, key: &Path) -> std::io::Result<TlsMaterial> {
     for p in [cert, key] {
         if !p.exists() {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("tls file not found: {}", p.display())));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("tls file not found: {}", p.display()),
+            ));
         }
     }
     let mode = std::fs::metadata(key)?.permissions().mode() & 0o777;
@@ -152,7 +186,10 @@ pub fn load_material(cert: &Path, key: &Path) -> std::io::Result<TlsMaterial> {
             mode
         )));
     }
-    Ok(TlsMaterial { cert: std::fs::read(cert)?, key: av_core::secret::SecretBytes::from(std::fs::read(key)?) })
+    Ok(TlsMaterial {
+        cert: std::fs::read(cert)?,
+        key: av_core::secret::SecretBytes::from(std::fs::read(key)?),
+    })
 }
 
 #[cfg(test)]
