@@ -72,6 +72,7 @@ agent-vault - a local credential proxy for agents
 setup
   setup [--dev] [--print-only]         install properly (--dev skips the uid boundary)
   upgrade                              reinstall the daemon from this checkout
+  migrate [--dry-run] [--from D] [--to D]  move a JavaScript vault (vault.json) into vault.db
   daemon [--port N]                    run the daemon (gateway + control socket)
   status | doctor | profiles           what is running, and what is configured
 

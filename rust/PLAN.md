@@ -136,6 +136,9 @@ port, so the conformance suite stays a pure equivalence check.
   ends the response if headers were sent. Unwinding also runs the zeroizing
   drops that `abort` would skip. `daemon.uncaught` (the JS process-wide
   handler) has no Rust counterpart and stays not applicable.
+- **`agent-vault help` lists `migrate`.** The help text is otherwise the
+  JS text byte for byte; the one added line under "setup" names the new
+  command so an upgrading user can find it.
 - README "Honest limits" is updated to match.
 
 ## Layout and ownership
