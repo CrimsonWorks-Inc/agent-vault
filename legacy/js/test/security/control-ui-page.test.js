@@ -14,15 +14,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { notificationText, showNotice, batchText } from '../../web/src/lib/notify.js'
-import { tripwireRuleText } from '../../web/src/lib/format.js'
+import { notificationText, showNotice, batchText } from '../../../../web/src/lib/notify.js'
+import { tripwireRuleText } from '../../../../web/src/lib/format.js'
 import {
   templateLimits, templateOverrides, advancedFields, buildSessionBody, detailMarkdown, narrowSummary, MODEL_KINDS,
-} from '../../web/src/components/sessions/sessionLogic.js'
-import { credentialBadges, pinsText, testParts } from '../../web/src/components/credentials/credentialText.js'
-import { copyable, copyText } from '../../web/src/lib/clipboard.js'
+} from '../../../../web/src/components/sessions/sessionLogic.js'
+import { credentialBadges, pinsText, testParts } from '../../../../web/src/components/credentials/credentialText.js'
+import { copyable, copyText } from '../../../../web/src/lib/clipboard.js'
 
-const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
+const read = (rel) => readFileSync(new URL(`${/^(web\/|src\/ui\/dist|README\.md|docs\/)/.test(rel) ? '../../../../' : '../../'}${rel}`, import.meta.url), 'utf8')
 const HOSTILE = '<img src=x onerror=alert(1)>'
 
 test('a notification says what the daemon saw, never what the agent claimed', () => {

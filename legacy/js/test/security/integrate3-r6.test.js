@@ -23,10 +23,10 @@ import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { startE2E } from './integrate3-e2e-helpers.js'
 import { startApi, PASSPHRASE } from './control-api-helpers.js'
-import { shownRules, toggleBody } from '../../web/src/components/overview/tripwires.js'
-import { notificationText } from '../../web/src/lib/notify.js'
-import { cleanLine, cleanText as pageCleanText } from '../../web/src/lib/text.js'
-import { copyable } from '../../web/src/lib/clipboard.js'
+import { shownRules, toggleBody } from '../../../../web/src/components/overview/tripwires.js'
+import { notificationText } from '../../../../web/src/lib/notify.js'
+import { cleanLine, cleanText as pageCleanText } from '../../../../web/src/lib/text.js'
+import { copyable } from '../../../../web/src/lib/clipboard.js'
 import { Daemon } from '../../src/daemon/server.js'
 import { DEFAULT_RULES } from '../../src/daemon/tripwire.js'
 import { cleanHeadline } from '../../src/daemon/notify.js'
@@ -88,7 +88,7 @@ test('B1: the page shows the defaults as defaults, and turning on stores them, w
   assert.deepEqual(toggleBody(mine), { enabled: true }, 'with rules saved, turning on only enables them')
   assert.deepEqual(toggleBody({ ...mine, enabled: true }), { enabled: false })
   // The card says which, from shownRules' answer (rendered in web/src/pages/Containment.test.jsx).
-  const card = readFileSync(new URL('../../web/src/components/overview/ContainmentCard.jsx', import.meta.url), 'utf8')
+  const card = readFileSync(new URL('../../../../web/src/components/overview/ContainmentCard.jsx', import.meta.url), 'utf8')
   assert.match(card, /rules\.length \? 'Off\. Turning them on uses your rules below\.'/)
   assert.match(card, /tw\.rules_saved === false \? 'Off\. Turning them on stores and uses the default rules below\.'/)
   assert.match(card, /const \{ rules, shown \} = shownRules\(tw\)/)

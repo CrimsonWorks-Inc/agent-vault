@@ -348,7 +348,7 @@ fn cargo_test(
 /// daemon), the UI sources (`web/src`) and the README. They are copied beside the `rust/` copy so the copy's
 /// tests see the same tree the working copy's tests do. A missing input is
 /// skipped; the baseline run then fails and names it.
-const REPO_INPUTS: &[&str] = &["src", "bin", "package.json", "web/src", "README.md"];
+const REPO_INPUTS: &[&str] = &["src", "legacy", "package.json", "web/src", "README.md"];
 
 fn copy_repo_inputs(root: &Path, dest: &Path) -> Result<(), String> {
     let Some(repo) = root.parent() else {

@@ -10,7 +10,7 @@
 // copy kept here would be a second reader, and the server rebuilds the signed
 // operation with the first.
 
-import { checkDecisions, parseOverrides } from '../../../../src/pending.js'
+import { checkDecisions, parseOverrides } from '../../../../legacy/js/src/pending.js'
 
 /** The approval modes an owner can choose for a session request, in the old page's order. */
 export const OWNER_APPROVALS = [

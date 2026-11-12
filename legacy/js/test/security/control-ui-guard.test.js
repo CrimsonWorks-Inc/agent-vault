@@ -17,7 +17,7 @@ import * as ph from '../../src/core/placeholder.js'
 import { operationFor } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { towardPage } from '../../src/ui/server.js'
-import { readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { readNarrowing } from '../../../../web/src/components/approvals/decide.js'
 import { startStub, startUi } from './control-ui-helpers.js'
 
 const PLACEHOLDER = ph.mint({ kPh: randomBytes(32), sid: ph.newSid(), slug: 'demo', field: 'token' }).text
@@ -99,8 +99,8 @@ test('the hand-off for a session made here still carries what the agent needs', 
 test('the page runs the very parser the server rebinds a narrowing with (C21)', () => {
   // The bundle's parseOverrides is src/pending.js's: proven from the build's
   // module graph in one-source-of-truth.test.js. Here, the page's reader.
-  const decide = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
-  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/src\/pending\.js'/)
+  const decide = readFileSync(new URL('../../../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  assert.match(decide, /import \{[^}]*\bparseOverrides\b[^}]*\} from '\.\.\/\.\.\/\.\.\/\.\.\/legacy\/js\/src\/pending\.js'/)
   // No second reader left in the page.
   assert.ok(!/function parse(?:Overrides|Narrowing)\(/.test(decide))
   assert.match(decide, /export function readNarrowing\(typed\) \{\n {2}try \{\n {4}return \{ overrides: parseOverrides\(typed\) \}/)

@@ -15,14 +15,14 @@ import { readFileSync } from 'node:fs'
 import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { McpServer } from '../../src/daemon/mcp.js'
-import { readNarrowing } from '../../web/src/components/approvals/decide.js'
-import { exampleCall } from '../../web/src/components/sessions/sessionLogic.js'
-import { createPresence, TOUCHID_NEEDS_PASSPHRASE } from '../../web/src/lib/presence.js'
+import { readNarrowing } from '../../../../web/src/components/approvals/decide.js'
+import { exampleCall } from '../../../../web/src/components/sessions/sessionLogic.js'
+import { createPresence, TOUCHID_NEEDS_PASSPHRASE } from '../../../../web/src/lib/presence.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
 
-const README = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
+const README = readFileSync(new URL('../../../../README.md', import.meta.url), 'utf8')
 
-const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
+const read = (rel) => readFileSync(new URL(`${/^(web\/|src\/ui\/dist)/.test(rel) ? '../../../../' : '../../'}${rel}`, import.meta.url), 'utf8')
 
 /** The page's narrowing, read as the approvals page reads it (decide.js, which imports src/pending.js, C21). */
 const pageNarrowing = (typed) => {
@@ -85,7 +85,7 @@ test('the hand-off example sends the token where it cannot displace the placehol
  * page is covered, not only in the Docs section.
  */
 function docsSource() {
-  const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
+  const read = (rel) => readFileSync(new URL(`${/^(web\/|src\/ui\/dist)/.test(rel) ? '../../../../' : '../../'}${rel}`, import.meta.url), 'utf8')
   const bundle = /src="\/assets\/([^"]+\.js)"/.exec(read('src/ui/dist/index.html'))?.[1]
   assert.ok(bundle, 'the built page names its script')
   return ['web/src/components/docs/sections.jsx', 'web/src/components/docs/RefusedTable.jsx',

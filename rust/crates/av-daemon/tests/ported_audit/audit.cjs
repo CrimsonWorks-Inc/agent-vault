@@ -9,7 +9,7 @@ process.chdir(
 );
 const acorn = require("internal/deps/acorn/acorn/dist/acorn");
 const U = Symbol("unknown");
-const sources = ["test/security", "test/core"].flatMap((d) =>
+const sources = ["legacy/js/test/security", "legacy/js/test/core"].flatMap((d) =>
   fs
     .readdirSync(d)
     .filter((f) => f.endsWith(".test.js"))

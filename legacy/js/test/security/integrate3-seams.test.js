@@ -22,7 +22,7 @@ import { fetchPending } from '../../src/pending.js'
 import { startUi } from './fix-control-helpers.js'
 import { startApi, SECRET } from './control-api-helpers.js'
 
-const README = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
+const README = readFileSync(new URL('../../../../README.md', import.meta.url), 'utf8')
 
 /**
  * The page's own text: every source file of the React UI (tests and fixtures
@@ -30,13 +30,13 @@ const README = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
  * where the tools are counted and named.
  */
 function docsSource() {
-  const root = new URL('../../web/src/', import.meta.url)
+  const root = new URL('../../../../web/src/', import.meta.url)
   const files = readdirSync(root, { recursive: true })
     .filter((f) => /\.jsx?$/.test(f) && !/\.test\.|fixtures|\/test\//.test(f) && !f.startsWith('test/'))
   return files.map((f) => readFileSync(new URL(f, root), 'utf8')).join('\n')
 }
 const PAGE_TEXT = docsSource()
-const DOCS = readFileSync(new URL('../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
+const DOCS = readFileSync(new URL('../../../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
 const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
 
 test('the README and the docs page say how many MCP tools there are, and it is how many mcp.js has', () => {

@@ -1,9 +1,10 @@
 # agent-vault in Rust
 
-The Rust + SQLite port of agent-vault. [`PLAN.md`](PLAN.md) is the contract:
-what must not change, what changes on purpose, who owns which file. The
-JavaScript in `src/`, `bin/` and `test/` stays the reference implementation
-until the cutover.
+agent-vault's implementation. [`PLAN.md`](PLAN.md) is the contract the port
+was built to: what must not change, what changes on purpose. The original
+JavaScript implementation is frozen in `../legacy/js` as the reference some
+tests compare against (migrate builds its fixture vaults with it, and a few
+core tests diff against it); it is never installed or run in production.
 
 ## Build and test
 
@@ -69,7 +70,7 @@ test = "db::tests::"                    # optional cargo test name filter
 ```
 
 The task copies `rust/` to a temporary directory, together with the repo
-inputs the tests read (`src/`, `bin/`, `package.json`, `web/src`,
+inputs the tests read (`src/`, `legacy/`, `package.json`, `web/src`,
 `README.md`); the working tree is never modified. It checks that the
 unmutated tests pass, then applies each swap in turn and runs
 `cargo test --workspace` there (only the owning crate with `--scoped`). A mutant must compile and must

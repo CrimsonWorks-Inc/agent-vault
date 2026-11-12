@@ -1,2 +1,2 @@
-import {canonicalize} from '../../../../../src/core/canon.js';import {canonicalOperation} from '../../../../../src/ui/webauthn.js';
+import {canonicalize} from '../../../../../legacy/js/src/core/canon.js';import {canonicalOperation} from '../../../../../legacy/js/src/ui/webauthn.js';
 console.log(JSON.stringify(['1.0','-0','1e20','1e21','9007199254740993','100000000000000020000','1.23e22','0.000001','0.0000001','1.5'].map(raw=>{const value=JSON.parse(raw);let canon=null;try{canon=canonicalize(value)}catch{}return{raw,canon,operation:canonicalOperation(value)}})));

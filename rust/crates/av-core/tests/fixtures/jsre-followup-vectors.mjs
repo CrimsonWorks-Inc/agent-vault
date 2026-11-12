@@ -1,5 +1,5 @@
-import {compileScrubPattern} from '../../../../../src/core/scrub.js';
-import {requestHash} from '../../../../../src/core/canon.js';
+import {compileScrubPattern} from '../../../../../legacy/js/src/core/scrub.js';
+import {requestHash} from '../../../../../legacy/js/src/core/canon.js';
 const probes=[];
 // Refused patterns have no portable JavaScript result (inline modifiers vary by Node).
 function add(source,text,{flags='',refuse=false,scalarException=false}={}) {let row={source,text,flags,refuse,scalarException};if(!refuse){try{row.js=new RegExp(source,flags).test(text)}catch{row.js=null}}probes.push(row)}

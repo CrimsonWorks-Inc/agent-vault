@@ -13,22 +13,20 @@ fn bin(name: &str) -> PathBuf {
     cargo_bin(name)
 }
 
-fn repo_root() -> PathBuf {
+/// The frozen JavaScript reference (`legacy/js`, or the parent of
+/// `AV_JS_SRC_DIR`): the oracle these contract tests compare against.
+fn js_root() -> PathBuf {
     if let Ok(src) = std::env::var("AV_JS_SRC_DIR") {
         return PathBuf::from(src)
             .parent()
             .expect("AV_JS_SRC_DIR is the src directory")
             .to_path_buf();
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../legacy/js")
 }
 
 fn js_src() -> PathBuf {
-    if let Ok(src) = std::env::var("AV_JS_SRC_DIR") {
-        PathBuf::from(src)
-    } else {
-        repo_root().join("src")
-    }
+    js_root().join("src")
 }
 
 /// Run `agent-vault` with a private vault dir and no color.
@@ -250,10 +248,9 @@ fn setup_plan_names_one_program_and_does_not_sudo() {
 
 fn release_checkout(root: &Path) -> PathBuf {
     let checkout = root.join("checkout");
-    fs::create_dir_all(checkout.join("src")).unwrap();
-    fs::create_dir_all(checkout.join("bin")).unwrap();
+    fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
-    fs::write(checkout.join("package.json"), "{}").unwrap();
+    fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     fs::write(
         checkout.join("rust/target/release/agent-vault-daemon"),
         b"daemon",
@@ -295,21 +292,17 @@ fn installer_dry_run_names_the_boundary_without_root() {
 }
 
 #[test]
-fn installer_refuses_a_symlinked_checkout_and_plans_a_clean_one() {
+fn installer_refuses_a_symlinked_release_binary_and_plans_a_clean_one() {
+    // The install copies only the release binaries; a daemon that is a link
+    // (say, to a file an agent owns) is refused before anything is planned.
     let dirty = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dirty.path().join("src/store")).unwrap();
-    fs::create_dir_all(dirty.path().join("bin")).unwrap();
-    fs::create_dir_all(dirty.path().join("rust/target/release")).unwrap();
-    fs::write(dirty.path().join("package.json"), "{}").unwrap();
-    fs::write(dirty.path().join("bin/agent-vault.js"), "// real").unwrap();
-    fs::write(
-        dirty.path().join("rust/target/release/agent-vault-daemon"),
-        b"daemon",
-    )
-    .unwrap();
+    let release = dirty.path().join("rust/target/release");
+    fs::create_dir_all(&release).unwrap();
+    fs::create_dir_all(dirty.path().join("rust/crates/av-cli")).unwrap();
+    fs::write(dirty.path().join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     std::os::unix::fs::symlink(
-        "/tmp/agent-owned.js",
-        dirty.path().join("src/store/vault.js"),
+        "/tmp/agent-owned-daemon",
+        release.join("agent-vault-daemon"),
     )
     .unwrap();
     let refused = Command::new(bin("agent-vault-setup"))
@@ -321,25 +314,14 @@ fn installer_refuses_a_symlinked_checkout_and_plans_a_clean_one() {
     let out = format!("{}{}", text(&refused.stdout), text(&refused.stderr));
     assert_ne!(refused.status.code(), Some(0), "{out}");
     assert!(out.to_lowercase().contains("symbolic link"), "{out}");
-    assert!(out.contains("src/store/vault.js"), "{out}");
-    assert!(out.contains("/tmp/agent-owned.js"), "{out}");
+    assert!(out.contains("agent-vault-daemon"), "{out}");
     assert!(!out.contains("would copied the daemon"), "{out}");
 
     let clean = tempfile::tempdir().unwrap();
-    fs::create_dir_all(clean.path().join("src/store")).unwrap();
-    fs::create_dir_all(clean.path().join("bin")).unwrap();
-    fs::create_dir_all(clean.path().join("rust/target/release")).unwrap();
-    fs::write(clean.path().join("package.json"), "{}").unwrap();
-    fs::write(clean.path().join("bin/agent-vault.js"), "// real").unwrap();
-    fs::write(clean.path().join("src/store/vault.js"), "// real").unwrap();
-    fs::write(
-        clean.path().join("rust/target/release/agent-vault-daemon"),
-        b"daemon",
-    )
-    .unwrap();
+    let checkout = release_checkout(clean.path());
     let planned = Command::new(bin("agent-vault-setup"))
         .args(["install", "--dry-run", "--from"])
-        .arg(clean.path())
+        .arg(&checkout)
         .env_remove("AGENT_VAULT_SETUP_DRY_ROOT")
         .output()
         .unwrap();
@@ -528,7 +510,7 @@ fn status_against_a_js_daemon_in_a_temp_dir() {
     let log = tmp.path().join("daemon.log");
     let log_file = fs::File::create(&log).unwrap();
     let mut child = Command::new("node")
-        .arg(repo_root().join("bin/agent-vault-daemon.js"))
+        .arg(js_root().join("bin/agent-vault-daemon.js"))
         .env("AV_VAULT_DIR", &dir)
         .env("AV_RUN_DIR", &dir)
         .env("AV_PORT", "0")

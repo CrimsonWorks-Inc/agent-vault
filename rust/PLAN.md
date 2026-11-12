@@ -15,8 +15,8 @@ existing JSON vault into the new one.
 
 The JavaScript in `src/`, `bin/` and `test/` is the **reference
 implementation**. When this file does not say how something behaves, the
-JavaScript decides. It stays in the repo, untouched, until a separate cutover
-PR that the owner approves.
+JavaScript decides. Since the cutover (0.3.0) it lives, frozen, in
+`legacy/js` as the test reference.
 
 ## Branches
 

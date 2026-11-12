@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')
+const read = (rel) => readFileSync(new URL(`${/^(web\/|src\/ui\/dist)/.test(rel) ? '../../../../' : '../../'}${rel}`, import.meta.url), 'utf8')
 
 /** The docs sections' source, read as text. */
 function docsSource() {

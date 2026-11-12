@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fireEvent, screen, within } from '@testing-library/react'
 import { renderWith } from '../test/harness.jsx'
-import { CODES } from '../../../src/core/errors.js'
+import { CODES } from '../../../legacy/js/src/core/errors.js'
 import { REFUSED } from '../components/docs/RefusedTable.jsx'
 import { SECTIONS, commandReference } from '../components/docs/sections.jsx'
 import { Docs, docsContext } from './Docs.jsx'
@@ -39,7 +39,7 @@ describe('Docs (parity with the old page)', () => {
 
   it('every section can be opened, and the CLI\'s docs command knows each one', () => {
     // vitest runs from the repo root (npm test) or from web/; jsdom's import.meta.url is not a file URL.
-    const file = ['src/cli/index.js', '../src/cli/index.js'].map((p) => resolve(process.cwd(), p)).find(existsSync)
+    const file = ['legacy/js/src/cli/index.js', '../legacy/js/src/cli/index.js'].map((p) => resolve(process.cwd(), p)).find(existsSync)
     const cli = readFileSync(file, 'utf8')
     const listed = cli.match(/const sections = \[([^\]]+)\]/)
     const known = [...listed[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1])

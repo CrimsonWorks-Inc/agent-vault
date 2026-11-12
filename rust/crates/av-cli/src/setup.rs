@@ -1065,10 +1065,7 @@ fn checkout_from(ctx: &Ctx) -> Result<PathBuf, Die> {
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(Path::to_path_buf);
         while let Some(current) = dir {
-            if current.join("src").is_dir()
-                && current.join("bin").is_dir()
-                && current.join("package.json").is_file()
-            {
+            if is_checkout(&current) {
                 return Ok(current);
             }
             dir = current.parent().map(Path::to_path_buf);
@@ -1183,24 +1180,27 @@ pub(crate) fn install_app_accepts(installer: &Path, source: &Path, app: &Path) -
     if refuses_self_install(source, app) || !installer.is_file() {
         return false;
     }
-    source.join("src").is_dir()
-        && source.join("bin").is_dir()
-        && source.join("package.json").is_file()
+    is_checkout(source)
+}
+
+/// A source checkout of agent-vault: the Rust workspace at `rust/`. The
+/// install copies only the release binaries built there
+/// (`rust/target/release`); nothing else from the checkout reaches the
+/// root-owned tree.
+pub(crate) fn is_checkout(dir: &Path) -> bool {
+    dir.join("rust/Cargo.toml").is_file() && dir.join("rust/crates/av-cli").is_dir()
 }
 
 fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     let source = checkout_from(ctx)?;
-    for required in ["src", "bin", "package.json"] {
-        if !source.join(required).exists() {
-            return Err(Die::msg(format!(
-                "{} does not look like an agent-vault checkout (no {required}).",
-                source.display()
-            )));
-        }
+    if !is_checkout(&source) {
+        return Err(Die::msg(format!(
+            "{} does not look like an agent-vault checkout (no rust/Cargo.toml).",
+            source.display()
+        )));
     }
     let app = app_dir();
     refuse_self_install(ctx, &source, &app)?;
-    assert_no_symlinks(&source, &["src", "bin", "package.json"])?;
     if !ctx.dry {
         // Never delete a path that resolves into the source. The guard above
         // already refused that; this is the last check before the unlink.
@@ -1209,10 +1209,7 @@ fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
             std::fs::remove_dir_all(&app)?;
         }
         std::fs::create_dir_all(&app)?;
-        for part in ["src", "bin", "package.json"] {
-            // dereference: copy the target of a link, never the link itself.
-            copy_dereference(&source.join(part), &app.join(part))?;
-        }
+        // The app is the Rust binaries and nothing else: no JS, no runtime.
         copy_rust_bins(&source, &app)?;
         if is_mac() {
             let _ = run_opts(
@@ -1379,35 +1376,6 @@ fn strip_special_bits(path: &Path) -> Result<(), Die> {
     let mut perms = meta.permissions();
     perms.set_mode(perms.mode() & !0o7000);
     std::fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-fn assert_no_symlinks(source: &Path, parts: &[&str]) -> Result<(), Die> {
-    fn walk(abs: &Path, shown: &str) -> Result<(), Die> {
-        let meta = std::fs::symlink_metadata(abs)?;
-        if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(abs).unwrap_or_default();
-            return Err(Die::new(
-                format!("refusing to install: {shown} is a symbolic link."),
-                format!(
-                    "It points at {}, which is outside the tree root is about to own.",
-                    target.display()
-                ),
-            ));
-        }
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(abs)? {
-                let entry = entry?;
-                let name = entry.file_name();
-                let child = format!("{shown}/{}", name.to_string_lossy());
-                walk(&entry.path(), &child)?;
-            }
-        }
-        Ok(())
-    }
-    for part in parts {
-        walk(&source.join(part), part)?;
-    }
     Ok(())
 }
 

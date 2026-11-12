@@ -18,7 +18,7 @@ function client(answer) {
 }
 
 test('the header name is the one the UI server checks', () => {
-  const server = readFileSync(new URL('../../src/ui/server.js', import.meta.url), 'utf8')
+  const server = readFileSync(new URL('../../legacy/js/src/ui/server.js', import.meta.url), 'utf8')
   assert.match(server, new RegExp(`req\\.headers\\['${UI_HEADER}'\\] !== '1'`))
 })
 

@@ -2,10 +2,10 @@
 # Names are unique across crates/*/mutations.toml.
 
 [[mutation]]
-name = "the installer accepts a symlinked checkout"
+name = "the installer accepts a symlinked release binary"
 file = "src/setup.rs"
-from = 'assert_no_symlinks(&source, &["src", "bin", "package.json"])?;'
-to = "let _ = source.as_os_str();"
+from = "    if meta.file_type().is_symlink() {\n        return Err(Die::new(\n            format!(\"refusing to install: {} is a symbolic link.\", src.display()),"
+to = "    if false {\n        return Err(Die::new(\n            format!(\"refusing to install: {} is a symbolic link.\", src.display()),"
 test = "installer_refuses_a_symlinked"
 
 [[mutation]]
@@ -639,8 +639,8 @@ test = "upgrade_bootstraps_from_the_checkout_release_installer"
 [[mutation]]
 name = "a checkout walk that lands on app is treated as a checkout"
 file = "src/commands.rs"
-from = "                if is_installed_app(dir) {"
-to = "                if false {"
+from = "            if is_installed_app(dir) {"
+to = "            if false {"
 test = "checkout_root_refuses_the_installed_app"
 
 [[mutation]]

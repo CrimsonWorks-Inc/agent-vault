@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { decisionCall, readNarrowing } from '../../web/src/components/approvals/decide.js'
+import { decisionCall, readNarrowing } from '../../../../web/src/components/approvals/decide.js'
 import { parseOverrides } from '../../src/pending.js'
 
 const ITEM = { id: 'sr_1', kind: 'session', narrowable: ['methods', 'budget', 'routes'], owner_settable: ['approval', 'infinite'] }
@@ -68,7 +68,7 @@ test('the narrowing is read by the shared parser, and a refusal is never read as
   assert.equal(bad.overrides, undefined, 'a narrowing that does not parse came back as overrides')
   assert.match(bad.error, /nothing was sent/)
   // decisionCall reads the narrowing before it builds the operation.
-  const src = readFileSync(new URL('../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../../../../web/src/components/approvals/decide.js', import.meta.url), 'utf8')
   const body = src.slice(src.indexOf('export async function decisionCall('))
   assert.ok(body.indexOf('readNarrowing(') < body.indexOf('operationFor('), 'the narrowing is not read before the operation is built')
 })

@@ -131,7 +131,7 @@ fn review_vectors_regenerate_from_javascript() {
     // Mutation copies contain rust/ only; stored vectors are still compared there.
     if !std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../src/core/detect.js"
+        "/../../../legacy/js/src/core/detect.js"
     ))
     .exists()
     {

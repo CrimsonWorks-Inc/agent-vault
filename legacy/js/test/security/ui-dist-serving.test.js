@@ -343,9 +343,9 @@ test('U2: with no dist/index.html the server refuses to start and names npm run 
 })
 
 test('U2: the shipped dist is what the server loads by default', () => {
-  const dist = loadDist(new URL('../../src/ui/dist', import.meta.url).pathname)
+  const dist = loadDist(new URL('../../../../src/ui/dist', import.meta.url).pathname)
   assert.ok(dist, 'src/ui/dist/index.html is missing; run npm run build:ui')
-  const manifest = JSON.parse(readFileSync(new URL('../../src/ui/dist/manifest.json', import.meta.url), 'utf8'))
+  const manifest = JSON.parse(readFileSync(new URL('../../../../src/ui/dist/manifest.json', import.meta.url), 'utf8'))
   for (const entry of Object.values(manifest)) {
     for (const f of [entry.file, ...(entry.css || []), ...(entry.assets || [])]) {
       assert.ok(dist.assets.has(f.replace(/^assets\//, '')), `${f} is in the manifest but would not be served`)

@@ -14,11 +14,11 @@ import { operationFor, canonicalOperation } from '../../src/ui/webauthn.js'
 import { parseOverrides } from '../../src/pending.js'
 import { overridesOf } from '../../src/daemon/session-requests.js'
 import { UiServer } from '../../src/ui/server.js'
-import { readNarrowing } from '../../web/src/components/approvals/decide.js'
-import { until } from '../../web/src/lib/format.js'
+import { readNarrowing } from '../../../../web/src/components/approvals/decide.js'
+import { until } from '../../../../web/src/lib/format.js'
 import {
   AUTO_WARNING, NEVER_WARNING, autoWrites, envCommand, suggestedName, defaultMappings,
-} from '../../web/src/components/sessions/sessionLogic.js'
+} from '../../../../web/src/components/sessions/sessionLogic.js'
 import { startDaemon, startUi, makeAuthenticator, enrol, PASSPHRASE } from './fix-control-helpers.js'
 
 
@@ -60,7 +60,7 @@ test('the page warns before it signs an elevated session', () => {
   assert.equal(AUTO_WARNING, 'No approval prompts for writes, or only for the first request. Your authenticator is asked every time you create one.')
   assert.equal(NEVER_WARNING, 'This session never expires. It lasts until you revoke it, and your authenticator is asked every time you create one.')
   // The form shows them before the tap (web/src/pages/Sessions.test.jsx).
-  const form = readFileSync(new URL('../../web/src/components/sessions/NewSessionForm.jsx', import.meta.url), 'utf8')
+  const form = readFileSync(new URL('../../../../web/src/components/sessions/NewSessionForm.jsx', import.meta.url), 'utf8')
   assert.match(form, /AUTO_WARNING/)
   assert.match(form, /NEVER_WARNING/)
   assert.equal(autoWrites('auto', ['GET', 'POST']), true)
@@ -78,7 +78,7 @@ test('the hand-off card offers an env command with no session token in it', () =
   const cmd = envCommand({ cli: 'agent-vault', sessionId: 's_1', mappings: defaultMappings(grants) })
   assert.equal(cmd, 'agent-vault env --session s_1 --out .env --map OPENAI_API_KEY=oai --map GH_WORK_TOKEN=gh-work')
   assert.doesNotMatch(cmd, /avs1\.|token=|av1\.ph/, 'the command must not carry the session token or a placeholder')
-  const src = readFileSync(new URL('../../web/src/components/sessions/sessionLogic.js', import.meta.url), 'utf8')
+  const src = readFileSync(new URL('../../../../web/src/components/sessions/sessionLogic.js', import.meta.url), 'utf8')
   const fn = src.slice(src.indexOf('export function envCommand('), src.indexOf('\n}\n', src.indexOf('export function envCommand(')))
   assert.doesNotMatch(fn, /token/, 'envCommand never reads a token')
   assert.equal(suggestedName({ cred: 'oai', env: { key: 'OPENAI_API_KEY' } }), 'OPENAI_API_KEY')
@@ -147,7 +147,7 @@ test('an auto-approving multi-credential session made from the page needs only i
 
 /** The docs sections' source (web/src/components/docs/sections.jsx), read as text. */
 function docsSource() {
-  return readFileSync(new URL('../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
+  return readFileSync(new URL('../../../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
 }
 
 test('the docs say how to start an auto-approving session, and that read-only needs nothing', () => {

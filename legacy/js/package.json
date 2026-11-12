@@ -1,0 +1,7 @@
+{
+  "name": "agent-vault",
+  "version": "0.2.0",
+  "private": true,
+  "description": "The frozen JavaScript implementation of agent-vault, kept as a test reference. Never installed.",
+  "type": "module"
+}

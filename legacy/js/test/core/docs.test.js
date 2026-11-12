@@ -11,12 +11,12 @@ import { PROFILES } from '../../src/connectors/profiles.js'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
 const cli = read('../../src/cli/index.js')
-const readme = read('../../README.md')
+const readme = read('../../../../README.md')
 
 // The docs page is built from the React sections in web/src/components/docs,
 // so what they say is what a reader sees.
-const SECTIONS_SRC = read('../../web/src/components/docs/sections.jsx')
-const REFUSED_SRC = read('../../web/src/components/docs/RefusedTable.jsx')
+const SECTIONS_SRC = read('../../../../web/src/components/docs/sections.jsx')
+const REFUSED_SRC = read('../../../../web/src/components/docs/RefusedTable.jsx')
 
 /** The section ids the docs page defines, in order (SECTIONS in sections.jsx). */
 const sectionList = [...SECTIONS_SRC.matchAll(/\{ id: '([a-z]+)', title: '[^']+', Body: (\w+) \}/g)].map((m) => ({ id: m[1], body: m[2] }))
@@ -88,8 +88,8 @@ test('the mark in the page matches the one in mark.svg', () => {
   // the sidebar and the lockup draw. Two copies of a shape drift, and a logo
   // that is subtly different in the sidebar than in the icon is worse than no
   // logo. (web/test/brand.test.js holds the rest of Mark.jsx to mark.svg.)
-  const mark = read('../../src/ui/mark.svg')
-  const component = read('../../web/src/components/ui/Mark.jsx')
+  const mark = read('../../../../src/ui/mark.svg')
+  const component = read('../../../../web/src/components/ui/Mark.jsx')
   const path = /d="(M28\.8[^"]+)"/.exec(mark)
   assert.ok(path, 'mark.svg should hold the keyhole path')
   assert.ok(component.includes(path[1]), 'the page and mark.svg disagree about the mark')
@@ -98,13 +98,13 @@ test('the mark in the page matches the one in mark.svg', () => {
 })
 
 test('the page carries a favicon that is well-formed', () => {
-  const index = read('../../src/ui/dist/index.html')
+  const index = read('../../../../src/ui/dist/index.html')
   const link = /<link rel="icon" type="image\/svg\+xml" href="\/assets\/([^"]+\.svg)">/.exec(index)
   assert.ok(link, 'the UI should have a favicon')
-  const manifest = JSON.parse(read('../../src/ui/dist/manifest.json'))
+  const manifest = JSON.parse(read('../../../../src/ui/dist/manifest.json'))
   assert.ok(Object.values(manifest).some((e) => e.file === `assets/${link[1]}` || (e.assets || []).includes(`assets/${link[1]}`)),
     'the favicon is a built asset the server will serve')
-  const svg = read(`../../src/ui/dist/assets/${link[1]}`).trim()
+  const svg = read(`../../../../src/ui/dist/assets/${link[1]}`).trim()
   assert.match(svg, /^<svg /)
   assert.match(svg, /<\/svg>$/)
   // Nothing sets a colour on a favicon, so currentColor would draw it in the

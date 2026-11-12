@@ -18,8 +18,10 @@ export const RECOVERY = 'recovery-phrase-ok'
 
 const SKIP_RUST = 'AV_IMPL=rust but rust/target/debug/agent-vault and rust/target/debug/agent-vault-daemon are not built'
 
+// Rust is the implementation since the cutover; AV_IMPL=js runs the frozen
+// JavaScript reference in legacy/js for a differential check.
 export function implName() {
-  return process.env.AV_IMPL || 'js'
+  return process.env.AV_IMPL || 'rust'
 }
 
 /** Argv for the daemon and the CLI, or null when the Rust binaries are absent. */
@@ -28,8 +30,8 @@ export function binaries() {
   if (impl === 'js') {
     return {
       impl,
-      daemon: [process.execPath, join(ROOT, 'bin/agent-vault-daemon.js')],
-      cli: [process.execPath, join(ROOT, 'bin/agent-vault.js')],
+      daemon: [process.execPath, join(ROOT, 'legacy/js/bin/agent-vault-daemon.js')],
+      cli: [process.execPath, join(ROOT, 'legacy/js/bin/agent-vault.js')],
     }
   }
   if (impl !== 'rust') {

@@ -14,7 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash, webcrypto } from 'node:crypto'
 import { operationFor, canonicalOperation, DIGESTED } from '../../src/ui/webauthn.js'
-import { operationFor as pageOperationFor, DIGESTED as PAGE_DIGESTED } from '../../web/src/lib/presence.js'
+import { operationFor as pageOperationFor, DIGESTED as PAGE_DIGESTED } from '../../../../web/src/lib/presence.js'
 
 const sha = (s) => createHash('sha256').update(s).digest('hex')
 

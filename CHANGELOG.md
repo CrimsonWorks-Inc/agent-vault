@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.3.0
+
+agent-vault is now Rust, with its vault in SQLite. `av` felt slow; the measured
+causes were a JSON vault rewritten and fsynced on every change, sessions and
+grants that were never pruned, and audit reads that parsed the whole log. The
+port fixes all three and drops the Node runtime.
+
+- **One binary per role.** `agent-vault` (and `av`), `agent-vault-daemon` and
+  `agent-vault-setup`, built from `rust/`. The installed service runs a
+  root-owned binary with no interpreter you own; the install copies only the
+  release binaries from your checkout.
+- **SQLite storage.** One transaction per operation, the audit log in an
+  insert-only table written in the same transaction, revoked and expired
+  history pruned after `retention_days` (default 30, recorded as
+  `history.pruned`).
+- **The crypto the spec chose.** XChaCha20-Poly1305 and Argon2id; key material
+  zeroized, the master key in `mlock`ed memory.
+- **`agent-vault migrate`** moves a JavaScript vault into `vault.db`, keeping the
+  master key so existing placeholders and session tokens keep working. It
+  verifies the old audit chain first and refuses on any break. A Touch ID unlock
+  cannot move (it needs the authenticator) and is dropped with the command to
+  re-enroll; the passphrase is kept.
+- **Same behavior.** The frozen external contract (CLI output and exit codes,
+  the control API, MCP, the gateway, error codes) is unchanged except where
+  `rust/PLAN.md` says so. 85 black-box conformance tests run against the
+  binaries, and all 1,207 daemon tests from the JavaScript suite are ported or
+  explicitly classified (`rust/crates/av-daemon/PORTED.md`).
+- **Found by porting the tests, fixed before release:** following redirects
+  could overspend a session's budget; a malformed last audit record could lock
+  the owner out; raw database errors reached `AV_INTERNAL` responses; a panic
+  ended the whole daemon (now one request, audited as `daemon.handler_error`);
+  migrate told the owner to delete a device key the new vault still needed.
+- **The JavaScript implementation is frozen in `legacy/js`** as the reference
+  the Rust tests compare against. Nothing installs or runs it, and the npm
+  package is now private build tooling for the web UI.
+
 ## 0.2.0
 
 Three things users asked for, twenty features, and the security work they

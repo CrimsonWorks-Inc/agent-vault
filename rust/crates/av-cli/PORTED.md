@@ -149,14 +149,14 @@ test asserts the same property, or `not applicable, because ...`.
 | `test/security/installer.test.js` the runtime version is checked before it is enshrined | not applicable, because the Rust installer does not copy a Node runtime (`MIN_NODE_MAJOR` is not part of this binary) |
 | `test/security/installer.test.js` install refuses a path chain that is writable by anyone but root | `probe_dry_run_checks_the_root_chain_so_the_row_is_testable` (`AGENT_VAULT_SETUP_DRY_ROOT` under a user temp dir, install --dry-run, exit 1, "root must not execute from it") |
 | `test/security/installer.test.js` the installer refuses to install its own directory over itself | `self_install_and_systemd_restart_and_from_probe` |
-| `test/security/installer.test.js` --from selects the checkout to install | `installer_refuses_a_symlinked_checkout_and_plans_a_clean_one` |
+| `test/security/installer.test.js` --from selects the checkout to install | `installer_refuses_a_symlinked_release_binary_and_plans_a_clean_one` (cutover: the install copies only the release binaries, so the link check is on them) |
 | `test/security/installer.test.js` an installer predating --from cannot be used to upgrade itself | `self_install_and_systemd_restart_and_from_probe` and `upgrade_print_only_names_an_installer_and_source_install_app_accepts` (the root-owned installer is printed when it supports `--from`; a copy that does not falls back to the checkout release installer when that file exists, and otherwise says `cargo build --release first`) |
 | `test/security/installer.test.js` the service load waits out the teardown race rather than failing on it | not applicable, because `bootstrap_launchd` is the root path and these tests do not call launchctl |
 | `test/security/installer.test.js` a failed service load prints the command that recovers it | not applicable, because the recovery text is printed only after a root `launchctl` failure, which these tests do not provoke |
 | `test/security/installer.test.js` the installer verifies the socket appeared instead of assuming | not applicable, because the socket wait is the root bootstrap path |
 | `test/security/installer.test.js` a reinstall restarts systemd rather than no-opping on an already-enabled unit | `self_install_and_systemd_restart_and_from_probe` (`restart`, not `start`) |
-| `test/security/installer.test.js` a symbolic link in the checkout stops the install | `installer_refuses_a_symlinked_checkout_and_plans_a_clean_one` |
-| `test/security/installer.test.js` a checkout with no symlinks installs normally | `installer_refuses_a_symlinked_checkout_and_plans_a_clean_one` |
+| `test/security/installer.test.js` a symbolic link in the checkout stops the install | `installer_refuses_a_symlinked_release_binary_and_plans_a_clean_one` (cutover: the install copies only the release binaries, so the link check is on them) |
+| `test/security/installer.test.js` a checkout with no symlinks installs normally | `installer_refuses_a_symlinked_release_binary_and_plans_a_clean_one` (cutover: the install copies only the release binaries, so the link check is on them) |
 | `test/security/installer.test.js` the copy dereferences, so nothing linked can survive it | `copy_dereference_writes_the_target_bytes` |
 | `test/security/installer.test.js` no privileged helper is ever resolved through an inherited PATH | `resolve_bin_is_absolute_and_refuses_path_fallback` |
 | `test/security/installer.test.js` every helper the installer spawns is in the allow-list | `resolve_bin_is_absolute_and_refuses_path_fallback` |

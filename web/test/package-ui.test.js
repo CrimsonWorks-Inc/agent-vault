@@ -20,16 +20,19 @@ test('every devDependency is an exact version, and the lockfile agrees', () => {
   assert.deepEqual(lock.packages[''].dependencies ?? {}, {}, 'the lockfile records a runtime dependency')
 })
 
-test('the package ships the built page and not its source', () => {
-  assert.ok(pkg.files.includes('src'), 'src (with src/ui/dist) ships')
-  assert.ok(!pkg.files.some((f) => f === 'web' || f.startsWith('web/')), 'web/ must not ship')
+test('nothing ships through npm: the UI is embedded in the Rust daemon', () => {
+  // Since the cutover the npm package is build tooling only. agent-vault is
+  // the Rust binaries; the daemon embeds src/ui/dist at compile time.
+  assert.equal(pkg.private, true, 'the package must stay private')
+  assert.equal(pkg.bin, undefined, 'npm must not install a JavaScript CLI')
+  assert.equal(pkg.files, undefined)
 })
 
-test('the UI scripts are wired: build, dev, tests, and the prepack drift check', () => {
+test('the UI scripts are wired: build, dev, tests, and the drift check', () => {
   assert.equal(pkg.scripts['build:ui'], 'vite build --config web/vite.config.js')
   assert.match(pkg.scripts['dev:ui'], /vite --config web\/vite\.config\.js/)
+  assert.match(pkg.scripts['test:ui'], /web\/test\/\*\.test\.js/)
   assert.match(pkg.scripts['test:ui'], /vitest run/)
-  assert.match(pkg.scripts.test, /web\/test\/\*\.test\.js/)
-  assert.match(pkg.scripts.test, /vitest run/)
-  assert.equal(pkg.scripts.prepack, 'node web/scripts/check-dist.mjs')
+  assert.equal(pkg.scripts.test, 'npm run test:ui')
+  assert.equal(pkg.scripts['check:ui'], 'node web/scripts/check-dist.mjs')
 })

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { fakeAuthenticator, fakeServer, renderWith } from '../test/harness.jsx'
 import { operationFor } from '../lib/presence.js'
-import { parseOverrides } from '../../../src/pending.js'
+import { parseOverrides } from '../../../legacy/js/src/pending.js'
 import { Approvals } from './Approvals.jsx'
 
 const CHALLENGE = { challengeId: 'ch1', challenge: 'AAEC', allowCredentials: [{ id: 'Y3JlZDE' }], rpId: 'localhost' }
