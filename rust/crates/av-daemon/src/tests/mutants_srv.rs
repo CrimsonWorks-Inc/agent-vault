@@ -421,3 +421,319 @@ async fn a_presence_record_that_is_not_a_webauthn_key_is_refused() {
     let (_, stored) = w.control("GET", "/v1/presence", json!({})).await;
     assert_eq!(stored, Value::Null);
 }
+
+const PASS: &str = "test-passphrase-123";
+
+async fn with_pass(w: &World) {
+    let (s, v) = w
+        .control("POST", "/v1/passphrase", json!({"passphrase": PASS}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+}
+
+/// An unlimited session's token and placeholder (made with a passphrase).
+async fn forever(w: &World) -> (String, String) {
+    with_pass(w).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "demo", "label": "forever", "methods": ["GET"], "infinite": true, "presence": {"passphrase": PASS}}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    (
+        v["token"].as_str().unwrap().to_string(),
+        v["placeholder"].as_str().unwrap().to_string(),
+    )
+}
+
+fn remote() -> Option<crate::pipeline::ListenerInfo> {
+    Some(crate::pipeline::ListenerInfo {
+        id: "ls_net".into(),
+        kind: "tls".into(),
+        remote: true,
+        advertise: vec![],
+    })
+}
+
+async fn on_gateway(
+    w: &World,
+    method: &str,
+    target: &str,
+    headers: Vec<(String, String)>,
+    body: &str,
+    listener: Option<crate::pipeline::ListenerInfo>,
+) -> (u16, Vec<(String, String)>, String) {
+    let mut h = vec![("host".to_string(), "127.0.0.1".to_string())];
+    h.extend(headers);
+    let r = w
+        .daemon
+        .on_gateway(
+            crate::server::Incoming {
+                method: method.into(),
+                target: target.into(),
+                headers: h,
+                body: body.as_bytes().to_vec(),
+            },
+            listener,
+            None,
+        )
+        .await;
+    let status = r.status().as_u16();
+    let headers = r
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    use http_body_util::BodyExt;
+    let bytes = r.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
+}
+
+fn mcp_status() -> String {
+    crate::util::js_stringify(
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "vault_status", "arguments": {}}}),
+    )
+}
+
+fn mcp_headers(token: &str) -> Vec<(String, String)> {
+    vec![
+        ("content-type".into(), "application/json".into()),
+        (
+            "accept".into(),
+            "application/json, text/event-stream".into(),
+        ),
+        ("authorization".into(), format!("Bearer {token}")),
+    ]
+}
+
+/// 'the MCP session is read from shared state again'.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mcp_endpoint_hands_each_call_its_own_session() {
+    let w = World::seeded(json!({})).await;
+    let (s, _, body) = on_gateway(
+        &w,
+        "POST",
+        "/mcp",
+        mcp_headers(&w.token),
+        &mcp_status(),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert!(body.contains(&w.session_id), "the caller's session: {body}");
+}
+
+/// 'the MCP endpoint checks liveness but not whether the session is usable on
+/// this listener', 'discovery checks liveness but not whether the session is
+/// usable on this listener', 'the listener never reaches the pipeline'.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unlimited_session_is_refused_on_a_network_listener_everywhere() {
+    let w = World::seeded(json!({})).await;
+    let (token, placeholder) = forever(&w).await;
+    // MCP: the session is not handed to the tools.
+    let (s, h, body) = on_gateway(
+        &w,
+        "POST",
+        "/mcp",
+        mcp_headers(&token),
+        &mcp_status(),
+        remote(),
+    )
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        h.iter().any(|(k, _)| k == "av-session-invalid"),
+        "{h:?} {body}"
+    );
+    let (_, _, local) =
+        on_gateway(&w, "POST", "/mcp", mcp_headers(&token), &mcp_status(), None).await;
+    assert!(!local.contains("\\\"session\\\":null"), "{local}");
+    // Discovery.
+    let auth = vec![("authorization".to_string(), format!("Bearer {token}"))];
+    let (s, _, body) = on_gateway(&w, "GET", "/v1/session", auth.clone(), "", remote()).await;
+    assert!(s >= 400 && body.contains("infinite_remote"), "{s} {body}");
+    let (s, _, _) = on_gateway(&w, "GET", "/v1/session", auth, "", None).await;
+    assert_eq!(s, 200);
+    // The gateway.
+    let h = vec![
+        ("av-session".to_string(), token.clone()),
+        ("authorization".to_string(), format!("Bearer {placeholder}")),
+    ];
+    let (s, _, body) = on_gateway(&w, "GET", "/p/demo/user", h.clone(), "", remote()).await;
+    assert!(s >= 400 && body.contains("infinite_remote"), "{s} {body}");
+    let (s, _, body) = on_gateway(&w, "GET", "/p/demo/user", h, "", None).await;
+    assert_eq!(s, 200, "{body}");
+}
+
+/// 'an authenticator-only vault reports its socket as ungated'.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authenticator_only_vault_opens_no_window_and_says_it_is_gated() {
+    let w = World::seeded(json!({})).await;
+    with_pass(&w).await;
+    let k = crate::ui::webauthn::testkit::SoftKey::new();
+    let mut rec = k.record();
+    rec["presence"] = json!({"passphrase": PASS});
+    let (s, v) = w.control("POST", "/v1/presence", rec).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/passphrase",
+            json!({"action": "remove", "current": PASS}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control("POST", "/v1/presence/window", json!({"passphrase": "x"}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(
+        (v["granted"].as_bool(), v["ungated"].as_bool()),
+        (Some(false), Some(false)),
+        "{v}"
+    );
+}
+
+/// 'the daemon asks for a tap before refusing Touch ID unlock without a
+/// passphrase'.
+#[tokio::test(flavor = "multi_thread")]
+async fn touch_id_without_a_passphrase_is_refused_for_the_missing_factor() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/factors/webauthn",
+            json!({"credential_id": "abc", "prf_secret": "x".repeat(32)}),
+        )
+        .await;
+    assert_eq!((s, v["rule"].as_str()), (403, Some("factor_order")), "{v}");
+}
+
+/// 'the single decide route takes any truthy verdict' (the verdict is read
+/// before the gate, which asks for presence by what it says).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_string_verdict_is_refused_before_anyone_is_asked() {
+    let w = World::seeded(json!({})).await;
+    let id = ask(&w, json!({"cred": "demo"})).await;
+    with_pass(&w).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id": id, "granted": "true"}),
+        )
+        .await;
+    assert_eq!((s, v["rule"].as_str()), (403, Some("bulk_decision")), "{v}");
+}
+
+/// 'approving a session request into auto with writes needs only the window'
+/// and 'a bulk decision with an elevated item needs only the window'.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_elevated_approval_needs_fresh_presence_even_inside_the_window() {
+    let w = World::seeded(json!({})).await;
+    let id = ask(&w, json!({"cred": "demo", "methods": ["GET", "POST"]})).await;
+    with_pass(&w).await;
+    let (s, v) = w
+        .control("POST", "/v1/presence/window", json!({"passphrase": PASS}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id": id, "granted": true, "overrides": {"approval": "auto"}}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (401, Some("fresh_presence")),
+        "{v}"
+    );
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/pending/decide-many",
+            json!({"decisions": [{"kind": "session", "id": id, "granted": true, "overrides": {"approval": "auto"}}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (401, Some("fresh_presence")),
+        "{v}"
+    );
+}
+
+/// 'ttl_hours is not required to be a positive number'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_lifetime_is_a_positive_number_of_hours() {
+    let w = World::seeded(json!({})).await;
+    for bad in [json!(-1), json!(0), json!("2"), json!(true)] {
+        let (s, v) = w
+            .control(
+                "POST",
+                "/v1/sessions",
+                json!({"cred": "demo", "methods": ["GET"], "ttl_hours": bad}),
+            )
+            .await;
+        assert_eq!((s, v["rule"].as_str()), (403, Some("ttl")), "{bad}: {v}");
+    }
+}
+
+/// 'the daemon does not hand a session its elevation'.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_elevated_session_is_stored_with_its_elevation() {
+    let w = World::seeded(json!({})).await;
+    with_pass(&w).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "demo", "label": "auto", "methods": ["GET", "POST"], "approval": "auto", "ttl_hours": 1, "presence": {"passphrase": PASS}}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let (_, list) = w.control("GET", "/v1/sessions", json!({})).await;
+    let me = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(sid))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(me["elevated"], json!(["approval_auto_writes"]), "{list}");
+}
+
+/// 'a session for a quarantined credential is planned and gated' and 'a
+/// session can be planned for a quarantined credential'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quarantined_credential_is_refused_before_anyone_is_asked() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials/quarantine",
+            json!({"slug": "demo", "reason": "test"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    with_pass(&w).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "demo", "methods": ["GET"]}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["code"].as_str()),
+        (403, Some("AV_QUARANTINED")),
+        "{v}"
+    );
+}
