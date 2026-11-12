@@ -291,8 +291,8 @@ async fn the_preflight_route_reads_assume_placeholder_as_a_boolean() {
     let (s, with) = pre(assumed).await;
     assert_eq!(s, 200, "{with}");
     assert_ne!(
-        plain, with,
-        "assuming a placeholder changes the answer: {plain} / {with}"
+        plain["checks"], with["checks"],
+        "assuming a placeholder changes the checks: {plain} / {with}"
     );
     let mut bad = base;
     bad["assume_placeholder"] = json!("yes");
@@ -836,4 +836,58 @@ async fn a_grant_lifetime_given_twice_is_refused() {
         (403, Some("policy_invalid")),
         "{v}"
     );
+}
+
+/// 'a placeholder batch resolves a quarantined credential'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_with_a_quarantined_credential_issues_nothing() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "other", "kind": "http", "host": "other.example.test", "value": "other-secret-0123456789abcdef", "sites": ["header:authorization:Bearer"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"label": "two", "ttl_hours": 1, "grants": [{"cred": "other", "methods": ["GET"]}, {"cred": "demo", "methods": ["GET"]}]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials/quarantine",
+            json!({"slug": "demo", "reason": "test"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let count = |w: &World, sid: String| {
+        let shared = w.shared.clone();
+        async move {
+            shared
+                .run(move |c| c.vault.list_placeholders(Some(&sid)).unwrap().len())
+                .await
+                .unwrap()
+        }
+    };
+    let before = count(&w, sid.clone()).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/placeholders/batch",
+            json!({"sid": sid, "items": [{"cred": "other"}, {"cred": "demo"}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["code"].as_str()),
+        (403, Some("AV_QUARANTINED")),
+        "{v}"
+    );
+    assert_eq!(count(&w, sid).await, before, "nothing was issued");
 }
