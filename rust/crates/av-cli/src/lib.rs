@@ -183,7 +183,7 @@ pub struct CliError {
     /// The command to run next, if any.
     pub next: Option<String>,
     /// The daemon's problem document, if this came from the control API.
-    pub problem: Option<Value>,
+    pub problem: Option<Box<Value>>,
     /// Daemon older than this CLI (`EXIT.VERSION_SKEW`).
     pub skew: bool,
 }
