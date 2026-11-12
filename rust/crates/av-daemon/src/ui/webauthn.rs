@@ -697,6 +697,16 @@ mod tests {
                 .failure,
             "malformed"
         );
+        // 'a clientDataJSON that is not JSON is recorded as other, not
+        // malformed (r5 F1)'.
+        let mut p5b = k.assert(&ch, "http://localhost:7412");
+        p5b["clientDataJSON"] = Value::from(crate::util::b64(b"{not json"));
+        assert_eq!(
+            verify_assertion(&input(&p5b, &ch, &origins, &enrolled))
+                .unwrap_err()
+                .failure,
+            "malformed"
+        );
         // Oversized.
         let mut p6 = k.assert(&ch, "http://localhost:7412");
         p6["clientDataJSON"] = Value::from("A".repeat(9000));
@@ -731,5 +741,32 @@ mod tests {
             decode_cbor(&[0xa1, 0x01, 0x02], 0).unwrap().0.get_int(1),
             Some(&Cbor::Int(2))
         );
+    }
+
+    /// 'a request field can rewrite the signed op or a digest', 'a
+    /// non-string secret field (a backup bundle) is digested as "[object
+    /// Object]"', 'the wave-3 secret fields are bound in clear'.
+    #[test]
+    fn the_operation_binds_secret_fields_by_digest_and_reserves_op() {
+        let m = |v: Value| v.as_object().unwrap().clone();
+        for bad in [serde_json::json!({"op": "other"}), serde_json::json!({"value_sha256": "00"}), serde_json::json!({"x_sha256": 1})] {
+            let e = operation_for("cred.add", &m(bad.clone())).unwrap_err();
+            assert_eq!(e.extra.rule.as_deref(), Some("reserved_operation_field"), "{bad}");
+        }
+        let secrets = serde_json::json!({
+            "value": "v-secret-1", "prf_secret": "p-secret-2", "recovery_passphrase": "r-secret-3",
+            "bundle": "b-secret-4", "webhook_url": "https://hooks.example.test/w-secret-5",
+        });
+        let op = operation_for("x", &m(secrets)).unwrap();
+        let text = serde_json::to_string(&op).unwrap();
+        for n in 1..=5 {
+            assert!(!text.contains(&format!("secret-{n}")), "{text}");
+        }
+        for k in DIGESTED {
+            assert!(op.contains_key(&format!("{k}_sha256")), "{k}");
+        }
+        let a = operation_for("x", &m(serde_json::json!({"bundle": {"v": 1, "data": "aaa"}}))).unwrap();
+        let b = operation_for("x", &m(serde_json::json!({"bundle": {"v": 1, "data": "bbb"}}))).unwrap();
+        assert_ne!(a["bundle_sha256"], b["bundle_sha256"], "two bundles, two digests");
     }
 }

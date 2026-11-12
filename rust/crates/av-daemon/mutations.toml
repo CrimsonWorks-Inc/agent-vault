@@ -782,3 +782,41 @@ name = 'an expiry offset outside +-14:00 is applied'
 file = "../av-core/src/profiles.rs"
 from = '        if hours > 14 || minutes > 59 || (hours == 14 && minutes > 0) {'
 to = '        if false {'
+
+# ---------------------------------------------------- src/ui/webauthn.js, list-paging.js
+
+[[mutation]]
+name = 'a request field can rewrite the signed op or a digest'
+file = "../av-core/src/operation.rs"
+from = '        if key == "op" || key.ends_with("_sha256") {'
+to = '        if false {'
+
+[[mutation]]
+name = 'a non-string secret field (a backup bundle) is digested as "[object Object]"'
+file = "../av-core/src/operation.rs"
+from = '.unwrap_or_else(|| canonical_operation(v));'
+to = '.unwrap_or_else(|| "[object Object]".to_string());'
+
+[[mutation]]
+name = 'the wave-3 secret fields are bound in clear'
+file = "../av-core/src/operation.rs"
+from = '''    "recovery_passphrase",
+    "bundle",
+    "webhook_url",
+];'''
+to = '''];'''
+
+[[mutation]]
+name = 'a clientDataJSON that is not JSON is recorded as other, not malformed (r5 F1)'
+file = "src/ui/webauthn.rs"
+from = '.map_err(|e| fail("malformed", format!("clientDataJSON is not JSON: {e}")))?;'
+to = '.map_err(|e| plain(format!("clientDataJSON is not JSON: {e}")))?;'
+
+[[mutation]]
+name = 'U3: limit is coerced instead of read as written'
+file = "src/ui/list_paging.rs"
+from = '''        let plain = !l.is_empty()
+            && l.len() <= 3
+            && !l.starts_with('0')
+            && l.bytes().all(|b| b.is_ascii_digit());'''
+to = '''        let plain = l.trim().parse::<f64>().is_ok_and(|n| n >= 1.0);'''
