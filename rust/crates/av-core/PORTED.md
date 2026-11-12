@@ -877,3 +877,16 @@ read-only reference functions (`tests/fixtures/regex-review-vectors.mjs`):
 | Live regeneration of the reference probes | `review_vectors_regenerate_from_javascript` |
 | Shared regex class translation, escaped backslashes, BMP legacy case folding | `javascript_classes_inside_and_outside_brackets`, `legacy_case_folding_does_not_introduce_unicode_ascii_equivalents` |
 | Every av-core regex uses the shared JS compiler | `every_core_regex_uses_javascript_compiler` |
+
+## Follow-up translator hardening probes
+
+`tests/fixtures/jsre-followup-vectors.mjs` generates Node probes and ordinary
+controls for the second review's six minor findings:
+
+| Reference behavior / explicit stricter refusal | Rust test |
+|---|---|
+| JS dot line terminators, class operators, invalid inline flags | `js_dot_classes_and_flag_refusals` |
+| Quantified complement shorthand emoji behavior and fail-closed scrub refusal | `js_scrub_non_bmp_repetitions_refuse_with_invalid_pattern_problem` |
+| Request hash credential/header UTF-16 ordering with ASCII control | `js_request_hash_utf16_names_credentials_and_ascii_control` |
+| Live regeneration of all follow-up probes | `followup_vectors_regenerate_from_node` |
+| Guard bait for sets, bytes, aliases and split constructors; ordinary control | `guard_rejects_sets_bytes_aliases_and_split_constructors` |

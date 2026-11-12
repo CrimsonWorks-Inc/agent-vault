@@ -315,7 +315,7 @@ fn scrub_extra_patterns_validation_additivity_and_controls() {
         "abc\\.xyz|def_[A-Z]{0,40}",
         "acme_[A-Za-z0-9]{20,80}",
         "abc[\\d]{4}",
-        "abc\\S{253}\\S{0,256}",
+        "abc\\w{253}\\w{0,256}",
     ] {
         assert!(compile_scrub_pattern(source).is_ok(), "{source}");
     }
