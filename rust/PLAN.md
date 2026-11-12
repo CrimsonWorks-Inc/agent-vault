@@ -160,6 +160,12 @@ CBOR), `libc` (`mlock`, peer credentials, uid/gid), `clap`, `rpassword`,
 `regex` (only with linear-time guarantees; no backtracking), `url`, `time`,
 `thiserror`, `tracing`. Dev: `proptest`, `tempfile`, `assert_cmd`.
 
+**JSON key order follows insertion, like JavaScript.** `serde_json` is built
+with `preserve_order` (it applies to every crate). Code whose result depends
+on key order (hashes, canonical forms, MAC inputs, anything compared as text)
+must sort explicitly and say by what (UTF-8 bytes for `canonicalize`, UTF-16
+code units for `canonical_operation`), never rely on the map's order.
+
 **Regexes use JavaScript semantics.** The `regex` crate's `\s`, `\w`, `\d` and
 `\b` are Unicode; JavaScript's are not (JS `\s` includes U+FEFF and excludes
 U+0085; `\w` is `[A-Za-z0-9_]`; `\d` is `[0-9]`). Every crate compiles every
