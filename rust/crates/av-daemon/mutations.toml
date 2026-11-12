@@ -2899,3 +2899,12 @@ to = '''
         self.inner().last_sent = now_ms();
         let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
 '''
+
+# CLI re-review m-N5 (no JS counterpart; the JS daemon set no limit): the
+# daemon turns off core files itself at startup.
+
+[[mutation]]
+name = 'a daemon started by hand may leave a core file'
+file = "src/lib.rs"
+from = '''    if let Err(e) = peercred::disable_core_dumps() {'''
+to = '''    if let Err(e) = Ok::<(), std::io::Error>(()) {'''

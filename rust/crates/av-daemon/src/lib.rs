@@ -41,6 +41,9 @@ pub use state::{Shared, VaultRef};
 /// [`server::Daemon`] and run until SIGINT/SIGTERM. Ports the whole of
 /// `bin/agent-vault-daemon.js`.
 pub fn run_from_env() -> Exit {
+    if let Err(e) = peercred::disable_core_dumps() {
+        eprintln!("agent-vault-daemon: could not turn off core dumps: {e}");
+    }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let (Some(vault_dir), Some(run_dir)) = (env("AV_VAULT_DIR"), env("AV_RUN_DIR")) else {
         eprintln!("agent-vault-daemon: AV_VAULT_DIR and AV_RUN_DIR must be set; this runs under launchd or systemd");
