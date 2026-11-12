@@ -474,6 +474,63 @@ pub fn search_string(pairs: &[(String, String)]) -> String {
     s.finish()
 }
 
+/// Header names whose repeats Node's `IncomingMessage` drops (the first
+/// counts). The JS reads `req.headers` / `res.headers`, so the daemon reads
+/// headers the same way: this is how only the FIRST `Authorization` header
+/// counts (rust/PLAN.md, quirk ten).
+const NODE_SINGLE: [&str; 18] = [
+    "content-type",
+    "content-length",
+    "user-agent",
+    "referer",
+    "host",
+    "authorization",
+    "proxy-authorization",
+    "if-modified-since",
+    "if-unmodified-since",
+    "from",
+    "location",
+    "max-forwards",
+    "retry-after",
+    "etag",
+    "last-modified",
+    "server",
+    "age",
+    "expires",
+];
+
+/// A header map as Node's `req.headers` / `res.headers` gives it: names
+/// lower-cased in first-seen order, values read as latin1, the repeats of
+/// [`NODE_SINGLE`] dropped, `cookie` repeats joined with `; ` and every other
+/// repeat with `, `.
+pub fn node_headers(h: &hyper::HeaderMap) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in h.iter() {
+        let n = name.as_str().to_string();
+        let v = latin1_string(value.as_bytes());
+        match out.iter_mut().find(|(k, _)| *k == n) {
+            None => out.push((n, v)),
+            Some(e) => {
+                if NODE_SINGLE.contains(&e.0.as_str()) {
+                    continue;
+                }
+                let sep = if e.0 == "cookie" { "; " } else { ", " };
+                e.1.push_str(sep);
+                e.1.push_str(&v);
+            }
+        }
+    }
+    out
+}
+
+/// `webauthn.operationFor(op, params)` over any JSON (a non-object is read as
+/// `{}`), as a JSON value.
+pub fn operation_for(op: &str, params: &Value) -> Result<Value, av_core::errors::VaultError> {
+    let empty = Map::new();
+    let m = params.as_object().unwrap_or(&empty);
+    av_core::operation::operation_for(op, m).map(Value::Object)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +560,21 @@ mod tests {
         assert_eq!(parse_iso_ms(&iso_of_ms(ms)), Some(ms));
         assert_eq!(parse_iso_ms("not a date"), None);
         assert_eq!(parse_iso_ms("2026-01-02"), Some(1_767_312_000_000));
+    }
+
+    #[test]
+    fn hardening_only_the_first_authorization_header_counts() {
+        let mut h = hyper::HeaderMap::new();
+        h.append("authorization", "Bearer first".parse().unwrap());
+        h.append("authorization", "Bearer second".parse().unwrap());
+        h.append("accept", "a".parse().unwrap());
+        h.append("accept", "b".parse().unwrap());
+        h.append("cookie", "x=1".parse().unwrap());
+        h.append("cookie", "y=2".parse().unwrap());
+        let got = node_headers(&h);
+        assert_eq!(got[0], ("authorization".to_string(), "Bearer first".to_string()));
+        assert_eq!(got[1].1, "a, b");
+        assert_eq!(got[2].1, "x=1; y=2");
     }
 
     #[test]

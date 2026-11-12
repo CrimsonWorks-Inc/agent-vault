@@ -20,7 +20,7 @@ pub trait DenyExt: Sized {
     /// `rule`.
     fn rule(self, rule: &str) -> Self;
     /// `hint`.
-    fn hint(self, hint: impl Into<String>) -> Self;
+    fn hinted(self, hint: impl Into<String>) -> Self;
     /// `next`.
     fn next(self, next: Value) -> Self;
     /// `retryAfter`.
@@ -36,7 +36,7 @@ impl DenyExt for VaultError {
         self.extra.rule = Some(rule.to_string());
         self
     }
-    fn hint(mut self, hint: impl Into<String>) -> Self {
+    fn hinted(mut self, hint: impl Into<String>) -> Self {
         self.extra.hint = Some(hint.into());
         self
     }

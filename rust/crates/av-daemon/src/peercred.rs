@@ -1,14 +1,15 @@
 //! Socket peer credentials for the control socket: who is on the other end of
-//! an accepted Unix-domain connection. The JS relied on file mode and group
+//! an accepted Unix-domain connection, this process's uid, and the umask the
+//! control socket is bound under. The JS relied on file mode and group
 //! ownership of `control.sock` (`#secureSocket` in `src/daemon/server.js`);
 //! the Rust daemon also checks the peer uid against `AV_ENROLLED_UID`.
 //!
 //! **This is the only module in av-daemon where `unsafe` is allowed** (the
 //! crate root is `#![deny(unsafe_code)]` and opts this module out). Rules:
-//! each `unsafe` block makes exactly one libc call (`getpeereid` on macOS/BSD,
-//! `getsockopt(SO_PEERCRED)` on Linux), carries a `// SAFETY:` comment saying
-//! why its pointers and lengths are valid, and checks the return value before
-//! reading any out-parameter. No other code in the crate may add `unsafe`.
+//! each `unsafe` block makes exactly one libc call, carries a `// SAFETY:`
+//! comment saying why its pointers and lengths are valid, and checks the
+//! return value before reading any out-parameter. No other code in the crate
+//! may add `unsafe`.
 
 use std::os::unix::io::AsRawFd;
 
@@ -22,15 +23,66 @@ pub struct PeerCred {
 }
 
 /// Read the peer's credentials from a connected Unix-domain socket:
-/// `getpeereid(2)` on macOS, `SO_PEERCRED` on Linux. New in the Rust port; no
-/// JS function (the JS trusted the socket's mode and group,
-/// `#secureSocket` in `src/daemon/server.js`).
+/// `getpeereid(2)` on macOS and the BSDs, `SO_PEERCRED` on Linux.
 pub fn peer_cred(socket: &impl AsRawFd) -> std::io::Result<PeerCred> {
-    todo!()
+    let fd = socket.as_raw_fd();
+    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    {
+        let mut uid: libc::uid_t = 0;
+        let mut gid: libc::gid_t = 0;
+        // SAFETY: `fd` is a live descriptor borrowed from `socket` for the
+        // duration of the call; `uid` and `gid` are valid, aligned, writable
+        // locals the kernel fills in. The return value is checked before
+        // either is read.
+        let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(PeerCred { uid, gid })
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `fd` is a live descriptor borrowed from `socket`; `cred` is
+        // a valid, aligned `ucred` and `len` is exactly its size, as
+        // `SO_PEERCRED` requires. The return value and the returned length
+        // are checked before `cred` is read.
+        let rc = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) };
+        if rc != 0 || len as usize != std::mem::size_of::<libc::ucred>() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(PeerCred { uid: cred.uid, gid: cred.gid })
+    }
 }
 
 /// The uid of the current process (`geteuid`), used to refuse running as root
 /// (`process.getuid() === 0` in `bin/agent-vault-daemon.js`).
 pub fn effective_uid() -> u32 {
-    todo!()
+    // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
+    unsafe { libc::geteuid() }
+}
+
+/// Run `f` with the process umask set to `mask`, then restore it. Used to
+/// bind the control socket so it is never created connectable by others
+/// (`process.umask(0o077)` around `listen` in `Daemon.start()`).
+pub fn with_umask<T>(mask: u32, f: impl FnOnce() -> T) -> T {
+    // SAFETY: `umask` takes a mode value, cannot fail and touches no memory.
+    let previous = unsafe { libc::umask(mask as libc::mode_t) };
+    let out = f();
+    // SAFETY: as above; restores the value `umask` returned.
+    unsafe { libc::umask(previous) };
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_socket_pair_reports_this_process() {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let c = peer_cred(&a).unwrap();
+        assert_eq!(c.uid, effective_uid());
+    }
 }

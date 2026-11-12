@@ -546,7 +546,7 @@ impl Core {
         let h = |n: &str| req.header(n).filter(|v| !v.is_empty());
         if h("origin").is_some() || h("sec-fetch-site").is_some() {
             return Err(dr(C::BrowserOrigin, "requests carrying Origin or Sec-Fetch-Site are refused", "browser_origin")
-                .hint("This endpoint is not reachable from a web page. A DNS-rebinding attack looks exactly like this."));
+                .hinted("This endpoint is not reachable from a web page. A DNS-rebinding attack looks exactly like this."));
         }
         let host = h("host").unwrap_or("").split(':').next().unwrap_or("").to_string();
         let advertised = req.listener.as_ref().is_some_and(|l| l.advertise.contains(&host));
@@ -584,7 +584,7 @@ impl Core {
         if let Some(carrier) = carrier {
             if req.listener.as_ref().is_some_and(|l| l.remote) {
                 return Err(dr(C::SessionRequired, "a placeholder alone does not authorize on a network listener", "remote_carrier")
-                    .hint("Send the session token in Authorization: Bearer as well as the placeholder."));
+                    .hinted("Send the session token in Authorization: Bearer as well as the placeholder."));
             }
             let session = self
                 .vault
@@ -606,13 +606,13 @@ impl Core {
         }
         Err(d(C::SessionRequired, "no session carrier on this request")
             .next(json!({"cli": ["agent-vault session create --cred <slug>"], "mcp": {"tool": "vault_request_session"}}))
-            .hint("Send Authorization: Bearer <session token>, or a placeholder at a declared header site."))
+            .hinted("Send Authorization: Bearer <session token>, or a placeholder at a declared header site."))
     }
 
     fn pl_check_quarantine(cred: &CredentialRecord) -> R<()> {
         if cred.quarantine.is_some() {
             return Err(dr(C::Quarantined, format!("{} is quarantined", cred.slug), "quarantine")
-                .hint("A human can release it: agent-vault cred release <slug>"));
+                .hinted("A human can release it: agent-vault cred release <slug>"));
         }
         Ok(())
     }
@@ -725,7 +725,7 @@ impl Core {
                         format!("{} is an https credential; {scheme} would send it in the clear", cred.slug),
                         "scheme_downgrade",
                     )
-                    .hint(format!("Use /t/https/{host}/... or the credential's own route, /p/{}/...", cred.slug)));
+                    .hinted(format!("Use /t/https/{host}/... or the credential's own route, /p/{}/...", cred.slug)));
                 }
                 let use_scheme = if scheme == "https" { "https".to_string() } else { cred_scheme };
                 return Ok(RouteInfo {
@@ -742,7 +742,7 @@ impl Core {
             return Err(d(C::NoGrant, format!("no grant in this session allows host {}", policy::host_only(&raw_host))));
         }
         Err(d(C::NotFound, format!("unknown route {path}"))
-            .hint("Use /p/<credential>/<path> for a configured credential, or /t/<scheme>/<host>/<path>."))
+            .hinted("Use /p/<credential>/<path> for a configured credential, or /t/<scheme>/<host>/<path>."))
     }
 
     // -------------------------------------------------------- the limits
@@ -756,7 +756,7 @@ impl Core {
                 "this grant has a budget whose limit is not a whole number of requests, so no request can be counted against it",
                 "budget_invalid",
             )
-            .hint("Recreate the grant with a numeric budget limit.")),
+            .hinted("Recreate the grant with a numeric budget limit.")),
             policy::BudgetLimit::Limit(limit) => {
                 if grant.budget_used > policy::MAX_SAFE_INTEGER {
                     return Err(dr(
@@ -764,11 +764,11 @@ impl Core {
                         "this grant has a budget whose limit is not a whole number of requests, so no request can be counted against it",
                         "budget_invalid",
                     )
-                    .hint("Recreate the grant with a numeric budget limit."));
+                    .hinted("Recreate the grant with a numeric budget limit."));
                 }
                 if grant.budget_used >= limit {
                     return Err(dr(C::PolicyDenied, format!("grant budget of {limit} requests is spent"), "budget")
-                        .hint("A human must widen the grant or start a new session."));
+                        .hinted("A human must widen the grant or start a new session."));
                 }
                 Ok(())
             }
@@ -973,7 +973,7 @@ impl Core {
                         format!("${:.2}", reservation.usd_micros as f64 / 1e6)
                     };
                     return Err(dr(C::PolicyDenied, "this call could cost more than the spend limit has left", "spend")
-                        .hint(format!("This grant may spend {say}; this call could cost up to {could}.")));
+                        .hinted(format!("This grant may spend {say}; this call could cost up to {could}.")));
                 }
             }
         }
@@ -1383,7 +1383,7 @@ impl Core {
         self.pl_sweep_approvals();
         if self.pl.approvals.len() >= MAX_APPROVALS {
             return Err(dr(C::PolicyDenied, format!("too many requests are waiting for approval ({})", self.pl.approvals.len()), "approval")
-                .hint("Approve or deny the waiting requests, or wait for them to expire."));
+                .hinted("Approve or deny the waiting requests, or wait for them to expire."));
         }
         let summary = if overrides.is_empty() {
             format!("{} {}{}", decision.method, decision.host, decision.path)
@@ -1400,7 +1400,7 @@ impl Core {
         let preview = self.pl_preview(req, subs, decision)?;
         let summary = self.pl_safe_message(&summary, None);
         let approval = Approval {
-            id: av_store::ids::Ids::approval(),
+            id: av_store::ids::id::approval(),
             request_hash: request_hash.to_string(),
             grant_id: grant.id.clone(),
             summary,
@@ -1483,12 +1483,12 @@ struct Sub {
 
 fn malformed(loc: &sub::Location) -> VaultError {
     dr(C::PhMalformed, format!("that placeholder was not minted by this vault ({})", sub::describe_location(loc)), "checksum")
-        .hint("Ask for a placeholder with vault_get_placeholder, or agent-vault ph next.")
+        .hinted("Ask for a placeholder with vault_get_placeholder, or agent-vault ph next.")
 }
 
 fn unknown_placeholder(loc: &sub::Location) -> VaultError {
     dr(C::PhReplay, format!("unknown placeholder at {}", sub::describe_location(loc)), "placeholder_unknown")
-        .hint("This placeholder was never issued by this vault, or it was garbage-collected.")
+        .hinted("This placeholder was never issued by this vault, or it was garbage-collected.")
 }
 
 /// JS `String.prototype.trim`.
@@ -1541,7 +1541,7 @@ pub fn fold_headers(headers: &[(String, String)]) -> R<Vec<(String, String)>> {
                 format!("the {lower} header appears more than once, so the upstream could read a different one from the one checked"),
                 "header_duplicate",
             )
-            .hint(format!("Send {lower} once.")));
+            .hinted(format!("Send {lower} once.")));
         }
         if prior.is_some() {
             continue;
@@ -1559,7 +1559,7 @@ fn check_overrides(effective: &Policy, view: &RequestView<'_>, host: &str, path:
             if !methods.contains(m) {
                 let allowed = if methods.is_empty() { "none".to_string() } else { methods.join(", ") };
                 return Err(dr(C::PolicyDenied, format!("method {m}, asked for in a method-override header, is not allowed"), "methods")
-                    .hint(format!("Allowed methods: {allowed}.")));
+                    .hinted(format!("Allowed methods: {allowed}.")));
             }
         }
         let mut p = effective.clone();
@@ -1569,7 +1569,7 @@ fn check_overrides(effective: &Policy, view: &RequestView<'_>, host: &str, path:
     for value in &view.overrides.fields {
         if value.to_uppercase() != view.method {
             return Err(dr(C::PolicyDenied, format!("a method-override field (such as _method) asks for a method other than {}", view.method), "method_override")
-                .hint("Send the method you mean on the request line, without a method-override field."));
+                .hinted("Send the method you mean on the request line, without a method-override field."));
         }
     }
     Ok(())
@@ -1640,7 +1640,7 @@ impl Core {
         }
         if sub::get_header(&preq, "content-encoding").is_some_and(|v| !v.is_empty()) {
             return Err(dr(C::EncodedBody, "compressed request bodies cannot be scanned for placeholders", "content_encoding")
-                .hint("Send the body with identity encoding."));
+                .hinted("Send the body with identity encoding."));
         }
 
         let k_ph = self.vault.k_ph().v()?;
@@ -1657,7 +1657,7 @@ impl Core {
             }
             if row.grant_id != grant.id {
                 return Err(dr(C::PhWrongConnector, "that placeholder was issued under a different grant", "placeholder_grant")
-                    .hint("Use a placeholder issued under the grant that covers this route."));
+                    .hinted("Use a placeholder issued under the grant that covers this route."));
             }
             let ph_cred = self
                 .vault
@@ -1666,7 +1666,7 @@ impl Core {
                 .ok_or_else(|| internal("Cannot read properties of undefined (reading 'id')"))?;
             if ph_cred.id != cred.id {
                 return Err(dr(C::PhWrongConnector, format!("that placeholder is for {}, but the route is {}", ph_cred.slug, cred.slug), "placeholder_connector")
-                    .hint(format!("Send it to /p/{}/... instead.", ph_cred.slug)));
+                    .hinted(format!("Send it to /p/{}/... instead.", ph_cred.slug)));
             }
             let field = ph_cred
                 .fields
@@ -1681,7 +1681,7 @@ impl Core {
                     format!("a placeholder for {}.{} appeared in {}, which is not a declared injection site", ph_cred.slug, row.field, sub::describe_location(&occ.location)),
                     "injection_site",
                 )
-                .hint(format!("This credential is only ever injected at: {list}.")));
+                .hinted(format!("This credential is only ever injected at: {list}.")));
             };
             subs.push(Sub { occ: occ.clone(), row, site });
         }
@@ -1700,7 +1700,7 @@ impl Core {
                 .collect::<Vec<_>>()
                 .join(" | ");
             return Err(dr(C::SessionRequired, "no placeholder in this request", "no_placeholder")
-                .hint(format!("Put a placeholder at: {sites}. Get one with: agent-vault ph next {}", cred.slug))
+                .hinted(format!("Put a placeholder at: {sites}. Get one with: agent-vault ph next {}", cred.slug))
                 .next(json!({"cli": [format!("agent-vault ph next {}", cred.slug)], "mcp": {"tool": "vault_get_placeholder", "args": {"cred": cred.slug}}})));
         }
 
@@ -1716,12 +1716,12 @@ impl Core {
         st.stage("payload");
         if view.unsendable {
             return Err(dr(C::PolicyDenied, "the query string contains a character a URL cannot carry as written (#, a tab, a line break, or trailing whitespace)", "query_unsendable")
-                .hint("Percent-encode it, as %23, %09, %0A, %0D or %20."));
+                .hinted("Percent-encode it, as %23, %09, %0A, %0D or %20."));
         }
         check_overrides(&effective, &view, &route.host, &route.path)?;
         if view.stray_name {
             return Err(dr(C::PolicyDenied, "a parameter name is empty, holds a control character, a non-ASCII character or a space at either end, or starts with punctuation such as [, which servers read differently", "request_ambiguous")
-                .hint("Name each parameter in printable ASCII, starting with a letter, a digit, _, -, . or $, without a space at either end."));
+                .hinted("Name each parameter in printable ASCII, starting with a letter, a digit, _, -, . or $, without a space at either end."));
         }
         let payload_sets = policy::describe_effective(&effective).payload;
         av_core::payload::evaluate_payload(Some(&payload_sets), &av_core::payload::PayloadInput { view: &view, path: &decision.path })?;
@@ -1882,7 +1882,7 @@ impl Core {
             ctx.resources.quota = Some(quota);
         }
         if let Some(mut sp) = spending {
-            let rid = av_store::ids::Ids::request();
+            let rid = av_store::ids::id::request();
             let mut rt = self.rt(&grant.id);
             let mut state = rt.spend.take().unwrap_or_else(|| json!({"tokens_used": 0, "usd_micros_used": 0, "reserved": {}}));
             if let Some(m) = state.get_mut("reserved").and_then(Value::as_object_mut) {
@@ -1897,7 +1897,7 @@ impl Core {
         let nonces: Vec<String> = subs.iter().map(|s| s.occ.parsed.nonce.clone()).collect();
         if let Some(left) = sub::unsubstituted(&outgoing, &nonces) {
             return Err(dr(C::BadLocation, format!("a placeholder would have reached the upstream unsubstituted, in {}", sub::describe_location(&left.location)), "injection_site")
-                .hint("Put each placeholder once, at a declared injection site, and nowhere a parser could read it twice."));
+                .hinted("Put each placeholder once, at a declared injection site, and nowhere a parser could read it twice."));
         }
         let sent = query_params(&outgoing.query, QuerySeparator::AmpersandOrSemicolon);
         if sent.len() != view.params.len() || sent.iter().zip(&view.params).any(|(a, b)| a.raw_name != b.raw_name) {
@@ -2362,7 +2362,7 @@ impl Pipeline {
     /// Handle one proxied request end to end. Ports `Pipeline.handle(req)`.
     pub async fn handle(&self, req: GatewayRequest) -> GatewayResponse {
         let mut ctx = Ctx {
-            request_id: av_store::ids::Ids::request(),
+            request_id: av_store::ids::id::request(),
             started: now_ms(),
             method: req.method.clone(),
             path: req.path.clone(),
@@ -2587,7 +2587,7 @@ impl Pipeline {
                     Some(dcd) => Some(dcd),
                     None => {
                         return Err(dr(C::Unscannable, format!("upstream sent a {encoding} event stream that could not be decoded, so it could not be scrubbed"), "content_encoding")
-                            .hint("The response was discarded rather than passed through unread."))
+                            .hinted("The response was discarded rather than passed through unread."))
                     }
                 }
             } else {
@@ -2621,7 +2621,7 @@ impl Pipeline {
                             buf.extend_from_slice(&c);
                             if buf.len() > MAX_RESPONSE_BYTES {
                                 return Err(dr(C::Unscannable, format!("the upstream sent more than {} MiB, which is more than can be buffered and scanned", MAX_RESPONSE_BYTES / 1024 / 1024), "response_size")
-                                    .hint("The response was discarded rather than passed through unread."));
+                                    .hinted("The response was discarded rather than passed through unread."));
                             }
                         }
                         Some(Err(m)) => {
@@ -2638,7 +2638,7 @@ impl Pipeline {
             let raw = if !enc.is_empty() && enc != "identity" {
                 crate::decode::decompress(&raw, &enc).map_err(|_| {
                     dr(C::Unscannable, format!("upstream sent {enc} that could not be decoded, so it could not be scrubbed"), "content_encoding")
-                        .hint("The response was discarded rather than passed through unread.")
+                        .hinted("The response was discarded rather than passed through unread.")
                 })?
             } else {
                 raw
@@ -2651,7 +2651,7 @@ impl Pipeline {
         let (scrubbed, _check) = scrubbed;
         if scrubbed.unscannable {
             return Err(dr(C::Unscannable, "the response nested encodings deeper than could be decoded within budget, so it could not be fully scrubbed", "scrub_budget")
-                .hint("The response was discarded rather than passed through part-scanned."));
+                .hinted("The response was discarded rather than passed through part-scanned."));
         }
         let body = latin1_bytes(&scrubbed.text);
         let redactions = scrubbed.redactions + header_redactions;
@@ -2919,7 +2919,7 @@ impl Core {
         if !self.pl.spend_recovered {
             self.pl_recover_spend();
         }
-        let request_id = av_store::ids::Ids::request();
+        let request_id = av_store::ids::id::request();
         self.pl_refuse_browsers(&req)?;
         let mut req = req;
         req.headers = fold_headers(&req.headers)?;

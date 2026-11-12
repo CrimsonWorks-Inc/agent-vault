@@ -20,6 +20,7 @@ thiserror.workspace = true
 tokio.workspace = true
 libc.workspace = true
 url.workspace = true
+regex.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
