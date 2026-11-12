@@ -1030,3 +1030,24 @@ from = '''            self.seq = stored;
             self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''
 to = '''            self.seq = 0;
             self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''
+
+# The JS audit reader on a legacy log (#dropTornTail, #rows): a torn last
+# line is dropped, and a last line without its newline is still a record.
+
+[[mutation]]
+name = 'a torn last audit line is kept, so a crash mid-append makes a JS vault unmigratable'
+file = "src/audit.rs"
+from = '''        if serde_json::from_str::<Value>(last).is_err() {
+            lines.pop();
+        }'''
+to = '''        if false && serde_json::from_str::<Value>(last).is_err() {
+            lines.pop();
+        }'''
+
+[[mutation]]
+name = 'a last audit record without its newline is dropped as if torn'
+file = "src/migrate.rs"
+from = '''    let audit_lines: Vec<String> = audit_text
+        .split('\n')'''
+to = '''    let audit_lines: Vec<String> = audit_text[..audit_text.rfind('\n').map_or(0, |i| i + 1)]
+        .split('\n')'''
