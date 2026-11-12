@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 241 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **739 not yet ported**.
+Totals: 1090 JS tests: 246 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **734 not yet ported**.
 
 ## Mutation check
 
@@ -553,8 +553,8 @@ the vault on every call instead of caching an audit handle.
 | gateway-response.test.js | a request body goes out with a Content-Length that matches it | `tests::gateway::hardening_a_compressed_request_body_and_a_duplicated_content_type_are_refused` |
 | gateway-response.test.js | a DELETE with a body reaches a real upstream framed | tests/ported_gateway_core.rs::real_buffered_complete_response_and_delete_body_have_correct_framing |
 | gateway-routing.test.js | /t/https/ to an http credential goes out over https, not in the clear | tests/ported_gateway_core.rs::explicit_https_target_upgrades_http_credential_while_explicit_http_stays_http |
-| gateway-routing.test.js | a placeholder with a forged checksum does not keep its session alive | not yet ported: waiting for session-expiry seam |
-| gateway-routing.test.js | a real placeholder as the only carrier still authenticates and keeps the session alive | not yet ported: waiting for session-expiry seam |
+| gateway-routing.test.js | a placeholder with a forged checksum does not keep its session alive | `ported_gateway_core::placeholder_only_authentication_touches_session_only_after_checksum_verification (forged row)` |
+| gateway-routing.test.js | a real placeholder as the only carrier still authenticates and keeps the session alive | `ported_gateway_core::placeholder_only_authentication_touches_session_only_after_checksum_verification (authentic row)` |
 | gateway-w2-model.test.js | model meters classify only the contracted endpoints and methods | tests/ported_gateway_model.rs::model_endpoint_and_method_classification_is_contract_exact |
 | gateway-w2-model.test.js | metered JSON fails closed without echoing request contents | tests/ported_gateway_model.rs::malformed_metered_json_fails_without_echo_and_vendor_json_is_ordinary |
 | gateway-w2-model.test.js | reservations use original UTF-8 byte length and provider output limits | tests/ported_gateway_model.rs::reservations_use_original_utf8_bytes_and_provider_output_limit_precedence |
@@ -591,14 +591,14 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | quarantine and grant expiry stop before consume, and denyApprovals returns only a count | tests/ported_gateway_core.rs::quarantine_and_grant_expiry_stop_before_consume_and_bulk_deny_returns_count |
 | gateway-w2-pipeline.test.js | preflight is observational, peeks limits and reports a hold without creating approval | tests/ported_gateway_core.rs::preflight_observes_limits_without_mutating_vault_or_creating_approval |
 | gateway-w2-pipeline.test.js | preflight denial never trips and the eleventh call is throttled | not yet ported |
-| gateway-w2-pipeline.test.js | tripwires revoke only authenticated matching session and deny its approvals | not yet ported |
+| gateway-w2-pipeline.test.js | tripwires revoke only authenticated matching session and deny its approvals | `ported_gateway_core::authenticated_replay_revokes_only_its_session_and_denies_held_approvals` |
 | gateway-w2-pipeline.test.js | tripwires default off; panic hook awaits and reports unwired or failed denial honestly | not yet ported |
 | gateway-w2-pipeline.test.js | legacy decimal budgets work while noncanonical values never reach comparisons | not yet ported |
 | gateway-w2-pipeline.test.js | a held request previews its label, a redacted secret and no placeholder, token or audit body | tests/ported_gateway_core.rs::held_preview_labels_injection_redacts_secret_and_token_and_keeps_comment_out_of_audit |
 | gateway-w2-pipeline.test.js | the preview builder replaces encoded placeholders, keeps duplicate JSON keys as sent, and stays under 8 KiB | tests/ported_gateway_core.rs::preview_builder_replaces_encoded_placeholders_preserves_duplicate_json_and_caps_size |
 | gateway-w2-pipeline.test.js | preflight expiration has no state changes and uses the shared expiry predicates | not yet ported |
 | gateway-w2-pipeline.test.js | expired grant fallback keeps its specific error after store marked it expired | not yet ported |
-| gateway-w2-pipeline.test.js | quarantine tripwire pauses only its credential and leaves other sessions active | not yet ported |
+| gateway-w2-pipeline.test.js | quarantine tripwire pauses only its credential and leaves other sessions active | `ported_gateway_core::quarantine_tripwire_pauses_its_credential_and_preserves_active_sessions` |
 | gateway-w2-pipeline.test.js | a redirect hop is held to the GraphQL rules a direct request is held to | tests/ported_gateway_core.rs::graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops |
 | gateway-w2-pipeline.test.js | a redirect hop answers to the body rules as a body-less request, not to none | tests/ported_gateway_core.rs::graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops |
 | gateway-w2-pipeline.test.js | a single-valued header sent twice, differently, is refused before anything is sent | tests/ported_gateway_core.rs::conflicting_single_valued_headers_are_refused_without_spending_or_upstream |
@@ -648,7 +648,7 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-scrub.test.js | every accepted pattern scans hostile input in under 50 ms | tests/ported_gateway_scrub.rs::hostile_input_scans_meet_bound_and_non_bmp_repetitions_are_refused_as_planned; ported (intended difference: rust/PLAN.md non-BMP repetition) |
 | gateway-w2-scrub.test.js | a stream that mentions a pattern prefix keeps flowing, and its holdback stays bounded | tests/ported_gateway_scrub.rs::ordinary_prefix_traffic_keeps_flowing_with_bounded_holdback |
 | gateway-w2-scrub.test.js | a custom token straddling every possible cut is redacted whole, in any chunking | tests/ported_gateway_scrub.rs::custom_token_is_redacted_at_every_two_chunk_cut_and_every_odd_chunk_width |
-| gateway-w2-seams.test.js | pins on a plaintext credential refuse before any connection; no pins still connects | not yet ported |
+| gateway-w2-seams.test.js | pins on a plaintext credential refuse before any connection; no pins still connects | `ported_gateway_core::plaintext_pins_refuse_before_connecting_and_unpinned_control_connects` |
 | gateway-w2-seams.test.js | a throwing health reader or recorder never turns an executed request into a failure | not yet ported |
 | gateway-w2-seams.test.js | onPending gets the id and headline only, and a throwing hook still holds the request | not yet ported |
 | gateway-w2-seams.test.js | denyApprovals filters by session, credential and grant ids, records the reason, and returns a count | tests/ported_gateway_core.rs::deny_approvals_filters_by_session_or_grant_records_reason_and_skips_consumed_requests |

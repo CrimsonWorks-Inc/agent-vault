@@ -5659,3 +5659,288 @@ proptest::proptest! {
         rt.block_on(check_query_wire_property(&query))?;
     }
 }
+
+#[tokio::test]
+async fn plaintext_pins_refuse_before_connecting_and_unpinned_control_connects() {
+    use tokio::io::AsyncWriteExt;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (pipeline, request) = network_pipeline(&f, port, "GET", None).await;
+    f.shared
+        .run(|core| {
+            core.vault
+                .set_pins(
+                    "network",
+                    "127.0.0.1",
+                    &[format!("sha256/{}=", "A".repeat(43))],
+                )
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    let refused = pipeline.handle(request.clone()).await;
+    assert_eq!(
+        refused.error.as_ref().unwrap().code.as_str(),
+        "AV_PIN_MISMATCH"
+    );
+    assert_eq!(
+        refused.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("pin_plaintext")
+    );
+    assert_eq!(refused.error.as_ref().unwrap().extra.refunded, Some(true));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "pinned plaintext must never open a connection"
+    );
+    f.clean(&refused).await;
+    f.shared
+        .run(|core| {
+            let credential = core.vault.find_credential("network").unwrap().unwrap();
+            let grant = core
+                .vault
+                .grants()
+                .unwrap()
+                .into_iter()
+                .find(|g| g.credential_id == credential.id)
+                .unwrap();
+            assert_eq!(grant.budget_used, 0);
+            assert!(core
+                .vault
+                .list_placeholders(None)
+                .unwrap()
+                .iter()
+                .filter(|p| p.grant_id == grant.id)
+                .all(|p| p.uses == 0));
+        })
+        .await
+        .unwrap();
+    f.shared
+        .run(|core| {
+            core.vault.clear_pins("network", "127.0.0.1", None).unwrap();
+        })
+        .await
+        .unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let (headers, body) = read_wire_request(&mut socket).await;
+        assert!(headers.contains(SECRET));
+        assert!(body.is_empty());
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 24\r\nConnection: close\r\n\r\nordinary-traffic-control").await.unwrap();
+    });
+    let ordinary =
+        tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.handle(request))
+            .await
+            .unwrap();
+    assert_eq!(ordinary.status, 200);
+    assert_eq!(ordinary.body, b"ordinary-traffic-control");
+    server.await.unwrap();
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn authenticated_replay_revokes_only_its_session_and_denies_held_approvals() {
+    use av_daemon::tripwire::Observation;
+    use av_store::model::SessionState;
+    let f = approval_fixture("each", &["header:x-key"]).await;
+    let id = held_id(&f.get().await);
+    let token = f.token.clone();
+    let (sid, other) = f.shared.run(move |core| {
+        core.vault.update_settings(&json!({"tripwires":{"enabled":true,"rules":av_daemon::tripwire::default_rules_json()}})).unwrap();
+        let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+        let other = core.vault.create_session(Default::default()).unwrap().session.id;
+        assert!(core.tw_observe(&Observation { code:"AV_PH_REPLAY".into(), ..Default::default() }).unwrap().is_none());
+        let row = core.vault.list_placeholders(None).unwrap().into_iter().next().unwrap();
+        core.vault.burn_placeholder(&row.id, "fixture replay").unwrap();
+        (sid, other)
+    }).await.unwrap();
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let replay = f.get().await;
+    assert_eq!(replay.error.as_ref().unwrap().code.as_str(), "AV_PH_REPLAY");
+    assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+    f.shared
+        .run(move |core| {
+            assert_eq!(
+                core.vault.session(&sid).unwrap().unwrap().state,
+                SessionState::Revoked
+            );
+            assert_eq!(
+                core.vault.session(&other).unwrap().unwrap().state,
+                SessionState::Active
+            );
+        })
+        .await
+        .unwrap();
+    let revoked = f.get().await;
+    assert_eq!(
+        revoked.error.as_ref().unwrap().code.as_str(),
+        "AV_SESSION_REVOKED"
+    );
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    f.clean(&replay).await;
+    f.clean(&revoked).await;
+    let ordinary = Fixture::new(&["header:x-key"]).await;
+    let response = ordinary.get().await;
+    assert_eq!(response.status, 200);
+    ordinary.clean(&response).await;
+}
+
+#[tokio::test]
+async fn quarantine_tripwire_pauses_its_credential_and_preserves_active_sessions() {
+    use av_daemon::tripwire::Observation;
+    use av_store::model::{QuarantineBy, SessionState};
+    let f = Fixture::new(&["header:x-key"]).await;
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+    let token = f.token.clone();
+    f.shared.run(move |core| {
+        core.vault.update_settings(&json!({"tripwires":{"enabled":true,"rules":[{"id":"quarantine","codes":["AV_BAD_LOCATION"],"threshold":1,"window_s":10,"action":"quarantine_credential"}]}})).unwrap();
+        let sid = core.vault.session_by_token(&token).unwrap().unwrap().id;
+        let other = core.vault.create_session(Default::default()).unwrap().session.id;
+        let cred = core.vault.find_credential("demo").unwrap().unwrap();
+        let rule = core.tw_observe(&Observation { session_id:sid.clone(), credential_id:Some(cred.id), code:"AV_BAD_LOCATION".into(), ..Default::default() }).unwrap().unwrap();
+        assert_eq!(rule["id"], "quarantine");
+        assert_eq!(core.vault.find_credential("demo").unwrap().unwrap().quarantine.unwrap().by, QuarantineBy::Tripwire);
+        for id in [sid, other] { assert_eq!(core.vault.session(&id).unwrap().unwrap().state, SessionState::Active); }
+    }).await.unwrap();
+    let refused = f.get().await;
+    assert_eq!(
+        refused.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("quarantine")
+    );
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&refused).await;
+    f.shared
+        .run(|core| core.vault.clear_quarantine("demo").unwrap())
+        .await
+        .unwrap();
+    let released = f.get().await;
+    assert_eq!(released.status, 200);
+    f.clean(&released).await;
+}
+
+mod ported_common;
+
+#[tokio::test]
+async fn placeholder_only_authentication_touches_session_only_after_checksum_verification() {
+    use av_store::vault::{CreateGrantOptions, IssueOptions, NewCredential};
+    for forged in [true, false] {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+        let cred = vault
+            .add_credential(NewCredential {
+                slug: "demo".into(),
+                kind: "http".into(),
+                connector: serde_json::from_value(json!({"host":"api.example.test"})).unwrap(),
+                fields: vec![("key".into(), SECRET.to_string().into())],
+                sites: std::collections::BTreeMap::from([(
+                    "key".into(),
+                    vec!["header:x-key".into()],
+                )]),
+            })
+            .unwrap();
+        let session = vault.create_session(Default::default()).unwrap().session;
+        let grant = vault.create_grant(CreateGrantOptions {
+            session_id:session.id.clone(), credential_id:cred.id,
+            policy:serde_json::from_value(json!({"hosts":["api.example.test"],"methods":["GET"],"paths":["/**"],"approval":"auto","budget":{"unit":"requests","limit":10}})).unwrap(),
+            ..Default::default()
+        }).unwrap();
+        let ph = vault
+            .issue_placeholder(IssueOptions {
+                grant_id: grant.id.clone(),
+                ..Default::default()
+            })
+            .unwrap()
+            .placeholder;
+        let soon = (time::OffsetDateTime::now_utc() + time::Duration::minutes(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        drop(vault);
+        ported_common::seed_session_expiry(dir.path(), &session.id, &soon);
+        let mut reopened = av_store::vault::Vault::open(dir.path()).unwrap();
+        reopened.unlock(None).unwrap();
+        let shared = Shared::new(reopened);
+        let up = Arc::new(RecordingUpstream::default());
+        let pipeline = av_daemon::pipeline::Pipeline::new(
+            shared.clone(),
+            PipelineOptions {
+                upstream: Some(up.clone()),
+                ..Default::default()
+            },
+        );
+        let mut marker = ph.clone();
+        if forged {
+            let suffix = if ph.ends_with("aaaaaa") {
+                "bbbbbb"
+            } else {
+                "aaaaaa"
+            };
+            marker.replace_range(marker.len() - 6.., suffix);
+        }
+        let response = pipeline
+            .handle(GatewayRequest {
+                method: "GET".into(),
+                path: "/p/demo/ordinary".into(),
+                headers: vec![
+                    ("host".into(), "127.0.0.1".into()),
+                    ("x-key".into(), marker),
+                ],
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(response.status, if forged { 400 } else { 200 });
+        if forged {
+            assert_eq!(
+                response.error.as_ref().unwrap().code.as_str(),
+                "AV_PH_MALFORMED"
+            );
+        }
+        assert_eq!(up.hits.lock().unwrap().len(), usize::from(!forged));
+        let sid = session.id.clone();
+        shared
+            .run(move |core| {
+                let after = core
+                    .vault
+                    .session(&sid)
+                    .unwrap()
+                    .unwrap()
+                    .expires_at
+                    .unwrap();
+                if forged {
+                    assert_eq!(after, soon);
+                } else {
+                    let parse = |s: &str| {
+                        time::OffsetDateTime::parse(
+                            s,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .unwrap()
+                    };
+                    assert!(parse(&after) > parse(&soon));
+                }
+                assert_eq!(
+                    core.vault.grant(&grant.id).unwrap().unwrap().budget_used,
+                    u64::from(!forged)
+                );
+                let audit = serde_json::to_string(
+                    &core
+                        .vault
+                        .audit()
+                        .unwrap()
+                        .read(&Default::default())
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(!audit.contains(SECRET));
+            })
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&response.body).contains(SECRET));
+        assert!(!serde_json::to_string(&response.headers)
+            .unwrap()
+            .contains(SECRET));
+    }
+}
