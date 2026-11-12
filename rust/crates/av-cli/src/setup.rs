@@ -552,11 +552,14 @@ struct CreatedItem {
 }
 
 /// The installer's `state.json` document. `version` is 1. `retired` is set
-/// when uninstall moves the vault aside.
+/// when uninstall moves the vault aside. `saved_ids` is what `save_state`
+/// persisted (empty when that call did not run); it is not part of the file.
 struct InstallState {
     created: Vec<CreatedItem>,
     version: u32,
     retired: Option<String>,
+    #[cfg(test)]
+    saved_ids: Vec<String>,
 }
 
 fn empty_state() -> InstallState {
@@ -564,7 +567,16 @@ fn empty_state() -> InstallState {
         created: Vec::new(),
         version: 1,
         retired: None,
+        #[cfg(test)]
+        saved_ids: Vec::new(),
     }
+}
+
+/// What a dry-run install recorded, and the ids `save_state` saw.
+#[cfg(test)]
+pub(crate) struct RecordedInstall {
+    pub created: Vec<(String, String)>,
+    pub saved_ids: Vec<String>,
 }
 
 fn record(state: &mut InstallState, kind: &str, id: &str) {
@@ -633,7 +645,13 @@ pub(crate) fn state_document(
     serde_json::to_string_pretty(&serde_json::Value::Object(root)).unwrap_or_else(|_| "{}".into())
 }
 
-fn save_state(ctx: &Ctx, state: &InstallState) -> Result<(), Die> {
+fn save_state(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
+    // Recorded even on a dry run, so a test can see that install reached
+    // this call after the service file was added to `created`.
+    #[cfg(test)]
+    {
+        state.saved_ids = state.created.iter().map(|item| item.id.clone()).collect();
+    }
     if ctx.dry {
         return Ok(());
     }
@@ -1045,6 +1063,50 @@ fn binary_inside(app: &Path) -> bool {
     canonical_prefix(&exe).starts_with(canonical_prefix(app))
 }
 
+/// Hint for a self-install refusal. "Pass --from" is only right when the
+/// caller has not already passed it and this process is not the installed
+/// copy: that copy refuses even with `--from`, because it lives inside `app`.
+fn self_install_die(from_passed: bool, running_inside: bool) -> Die {
+    let hint = if running_inside || from_passed {
+        "Run the installer from your checkout, not the installed copy."
+    } else {
+        "Pass --from <path to your checkout> so there is something new to install."
+    };
+    Die::new("refusing to install the app directory over itself.", hint)
+}
+
+fn refuse_self_install(ctx: &Ctx, source: &Path, app: &Path) -> Result<(), Die> {
+    let inside = binary_inside(app);
+    if refuses_self_install(source, app) || inside {
+        return Err(self_install_die(value(&ctx.args, "from").is_some(), inside));
+    }
+    Ok(())
+}
+
+/// The installed binary cannot install anything: `current_exe` is inside
+/// `app`, so the guard below would refuse after the tree had already changed.
+fn refuse_running_inside_app(ctx: &Ctx) -> Result<(), Die> {
+    if binary_inside(&app_dir()) {
+        return Err(self_install_die(value(&ctx.args, "from").is_some(), true));
+    }
+    Ok(())
+}
+
+/// Whether `install_app` would accept running `installer` to copy `source`
+/// into `app`. This is the guard `upgrade --print-only` has to satisfy: the
+/// installer is not inside `app`, and `--from` is a checkout outside it.
+#[cfg(test)]
+pub(crate) fn install_app_accepts(installer: &Path, source: &Path, app: &Path) -> bool {
+    if refuses_self_install(source, app)
+        || canonical_prefix(installer).starts_with(canonical_prefix(app))
+    {
+        return false;
+    }
+    source.join("src").is_dir()
+        && source.join("bin").is_dir()
+        && source.join("package.json").is_file()
+}
+
 fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     let source = checkout_from(ctx)?;
     for required in ["src", "bin", "package.json"] {
@@ -1056,22 +1118,12 @@ fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
         }
     }
     let app = app_dir();
-    if refuses_self_install(&source, &app) || binary_inside(&app) {
-        return Err(Die::new(
-            "refusing to install the app directory over itself.",
-            "Pass --from <path to your checkout> so there is something new to install.",
-        ));
-    }
+    refuse_self_install(ctx, &source, &app)?;
     assert_no_symlinks(&source, &["src", "bin", "package.json"])?;
     if !ctx.dry {
         // Never delete a path that resolves into the source. The guard above
         // already refused that; this is the last check before the unlink.
-        if refuses_self_install(&source, &app) {
-            return Err(Die::new(
-                "refusing to install the app directory over itself.",
-                "Pass --from <path to your checkout> so there is something new to install.",
-            ));
-        }
+        refuse_self_install(ctx, &source, &app)?;
         if app.exists() {
             std::fs::remove_dir_all(&app)?;
         }
@@ -1080,7 +1132,7 @@ fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
             // dereference: copy the target of a link, never the link itself.
             copy_dereference(&source.join(part), &app.join(part))?;
         }
-        copy_rust_bins(&app)?;
+        copy_rust_bins(&source, &app)?;
         if is_mac() {
             let _ = run_opts(
                 ctx,
@@ -1109,15 +1161,24 @@ fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     Ok(())
 }
 
-fn copy_rust_bins(app: &Path) -> Result<(), Die> {
-    let exe = std::env::current_exe().map_err(|_| {
-        Die::msg("the daemon binary is missing: this process has no executable path")
-    })?;
-    let Some(dir) = exe.parent() else {
-        return Err(Die::msg(
-            "the daemon binary is missing: this process has no directory",
+/// Release binaries of the `--from` checkout. The running installer may be
+/// an older binary; the files that get installed are these, not whatever
+/// sits beside `current_exe`.
+fn rust_release_dir(checkout: &Path) -> PathBuf {
+    checkout.join("rust/target/release")
+}
+
+pub(crate) fn copy_rust_bins(checkout: &Path, app: &Path) -> Result<(), Die> {
+    let dir = rust_release_dir(checkout);
+    if !dir.is_dir() {
+        return Err(Die::new(
+            format!(
+                "the Rust release binaries are missing at {}",
+                dir.display()
+            ),
+            "Build them with cargo build --release in the checkout, then run that checkout's installer.",
         ));
-    };
+    }
     let dest = app.join("bin");
     std::fs::create_dir_all(&dest)?;
     for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
@@ -1534,12 +1595,41 @@ fn bootstrap_launchd(ctx: &Ctx) -> Result<(), Die> {
 }
 
 fn install(ctx: &Ctx) -> Result<(), Die> {
+    install_recording(ctx).map(|_| ())
+}
+
+/// Dry-run install against the real root paths. Nothing is written.
+/// `saved_ids` is empty when `save_state` did not run.
+#[cfg(test)]
+pub(crate) fn dry_run_recorded_install() -> Result<RecordedInstall, Die> {
+    std::env::remove_var("AGENT_VAULT_SETUP_DRY_ROOT");
+    let ctx = Ctx {
+        args: vec!["install".into(), "--dry-run".into()],
+        dry: true,
+        verb: "install".into(),
+    };
+    let state = install_recording(&ctx)?;
+    Ok(RecordedInstall {
+        created: state
+            .created
+            .iter()
+            .map(|item| (item.kind.clone(), item.id.clone()))
+            .collect(),
+        saved_ids: state.saved_ids,
+    })
+}
+
+fn install_recording(ctx: &Ctx) -> Result<InstallState, Die> {
     require_root(ctx)?;
     if value(&ctx.args, "use-node").is_some() {
         return Err(Die::msg(
             "this installer ships the Rust daemon and does not install a Node runtime.",
         ));
     }
+    // Checked before the user, the group, or the tree exist, so a bad
+    // --port does not leave an install uninstall cannot see.
+    service_port(value(&ctx.args, "port"))?;
+    refuse_running_inside_app(ctx)?;
     let enrolled = enrolled_user(ctx)?;
     say(&format!(
         "\n{}{}",
@@ -1568,7 +1658,7 @@ fn install(ctx: &Ctx) -> Result<(), Die> {
         "not installing a Node runtime; the service runs the Rust daemon",
     );
     install_service(ctx, &enrolled, &mut state)?;
-    save_state(ctx, &state)?;
+    save_state(ctx, &mut state)?;
     say(&format!("\n{}", paint("1", "done")));
     say(&format!(
         "  The daemon runs as {}. Your account cannot read {}.",
@@ -1600,7 +1690,7 @@ fn install(ctx: &Ctx) -> Result<(), Die> {
         "  (the installed binary is root-owned; there is no Node runtime on root's PATH)",
     ));
     say("");
-    Ok(())
+    Ok(state)
 }
 
 fn uninstall(ctx: &Ctx) -> Result<(), Die> {

@@ -384,11 +384,100 @@ fn self_install_and_systemd_restart_and_from_probe() {
     let (path, root) = crate::commands::choose_upgrade_installer(
         std::path::Path::new("/no/such/installer"),
         std::path::Path::new("/checkout/agent-vault-setup"),
+        std::path::Path::new("/checkout"),
     );
     assert!(!root);
     assert_eq!(
         path,
         std::path::PathBuf::from("/checkout/agent-vault-setup")
+    );
+}
+
+#[test]
+fn upgrade_print_only_names_an_installer_and_source_install_app_accepts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = tmp.path().join("app");
+    let root_owned = app.join("bin/agent-vault-setup");
+    std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
+    // The installed Rust installer contains the `--from` marker, which used
+    // to make upgrade print this path. install_app refuses it.
+    std::fs::write(&root_owned, b"#!/bin/sh\n--from\n").unwrap();
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("src")).unwrap();
+    std::fs::create_dir_all(checkout.join("bin")).unwrap();
+    std::fs::create_dir_all(checkout.join("rust/target/release")).unwrap();
+    std::fs::write(checkout.join("package.json"), "{}").unwrap();
+    let release = checkout.join("rust/target/release/agent-vault-setup");
+    std::fs::write(&release, b"checkout-setup").unwrap();
+    let (cmd, installer, using_root) =
+        crate::commands::format_upgrade_command(&root_owned, &root_owned, &checkout);
+    assert!(!using_root, "the installed copy was selected: {cmd}");
+    assert!(cmd.starts_with("sudo "), "{cmd}");
+    assert!(cmd.contains(" install --from "), "{cmd}");
+    let rest = cmd.strip_prefix("sudo ").unwrap();
+    let (named_installer, named_source) = rest.split_once(" install --from ").unwrap();
+    assert_eq!(named_installer, release.display().to_string(), "{cmd}");
+    assert_eq!(named_source, checkout.display().to_string(), "{cmd}");
+    assert_eq!(installer, release);
+    assert!(
+        crate::setup::install_app_accepts(&installer, &checkout, &app),
+        "upgrade --print-only named an installer install_app refuses: {cmd}"
+    );
+    assert!(
+        !crate::setup::install_app_accepts(&root_owned, &checkout, &app),
+        "the installed copy must stay refused"
+    );
+}
+
+#[test]
+fn copy_rust_bins_copies_the_checkout_release_not_the_running_binary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("checkout");
+    let release = checkout.join("rust/target/release");
+    std::fs::create_dir_all(&release).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        std::fs::write(release.join(name), format!("from-checkout-{name}")).unwrap();
+    }
+    let app = tmp.path().join("app");
+    crate::setup::copy_rust_bins(&checkout, &app).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        let got = std::fs::read(app.join("bin").join(name)).unwrap();
+        assert_eq!(got, format!("from-checkout-{name}").into_bytes(), "{name}");
+    }
+}
+
+#[test]
+fn install_dry_run_records_and_saves_state() {
+    let recorded = crate::setup::dry_run_recorded_install().expect("dry-run install");
+    let app = recorded
+        .created
+        .iter()
+        .find(|(kind, id)| kind == "dir" && id.ends_with("/app"));
+    assert!(
+        app.is_some(),
+        "app was not recorded: {:?}",
+        recorded.created
+    );
+    let service = recorded.created.iter().find(|(kind, id)| {
+        kind == "file"
+            && (id.ends_with("com.agentvault.daemon.plist") || id.ends_with("agent-vault.service"))
+    });
+    assert!(
+        service.is_some(),
+        "the service file was not recorded: {:?}",
+        recorded.created
+    );
+    let service_id = &service.unwrap().1;
+    assert!(
+        recorded.saved_ids.iter().any(|id| id == service_id),
+        "save_state ran before install_service, or not at all: saved {:?} created {:?}",
+        recorded.saved_ids,
+        recorded.created
+    );
+    assert_eq!(
+        recorded.saved_ids.len(),
+        recorded.created.len(),
+        "save_state did not see the full record"
     );
 }
 

@@ -621,3 +621,24 @@ file = "src/setup.rs"
 from = "LimitCORE=0\\n\\"
 to = "LimitCORE=1\\n\\"
 test = "probe_service_units_keep_the_js_hardening"
+
+[[mutation]]
+name = "upgrade runs the installed Rust installer, which install_app refuses"
+file = "src/commands.rs"
+from = "        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {"
+to = "        if installer_supports_from(&bytes) {"
+test = "upgrade_print_only_names_an_installer_and_source_install_app_accepts"
+
+[[mutation]]
+name = "install checks --port only after the tree exists"
+file = "src/setup.rs"
+from = "    service_port(value(&ctx.args, \"port\"))?;"
+to = "    let _ = value(&ctx.args, \"port\");"
+test = "probe_install_rejects_a_bad_port_before_any_change"
+
+[[mutation]]
+name = "install returns without saving state.json"
+file = "src/setup.rs"
+from = "    save_state(ctx, &mut state)?;"
+to = "    let _ = (&ctx, &state);"
+test = "install_dry_run_records_and_saves_state"

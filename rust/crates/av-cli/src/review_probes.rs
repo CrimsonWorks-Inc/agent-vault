@@ -43,6 +43,17 @@ fn probe_exec_scrub_control_keeps_ordinary_values() {
     assert!(!parent_env_kept("DATABASE_URL", "postgres://app:pw@db"));
 }
 
+#[test]
+fn probe_exec_scrub_drops_non_special_scheme_with_a_space_in_the_host() {
+    // JS `new URL("foo://u:p w@h st")` throws, so urlHasPassword keeps the
+    // value. Rust re-parses spaces as %20 and then sees a password. Dropping
+    // it is the safe direction; the difference is accepted, not a bug.
+    assert!(crate::commands::looks_like_credential(
+        "PLAIN",
+        "foo://u:p w@h st"
+    ));
+}
+
 // ---- installer: self-install guard compared after canonicalize.
 
 #[test]
@@ -131,13 +142,28 @@ fn probe_service_units_keep_the_js_hardening() {
     assert!(missing.is_empty(), "service unit lost: {missing:?}");
 }
 
+/// The non-dry half of `write_root_file`: everything after the dry-run return.
+fn write_root_file_non_dry() -> &'static str {
+    let start = SETUP_SRC
+        .find("fn write_root_file(")
+        .expect("write_root_file");
+    let rest = &SETUP_SRC[start..];
+    let end = rest.find("\nfn ").expect("function after write_root_file");
+    let body = &rest[..end];
+    let dry = body.find("return Ok(());").expect("dry-run return");
+    &body[dry + "return Ok(());".len()..]
+}
+
 #[test]
-fn probe_installer_records_what_it_created() {
-    // JS saveState()/record() write state.json; status and the CLI's
-    // SYSTEM_INSTALLED read it, uninstall removes what it lists.
+fn write_root_file_non_dry_sets_0644_and_chowns_root() {
+    let body = write_root_file_non_dry();
     assert!(
-        SETUP_SRC.contains("write(&state_path()") || SETUP_SRC.contains("save_state"),
-        "the installer never writes state.json"
+        body.contains("set_mode(0o644)"),
+        "the non-dry write does not set 0644:\n{body}"
+    );
+    assert!(
+        body.contains("[\"0:0\""),
+        "the non-dry write does not chown 0:0:\n{body}"
     );
 }
 

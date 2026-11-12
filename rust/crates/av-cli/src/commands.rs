@@ -606,12 +606,8 @@ pub async fn upgrade(ctx: &Context, args: &UpgradeArgs) -> Outcome {
     let checkout_installer = setup_bin();
     let checkout = checkout_root();
     let root_owned = PathBuf::from(SYSTEM_ROOT).join("app/bin/agent-vault-setup");
-    let (installer, using_root) = choose_upgrade_installer(&root_owned, &checkout_installer);
-    let cmd = format!(
-        "sudo {} install --from {}",
-        installer.display(),
-        checkout.display()
-    );
+    let (cmd, installer, using_root) =
+        format_upgrade_command(&root_owned, &checkout_installer, &checkout);
     if boolean_flag(args.print_only.then_some(""), "print-only")? || ctx.json {
         ctx.out(Some(&cmd), &json!({ "command": cmd }));
         return Ok(0);
@@ -667,15 +663,57 @@ fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Prefer the root-owned installer when it supports `--from`. An older copy
-/// would reinstall itself and report success.
-pub(crate) fn choose_upgrade_installer(root_owned: &Path, checkout: &Path) -> (PathBuf, bool) {
+/// The installed setup binary lives at `<root>/app/bin/agent-vault-setup`.
+/// Running it puts `current_exe` inside the app directory, and `install_app`
+/// refuses that even when `--from` names a real checkout.
+pub(crate) fn installer_runs_inside_app(path: &Path) -> bool {
+    let Some(bin_dir) = path.parent() else {
+        return false;
+    };
+    let Some(app) = bin_dir.parent() else {
+        return false;
+    };
+    bin_dir.file_name().is_some_and(|name| name == "bin")
+        && app.file_name().is_some_and(|name| name == "app")
+}
+
+/// Prefer a root-owned installer that supports `--from` only when running it
+/// would not land inside `app`. A Rust install's copy always does, so the
+/// command names the checkout's `rust/target/release/agent-vault-setup`.
+pub(crate) fn choose_upgrade_installer(
+    root_owned: &Path,
+    checkout_installer: &Path,
+    checkout_root: &Path,
+) -> (PathBuf, bool) {
     if let Ok(bytes) = std::fs::read(root_owned) {
-        if installer_supports_from(&bytes) {
+        if installer_supports_from(&bytes) && !installer_runs_inside_app(root_owned) {
             return (root_owned.to_path_buf(), true);
         }
     }
-    (checkout.to_path_buf(), false)
+    if installer_runs_inside_app(checkout_installer) {
+        let release = checkout_root.join("rust/target/release/agent-vault-setup");
+        if !installer_runs_inside_app(&release) {
+            return (release, false);
+        }
+    }
+    (checkout_installer.to_path_buf(), false)
+}
+
+/// The line `upgrade --print-only` prints, the installer it names, and
+/// whether that installer is the root-owned copy.
+pub(crate) fn format_upgrade_command(
+    root_owned: &Path,
+    checkout_installer: &Path,
+    checkout_root: &Path,
+) -> (String, PathBuf, bool) {
+    let (installer, using_root) =
+        choose_upgrade_installer(root_owned, checkout_installer, checkout_root);
+    let cmd = format!(
+        "sudo {} install --from {}",
+        installer.display(),
+        checkout_root.display()
+    );
+    (cmd, installer, using_root)
 }
 
 /// Ports `COMMANDS.quickstart`.
@@ -3851,9 +3889,11 @@ pub async fn migrate(ctx: &Context, args: &MigrateArgs) -> Outcome {
     }
     // The CLI's own socket (AGENT_VAULT_DIR, or the system socket when the
     // install's state.json exists) is one of the places the JS looks, in
-    // addition to the library's candidates.
-    if std::os::unix::net::UnixStream::connect(socket_path()).is_ok() {
-        return Err(daemon_running_against(&from));
+    // addition to the library's candidates. Name the socket that answered:
+    // it is not always `--from`.
+    let sock = socket_path();
+    if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+        return Err(daemon_running_at(&sock));
     }
     if let Err(error) = migrate::preflight(&opts) {
         let message = error.to_string();
@@ -3885,9 +3925,12 @@ pub async fn migrate(ctx: &Context, args: &MigrateArgs) -> Outcome {
     finish_migrate(ctx, &report)
 }
 
-fn daemon_running_against(dir: &Path) -> CliError {
+fn daemon_running_at(sock: &Path) -> CliError {
     err_next(
-        format!("the agent-vault daemon is running against {}", dir.display()),
+        format!(
+            "the agent-vault daemon is running at {}",
+            sock.display()
+        ),
         Exit::Failure,
         "stop the daemon first (installed: sudo launchctl bootout system/com.agentvault.daemon; dev: stop the `agent-vault daemon` process), then run agent-vault migrate again",
     )
