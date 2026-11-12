@@ -158,7 +158,13 @@ Approved crates (ask the coordinator before adding others): `tokio`, `hyper`
 `serde_json`, `base64`, `p256`/`ecdsa`, `ed25519-dalek`, `ciborium` (WebAuthn
 CBOR), `libc` (`mlock`, peer credentials, uid/gid), `clap`, `rpassword`,
 `regex` (only with linear-time guarantees; no backtracking), `url`, `time`,
-`thiserror`, `tracing`. Dev: `proptest`, `tempfile`, `assert_cmd`.
+`thiserror`, `tracing`; and, for av-daemon only, `flate2` (rust_backend),
+`brotli-decompressor` (decode only), `webpki-roots`, and `x509-parser` or the
+RustCrypto `x509-cert`/`spki` crates for certificate parsing (never a
+hand-rolled DER parser). Response decompression keeps the JS cap of 64 MiB
+(`MAX_DECOMPRESSED`), zstd stays refused, and upstream TLS trusts the Mozilla
+roots plus `NODE_EXTRA_CA_CERTS`, as Node does. Dev: `proptest`, `tempfile`,
+`assert_cmd`.
 
 **JSON key order follows insertion, like JavaScript.** `serde_json` is built
 with `preserve_order` (it applies to every crate). Code whose result depends
