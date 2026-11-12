@@ -1456,12 +1456,25 @@ impl Core {
         })
     }
 
+    /// Every stored secret, decrypted: the one way the pipeline reads them,
+    /// so a test can count how often a request pays for it.
+    fn pl_all_secrets(&self) -> R<Vec<av_store::vault::StoredSecret>> {
+        #[cfg(test)]
+        self.secret_reads.set(self.secret_reads.get() + 1);
+        self.vault.all_secrets().v()
+    }
+
+    /// `vault.untrustedText(text)`, which decrypts every secret too.
+    fn pl_untrusted_text(&self, text: &str, max: usize) -> R<String> {
+        #[cfg(test)]
+        self.secret_reads.set(self.secret_reads.get() + 1);
+        self.vault.untrusted_text(text, max).v()
+    }
+
     /// `#errorScrubber()`.
     pub(crate) fn pl_error_scrubber(&self) -> R<Scrubber> {
         let entries: Vec<ScrubEntry> = self
-            .vault
-            .all_secrets()
-            .v()?
+            .pl_all_secrets()?
             .into_iter()
             .map(|s| ScrubEntry {
                 secret: s.secret,
@@ -1723,7 +1736,7 @@ impl Core {
         let reason_text = match &reason {
             Some(r) => {
                 let safe = self.pl_safe_message(r, None);
-                Value::from(self.vault.untrusted_text(&safe, 200).v()?)
+                Value::from(self.pl_untrusted_text(&safe, 200)?)
             }
             None => Value::Null,
         };
@@ -1806,7 +1819,7 @@ impl Core {
         let reason = match reason.filter(|r| !r.is_empty()) {
             Some(r) => {
                 let safe = self.pl_safe_message(r, None);
-                Some(self.vault.untrusted_text(&safe, 200).v()?)
+                Some(self.pl_untrusted_text(&safe, 200)?)
             }
             None => None,
         };
@@ -2828,7 +2841,7 @@ struct ScrubKit {
 impl Core {
     fn pl_scrub_kit(&self, injected: &[ScrubEntry]) -> R<ScrubKit> {
         let mut entries: Vec<ScrubEntry> = injected.to_vec();
-        for s in self.vault.all_secrets().v()? {
+        for s in self.pl_all_secrets()? {
             if injected
                 .iter()
                 .any(|i| i.secret.expose_secret() == s.secret.expose_secret())
@@ -4042,3 +4055,32 @@ pub type Substitutions = BTreeMap<String, Value>;
 
 #[allow(dead_code)]
 fn shared_type_check(_: &Shared) {}
+
+#[cfg(test)]
+mod decrypt_tests {
+    use crate::tests::World;
+    use serde_json::json;
+
+    /// A refused request decrypts the vault's secrets at most once, however
+    /// many credentials it holds (pipeline.test.js 'a refused request does
+    /// not decrypt the whole vault three times').
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_request_decrypts_the_vault_at_most_once() {
+        let w = World::seeded(json!({"paths": ["/allowed/**"]})).await;
+        for i in 0..50 {
+            let (s, v) = w
+                .control(
+                    "POST",
+                    "/v1/credentials",
+                    json!({"slug": format!("filler-{i}"), "kind": "http", "host": "example.test", "value": format!("a-stored-secret-value-number-{i}"), "sites": ["header:authorization:Bearer"]}),
+                )
+                .await;
+            assert_eq!(s, 200, "{v}");
+        }
+        w.shared.run(|c| c.secret_reads.set(0)).await.unwrap();
+        let r = w.get("/definitely/not/granted").await;
+        assert_eq!(r.status, 403);
+        let reads = w.shared.run(|c| c.secret_reads.get()).await.unwrap();
+        assert!(reads <= 1, "one refusal decrypted the vault {reads} times");
+    }
+}

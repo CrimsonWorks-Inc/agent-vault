@@ -2786,7 +2786,7 @@ to = '''"to_host": hop.as_ref().map(|h| h.host.clone()).or_else(|| next.as_ref()
 name = "a held request's reason is recorded unbounded (C28)"
 file = "src/pipeline.rs"
 from = '''                let safe = self.pl_safe_message(r, None);
-                Some(self.vault.untrusted_text(&safe, 200).v()?)'''
+                Some(self.pl_untrusted_text(&safe, 200)?)'''
 to = '''                let safe = self.pl_safe_message(r, None);
                 Some(safe)'''
 

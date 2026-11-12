@@ -43,6 +43,9 @@ pub struct Core {
     pub notifier: Option<Arc<Notifier>>,
     /// The gateway's bound port, once started.
     pub gateway_port: u16,
+    /// How many times the pipeline decrypted every vault secret (tests).
+    #[cfg(test)]
+    pub secret_reads: std::cell::Cell<usize>,
 }
 
 impl Core {
@@ -57,6 +60,8 @@ impl Core {
             tw: TripwireState::default(),
             notifier: None,
             gateway_port: 0,
+            #[cfg(test)]
+            secret_reads: std::cell::Cell::new(0),
         }
     }
 

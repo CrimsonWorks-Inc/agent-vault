@@ -532,3 +532,55 @@ async fn a_basic_header_hashes_by_its_decoded_pair_written_strictly() {
         r.error
     );
 }
+
+/// The single-issue route normalizes `uses` as the JS store does: floored,
+/// and 0, a negative, a fraction below 1, NaN or a non-number is the grant's
+/// ceiling (here the session budget, 40).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_single_placeholder_uses_is_normalized_not_refused() {
+    let w = World::seeded(json!({})).await;
+    let cases = [
+        (json!(1.5), 1),
+        (json!(0), 40),
+        (json!(-3), 40),
+        (json!(0.2), 40),
+        (json!("NaN"), 40),
+        (json!("2"), 2),
+        (json!(3), 3),
+        (json!({"n": 1}), 40),
+    ];
+    for (uses, want) in cases {
+        let (s, v) = w
+            .control(
+                "POST",
+                "/v1/placeholders",
+                json!({"cred": "demo", "sid": w.session_id, "uses": uses}),
+            )
+            .await;
+        assert_eq!(s, 200, "{uses}: {v}");
+        let ph = v["placeholder"].as_str().unwrap().to_string();
+        let sid = w.session_id.clone();
+        let row = w
+            .shared
+            .run(move |c| {
+                let parsed = av_core::placeholder::find_all(&ph).remove(0);
+                c.vault.resolve_placeholder(&parsed).unwrap().unwrap().id
+            })
+            .await
+            .unwrap();
+        let max = w
+            .shared
+            .run(move |c| {
+                c.vault
+                    .list_placeholders(Some(&sid))
+                    .unwrap()
+                    .into_iter()
+                    .find(|p| p.id == row)
+                    .unwrap()
+                    .max_uses
+            })
+            .await
+            .unwrap();
+        assert_eq!(max, want, "uses {uses}");
+    }
+}

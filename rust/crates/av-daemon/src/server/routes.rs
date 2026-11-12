@@ -1479,19 +1479,14 @@ fn issue_one(core: &mut Core, input: &Value) -> R<Value> {
         .fields
         .first()
         .ok_or_else(|| internal("Cannot read properties of undefined (reading 'name')"))?;
-    let uses = input
-        .get("uses")
-        .filter(|u| !u.is_null())
-        .map(|u| {
-            as_whole(u).ok_or_else(|| {
-                dr(
-                    C::PolicyDenied,
-                    "uses must be a whole number, 1 or more",
-                    "policy_invalid",
-                )
-            })
-        })
-        .transpose()?;
+    // Normalized as `issuePlaceholder` normalizes it: floored, and anything
+    // that is not a finite number of at least 1 (0, -3, 0.2, NaN, a
+    // non-number) is the grant's ceiling. Not refused here: the batch route
+    // and session creation refuse a non-integer, this one never did.
+    let uses = input.get("uses").filter(|u| !u.is_null()).and_then(|u| {
+        let n = js_number(u).floor();
+        (n.is_finite() && n >= 1.0).then(|| n.min(9.007_199_254_740_991e15) as u64)
+    });
     let issued = core
         .vault
         .issue_placeholder(IssueOptions {
@@ -1504,6 +1499,36 @@ fn issue_one(core: &mut Core, input: &Value) -> R<Value> {
     Ok(
         json!({"placeholder": issued.placeholder, "usage": field.sites.iter().map(|s| describe(s, Some(&issued.placeholder))).collect::<Vec<_>>()}),
     )
+}
+
+/// `Number(v)` for a JSON value, as JS reads it.
+fn js_number(v: &Value) -> f64 {
+    match v {
+        Value::Null => 0.0,
+        Value::Bool(b) => f64::from(u8::from(*b)),
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::String(s) => {
+            let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+            if t.is_empty() {
+                0.0
+            } else if t
+                .bytes()
+                .any(|c| c.is_ascii_alphabetic() && c != b'e' && c != b'E')
+                && !matches!(t, "Infinity" | "+Infinity" | "-Infinity")
+            {
+                f64::NAN
+            } else {
+                match t {
+                    "Infinity" | "+Infinity" => f64::INFINITY,
+                    "-Infinity" => f64::NEG_INFINITY,
+                    _ => t.parse::<f64>().unwrap_or(f64::NAN),
+                }
+            }
+        }
+        Value::Array(a) if a.is_empty() => 0.0,
+        Value::Array(a) if a.len() == 1 => js_number(&Value::from(js_string(&a[0]))),
+        _ => f64::NAN,
+    }
 }
 
 fn batch_shape(input: &Value) -> R<()> {
