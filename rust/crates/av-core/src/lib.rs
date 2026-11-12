@@ -2,14 +2,12 @@
 //! "Module map"), plus the I/O-free parts of `src/connectors/profiles.js`,
 //! `src/connectors/pinning.js` and `src/ui/webauthn.js` that the store needs.
 #![forbid(unsafe_code)]
-// Scaffold: bodies are `todo!()` until the next wave fills them in. Remove
-// this allow when the last `todo!()` in the crate is gone.
-#![allow(unused_variables)]
 
 pub mod base32;
 pub mod canon;
 pub mod detect;
 pub mod errors;
+pub mod jsre;
 pub mod model_usage;
 pub mod operation;
 pub mod payload;

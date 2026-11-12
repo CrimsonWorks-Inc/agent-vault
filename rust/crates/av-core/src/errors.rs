@@ -265,20 +265,94 @@ impl ErrorCode {
     /// The wire string, e.g. `"AV_NO_GRANT"`. Ports the `code` keys of `CODES` in
     /// `src/core/errors.js`.
     pub fn as_str(self) -> &'static str {
-        todo!()
+        match self {
+            Self::NoGrant => "AV_NO_GRANT",
+            Self::PolicyDenied => "AV_POLICY_DENIED",
+            Self::BadLocation => "AV_BAD_LOCATION",
+            Self::EncodedBody => "AV_ENCODED_BODY",
+            Self::Unscannable => "AV_UNSCANNABLE",
+            Self::BrowserOrigin => "AV_BROWSER_ORIGIN",
+            Self::PhMalformed => "AV_PH_MALFORMED",
+            Self::PhExhausted => "AV_PH_EXHAUSTED",
+            Self::PhStale => "AV_PH_STALE",
+            Self::PhReplay => "AV_PH_REPLAY",
+            Self::PhCrossSession => "AV_PH_CROSS_SESSION",
+            Self::PhWrongConnector => "AV_PH_WRONG_CONNECTOR",
+            Self::SessionExpired => "AV_SESSION_EXPIRED",
+            Self::SessionRevoked => "AV_SESSION_REVOKED",
+            Self::SessionRequired => "AV_SESSION_REQUIRED",
+            Self::Locked => "AV_LOCKED",
+            Self::RemoteForbidden => "AV_REMOTE_FORBIDDEN",
+            Self::PresenceRequired => "AV_PRESENCE_REQUIRED",
+            Self::PresenceDenied => "AV_PRESENCE_DENIED",
+            Self::RateLimited => "AV_RATE_LIMITED",
+            Self::UpstreamUnreachable => "AV_UPSTREAM_UNREACHABLE",
+            Self::QuotaExceeded => "AV_QUOTA_EXCEEDED",
+            Self::GrantExpired => "AV_GRANT_EXPIRED",
+            Self::Quarantined => "AV_QUARANTINED",
+            Self::PinMismatch => "AV_PIN_MISMATCH",
+            Self::McpProtocol => "AV_MCP_PROTOCOL",
+            Self::McpSessionUnknown => "AV_MCP_SESSION_UNKNOWN",
+            Self::NotFound => "AV_NOT_FOUND",
+            Self::Internal => "AV_INTERNAL",
+            Self::TooManyRequests => "AV_TOO_MANY_REQUESTS",
+            Self::ApprovalPending => "AV_APPROVAL_PENDING",
+            Self::OwnerOnly => "AV_OWNER_ONLY",
+            Self::BadCursor => "AV_BAD_CURSOR",
+            Self::BadLimit => "AV_BAD_LIMIT",
+        }
     }
 
     /// Parse a wire string. Unknown strings return `None`. Ports the
     /// `CODES[code]` lookup in `src/core/errors.js` / `src/cli/index.js`.
     pub fn parse(code: &str) -> Option<Self> {
-        todo!()
+        match code {
+            "AV_NO_GRANT" => Some(Self::NoGrant),
+            "AV_POLICY_DENIED" => Some(Self::PolicyDenied),
+            "AV_BAD_LOCATION" => Some(Self::BadLocation),
+            "AV_ENCODED_BODY" => Some(Self::EncodedBody),
+            "AV_UNSCANNABLE" => Some(Self::Unscannable),
+            "AV_BROWSER_ORIGIN" => Some(Self::BrowserOrigin),
+            "AV_PH_MALFORMED" => Some(Self::PhMalformed),
+            "AV_PH_EXHAUSTED" => Some(Self::PhExhausted),
+            "AV_PH_STALE" => Some(Self::PhStale),
+            "AV_PH_REPLAY" => Some(Self::PhReplay),
+            "AV_PH_CROSS_SESSION" => Some(Self::PhCrossSession),
+            "AV_PH_WRONG_CONNECTOR" => Some(Self::PhWrongConnector),
+            "AV_SESSION_EXPIRED" => Some(Self::SessionExpired),
+            "AV_SESSION_REVOKED" => Some(Self::SessionRevoked),
+            "AV_SESSION_REQUIRED" => Some(Self::SessionRequired),
+            "AV_LOCKED" => Some(Self::Locked),
+            "AV_REMOTE_FORBIDDEN" => Some(Self::RemoteForbidden),
+            "AV_PRESENCE_REQUIRED" => Some(Self::PresenceRequired),
+            "AV_PRESENCE_DENIED" => Some(Self::PresenceDenied),
+            "AV_RATE_LIMITED" => Some(Self::RateLimited),
+            "AV_UPSTREAM_UNREACHABLE" => Some(Self::UpstreamUnreachable),
+            "AV_QUOTA_EXCEEDED" => Some(Self::QuotaExceeded),
+            "AV_GRANT_EXPIRED" => Some(Self::GrantExpired),
+            "AV_QUARANTINED" => Some(Self::Quarantined),
+            "AV_PIN_MISMATCH" => Some(Self::PinMismatch),
+            "AV_MCP_PROTOCOL" => Some(Self::McpProtocol),
+            "AV_MCP_SESSION_UNKNOWN" => Some(Self::McpSessionUnknown),
+            "AV_NOT_FOUND" => Some(Self::NotFound),
+            "AV_INTERNAL" => Some(Self::Internal),
+            "AV_TOO_MANY_REQUESTS" => Some(Self::TooManyRequests),
+            "AV_APPROVAL_PENDING" => Some(Self::ApprovalPending),
+            "AV_OWNER_ONLY" => Some(Self::OwnerOnly),
+            "AV_BAD_CURSOR" => Some(Self::BadCursor),
+            "AV_BAD_LIMIT" => Some(Self::BadLimit),
+            _ => None,
+        }
     }
 
     /// The registry row for this code, falling back to `AV_INTERNAL` for
     /// unregistered codes exactly as `CODES[code] || CODES.AV_INTERNAL` does in
     /// the `VaultError` constructor (`src/core/errors.js`).
     pub fn spec(self) -> &'static CodeSpec {
-        todo!()
+        CODES
+            .iter()
+            .find(|s| s.code == self.as_str())
+            .unwrap_or_else(|| CODES.last().expect("registry is nonempty"))
     }
 }
 
@@ -292,8 +366,8 @@ pub struct DenyExtra {
     pub hint: Option<String>,
     /// The rule name that refused the request.
     pub rule: Option<String>,
-    /// The concrete next step (a command or tool call).
-    pub next: Option<String>,
+    /// The concrete next step: a command string, or `{cli, mcp}` recovery instructions.
+    pub next: Option<serde_json::Value>,
     /// The request id, so `vault_explain_denial` can find it.
     pub request_id: Option<String>,
     /// A successor placeholder (for `AV_PH_EXHAUSTED`).
@@ -330,28 +404,36 @@ impl VaultError {
     /// Build an error from a code, a detail and extras. Ports the
     /// `VaultError` constructor in `src/core/errors.js`.
     pub fn new(code: ErrorCode, detail: impl Into<String>, extra: DenyExtra) -> Self {
-        todo!()
+        Self {
+            code,
+            detail: detail.into(),
+            extra: Box::new(extra),
+        }
     }
 
     /// HTTP status: `this.http` (`spec.http`) in `src/core/errors.js`.
     pub fn http(&self) -> u16 {
-        todo!()
+        self.code.spec().http
     }
 
     /// CLI exit code: `this.exit` (`spec.exit`) in `src/core/errors.js`.
     pub fn exit(&self) -> Exit {
-        todo!()
+        self.code.spec().exit
     }
 
     /// Audit record kind: `this.auditKind` (`spec.audit`) in
     /// `src/core/errors.js`.
     pub fn audit_kind(&self) -> &'static str {
-        todo!()
+        self.code.spec().audit
     }
 
     /// `this.hint`: `extra.hint || spec.hint` in `src/core/errors.js`.
     pub fn hint(&self) -> &str {
-        todo!()
+        self.extra
+            .hint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.code.spec().hint)
     }
 
     /// RFC 9457 problem+json body, the shape every denied HTTP request
@@ -359,7 +441,42 @@ impl VaultError {
     /// next, factors, refunded, next_placeholder, retry_after`, in that order.
     /// Ports `VaultError.prototype.toProblem` in `src/core/errors.js`.
     pub fn to_problem(&self) -> serde_json::Value {
-        todo!()
+        let mut body = serde_json::json!({"type":format!("https://agent-vault.dev/errors/{}",self.code.as_str()),"code":self.code.as_str(),"detail":self.detail,"hint":self.hint()});
+        for (key, value) in [
+            ("rule", &self.extra.rule),
+            ("request_id", &self.extra.request_id),
+        ] {
+            if let Some(v) = value.as_ref().filter(|s| !s.is_empty()) {
+                body[key] = v.clone().into();
+            }
+        }
+        if let Some(v) = self.extra.next.as_ref().filter(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(v) => *v,
+            serde_json::Value::String(s) => !s.is_empty(),
+            serde_json::Value::Number(n) => n.as_f64() != Some(0.0),
+            _ => true,
+        }) {
+            body["next"] = v.clone();
+        }
+        if let Some(v) = &self.extra.factors {
+            body["factors"] = serde_json::json!(v);
+        }
+        if let Some(v) = self.extra.refunded {
+            body["refunded"] = v.into();
+        }
+        if let Some(v) = self
+            .extra
+            .next_placeholder
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            body["next_placeholder"] = v.clone().into();
+        }
+        if let Some(v) = self.extra.retry_after {
+            body["retry_after"] = v.into();
+        }
+        body
     }
 }
 
@@ -371,3 +488,64 @@ pub fn deny(code: ErrorCode, detail: impl Into<String>, extra: DenyExtra) -> Vau
 
 /// `Result` with a [`VaultError`].
 pub type Result<T, E = VaultError> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn registry_and_problem_match_reference() {
+        for spec in CODES {
+            let code = ErrorCode::parse(spec.code).unwrap();
+            assert_eq!(code.as_str(), spec.code);
+            assert_eq!(code.spec(), spec);
+            let e = deny(code, "test refusal", DenyExtra::default());
+            assert_eq!(e.http(), spec.http);
+            assert_eq!(e.exit(), spec.exit);
+            assert_eq!(e.audit_kind(), spec.audit);
+            assert_eq!(e.hint(), spec.hint);
+            assert_eq!(e.to_problem()["code"], spec.code);
+        }
+        let e = deny(
+            ErrorCode::OwnerOnly,
+            "test refusal",
+            DenyExtra {
+                hint: Some(String::new()),
+                refunded: Some(false),
+                retry_after: Some(0),
+                rule: Some("test_rule".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(e.http(), 500);
+        assert_eq!(e.hint(), ErrorCode::Internal.spec().hint);
+        assert_eq!(e.to_problem()["refunded"], false);
+        assert_eq!(e.to_problem()["retry_after"], 0);
+        assert_eq!(e.to_problem()["rule"], "test_rule");
+        assert!(ErrorCode::parse("UNKNOWN").is_none());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn structured_and_string_next_match_javascript() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/error-next-vectors.json"))
+                .unwrap();
+        for row in vectors.as_array().unwrap() {
+            let error = deny(
+                ErrorCode::parse(row["code"].as_str().unwrap()).unwrap(),
+                "test refusal",
+                DenyExtra {
+                    next: Some(row["next"].clone()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(error.to_problem(), row["problem"]);
+            let serialized = serde_json::to_string(&error.to_problem()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(parsed, row["problem"]);
+        }
+    }
+}

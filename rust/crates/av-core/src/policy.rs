@@ -76,13 +76,25 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// be reported and refused. There is no JS counterpart: it carries the JS
 /// fact that a policy field may hold any JSON value (`src/core/policy.js`,
 /// `validate` and `intersect`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Checked<T> {
     /// The value has the expected shape (range checks are still `validate`'s).
     Valid(T),
     /// Anything else, verbatim (including `null` where `null` is not allowed).
     Invalid(serde_json::Value),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Checked<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        Ok(
+            match T::deserialize(crate::canon::js_numbers(raw.clone())) {
+                Ok(value) => Checked::Valid(value),
+                Err(_) => Checked::Invalid(raw),
+            },
+        )
+    }
 }
 
 /// Deserialize a present field, so `null` becomes `Some(Checked::Invalid)`
@@ -94,6 +106,16 @@ where
     T: Deserialize<'de>,
 {
     Checked::<T>::deserialize(d).map(Some)
+}
+
+// Optional schema members are absent when omitted; an explicit null is not
+// absence in the JS validators. Let Checked preserve those invalid objects.
+pub(crate) fn non_null<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 /// An approval mode. Ports the values of `APPROVAL_ORDER` in
@@ -197,10 +219,18 @@ pub enum BudgetValue {
 #[serde(deny_unknown_fields)]
 pub struct Budget {
     /// `requests`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub unit: Option<String>,
     /// The limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub limit: Option<BudgetValue>,
 }
 
@@ -210,10 +240,18 @@ pub struct Budget {
 #[serde(deny_unknown_fields)]
 pub struct Spend {
     /// Token limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub tokens: Option<u64>,
     /// USD micros limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub usd_micros: Option<u64>,
 }
 
@@ -244,13 +282,25 @@ pub struct Route {
 #[serde(deny_unknown_fields)]
 pub struct PlaceholderPolicy {
     /// Uses per placeholder.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub max_uses: Option<u64>,
     /// Lifetime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub ttl: Option<u64>,
     /// Live placeholders at once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "non_null"
+    )]
     pub max_active: Option<u64>,
 }
 
@@ -441,28 +491,80 @@ pub struct ValidateOptions {
 /// Pure validation of a writable layer or a stored effective policy; empty
 /// means valid. Ports `validate` in `src/core/policy.js`.
 pub fn validate(layer: &Policy, opts: &ValidateOptions) -> Vec<Problem> {
-    todo!()
+    validate_raw(
+        &serde_json::to_value(layer).expect("policy serializes"),
+        opts,
+    )
 }
 
 /// [`validate`] on raw JSON: a non-object is
 /// `[{ field: 'policy', message: 'policy must be an object' }]`. Ports
 /// `validate` in `src/core/policy.js` for callers holding unparsed input.
 pub fn validate_json(layer: &serde_json::Value, opts: &ValidateOptions) -> Vec<Problem> {
-    todo!()
+    validate_raw(layer, opts)
 }
 
 /// Intersect a chain of layers, outermost (ceiling) first; `None` layers are
 /// skipped. An invalid field poisons the result so evaluation refuses (see
 /// the module docs). Ports `intersect` in `src/core/policy.js`.
 pub fn intersect(layers: &[Option<&Policy>]) -> Policy {
-    todo!()
+    let mut out = serde_json::json!({});
+    let mut invalid = serde_json::Map::new();
+    for layer in layers.iter().flatten() {
+        let mut v = serde_json::to_value(layer).expect("policy");
+        for problem in validate(layer, &ValidateOptions::default()) {
+            let f = problem.field;
+            match f.as_str() {
+                "redirects" => v["redirects"] = serde_json::json!({"max":0}),
+                "budget" | "spend" => {
+                    invalid.insert(f.clone(), serde_json::json!({"invalid":true}));
+                    v.as_object_mut().unwrap().remove(&f);
+                }
+                "routes" | "payload" => {
+                    let e = if f == "routes" {
+                        "route_sets"
+                    } else {
+                        "payload_sets"
+                    };
+                    invalid.insert(e.into(), serde_json::json!([null]));
+                    v.as_object_mut().unwrap().remove(&f);
+                    v.as_object_mut().unwrap().remove(e);
+                }
+                _ => {
+                    invalid.insert(f.clone(), v[&f].clone());
+                    v.as_object_mut().unwrap().remove(&f);
+                }
+            }
+        }
+        out = intersect_raw(&out, &v);
+    }
+    out.as_object_mut().unwrap().extend(invalid);
+    serde_json::from_value(out).expect("intersection policy shape")
 }
 
 /// A budget limit read as a whole number: a JSON integer or canonical
 /// decimal string within the safe integers, else `None`. Ports
 /// `budgetInteger` in `src/core/policy.js`.
 pub fn budget_integer(value: &serde_json::Value) -> Option<u64> {
-    todo!()
+    let n = match value {
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|n| {
+                    n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= MAX_SAFE_INTEGER as f64
+                })
+                .map(|n| n as u64)
+        }),
+        serde_json::Value::String(s)
+            if s == "0"
+                || (!s.starts_with('0')
+                    && !s.is_empty()
+                    && s.bytes().all(|b| b.is_ascii_digit())) =>
+        {
+            s.parse().ok()
+        }
+        _ => None,
+    }?;
+    (n <= MAX_SAFE_INTEGER).then_some(n)
 }
 
 /// One budget layer's request limit, as the gateway and the store read it.
@@ -480,7 +582,20 @@ pub enum BudgetLimit {
 /// Read one budget layer's request limit (C4). `None` is an absent budget.
 /// Ports `budgetLimit` in `src/core/policy.js`.
 pub fn budget_limit(budget: Option<&Checked<Budget>>) -> BudgetLimit {
-    todo!()
+    match budget {
+        None => BudgetLimit::Unlimited,
+        Some(Checked::Invalid(_)) => BudgetLimit::Unreadable,
+        Some(Checked::Valid(b)) => {
+            if b.unit.as_deref().is_some_and(|u| u != "requests") {
+                return BudgetLimit::Unreadable;
+            }
+            match &b.limit {
+                None => BudgetLimit::Unlimited,
+                Some(v) => budget_integer(&serde_json::to_value(v).expect("budget"))
+                    .map_or(BudgetLimit::Unreadable, BudgetLimit::Limit),
+            }
+        }
+    }
 }
 
 /// Normalize a destination host before any grant match: trimmed,
@@ -488,7 +603,25 @@ pub fn budget_limit(budget: Option<&Checked<Budget>>) -> BudgetLimit {
 /// (`AV_POLICY_DENIED`) an empty host, userinfo, `\`, NUL, or anything
 /// unparseable. Ports `normalizeHost` in `src/core/policy.js`.
 pub fn normalize_host(host: &str) -> Result<String> {
-    todo!()
+    if host.is_empty() {
+        return Err(policy_deny("no destination host", None, None));
+    }
+    let h = host.trim().to_lowercase();
+    if h.contains('@') {
+        return Err(policy_deny("destination contains userinfo", None, None));
+    }
+    if h.contains(['\\', '\0']) {
+        return Err(policy_deny(
+            "destination contains an illegal character",
+            None,
+            None,
+        ));
+    }
+    let h = h.strip_suffix('.').unwrap_or(&h);
+    url::Url::parse(&format!("https://{h}"))
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .ok_or_else(|| policy_deny(format!("unparseable host: {host}"), None, None))
 }
 
 /// Characters left bare in a wire path segment (RFC 3986 pchar). Ports
@@ -499,13 +632,24 @@ pub const PCHAR_SAFE_PATTERN: &str = "[A-Za-z0-9\\-._~!$&'()*+,;=:@]";
 /// pchar, as uppercase `%XX` of its UTF-8 bytes. Ports `encodePathSegment` in
 /// `src/core/policy.js`.
 pub fn encode_path_segment(segment: &str) -> String {
-    todo!()
+    let mut out = String::new();
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// A whole decided path for the wire, segment by segment. Ports
 /// `encodePathForWire` in `src/core/policy.js`.
 pub fn encode_path_for_wire(path: &str) -> String {
-    todo!()
+    path.split('/')
+        .map(encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The path a request names, decoded exactly once and normalized (`?`/`#`
@@ -515,20 +659,52 @@ pub fn encode_path_for_wire(path: &str) -> String {
 /// traversal above the root. An empty path is `/`. Ports `normalizePath` in
 /// `src/core/policy.js`.
 pub fn normalize_path(path: &str) -> Result<String> {
-    todo!()
+    let raw = if path.is_empty() { "/" } else { path };
+    let p = strict_percent_decode(raw)
+        .ok_or_else(|| policy_deny("path contains an invalid percent-escape", None, None))?;
+    let sep = crate::jsre::compile(r"(?i)%2f|%5c|\\").expect("fixed regex");
+    if sep.is_match(raw) || sep.is_match(&p) {
+        return Err(policy_deny("path contains an encoded slash or a backslash",Some("path_ambiguous_separator"),Some("Whether that names one segment or two depends on the upstream, so the path checked here may not be the path served.")));
+    }
+    if crate::jsre::compile(r"(?i)%(?:[0-9a-f]{2}|u[0-9a-f]{4})")
+        .expect("fixed regex")
+        .is_match(&p)
+    {
+        return Err(policy_deny("path is percent-encoded too many times: decoding it again would change it",Some("path_ambiguous_encoding"),Some("An upstream that decodes the path twice would serve a different path from the one checked here. Encode the path once.")));
+    }
+    let p = p.split(['?', '#']).next().unwrap_or("");
+    if let Some(b) = p.bytes().find(|b| *b < 32 || *b == 127) {
+        return Err(policy_deny(format!("path contains a control character (0x{b:02x})"),Some("path_control_char"),Some("A URL parser strips or reinterprets these, so the path checked here would not be the path requested.")));
+    }
+    let mut segments = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if segments.pop().is_none() {
+                    return Err(policy_deny("path traverses above its root", None, None));
+                }
+            }
+            _ => segments.push(seg),
+        }
+    }
+    Ok(format!("/{}", segments.join("/")))
 }
 
 /// Segment-wise glob match (`*` within a segment, `**` across segments),
 /// linear time with no backtracking. Ports `matchPath` in
 /// `src/core/policy.js`.
 pub fn match_path(pattern: &str, path: &str) -> bool {
-    todo!()
+    glob_segments(pattern, path, false)
 }
 
 /// Exact host match, or `*.suffix` matching a strictly longer host. Ports
 /// `matchHost` in `src/core/policy.js`.
 pub fn match_host(pattern: &str, host: &str) -> bool {
-    todo!()
+    pattern == host
+        || pattern
+            .strip_prefix("*.")
+            .is_some_and(|s| host.ends_with(&format!(".{s}")) && host.len() > s.len() + 1)
 }
 
 /// The hosts a credential may ever reach: its connector host plus the
@@ -539,26 +715,78 @@ pub fn credential_host_ceiling(
     connector_host: Option<&str>,
     profile_hosts: &[String],
 ) -> Vec<String> {
-    todo!()
+    let mut out = Vec::new();
+    for h in connector_host
+        .into_iter()
+        .chain(profile_hosts.iter().map(String::as_str))
+    {
+        let mut h = h.to_lowercase();
+        if h.starts_with('[') {
+            h = h.find(']').map_or(String::new(), |end| h[..=end].into());
+        } else {
+            let name = h.split(':').next().unwrap_or("");
+            h = name.strip_suffix('.').unwrap_or(name).into();
+        }
+        if !h.is_empty() && !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
 }
 
 /// Hostname only: lowercased, trimmed, port and trailing dot removed, IPv6
 /// brackets kept. Ports `hostOnly` in `src/core/policy.js`.
 pub fn host_only(authority: &str) -> String {
-    todo!()
+    let h = authority.trim().to_lowercase();
+    if h.starts_with('[') {
+        return h.find(']').map_or(String::new(), |end| h[..=end].into());
+    }
+    let name = h.split(':').next().unwrap_or("");
+    name.strip_suffix('.').unwrap_or(name).into()
 }
 
 /// Confine requested hosts to a credential's ceiling; `None` or empty means
 /// the whole ceiling. Refuses (`credential_host`) an empty ceiling or a host
 /// outside it. Ports `confineHosts` in `src/core/policy.js`.
 pub fn confine_hosts(requested: Option<&[String]>, ceiling: &[String]) -> Result<Vec<String>> {
-    todo!()
+    if ceiling.is_empty() {
+        return Err(policy_deny(
+            "this credential declares no host it may reach",
+            Some("credential_host"),
+            None,
+        ));
+    }
+    let Some(requested) = requested.filter(|r| !r.is_empty()) else {
+        return Ok(ceiling.to_vec());
+    };
+    let mut out = Vec::new();
+    for req in requested {
+        let h = host_only(req);
+        if !ceiling.iter().any(|c| match_host(c, &h)) {
+            return Err(policy_deny(
+                format!(
+                    "host {h} is outside what credential permits ({})",
+                    ceiling.join(", ")
+                ),
+                Some("credential_host"),
+                Some("A grant can only reach the hosts the credential itself declares."),
+            ));
+        }
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    Ok(out)
 }
 
 /// True when a `*.` pattern spans a shared multi-tenant suffix. Ports
 /// `isMultiTenantWildcard` in `src/core/policy.js`.
 pub fn is_multi_tenant_wildcard(pattern: &str) -> bool {
-    todo!()
+    pattern.strip_prefix("*.").is_some_and(|suffix| {
+        MULTI_TENANT_SUFFIXES
+            .iter()
+            .any(|s| suffix == *s || suffix.ends_with(&format!(".{s}")))
+    })
 }
 
 /// The request line [`evaluate_http`] checks. Ports the
@@ -597,7 +825,120 @@ pub struct HttpDecision {
 /// `<field>_invalid`, `methods`, `deny_paths:<i>`, `paths`, `routes`, or a
 /// normalization rule). Ports `evaluateHttp` in `src/core/policy.js`.
 pub fn evaluate_http(policy: &Policy, target: &HttpTarget<'_>) -> Result<HttpDecision> {
-    todo!()
+    for problem in validate(policy, &Default::default()) {
+        if problem.field == "redirects" {
+            continue;
+        }
+        return Err(policy_deny(
+            if problem.field == "budget" {
+                "budget limit is not a number in the accepted integer format".into()
+            } else {
+                format!("invalid policy field {}", problem.field)
+            },
+            Some(&format!("{}_invalid", problem.field)),
+            None,
+        ));
+    }
+    let m = target
+        .method
+        .filter(|s| !s.is_empty())
+        .unwrap_or("GET")
+        .to_uppercase();
+    let h = normalize_host(target.host)?;
+    let p = normalize_path(target.path)?;
+    if let Some(Checked::Valid(hosts)) = &policy.hosts {
+        if !hosts.iter().any(|pat| match_host(pat, &h)) {
+            return Err(crate::errors::deny(
+                crate::errors::ErrorCode::NoGrant,
+                format!("no grant allows host {h}"),
+                crate::errors::DenyExtra {
+                    rule: Some("hosts".into()),
+                    hint: Some(if hosts.is_empty() {
+                        "This session has no host grants at all.".into()
+                    } else {
+                        format!("This session may reach: {}.", hosts.join(", "))
+                    }),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    if let Some(Checked::Valid(methods)) = &policy.methods {
+        if !methods.contains(&m) {
+            return Err(policy_deny(
+                format!("method {m} is not allowed"),
+                Some("methods"),
+                Some(&format!(
+                    "Allowed methods: {}.",
+                    if methods.is_empty() {
+                        "none".into()
+                    } else {
+                        methods.join(", ")
+                    }
+                )),
+            ));
+        }
+    }
+    if let Some(Checked::Valid(deny)) = &policy.deny_paths {
+        for (i, dp) in deny.iter().enumerate() {
+            if match_path(dp, &p) {
+                return Err(policy_deny(
+                    format!("path {p} is on a deny list"),
+                    Some(&format!("deny_paths:{i}")),
+                    Some("This path is denied by the connector profile and cannot be granted."),
+                ));
+            }
+        }
+    }
+    let mut path_rule = None;
+    if let Some(Checked::Valid(paths)) = &policy.paths {
+        path_rule = paths.iter().position(|pat| match_path(pat, &p));
+        if path_rule.is_none() {
+            return Err(policy_deny(
+                format!("path {p} is outside the grant"),
+                Some("paths"),
+                Some(&format!(
+                    "Allowed paths: {}.",
+                    if paths.is_empty() {
+                        "none".into()
+                    } else {
+                        paths.join(", ")
+                    }
+                )),
+            ));
+        }
+    }
+    let sets = route_sets(policy);
+    let mut route_rule = None;
+    for set in sets {
+        let i = set.iter().position(|pair| {
+            pair.methods.contains(&m) && pair.paths.iter().any(|g| match_path(g, &p))
+        });
+        if i.is_none() {
+            return Err(policy_deny(
+                "request is outside the allowed routes",
+                Some("routes"),
+                Some(&format!(
+                    "Allowed here: {}",
+                    set.iter()
+                        .flat_map(|pair| pair.methods.iter().flat_map(|method| pair
+                            .paths
+                            .iter()
+                            .map(move |glob| format!("{method} {glob}"))))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                )),
+            ));
+        }
+        route_rule = i;
+    }
+    Ok(HttpDecision {
+        host: h,
+        path: p,
+        method: m,
+        path_rule,
+        route_rule,
+    })
 }
 
 /// Input to [`needs_approval`]. Ports the `{ method, firstUse }` argument of
@@ -614,7 +955,19 @@ pub struct ApprovalQuery<'a> {
 /// first use, `on-write` for unsafe methods, `each` and anything unknown
 /// always. Ports `needsApproval` in `src/core/policy.js`.
 pub fn needs_approval(policy: &Policy, query: &ApprovalQuery<'_>) -> bool {
-    todo!()
+    match &policy.approval {
+        None | Some(Checked::Valid(Approval::Auto)) => false,
+        Some(Checked::Valid(Approval::FirstUse)) => query.first_use,
+        Some(Checked::Valid(Approval::OnWrite)) => !SAFE_METHODS.contains(
+            &query
+                .method
+                .filter(|m| !m.is_empty())
+                .unwrap_or("GET")
+                .to_uppercase()
+                .as_str(),
+        ),
+        _ => true,
+    }
 }
 
 /// Severity of a lint finding. Ports the `level` strings of `lint` in
@@ -645,13 +998,109 @@ pub struct LintProblem {
 /// `auto`, every `validate` problem, and write routes over every path. Ports
 /// `lint` in `src/core/policy.js`.
 pub fn lint(policy: &Policy, opts: &ValidateOptions) -> Vec<LintProblem> {
-    todo!()
+    let mut problems = Vec::new();
+    let mut add = |level, rule: &str, message: String| {
+        problems.push(LintProblem {
+            level,
+            rule: rule.into(),
+            message,
+        })
+    };
+    if !matches!(
+        &policy.budget,
+        Some(Checked::Valid(Budget { limit: Some(_), .. }))
+    ) {
+        add(
+            LintLevel::Error,
+            "budget",
+            "every grant must set a budget; add budget: { requests: N }".into(),
+        );
+    }
+    if let Some(Checked::Valid(hosts)) = &policy.hosts {
+        for h in hosts {
+            if is_multi_tenant_wildcard(h) {
+                add(
+                    LintLevel::Error,
+                    "hosts",
+                    format!("{h} spans a shared multi-tenant suffix; name exact hosts"),
+                );
+            }
+        }
+    }
+    if let Some(Checked::Valid(paths)) = &policy.paths {
+        for p in paths {
+            if p == "/**" || p == "**" {
+                add(
+                    LintLevel::Warn,
+                    "paths",
+                    "a root ** grant allows every path this connector permits".into(),
+                );
+            }
+        }
+    }
+    if let Some(Checked::Valid(ph)) = &policy.placeholder_policy {
+        if ph.max_uses.is_some_and(|n| n < 100)
+            && opts
+                .kind
+                .as_deref()
+                .is_some_and(|k| ["http", "github", "slack"].contains(&k))
+        {
+            add(LintLevel::Warn,"placeholder_policy","a low max_uses breaks SDK pagination and retries; session-lifetime is the default for a reason".into());
+        }
+    }
+    if matches!(&policy.methods,Some(Checked::Valid(m)) if m.iter().any(|x|!SAFE_METHODS.contains(&x.as_str())))
+        && matches!(policy.approval, None | Some(Checked::Valid(Approval::Auto)))
+    {
+        add(
+            LintLevel::Warn,
+            "approval",
+            "write methods with approval: auto; on-write is the default for a reason".into(),
+        );
+    }
+    for p in validate(policy, opts) {
+        add(LintLevel::Error, &p.field, p.message);
+    }
+    for set in route_sets(policy) {
+        if set.iter().any(|r| {
+            r.methods
+                .iter()
+                .any(|m| !SAFE_METHODS.contains(&m.as_str()))
+                && r.paths.iter().any(|p| p == "/**" || p == "**")
+        }) {
+            add(
+                LintLevel::Warn,
+                "routes",
+                "write route permits every path".into(),
+            );
+        }
+    }
+    problems
 }
 
 /// [`lint`] on raw JSON; a non-object yields the `validate` errors. Ports
 /// `lint` in `src/core/policy.js` for callers holding unparsed input.
 pub fn lint_json(policy: &serde_json::Value, opts: &ValidateOptions) -> Vec<LintProblem> {
-    todo!()
+    if !policy.is_object() {
+        return validate_json(policy, opts)
+            .into_iter()
+            .map(|p| LintProblem {
+                level: LintLevel::Error,
+                rule: p.field,
+                message: p.message,
+            })
+            .collect();
+    }
+    match serde_json::from_value(policy.clone()) {
+        Ok(p) => lint(&p, opts),
+        Err(_) => validate_json(policy, opts)
+            .into_iter()
+            .map(|p| LintProblem {
+                level: LintLevel::Error,
+                rule: p.field,
+                message: p.message,
+            })
+            .collect(),
+    }
 }
 
 /// The host ceiling for [`grant_policy_from_input`]. Ports the `ceiling`
@@ -709,7 +1158,7 @@ pub fn grant_policy_from_input(
     spec: &serde_json::Value,
     opts: &GrantPolicyOptions<'_>,
 ) -> Result<Policy> {
-    todo!()
+    grant_from_raw(spec, opts)
 }
 
 /// The budget as described publicly. Ports the `budget` value built by
@@ -760,5 +1209,593 @@ pub struct EffectiveDescription {
 /// Describe an effective policy for an agent or the UI. Ports
 /// `describeEffective` in `src/core/policy.js`.
 pub fn describe_effective(effective: &Policy) -> EffectiveDescription {
-    todo!()
+    EffectiveDescription {
+        hosts: effective.hosts.clone(),
+        methods: effective.methods.clone(),
+        paths: effective.paths.clone(),
+        deny_paths: effective.deny_paths.clone(),
+        approval: effective.approval.clone(),
+        spend: effective.spend.clone(),
+        rate: effective.rate.clone(),
+        max_concurrent: effective.max_concurrent.clone(),
+        quota: effective.quota.clone(),
+        routes: effective
+            .route_sets
+            .clone()
+            .unwrap_or_else(|| match &effective.routes {
+                Some(Checked::Valid(r)) => Checked::Valid(vec![r.clone()]),
+                Some(Checked::Invalid(v)) => Checked::Invalid(serde_json::json!([v])),
+                None => Checked::Valid(vec![]),
+            }),
+        payload: effective
+            .payload_sets
+            .clone()
+            .unwrap_or_else(|| match &effective.payload {
+                Some(Checked::Valid(p)) => Checked::Valid(vec![p.clone()]),
+                Some(Checked::Invalid(v)) => Checked::Invalid(serde_json::json!([v])),
+                None => Checked::Valid(vec![]),
+            }),
+        budget: effective.budget.as_ref().map(|b| match b {
+            Checked::Invalid(_) => DescribedBudget {
+                limit: None,
+                invalid: Some(true),
+            },
+            Checked::Valid(b) => DescribedBudget {
+                limit: b
+                    .limit
+                    .as_ref()
+                    .map(|v| serde_json::to_value(v).expect("budget")),
+                invalid: None,
+            },
+        }),
+        redirects: match effective.redirects {
+            Some(Checked::Valid(r)) if r.max <= 5 => r,
+            _ => Redirects { max: 0 },
+        },
+    }
+}
+
+fn policy_deny(
+    detail: impl Into<String>,
+    rule: Option<&str>,
+    hint: Option<&str>,
+) -> crate::errors::VaultError {
+    crate::errors::deny(
+        crate::errors::ErrorCode::PolicyDenied,
+        detail,
+        crate::errors::DenyExtra {
+            rule: rule.map(str::to_owned),
+            hint: hint.map(str::to_owned),
+            ..Default::default()
+        },
+    )
+}
+fn strict_percent_decode(s: &str) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        if s.as_bytes()[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(s.as_bytes()[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+fn match_segment(pattern: &str, segment: &str) -> bool {
+    let p: Vec<_> = pattern.encode_utf16().collect();
+    let s: Vec<_> = segment.encode_utf16().collect();
+    let mut dp = vec![false; s.len() + 1];
+    dp[0] = true;
+    for c in p {
+        if c == 42 {
+            let mut seen = false;
+            for v in &mut dp {
+                seen |= *v;
+                *v = seen;
+            }
+        } else {
+            for j in (0..=s.len()).rev() {
+                dp[j] = j > 0 && dp[j - 1] && s[j - 1] == c;
+            }
+        }
+    }
+    dp[s.len()]
+}
+fn glob_segments(pattern: &str, path: &str, containment: bool) -> bool {
+    let pats: Vec<_> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut dp = vec![false; segs.len() + 1];
+    dp[0] = true;
+    for pat in pats {
+        let mut next = vec![false; segs.len() + 1];
+        if pat == "**" {
+            let mut seen = false;
+            for j in 0..=segs.len() {
+                seen |= dp[j];
+                next[j] = seen;
+            }
+        } else {
+            for j in 1..=segs.len() {
+                let seg = segs[j - 1];
+                let yes = if containment {
+                    pat == seg
+                        || (!seg.contains('*') && match_segment(pat, seg))
+                        || (pat == "*" && seg != "**")
+                } else {
+                    match_segment(pat, seg)
+                };
+                next[j] = dp[j - 1] && yes;
+            }
+        }
+        dp = next;
+    }
+    dp[segs.len()]
+}
+fn route_sets(p: &Policy) -> Vec<&[Route]> {
+    match &p.route_sets {
+        Some(Checked::Valid(sets)) => sets.iter().map(Vec::as_slice).collect(),
+        _ => match &p.routes {
+            Some(Checked::Valid(r)) => vec![r.as_slice()],
+            _ => vec![],
+        },
+    }
+}
+fn validate_raw(layer: &serde_json::Value, opts: &ValidateOptions) -> Vec<Problem> {
+    use serde_json::Value as V;
+    let Some(o) = layer.as_object() else {
+        return vec![Problem {
+            field: "policy".into(),
+            message: "policy must be an object".into(),
+        }];
+    };
+    let mut problems = Vec::new();
+    let keys = |v: &V, allowed: &[&str]| {
+        v.as_object()
+            .is_some_and(|o| o.keys().all(|k| allowed.contains(&k.as_str())))
+    };
+    let int = |v: &V, min: u64, max: u64| {
+        v.is_number() && budget_integer(v).is_some_and(|n| n >= min && n <= max)
+    };
+    let strings = |v: &V| {
+        v.as_array()
+            .is_some_and(|a| a.iter().all(|v| v.as_str().is_some_and(|s| !s.is_empty())))
+    };
+    let routes = |v: &V| {
+        v.as_array().is_some_and(|a| {
+            a.len() <= 64
+                && a.iter().all(|p| {
+                    keys(p, &["methods", "paths"])
+                        && strings(&p["methods"])
+                        && p["methods"].as_array().is_some_and(|m| {
+                            !m.is_empty()
+                                && m.len() <= 7
+                                && m.iter()
+                                    .all(|m| METHODS.contains(&m.as_str().unwrap_or("")))
+                        })
+                        && strings(&p["paths"])
+                        && p["paths"]
+                            .as_array()
+                            .is_some_and(|a| !a.is_empty() && a.len() <= 64)
+                })
+        })
+    };
+    for (field, value) in o {
+        if ["hosts", "methods", "paths", "databases", "rcpt", "commands"].contains(&field.as_str())
+            && value.is_null()
+        {
+            continue;
+        }
+        let (name, ok) = match field.as_str() {
+            "kind" => (
+                field.as_str(),
+                value.as_str().is_some_and(|s| !s.is_empty()),
+            ),
+            "hosts" | "paths" | "deny_paths" | "databases" | "rcpt" | "commands" => {
+                (field.as_str(), strings(value))
+            }
+            "methods" => (
+                field.as_str(),
+                strings(value)
+                    && value
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|m| METHODS.contains(&m.as_str().unwrap_or(""))),
+            ),
+            "approval" => (
+                field.as_str(),
+                value.as_str().is_some_and(|s| APPROVAL_ORDER.contains(&s)),
+            ),
+            "sql_profile" => (
+                field.as_str(),
+                value.as_str().is_some_and(|s| SQL_ORDER.contains(&s)),
+            ),
+            "mode" => (
+                field.as_str(),
+                value.as_str().is_some_and(|s| SSH_MODE_ORDER.contains(&s)),
+            ),
+            "budget" => (
+                field.as_str(),
+                keys(value, &["unit", "limit"])
+                    && value.get("unit").is_none_or(|v| v == "requests")
+                    && value
+                        .get("limit")
+                        .is_none_or(|v| budget_integer(v).is_some()),
+            ),
+            "spend" => (
+                field.as_str(),
+                keys(value, &["tokens", "usd_micros"])
+                    && value
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| int(v, 0, MAX_SAFE_INTEGER)),
+            ),
+            "rate" => (
+                field.as_str(),
+                keys(value, &["count", "per"])
+                    && int(&value["count"], 1, RATE_COUNT_MAX)
+                    && value["per"]
+                        .as_str()
+                        .is_some_and(|u| PER_MS.iter().any(|(s, _)| *s == u)),
+            ),
+            "quota" => (
+                field.as_str(),
+                keys(value, &["count", "window"])
+                    && int(&value["count"], 1, QUOTA_COUNT_MAX)
+                    && value["window"]
+                        .as_str()
+                        .is_some_and(|u| WINDOW_MS.iter().any(|(s, _)| *s == u)),
+            ),
+            "max_concurrent" => (field.as_str(), int(value, 1, MAX_CONCURRENT_MAX)),
+            "redirects" => (
+                field.as_str(),
+                keys(value, &["max"]) && int(&value["max"], 0, 5),
+            ),
+            "routes" => (field.as_str(), routes(value)),
+            "route_sets" => (
+                "routes",
+                value.as_array().is_some_and(|a| a.iter().all(routes)),
+            ),
+            "payload" => (field.as_str(), valid_payload_raw(value)),
+            "payload_sets" => (
+                "payload",
+                value
+                    .as_array()
+                    .is_some_and(|a| a.iter().all(valid_payload_raw)),
+            ),
+            "stream_bodies" => (field.as_str(), value.is_boolean()),
+            "graphql" => (field.as_str(), value.is_object()),
+            "placeholder_policy" => (
+                field.as_str(),
+                keys(value, &["max_uses", "ttl", "max_active"])
+                    && value
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| int(v, 1, MAX_SAFE_INTEGER)),
+            ),
+            _ => (field.as_str(), false),
+        };
+        if !ok {
+            problems.push(Problem {
+                field: name.into(),
+                message: format!("invalid {name}"),
+            });
+        }
+    }
+    if o.contains_key("spend")
+        && opts
+            .kind
+            .as_deref()
+            .is_some_and(|k| !["anthropic", "openai", "google-genai"].contains(&k))
+    {
+        problems.push(Problem {
+            field: "spend".into(),
+            message: "spend applies only to anthropic, openai and google-genai".into(),
+        });
+    }
+    problems
+}
+fn valid_payload_raw(v: &serde_json::Value) -> bool {
+    // Typed rule shapes carry invalid inputs explicitly.
+    // Full payload validation is shared with the payload module.
+    crate::payload::validate_payload(v).is_empty()
+}
+fn intersect_raw(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value as V};
+    let mut out = serde_json::Map::new();
+    let min = |a: &V, b: &V| {
+        if a.is_null() {
+            b.clone()
+        } else if b.is_null() || a.as_f64() <= b.as_f64() {
+            a.clone()
+        } else {
+            b.clone()
+        }
+    };
+    for key in ["kind", "graphql"] {
+        let v = if a[key].is_null() { &b[key] } else { &a[key] };
+        if !v.is_null() {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    for key in ["hosts", "paths", "methods", "databases", "rcpt", "commands"] {
+        let v = match (a[key].as_array(), b[key].as_array()) {
+            (None, None) => V::Null,
+            (Some(a), None) => V::Array(a.clone()),
+            (None, Some(b)) => V::Array(b.clone()),
+            (Some(aa), Some(bb)) => {
+                let allows = |x: &V, y: &V| {
+                    let x = x.as_str().unwrap_or("");
+                    let y = y.as_str().unwrap_or("");
+                    match key {
+                        "hosts" => x == y || (x.starts_with("*.") && y.ends_with(&x[1..])),
+                        "paths" => glob_segments(x, y, true),
+                        _ => x == y,
+                    }
+                };
+                let mut keep = Vec::new();
+                if key == "hosts" || key == "paths" {
+                    for x in bb {
+                        if aa.iter().any(|y| allows(y, x)) && !keep.contains(x) {
+                            keep.push(x.clone());
+                        }
+                    }
+                    for x in aa {
+                        if bb.iter().any(|y| allows(y, x)) && !keep.contains(x) {
+                            keep.push(x.clone());
+                        }
+                    }
+                } else {
+                    keep.extend(aa.iter().filter(|x| bb.contains(x)).cloned());
+                }
+                V::Array(keep)
+            }
+        };
+        out.insert(key.into(), v);
+    }
+    for key in ["deny_paths", "route_sets", "payload_sets"] {
+        let mut v = a[key].as_array().cloned().unwrap_or_default();
+        v.extend(b[key].as_array().cloned().unwrap_or_default());
+        let own = match key {
+            "route_sets" => Some("routes"),
+            "payload_sets" => Some("payload"),
+            _ => None,
+        };
+        if let Some(own) = own {
+            if !b[own].is_null() {
+                v.push(b[own].clone());
+            }
+        }
+        out.insert(key.into(), v.into());
+    }
+    for (key, order, stricter) in [
+        ("approval", APPROVAL_ORDER, true),
+        ("sql_profile", SQL_ORDER, false),
+        ("mode", SSH_MODE_ORDER, false),
+    ] {
+        let v = if a[key].is_null() {
+            b[key].clone()
+        } else if b[key].is_null() {
+            a[key].clone()
+        } else {
+            let ai = order
+                .iter()
+                .position(|x| Some(*x) == a[key].as_str())
+                .unwrap_or(usize::MAX);
+            let bi = order
+                .iter()
+                .position(|x| Some(*x) == b[key].as_str())
+                .unwrap_or(usize::MAX);
+            if (stricter && ai >= bi) || (!stricter && ai <= bi) {
+                a[key].clone()
+            } else {
+                b[key].clone()
+            }
+        };
+        if !v.is_null() {
+            out.insert(key.into(), v);
+        }
+    }
+    for key in ["rate", "quota"] {
+        let unit = if key == "rate" { "per" } else { "window" };
+        let units = if key == "rate" { PER_MS } else { WINDOW_MS };
+        let v = if a[key].is_null() {
+            b[key].clone()
+        } else if b[key].is_null() {
+            a[key].clone()
+        } else {
+            let duration = |v: &V| {
+                units
+                    .iter()
+                    .find(|(u, _)| Some(*u) == v[unit].as_str())
+                    .map_or(1., |(_, n)| *n as f64)
+            };
+            let ac = a[key]["count"].as_f64().unwrap_or(0.);
+            let bc = b[key]["count"].as_f64().unwrap_or(0.);
+            let ar = ac / duration(&a[key]);
+            let br = bc / duration(&b[key]);
+            if ar < br || (ar == br && ac <= bc) {
+                a[key].clone()
+            } else {
+                b[key].clone()
+            }
+        };
+        if !v.is_null() {
+            out.insert(key.into(), v);
+        }
+    }
+    {
+        let key = "max_concurrent";
+        let v = min(&a[key], &b[key]);
+        if !v.is_null() {
+            out.insert(key.into(), v);
+        }
+    }
+    if !a["budget"].is_null() || !b["budget"].is_null() {
+        let aa = budget_integer(&a["budget"]["limit"]);
+        let bb = budget_integer(&b["budget"]["limit"]);
+        let n = match (aa, bb) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let mut v = json!({"unit":"requests"});
+        if let Some(n) = n {
+            v["limit"] = n.into();
+        }
+        out.insert("budget".into(), v);
+    }
+    for (key, fields) in [
+        ("spend", &["tokens", "usd_micros"][..]),
+        ("placeholder_policy", &["max_uses", "ttl", "max_active"][..]),
+        ("redirects", &["max"][..]),
+    ] {
+        if a[key].is_null() && b[key].is_null() {
+            continue;
+        }
+        let mut v = serde_json::Map::new();
+        for f in fields {
+            let mut aa = a[key][*f].clone();
+            let mut bb = b[key][*f].clone();
+            if key == "placeholder_policy"
+                && *f == "max_active"
+                && !a[key].is_null()
+                && !b[key].is_null()
+            {
+                if aa.is_null() {
+                    aa = 8.into();
+                }
+                if bb.is_null() {
+                    bb = 8.into();
+                }
+            }
+            let n = min(&aa, &bb);
+            if !n.is_null() {
+                v.insert((*f).into(), n);
+            }
+        }
+        out.insert(key.into(), V::Object(v));
+    }
+    out.insert(
+        "stream_bodies".into(),
+        json!(
+            a["stream_bodies"].as_bool().unwrap_or(false)
+                && b["stream_bodies"].as_bool().unwrap_or(false)
+        ),
+    );
+    V::Object(out)
+}
+fn grant_from_raw(spec: &serde_json::Value, opts: &GrantPolicyOptions<'_>) -> Result<Policy> {
+    use serde_json::{json, Value as V};
+    let has = |k: &str| spec.get(k).is_some();
+    let mut out = json!({});
+    let profile_hosts = opts
+        .profile
+        .map_or(vec![], |p| p.hosts.iter().map(|s| s.to_string()).collect());
+    let ceiling = match &opts.ceiling {
+        GrantCeiling::Hosts(h) => h,
+        GrantCeiling::Layer { hosts } => hosts.as_ref().unwrap_or(&profile_hosts),
+    };
+    if opts.defaults || has("hosts") {
+        let requested: Option<Vec<String>> = spec
+            .get("hosts")
+            .filter(|v| !v.is_null())
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|_| policy_deny("invalid policy field hosts", Some("policy_invalid"), None))?;
+        out["hosts"] = json!(confine_hosts(requested.as_deref(), ceiling)?);
+    }
+    for (k, fallback) in [
+        ("methods", json!(["GET", "HEAD"])),
+        ("paths", json!(["/**"])),
+        ("approval", json!("on-write")),
+    ] {
+        if opts.defaults || has(k) {
+            out[k] = spec.get(k).cloned().unwrap_or(fallback);
+        }
+    }
+    if opts.defaults || has("budget") {
+        out["budget"] = json!({"unit":opts.profile.map_or("requests",|p|p.default_budget.unit),"limit":if has("budget"){budget_integer(&spec["budget"]).map_or_else(||spec["budget"].clone(),V::from)}else{opts.profile.map_or(500,|p|p.default_budget.limit).into()}});
+    }
+    for k in [
+        "deny_paths",
+        "max_concurrent",
+        "routes",
+        "payload",
+        "sql_profile",
+        "mode",
+        "databases",
+        "rcpt",
+        "commands",
+        "graphql",
+        "stream_bodies",
+        "placeholder_policy",
+    ] {
+        if has(k) {
+            out[k] = spec[k].clone();
+        }
+    }
+    for (k, key) in [("rate", "per"), ("quota", "window")] {
+        if !has(k) {
+            continue;
+        }
+        let mut v = spec[k].clone();
+        if let Some((count, unit)) = v.as_str().and_then(|s| s.split_once('/')) {
+            let unit = match unit {
+                "s" | "sec" | "second" => "second",
+                "m" | "min" | "minute" => "minute",
+                "h" | "hour" => "hour",
+                "d" | "day" => "day",
+                _ => "",
+            };
+            if !count.is_empty()
+                && count.bytes().all(|b| b.is_ascii_digit())
+                && ((k == "rate" && ["second", "minute", "hour"].contains(&unit))
+                    || (k == "quota" && ["hour", "day"].contains(&unit)))
+            {
+                if let Ok(n) = count.parse::<u64>() {
+                    v = json!({"count":n,key:unit});
+                }
+            }
+        }
+        out[k] = v;
+    }
+    if opts.defaults || has("redirects") {
+        out["redirects"] = json!({"max":spec.get("redirects").cloned().unwrap_or(json!(0))});
+    }
+    if has("spend_tokens") || has("spend_usd") {
+        out["spend"] = json!({});
+        if has("spend_tokens") {
+            out["spend"]["tokens"] = spec["spend_tokens"].clone();
+        }
+        if has("spend_usd") {
+            let usd = spec["spend_usd"]
+                .as_f64()
+                .filter(|u| {
+                    u.is_finite() && *u >= 0. && (u * 1e6 - (u * 1e6).round()).abs() <= 1e-7
+                })
+                .ok_or_else(|| policy_deny("invalid spend_usd", Some("policy_invalid"), None))?;
+            out["spend"]["usd_micros"] = json!((usd * 1e6).round() as u64);
+        }
+    }
+    let problems = validate_json(
+        &out,
+        &ValidateOptions {
+            kind: opts.profile.map(|p| p.kind.into()),
+        },
+    );
+    if let Some(p) = problems.first() {
+        return Err(policy_deny(
+            format!("invalid policy field {}", p.field),
+            Some("policy_invalid"),
+            None,
+        ));
+    }
+    serde_json::from_value(out)
+        .map_err(|_| policy_deny("invalid policy", Some("policy_invalid"), None))
 }

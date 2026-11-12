@@ -20,12 +20,14 @@ const USAGE: &str = "\
 usage: cargo xtask <task>
 
 tasks:
-  mutation [--only <name>] [--keep]
+  mutation [--only <name>] [--keep] [--scoped]
       Apply each entry of crates/*/mutations.toml to a temporary copy of the
       rust/ tree and require `cargo test` to fail. Exits non-zero if any
       mutation survives or no longer applies.
         --only <name>   run just the named mutation (repeatable)
         --keep          keep the temporary copy for inspection
+        --scoped        opt in to testing each mutant in its owning crate;
+                        the baseline still tests the entire workspace
       Environment: MUTATION_TIMEOUT_SECS (default 600) bounds one test run; a
       run that times out counts as caught, as in test/mutation-check.js.
 ";
