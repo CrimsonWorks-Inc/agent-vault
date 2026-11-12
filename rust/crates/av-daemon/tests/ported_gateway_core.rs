@@ -11675,3 +11675,304 @@ async fn control_sessions_detail_reports_missing_creation_history_and_both_reads
     .await
     .expect("incomplete detail and lock timed out");
 }
+
+async fn control_mcp_call(
+    f: &Fixture,
+    name: &str,
+    args: Value,
+    authenticated: bool,
+) -> (bool, Value) {
+    let session = if authenticated {
+        let token = f.token.clone();
+        f.shared
+            .run(move |c| c.vault.session_by_token(&token).unwrap())
+            .await
+            .unwrap()
+    } else {
+        None
+    };
+    let r=f.daemon.mcp().handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}),session,authenticated.then(||f.token.clone()),None).await.unwrap();
+    let result = &r["result"];
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains(&f.secret));
+    (
+        result["isError"].as_bool().unwrap_or(false),
+        serde_json::from_str(text).unwrap(),
+    )
+}
+async fn control_mcp_preflight_http(
+    f: &Fixture,
+    method: &str,
+    body: String,
+    headers: Vec<(String, String)>,
+) -> (u16, Value) {
+    let mut h = vec![("content-type".into(), "application/json".into())];
+    h.extend(headers);
+    let (s, _, bytes) = loopback_http(
+        f.daemon.gateway_port().unwrap(),
+        method,
+        "/v1/preflight",
+        h,
+        body.into_bytes(),
+    )
+    .await;
+    let v = serde_json::from_slice(&bytes).unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains(&f.secret));
+    (s, v)
+}
+
+#[tokio::test]
+async fn control_mcp_access_description_is_read_only_and_instructions_name_both_advisory_tools() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let mut f=Fixture::configured(&["header:x-key"],SECRET,None,json!({"methods":["GET"],"rate":{"count":5,"per":"second"},"budget":{"unit":"requests","limit":100}})).await;
+        let gid=f.grant_id.clone();f.shared.run(move|c|{c.vault.shorten_grant(&gid,600000).unwrap();c.vault.save_template("read",&json!({"cred":"demo","methods":["GET"]})).unwrap();}).await.unwrap();let sid=control_session_sid(&f).await;let audits=audit_records(&f).await;let before=store_snapshot(&f).await;
+        let(error,v)=control_mcp_call(&f,"vault_describe_access",json!({}),true).await;assert!(!error,"{v}");assert_eq!(audit_records(&f).await,audits);assert_eq!(store_snapshot(&f).await,before);assert_eq!(v["session"]["id"],sid);assert_eq!(v["session"]["infinite"],false);let g=&v["grants"][0];assert_eq!(g["cred"],"demo");assert_eq!(g["effective"]["methods"],json!(["GET"]));assert_eq!(g["effective"]["rate"],json!({"count":5,"per":"second"}));assert_eq!(g["budget_remaining"],100);assert!(g["spend_remaining"].is_null());assert_eq!(g["quarantined"],false);assert!(g["expires_at"].is_string());assert!(!g["put_it_at"].as_array().unwrap().is_empty());assert_eq!(v["templates"].as_array().unwrap().iter().map(|t|t["name"].as_str().unwrap()).collect::<Vec<_>>(),vec!["read"]);assert!(v["next"].as_str().unwrap().contains("vault_request_session"));let text=v.to_string();for p in [&f.ph,&f.token,"av1.","\"fp8\"","\"size\"","\"length\"","\"token_hash\""] {assert!(!text.contains(p),"private metadata {p}");}
+        assert_eq!(f.get().await.status,200);
+        let token=f.shared.run(|c|{use av_core::secret::ExposeSecret;c.vault.create_session(av_store::vault::CreateSessionOptions{infinite:true,..Default::default()}).unwrap().token.expose_secret().to_string()}).await.unwrap();f.token=token;let(_,v)=control_mcp_call(&f,"vault_describe_access",json!({}),true).await;assert_eq!(v["session"]["infinite"],true);assert!(v["session"]["expires_at"].is_null());assert!(control_mcp_call(&f,"vault_describe_access",json!({}),false).await.0);
+        let init=f.daemon.mcp().handle(json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}),None,None,None).await.unwrap();assert!(init["result"]["instructions"].as_str().unwrap().contains("Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access."));credential_finish(&f).await;
+    }).await.expect("MCP description timed out");
+}
+
+#[tokio::test]
+async fn control_mcp_preflight_holds_allows_and_denies_without_touch_use_approval_or_upstream() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = approval_fixture("on-write", &["header:x-key"]).await;
+        let before = store_snapshot(&f).await;
+        let (error, v) = control_mcp_call(
+            &f,
+            "vault_preflight",
+            json!({"cred":"demo","method":"POST","path":"/repos/x","body":"{\"a\":1}"}),
+            true,
+        )
+        .await;
+        assert!(!error, "{v}");
+        assert_eq!(v["would"], "hold");
+        assert!(v["advisory"]
+            .as_str()
+            .unwrap()
+            .contains("A prediction, not a permission"));
+        for (method, would) in [("GET", "allow"), ("DELETE", "deny")] {
+            assert_eq!(
+                control_mcp_call(
+                    &f,
+                    "vault_preflight",
+                    json!({"cred":"demo","method":method,"path":"/repos/x"}),
+                    true
+                )
+                .await
+                .1["would"],
+                would
+            );
+        }
+        assert_eq!(store_snapshot(&f).await, before);
+        assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        let rows = audit_records(&f).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["kind"] == "request.preflighted")
+                .count(),
+            3
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["kind"] == "placeholder.issued")
+                .count(),
+            1
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("MCP preflight no-side-effects timed out");
+}
+
+#[tokio::test]
+async fn control_mcp_preflight_refuses_bad_shapes_unknown_credential_and_concurrent_eleventh_call()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_eq!(
+            control_mcp_call(
+                &f,
+                "vault_preflight",
+                json!({"cred":"missing","method":"GET","path":"/x"}),
+                true
+            )
+            .await
+            .1["code"],
+            "AV_NOT_FOUND"
+        );
+        for args in [
+            json!({"cred":"demo","method":"GET","path":"x"}),
+            json!({"cred":"demo","method":"G E T","path":"/x"}),
+            json!({"cred":"demo","method":"GET","path":"/x","headers":["a"]}),
+        ] {
+            assert_eq!(
+                control_mcp_call(&f, "vault_preflight", args, true).await.1["rule"],
+                "preflight_shape"
+            );
+        }
+        assert!(
+            control_mcp_call(
+                &f,
+                "vault_preflight",
+                json!({"cred":"demo","method":"GET","path":"/x"}),
+                false
+            )
+            .await
+            .0
+        );
+        let mut throttled = None;
+        for _ in 0..3 {
+            let call = || {
+                Box::pin(control_mcp_call(
+                    &f,
+                    "vault_preflight",
+                    json!({"cred":"demo","method":"GET","path":"/x"}),
+                    true,
+                ))
+            };
+            let (a, b, c, d, e, g, h, i, j, k, l, m) = tokio::join!(
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call(),
+                call()
+            );
+            throttled = [a, b, c, d, e, g, h, i, j, k, l, m]
+                .into_iter()
+                .map(|(_, v)| v)
+                .find(|v| v["code"] == "AV_QUOTA_EXCEEDED");
+            if throttled.is_some() {
+                break;
+            }
+        }
+        let v = throttled.expect("more than ten preflights all passed");
+        assert_eq!(v["rule"], "preflight_rate");
+        assert!(v["retry_after"].as_u64().is_some());
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("MCP preflight strictness and rate timed out");
+}
+
+#[tokio::test]
+async fn control_mcp_gateway_preflight_strict_shapes_auth_and_bad_location_never_trip_or_touch() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=approval_fixture("on-write",&["header:x-key"]).await;assert_eq!(credential_api(&f,"POST","/v1/tripwires",json!({"enabled":true,"rules":[{"id":"loc","codes":["AV_BAD_LOCATION"],"threshold":1,"window_s":600,"action":"revoke_session"}]})).await.0,200);
+        let before=store_snapshot(&f).await;let auth=||vec![("authorization".into(),format!("Bearer {}",f.token))];
+        let(s,v)=control_mcp_preflight_http(&f,"POST",json!({"method":"GET","path":format!("/p/demo/items/{}",f.ph),"headers":[["x-key",f.ph]]}).to_string(),auth()).await;assert_eq!(s,200,"{v}");assert_eq!(v["would"],"deny");assert_eq!(v["checks"].as_array().unwrap().last().unwrap()["code"],"AV_BAD_LOCATION");assert!(!audit_records(&f).await.iter().any(|r|r["kind"]=="tripwire.fired"));
+        assert_eq!(control_mcp_preflight_http(&f,"POST",json!({"method":"POST","path":"/p/demo/repos/x"}).to_string(),auth()).await.1["would"],"deny");
+        let(s,v)=control_mcp_preflight_http(&f,"POST",json!({"method":"post","path":"/p/demo/repos/x","body":"{}","headers":{"content-type":"application/json","x-key":f.ph}}).to_string(),auth()).await;assert_eq!(s,200,"{v}");assert_eq!(v["would"],"hold");assert_eq!(control_mcp_preflight_http(&f,"POST",json!({"method":"GET","path":"/p/demo/x","body_base64":"aGk=","headers":[["x-key",f.ph]]}).to_string(),auth()).await.1["would"],"allow");assert_eq!(store_snapshot(&f).await,before);assert!(f.daemon.pipeline().pending_approvals().await.is_empty());assert!(f.up.hits.lock().unwrap().is_empty());
+        for body in [json!({"method":"GET","path":"/p/demo/x","body":"a","body_base64":"YQ=="}).to_string(),json!({"method":"GET","path":"/v1/status"}).to_string(),json!({"method":"GET"}).to_string(),json!({"method":5,"path":"/p/demo/x"}).to_string(),json!({"method":"GET","path":"/p/demo/x","headers":[["a"]]}).to_string(),json!({"method":"GET","path":"/p/demo/x","query":1}).to_string(),json!({"method":"GET","path":"/p/demo/x","body_base64":"not base64!"}).to_string(),"not json".into(),"[]".into()] {let(s,v)=control_mcp_preflight_http(&f,"POST",body,auth()).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"preflight_shape");}
+        assert_eq!(control_mcp_preflight_http(&f,"POST",json!({"method":"GET","path":"/p/demo/x"}).to_string(),vec![]).await.0,401);let mut evil=auth();evil.push(("origin".into(),"http://evil.example".into()));assert_eq!(control_mcp_preflight_http(&f,"POST","{}".into(),evil).await.0,403);assert_eq!(control_mcp_preflight_http(&f,"GET","{}".into(),auth()).await.0,404);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("HTTP preflight strictness timed out");
+}
+
+#[tokio::test]
+async fn control_mcp_session_proposal_whitelists_fields_and_invalid_dry_runs_leave_no_state_or_audit(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;let(error,v)=control_mcp_call(&f,"vault_request_session",json!({"cred":"demo","reason":"x","methods":["GET","POST"],"uses":5,"grant_ttl_minutes":15,"routes":[{"methods":["POST"],"paths":["/repos/*/issues"]}],"hosts":["evil.example"],"rate":"1000/s"}),false).await;assert!(!error,"{v}");assert_eq!(v["state"],"pending");let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;let proposal=&pending.as_array().unwrap().iter().find(|r|r["id"]==v["request_id"]).unwrap()["proposal"];assert_eq!(proposal["uses"],5);assert_eq!(proposal["grant_ttl_minutes"],15);assert_eq!(proposal["routes"],json!([{"methods":["POST"],"paths":["/repos/*/issues"]}]));assert!(proposal.get("hosts").is_none());assert!(proposal.get("rate").is_none());assert!(v["asked_for"].as_str().unwrap().contains("routes POST /repos/*/issues"));let before=store_snapshot(&f).await;let audit=audit_records(&f).await;
+        for extra in [json!({"grant_ttl_minutes":0}),json!({"routes":[{"methods":["FETCH"],"paths":["/x"]}]}),json!({"budget":0}),json!({"methods":"POST"})] {let mut args=extra;args["cred"]=json!("demo");args["reason"]=json!("x");assert!(control_mcp_call(&f,"vault_request_session",args,false).await.0);}
+        assert_eq!(credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","reason":"x","rate":"5/fortnight"})).await.1["rule"],"policy_invalid");assert_eq!(credential_api(&f,"GET","/v1/session-requests",json!({})).await.1,pending);assert_eq!(store_snapshot(&f).await,before);assert_eq!(audit_records(&f).await,audit);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("MCP proposed session dry runs timed out");
+}
+
+#[tokio::test]
+async fn control_mcp_status_shows_lifetimes_but_only_human_pending_views_receive_scrubbed_preview()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut f = approval_fixture("each", &["header:authorization:Bearer"]).await;
+        let original = f.token.clone();
+        f.token = f
+            .shared
+            .run(|c| {
+                use av_core::secret::ExposeSecret;
+                c.vault
+                    .create_session(av_store::vault::CreateSessionOptions {
+                        infinite: true,
+                        ..Default::default()
+                    })
+                    .unwrap()
+                    .token
+                    .expose_secret()
+                    .to_string()
+            })
+            .await
+            .unwrap();
+        let (_, v) = control_mcp_call(&f, "vault_status", json!({}), true).await;
+        assert_eq!(v["session"]["infinite"], true);
+        assert!(v["session"]["expires_at"].is_null());
+        f.token = original;
+        let held = f
+            .send(
+                "POST",
+                "/repos/x",
+                vec![
+                    ("authorization".into(), format!("Bearer {}", f.ph)),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                Some(json!({"title":"hello","note":format!("a pasted {SECRET}")}).to_string()),
+            )
+            .await;
+        let id = held_id(&held);
+        let (_, v) =
+            control_mcp_call(&f, "vault_approval_status", json!({"approval_id":id}), true).await;
+        assert!(v.get("preview").is_none());
+        let (_, human) = credential_api(&f, "GET", "/v1/approvals", json!({})).await;
+        let preview = &human
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()["preview"];
+        assert_eq!(preview["untrusted"], true);
+        assert!(!preview.to_string().contains(&f.ph));
+        assert!(preview["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| !h[0].as_str().unwrap().eq_ignore_ascii_case("authorization")));
+        assert!(preview["body"]["text"].as_str().unwrap().contains("hello"));
+        let (_, sessions) = credential_api(&f, "GET", "/v1/session-requests", json!({})).await;
+        let pending = av_store::pending::fetch_pending(|path| {
+            Some(if path == "/v1/approvals" {
+                human.as_array().unwrap().clone()
+            } else {
+                sessions.as_array().unwrap().clone()
+            })
+        });
+        let request = pending.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(request.preview.as_ref(), Some(preview));
+        assert!(request.narrowable.is_empty());
+        f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+        assert_eq!(
+            f.send(
+                "POST",
+                "/repos/x",
+                vec![
+                    ("authorization".into(), format!("Bearer {}", f.ph)),
+                    ("content-type".into(), "application/json".into())
+                ],
+                Some(json!({"title":"hello","note":format!("a pasted {SECRET}")}).to_string())
+            )
+            .await
+            .status,
+            200
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("MCP preview separation timed out");
+}

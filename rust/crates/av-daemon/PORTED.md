@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 512 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **585 not yet ported**.
+Totals: 1207 JS tests: 520 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **577 not yet ported**.
 
 ## Mutation check
 
@@ -147,14 +147,14 @@ the vault on every call instead of caching an audit handle.
 | control-api-credentials.test.js | an agent cannot ask for a session on a quarantined credential, over either door (C12 note) | `ported_gateway_core::control_credentials_quarantine_refuses_session_requests_on_both_doors_until_release` |
 | control-api-credentials.test.js | releasing a quarantine needs a human, and a still-live session works again | `ported_gateway_core::control_credentials_release_requires_presence_and_reason_scrubbing_precedes_200_character_cut` |
 | control-api-credentials.test.js | a secret across the 200-character cut of a quarantine reason leaves none of itself behind | `ported_gateway_core::control_credentials_release_requires_presence_and_reason_scrubbing_precedes_200_character_cut` |
-| control-api-mcp.test.js | vault_describe_access says what the session may do, with no token, placeholder, fingerprint or size, and records nothing | not yet ported |
-| control-api-mcp.test.js | vault_preflight changes nothing: no approval, no use, no budget, no touch, and no upstream connection | not yet ported |
-| control-api-mcp.test.js | vault_preflight refuses what it cannot read, an unknown credential, and an eleventh call in a second | not yet ported |
-| control-api-mcp.test.js | a preflight with a placeholder in the wrong place says deny, and never trips a tripwire | not yet ported |
-| control-api-mcp.test.js | the gateway preflight route authenticates like a real request, reads its body strictly, and touches nothing | not yet ported |
-| control-api-mcp.test.js | vault_request_session forwards routes, uses and a grant lifetime, and nothing it does not offer | not yet ported |
-| control-api-mcp.test.js | the existing tools show lifetimes; the preview stays with the human (F13) | not yet ported |
-| control-api-mcp.test.js | the server instructions point at the two new tools | not yet ported |
+| control-api-mcp.test.js | vault_describe_access says what the session may do, with no token, placeholder, fingerprint or size, and records nothing | `ported_gateway_core::control_mcp_access_description_is_read_only_and_instructions_name_both_advisory_tools` |
+| control-api-mcp.test.js | vault_preflight changes nothing: no approval, no use, no budget, no touch, and no upstream connection | `ported_gateway_core::control_mcp_preflight_holds_allows_and_denies_without_touch_use_approval_or_upstream` |
+| control-api-mcp.test.js | vault_preflight refuses what it cannot read, an unknown credential, and an eleventh call in a second | `ported_gateway_core::control_mcp_preflight_refuses_bad_shapes_unknown_credential_and_concurrent_eleventh_call` |
+| control-api-mcp.test.js | a preflight with a placeholder in the wrong place says deny, and never trips a tripwire | `ported_gateway_core::control_mcp_gateway_preflight_strict_shapes_auth_and_bad_location_never_trip_or_touch` |
+| control-api-mcp.test.js | the gateway preflight route authenticates like a real request, reads its body strictly, and touches nothing | `ported_gateway_core::control_mcp_gateway_preflight_strict_shapes_auth_and_bad_location_never_trip_or_touch` |
+| control-api-mcp.test.js | vault_request_session forwards routes, uses and a grant lifetime, and nothing it does not offer | `ported_gateway_core::control_mcp_session_proposal_whitelists_fields_and_invalid_dry_runs_leave_no_state_or_audit` |
+| control-api-mcp.test.js | the existing tools show lifetimes; the preview stays with the human (F13) | `ported_gateway_core::control_mcp_status_shows_lifetimes_but_only_human_pending_views_receive_scrubbed_preview` |
+| control-api-mcp.test.js | the server instructions point at the two new tools | `ported_gateway_core::control_mcp_access_description_is_read_only_and_instructions_name_both_advisory_tools` |
 | control-api-notify.test.js | the stream sends a snapshot, then each new item, without the agent's words | not yet ported |
 | control-api-notify.test.js | a ninth watcher is refused | not yet ported |
 | control-api-notify.test.js | the stream resolves no session: a token sent to it is ignored and touches nothing (C20) | not yet ported |
