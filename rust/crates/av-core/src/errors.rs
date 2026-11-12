@@ -366,8 +366,8 @@ pub struct DenyExtra {
     pub hint: Option<String>,
     /// The rule name that refused the request.
     pub rule: Option<String>,
-    /// The concrete next step (a command or tool call).
-    pub next: Option<String>,
+    /// The concrete next step: a command string, or `{cli, mcp}` recovery instructions.
+    pub next: Option<serde_json::Value>,
     /// The request id, so `vault_explain_denial` can find it.
     pub request_id: Option<String>,
     /// A successor placeholder (for `AV_PH_EXHAUSTED`).
@@ -445,12 +445,20 @@ impl VaultError {
         for (key, value) in [
             ("rule", &self.extra.rule),
             ("request_id", &self.extra.request_id),
-            ("next", &self.extra.next),
             ("next_placeholder", &self.extra.next_placeholder),
         ] {
             if let Some(v) = value.as_ref().filter(|s| !s.is_empty()) {
                 body[key] = v.clone().into();
             }
+        }
+        if let Some(v) = self.extra.next.as_ref().filter(|v| match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(v) => *v,
+            serde_json::Value::String(s) => !s.is_empty(),
+            serde_json::Value::Number(n) => n.as_f64() != Some(0.0),
+            _ => true,
+        }) {
+            body["next"] = v.clone();
         }
         if let Some(v) = &self.extra.factors {
             body["factors"] = serde_json::json!(v);
@@ -507,5 +515,30 @@ mod tests {
         assert_eq!(e.to_problem()["retry_after"], 0);
         assert_eq!(e.to_problem()["rule"], "test_rule");
         assert!(ErrorCode::parse("UNKNOWN").is_none());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn structured_and_string_next_match_javascript() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/error-next-vectors.json"))
+                .unwrap();
+        for row in vectors.as_array().unwrap() {
+            let error = deny(
+                ErrorCode::parse(row["code"].as_str().unwrap()).unwrap(),
+                "test refusal",
+                DenyExtra {
+                    next: Some(row["next"].clone()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(error.to_problem(), row["problem"]);
+            let serialized = serde_json::to_string(&error.to_problem()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(parsed, row["problem"]);
+        }
     }
 }
