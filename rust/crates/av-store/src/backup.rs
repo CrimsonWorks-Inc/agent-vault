@@ -470,6 +470,13 @@ fn b64_of_len(v: Option<&Value>, bytes: Option<usize>) -> bool {
 /// version, cipher, nonce length) before any key is derived (rule
 /// `backup_format`). Ports `checkEnvelope` in `src/store/backup.js`.
 pub fn check_envelope(bundle: &Value) -> Result<Bundle> {
+    check_envelope_with(bundle, &backup_kdf_v2())
+}
+
+/// [`check_envelope`] against a stated v2 KDF: production builds pass
+/// [`BACKUP_KDF_V2`], and a test can check that same production set even
+/// though `cfg(test)` restores use cheaper parameters.
+pub(crate) fn check_envelope_with(bundle: &Value, want: &Argon2Params) -> Result<Bundle> {
     let Value::Object(b) = bundle else {
         return Err(format_error("a bundle is a JSON object"));
     };
@@ -512,7 +519,6 @@ pub fn check_envelope(bundle: &Value) -> Result<Bundle> {
             serde_json::from_value(bundle.clone()).map_err(|_| bad_cipher())?,
         ));
     }
-    let want = backup_kdf_v2();
     let kdf_ok = kdf.and_then(|o| o.get("alg")).and_then(Value::as_str) == Some("argon2id")
         && num("m") == Some(u64::from(want.m))
         && num("t") == Some(u64::from(want.t))
@@ -926,20 +932,19 @@ pub fn restore_backup(
         entry.slug = slug;
         plan.push(PlannedCredential { entry, from });
     }
+    // `backup.restored` is written in the same transaction as the restore.
     let out = match vault.restore_entries(crate::vault::RestoreEntries {
         credentials: plan,
         templates: plain.templates,
+        summary: Some(crate::vault::RestoreSummary {
+            skipped: skipped.clone(),
+            renamed: serde_json::to_value(&renames)?,
+            bundle_sha256: bundle_digest(bundle),
+        }),
     }) {
         Ok(o) => o,
         Err(e) => return Err(refused(vault, e)),
     };
-    let audit = vault.audit_mut().ok_or_else(locked)?;
-    let mut f = Map::new();
-    f.insert("restored".into(), serde_json::to_value(&out.restored)?);
-    f.insert("skipped".into(), serde_json::to_value(&skipped)?);
-    f.insert("renamed".into(), serde_json::to_value(&renames)?);
-    f.insert("bundle_sha256".into(), bundle_digest(bundle).into());
-    audit.write("backup.restored", f)?;
     Ok(RestoreResult {
         restored: out.restored,
         skipped,

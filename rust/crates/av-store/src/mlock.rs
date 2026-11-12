@@ -10,6 +10,8 @@
 //! and are zeroed before they are unlocked and freed.
 
 use av_core::secret::Key32;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use zeroize::Zeroize;
 
 /// Lock `len` bytes at `ptr`-backed `buf` into RAM so they are never swapped.
@@ -38,6 +40,21 @@ pub fn unlock(buf: &mut [u8]) {
     let _ = unsafe { libc::munlock(buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 }
 
+/// Set once the first `mlock` refusal has been logged.
+static LOCK_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Log, once per `flag`, that the VMK could not be locked into RAM (the vault
+/// keeps working; the key may be swapped). Returns whether this call logged.
+fn note_lock_failure(flag: &AtomicBool) -> bool {
+    if flag.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    tracing::warn!(
+        "mlock refused: the vault master key is not held in locked memory and may be swapped to disk (raise RLIMIT_MEMLOCK to fix)"
+    );
+    true
+}
+
 /// A 32-byte key in locked memory, zeroed and unlocked on drop. Never
 /// `Debug` with its bytes, never `Clone`: there is one copy of the VMK.
 pub struct LockedKey {
@@ -51,6 +68,9 @@ impl LockedKey {
     pub fn new(key: &Key32) -> LockedKey {
         let mut bytes = Box::new([0u8; 32]);
         let locked = lock(bytes.as_mut_slice());
+        if !locked {
+            note_lock_failure(&LOCK_FAILURE_LOGGED);
+        }
         bytes.copy_from_slice(key.expose());
         LockedKey { bytes, locked }
     }
@@ -98,6 +118,17 @@ mod tests {
         assert!(lock(&mut b));
         unlock(&mut b);
         assert!(lock(&mut []));
+    }
+
+    #[test]
+    fn a_refused_mlock_is_logged_once() {
+        let flag = AtomicBool::new(false);
+        assert!(note_lock_failure(&flag), "the first refusal must log");
+        assert!(
+            !note_lock_failure(&flag),
+            "a second refusal must not log again"
+        );
+        assert!(flag.load(Ordering::Relaxed));
     }
 
     #[test]
