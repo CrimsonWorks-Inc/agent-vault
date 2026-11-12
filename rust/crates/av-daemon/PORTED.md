@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 540 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **556 not yet ported**.
+Totals: 1207 JS tests: 541 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **555 not yet ported**.
 
 ## Mutation check
 
@@ -168,7 +168,7 @@ the vault on every call instead of caching an audit handle.
 | control-api-overrides.test.js | routes and payload as JSON strings are parsed; a value passes through; bad JSON throws (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | a numeric narrowing is Number(v), and anything not finite throws, naming the field (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | rate and quota: a string is trimmed, anything else passes through for the daemon (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
-| control-api-overrides.test.js | an approval narrowed with --routes or --payload as JSON creates a grant with the parsed value, not the proposal | not yet ported |
+| control-api-overrides.test.js | an approval narrowed with --routes or --payload as JSON creates a grant with the parsed value, not the proposal | `ported_gateway_core::control_overrides_routes_and_payload_json_create_the_narrowed_grant_instead_of_agent_proposal` |
 | control-api-sessions.test.js | a budget of 0 is refused before the presence gate, and nothing is made (C17) | `ported_gateway_core::control_sessions_create_refuses_zero_budget_before_presence_and_unreadable_limits_are_atomic` |
 | control-api-sessions.test.js | a create body carries every grant limit, converted by the one converter | `ported_gateway_core::control_sessions_create_converts_every_limit_defaults_and_grant_lifetimes` |
 | control-api-sessions.test.js | a grant limit that cannot be read is refused and leaves nothing behind | `ported_gateway_core::control_sessions_create_refuses_zero_budget_before_presence_and_unreadable_limits_are_atomic` |

@@ -9903,7 +9903,12 @@ const CONTROL_ROTATED: &str = "ghp_PORTEDROTATEDVALUE99887766554433221100aa";
 async fn credential_api(f: &Fixture, method: &str, path: &str, body: Value) -> (u16, Value) {
     let r = control_method(&f._dir.path().join("control.sock"), method, path, body).await;
     let text = serde_json::to_string(&r.1).unwrap();
-    for secret in [&f.secret, CONTROL_ROTATED] {
+    for secret in [
+        &f.secret,
+        CONTROL_ROTATED,
+        "OTHER-SECRET-0099887766",
+        "LATER-SECRET-00112233",
+    ] {
         assert!(
             !text.contains(secret),
             "control response revealed credential"
@@ -9970,7 +9975,14 @@ async fn credential_tool(f: &Fixture, name: &str, args: Value, session: bool) ->
 }
 async fn credential_finish(f: &Fixture) {
     let text = serde_json::to_string(&audit_records(f).await).unwrap();
-    for secret in [&f.secret, CONTROL_ROTATED, WIDEN_PASS, CONTROL_RECOVERY] {
+    for secret in [
+        &f.secret,
+        CONTROL_ROTATED,
+        WIDEN_PASS,
+        CONTROL_RECOVERY,
+        "OTHER-SECRET-0099887766",
+        "LATER-SECRET-00112233",
+    ] {
         assert!(!text.contains(secret), "credential leaked to audit");
     }
     f.daemon.stop().await;
@@ -12493,4 +12505,17 @@ async fn control_templates_signed_consent_binds_exact_template_hash_and_fresh_ma
     })
     .await
     .expect("signed template hash timed out");
+}
+
+#[tokio::test]
+async fn control_overrides_routes_and_payload_json_create_the_narrowed_grant_instead_of_agent_proposal(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;let routes=json!([{"methods":["GET"],"paths":["/only"]}]);let payload=json!({"query":{"q":{"max_length":8}}});
+        for(field,requested)in [("routes",routes),("payload",payload)] {
+            let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET","POST"],"paths":["/**"],"routes":[{"methods":["GET","POST"],"paths":["/**"]}],"reason":"x"})).await;assert_eq!(s,200,"{asked}");
+            let args=json!({field:requested.to_string()});let parsed=av_store::pending::parse_overrides(args.as_object().unwrap()).unwrap();let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":true,"overrides":parsed})).await;assert_eq!(s,200,"{v}");let stored=control_session_policy(&f,v["session"]["grant_id"].as_str().unwrap()).await;assert_eq!(stored[field],requested,"{field} narrowing was dropped");
+        }
+        let bad=av_store::pending::parse_overrides(json!({"routes":"[{\"methods\":"}).as_object().unwrap()).unwrap_err();assert_eq!(bad.field,"routes");assert!(bad.to_string().contains("routes"));assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("parsed JSON overrides timed out");
 }
