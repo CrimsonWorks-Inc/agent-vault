@@ -320,3 +320,40 @@ pub fn seed_audit_tail(dir: &std::path::Path, record: &str) -> Result<u64, rusql
     )?;
     Ok(next as u64)
 }
+/// Bulk copies of a session for the complete-list fixture. The original stays
+/// usable as an ordinary-traffic control; fake hashes are never authenticators.
+/// Call only after every Vault and daemon has closed the temporary database.
+pub fn seed_complete_sessions(dir: &std::path::Path, count: usize) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let mut conn = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    let mut q = conn.prepare("SELECT * FROM sessions LIMIT 1").unwrap();
+    let columns = q.column_names().map(str::to_owned).collect::<Vec<_>>();
+    assert!(columns
+        .iter()
+        .all(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')));
+    let template = q
+        .query_row([], |r| {
+            (0..columns.len())
+                .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    drop(q);
+    let id = columns.iter().position(|s| s == "id").unwrap();
+    let label = columns.iter().position(|s| s == "label").unwrap();
+    let hash = columns.iter().position(|s| s == "token_hash").unwrap();
+    let sql = format!(
+        "INSERT INTO sessions ({}) VALUES ({})",
+        columns.join(","),
+        vec!["?"; columns.len()].join(",")
+    );
+    let tx = conn.transaction().unwrap();
+    for i in 0..count {
+        let mut row = template.clone();
+        row[id] = rusqlite::types::Value::Text(format!("s_many_{i:05}"));
+        row[label] = rusqlite::types::Value::Text(format!("s_many_{i:05}"));
+        row[hash] = rusqlite::types::Value::Text(format!("{i:064x}"));
+        tx.execute(&sql, rusqlite::params_from_iter(row)).unwrap();
+    }
+    tx.commit().unwrap();
+}

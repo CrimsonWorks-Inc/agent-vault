@@ -19,13 +19,15 @@ What each status means:
   JS test against a Rust test of its own (a pure core or store check the JS
   tested through the daemon). Rows there that defer to av-daemon or to
   conformance are not counted.
-- **not applicable to av-daemon**: the test drives the CLI; av-cli owns it.
+- **av-cli / not applicable to av-daemon**: CLI-owned execution or rendering assertions; av-cli owns them. A browser comparison names the shared golden fixture when needed.
+- **not applicable, because**: a JS representation or lifecycle has no Rust counterpart; the row states the concrete reason and names a surrounding native control.
 - **frontend: stays with the src/ui JS tests**: unchanged browser functions or bundle/source contracts remain in their JS suite; Rust serves the same bundle bytes (covered by `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy`).
 - **not yet ported**: no av-daemon test and no conformance test makes this
-  check yet. This is the remaining work for the piece, and it is listed as
-  such rather than mapped to a test that only resembles it.
+  check yet. Future unmapped cases must stay visible under this status until tested or explicitly classified.
 
-Totals: 1207 JS tests: 970 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **60 not yet ported**.
+Totals: 1207 JS tests: 1012 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 118 CLI-only, 8 not applicable, 40 frontend (stays with JS), **0 not yet ported**.
+
+The UI parity fixture `tests/fixtures/ui-parity/server-browser-v1.json` is shared with retained browser/CLI checks. Rust and the current browser modules both pass its 45 operation, 23 narrowing and one cleaner cases. The coordinator owns wiring the same fixture into the retained JS tests at cutover.
 
 ## Mutation check
 
@@ -334,8 +336,8 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-ui-webauthn.test.js | a string digests exactly as it always did | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | control-ui-webauthn.test.js | two different bundles give two different operations | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | control-ui-webauthn.test.js | the same bundle with its keys in another order is the same operation | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
-| control-ui-webauthn.test.js | the page builds the same operation as the servers, field for field | not yet ported |
-| control-ui-webauthn.test.js | the page's digested fields are the servers' digested fields | not yet ported |
+| control-ui-webauthn.test.js | the page builds the same operation as the servers, field for field | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
+| control-ui-webauthn.test.js | the page's digested fields are the servers' digested fields | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
 | exfil.test.js | the control socket refuses a session aimed at a host the credential does not permit | `ported_gateway_core::exfil_control_refuses_foreign_hosts_and_ungated_session_creation_is_audited` |
 | exfil.test.js | a session confined to the credential host cannot then be pointed elsewhere | `ported_gateway_core::exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_fresh_presence` |
 | exfil.test.js | the real credential value never reaches a caller-controlled destination | `ported_gateway_core::exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_fresh_presence` |
@@ -418,11 +420,11 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-mcp.test.js | vault_http does not leave a live placeholder behind per call | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
 | fix-control-mcp.test.js | the session token is what authenticates, so a query-site credential works | `ported_gateway_core::fix_mcp_query_credential_authenticates_by_session_and_proposals_preserve_ttl_and_uses` |
 | fix-control-mcp.test.js | vault_request_session carries ttl_minutes and uses to the human | `ported_gateway_core::fix_mcp_query_credential_authenticates_by_session_and_proposals_preserve_ttl_and_uses` |
-| fix-control-page.test.js | what the page signs for a narrowing is what the server rebuilds | not yet ported |
-| fix-control-page.test.js | a narrowed approval made the way the page makes it goes through | not yet ported |
-| fix-control-page.test.js | the hand-off example sends the token where it cannot displace the placeholder | not yet ported |
-| fix-control-page.test.js | the docs name every MCP tool, and only injection sites that exist | not yet ported |
-| fix-control-page.test.js | without a passphrase the page gives the daemon's guidance instead of a tap | not yet ported |
+| fix-control-page.test.js | what the page signs for a narrowing is what the server rebuilds | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
+| fix-control-page.test.js | a narrowed approval made the way the page makes it goes through | `ported_gateway_core::ui_narrowing_every_golden_field_reaches_the_real_grant_and_unreadable_or_unapplied_keys_stay_pending` |
+| fix-control-page.test.js | the hand-off example sends the token where it cannot displace the placeholder | frontend: stays with the src/ui JS tests |
+| fix-control-page.test.js | the docs name every MCP tool, and only injection sites that exist | `ported_gateway_core::ui_docs_catalog_count_and_every_documented_tool_match_the_rust_mcp_catalog` |
+| fix-control-page.test.js | without a passphrase the page gives the daemon's guidance instead of a tap | frontend: stays with the src/ui JS tests |
 | fix-control-presence.test.js | the shared window cannot enrol an unlock factor or replace the authenticator | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
 | fix-control-presence.test.js | with the passphrase in the request, the same changes go through | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
 | fix-control-presence.test.js | a vault with only an authenticator can still rotate it, by assertion | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
@@ -468,7 +470,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-touchid.test.js | a vault with no factor at all is refused Touch ID unlock with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
 | fix-control-touchid.test.js | without a passphrase, the presence authenticator rotates by a tap from itself, through the UI | `ported_gateway_core::ui_presence_key_can_rotate_without_passphrase_but_never_by_an_unsigned_or_windowed_call` |
 | fix-control-touchid.test.js | a first presence enrolment without a passphrase is refused with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
-| fix-control-uicookie.test.js | an authenticated call slides the cookie; an unauthenticated one is not activity | not yet ported |
+| fix-control-uicookie.test.js | an authenticated call slides the cookie; an unauthenticated one is not activity | `ported_gateway_core::ui_cookie_refreshes_same_session_and_anonymous_traffic_cannot_extend_the_idle_deadline` |
 | fix-control-webauthn.test.js | a request field named op cannot replace the route op | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | fix-control-webauthn.test.js | a supplied digest cannot replace the one computed from the secret | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | fix-control-webauthn.test.js | an ordinary request still binds every field, and the secret only by digest | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
@@ -849,19 +851,19 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | integrate3-fix1.test.js | D1: nothing the CLI or the page can send on a valid path names a key the daemon refuses | `ported_gateway_core::integration_d1_shared_parser_emits_only_daemon_supported_override_keys` |
 | integrate3-fix1.test.js | D2: towardPage withholds passphrase at any depth, in any case or hyphenation | `ported_gateway_core::ui_guard_passphrase_spellings_and_separator_runs_are_withheld_at_every_depth` |
 | integrate3-fix1.test.js | D2 (round 3): a run of hyphens, underscores or spaces is one separator, so pass--phrase, pass__phrase and "pass phrase" are withheld | `ported_gateway_core::ui_guard_passphrase_spellings_and_separator_runs_are_withheld_at_every_depth` |
-| integrate3-gates.test.js | C19: the page, webauthn.js and so the daemon digest every secret-bearing key the same way | not yet ported |
-| integrate3-gates.test.js | every gated UI route: the operation the page signs is the one the UI server and the real daemon rebuild | not yet ported |
+| integrate3-gates.test.js | C19: the page, webauthn.js and so the daemon digest every secret-bearing key the same way | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
+| integrate3-gates.test.js | every gated UI route: the operation the page signs is the one the UI server and the real daemon rebuild | `ported_gateway_core::integration_every_gated_ui_route_binds_the_exact_operation_and_daemon_verification_contract` |
 | integrate3-gates.test.js | C22(4): a pin removal signed without spki, or for another spki, is refused by the UI and by the daemon | `ported_gateway_core::integration_c22_pin_removal_binds_explicit_null_or_exact_spki_at_both_ui_and_daemon` |
 | integrate3-gates.test.js | C19 end to end: a backup bundle is bound by its canonical digest when the daemon restores it | `ported_gateway_core::integration_c19_backup_restore_binds_canonical_bundle_digest_and_refuses_a_different_bundle` |
 | integrate3-gates.test.js | C19 end to end: a webhook URL is bound by digest, and the page signs what the daemon checks | `ported_gateway_core::integration_c19_webhook_configuration_binds_url_digest_and_never_logs_the_secret_path` |
-| integrate3-narrowing.test.js | the page reads every narrowing with the module's parser, and keeps no second one | not yet ported |
-| integrate3-narrowing.test.js | the CLI and the page sign the same operation for the same narrowing, field by field | not yet ported |
-| integrate3-narrowing.test.js | through the UI server, each narrowing signed by the page is approved by the real daemon, and kept | not yet ported |
-| integrate3-narrowing.test.js | a narrowing that cannot be read: the CLI exits 2 naming the field, and sends nothing | not yet ported |
-| integrate3-narrowing.test.js | a narrowing that cannot be read: the page shows why and builds, signs and sends nothing | not yet ported |
-| integrate3-narrowing.test.js | a narrowing that cannot be read: the UI server answers 400 and the daemon 4xx, and nothing is approved | not yet ported |
-| integrate3-narrowing.test.js | a key no approval applies is refused by the shared parser, the UI server (400), the page and the CLI, as the daemon refuses it | not yet ported |
-| integrate3-narrowing.test.js | OVERRIDE_KEYS is the list the self-contained parser reads, key for key | not yet ported |
+| integrate3-narrowing.test.js | the page reads every narrowing with the module's parser, and keeps no second one | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
+| integrate3-narrowing.test.js | the CLI and the page sign the same operation for the same narrowing, field by field | av-cli (CLI operation compared with retained browser JS) + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json |
+| integrate3-narrowing.test.js | through the UI server, each narrowing signed by the page is approved by the real daemon, and kept | `ported_gateway_core::ui_narrowing_every_golden_field_reaches_the_real_grant_and_unreadable_or_unapplied_keys_stay_pending`; CLI half: integration e2e, deferred; browser parity: tests/fixtures/ui-parity/server-browser-v1.json |
+| integrate3-narrowing.test.js | a narrowing that cannot be read: the CLI exits 2 naming the field, and sends nothing | av-cli (CLI parsing exits and no-send assertions) |
+| integrate3-narrowing.test.js | a narrowing that cannot be read: the page shows why and builds, signs and sends nothing | frontend: stays with the src/ui JS tests |
+| integrate3-narrowing.test.js | a narrowing that cannot be read: the UI server answers 400 and the daemon 4xx, and nothing is approved | `ported_gateway_core::ui_narrowing_every_golden_field_reaches_the_real_grant_and_unreadable_or_unapplied_keys_stay_pending` |
+| integrate3-narrowing.test.js | a key no approval applies is refused by the shared parser, the UI server (400), the page and the CLI, as the daemon refuses it | `ported_gateway_core::ui_nonobject_narrowing_is_refused_instead_of_discarded_even_with_a_valid_empty_override_proof`; production parity fixed by 9a58f0a; other malformed-key controls: `ported_gateway_core::ui_narrowing_every_golden_field_reaches_the_real_grant_and_unreadable_or_unapplied_keys_stay_pending`; CLI half: integration e2e, deferred |
+| integrate3-narrowing.test.js | OVERRIDE_KEYS is the list the self-contained parser reads, key for key | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
 | integrate3-r4.test.js | C27: a secret as the path glob and the route glob is in no gateway row, before or after rotation; the grant still allows the path | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
 | integrate3-r4.test.js | C27: a path-only grant records path_rule and a null route_rule, never the glob | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
 | integrate3-r4.test.js | C27: a deny pattern added by an open narrowing is named by index in the denial, never by its text | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
@@ -885,17 +887,17 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | integrate3-r5.test.js | C28: a quarantine reason restored from a bundle is cleaned before it is recorded | `ported_gateway_core::integration_c28_restored_quarantine_reason_is_cleaned_before_any_record_is_written` |
 | integrate3-r5.test.js | item 3: mcp install --tls takes no value; bare --tls is the https URL and its absence the plain one | not applicable to av-daemon: drives CLI-only flag parsing and printed MCP URLs (av-cli) |
 | integrate3-r6.test.js | B1: tripwire show on a vault that never saved rules lists the defaults; set edits them; on keeps them | `ported_gateway_core::integration_r6_tripwire_defaults_are_read_only_edits_keep_other_rules_and_enable_keeps_edits`; CLI half: integration e2e, deferred |
-| integrate3-r6.test.js | B1: the page shows the defaults as defaults, and turning on stores them, when none were saved | not yet ported |
+| integrate3-r6.test.js | B1: the page shows the defaults as defaults, and turning on stores them, when none were saved | frontend: stays with the src/ui JS tests |
 | integrate3-r6.test.js | B2: preflight as documented predicts allow, hold and refuse correctly, and changes nothing but its records | `ported_gateway_core::integration_r6_preflight_assumption_is_explicit_boolean_and_never_hides_a_misplaced_placeholder`; CLI half: integration e2e, deferred |
 | integrate3-r6.test.js | N1: approving a narrowed session request prints what was granted, not what the agent asked for | `ported_gateway_core::integration_r6_approved_request_returns_granted_shape_and_probe_all_preserves_no_probe_and_real_failures`; CLI half: integration e2e, deferred |
 | integrate3-r6.test.js | N2: cred test names a kind with no probe as exit 7, and --all skips it without hiding a real failure | `ported_gateway_core::integration_r6_approved_request_returns_granted_shape_and_probe_all_preserves_no_probe_and_real_failures`; CLI half: integration e2e, deferred |
 | integrate3-r6.test.js | N4: bidi controls and line separators in agent text never reach the terminal | `ported_gateway_core::integration_r6_bidi_reason_request_and_held_write_keep_the_daemon_protocol_and_safe_headline`; CLI half: integration e2e, deferred |
-| integrate3-r6.test.js | N4: every shared cleaner strips bidi controls; the terminal ones strip line separators too | not yet ported |
+| integrate3-r6.test.js | N4: every shared cleaner strips bidi controls; the terminal ones strip line separators too | `ported_gateway_core::ui_elevated_session_routes_are_both_locally_gated_and_daemon_verified_and_headline_cleaning_strips_bidi`; CLI half: integration e2e, deferred; browser/CLI cleaners share golden fixture tests/fixtures/ui-parity/server-browser-v1.json |
 | integrate3-r6.test.js | r6 F1: a streamed response records a closed media type and encoding, never the upstream header text | `ported_gateway_core::integration_r6_stream_audit_media_types_are_closed_even_when_upstream_headers_contain_secrets` |
 | integrate3-r6.test.js | r6 F2: explain-denial gives code and rule however much was logged since, after eviction and after a restart | `ported_gateway_core::integration_c28_denials_keep_sentences_private_bounded_and_recover_codes_after_restart` |
 | integrate3-r6.test.js | r6 F2: a caller with no session gets the code and rule of a no-session denial, never its sentence | `ported_gateway_core::integration_r6_no_session_denial_explains_only_code_and_rule_and_a_session_cannot_read_it` |
-| integrate3-seams.test.js | the README and the docs page say how many MCP tools there are, and it is how many mcp.js has | not yet ported |
-| integrate3-seams.test.js | F13: a held request carries its preview from the gateway through pending.js and the UI server, and the page escapes it | not yet ported |
+| integrate3-seams.test.js | the README and the docs page say how many MCP tools there are, and it is how many mcp.js has | `ported_gateway_core::ui_docs_catalog_count_and_every_documented_tool_match_the_rust_mcp_catalog` |
+| integrate3-seams.test.js | F13: a held request carries its preview from the gateway through pending.js and the UI server, and the page escapes it | `ported_gateway_core::ui_pending_preview_keeps_hostile_markup_as_text_and_never_shows_the_routed_placeholder`; unchanged React text-render assertion stays in web/src/pages/Docs.ported.test.jsx |
 | integrate3-seams.test.js | C18: an infinite token is refused on a 0.0.0.0 and a [::] TLS listener by every wave-3 surface, and a finite one works | `ported_gateway_core::integrate3_c18_real_ipv4_ipv6_tls_preflight_and_description_refuse_infinite_and_keep_finite_peeks_unsent` |
 | integrate3-seams.test.js | a stored secret an agent puts in a session request path or reason does not reach the audit log | `ported_gateway_core::integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text` |
 | integrate3-seams.test.js | an ordinary session request is recorded in the audit log by its shape | `ported_gateway_core::integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text` |
@@ -1088,7 +1090,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | requested-r3.test.js | ordinary finite sessions are unchanged | `ported_gateway_core::r3_explicit_finite_lifetimes_keep_their_ceiling_while_default_idle_lifetime_extends` |
 | requested-r3.test.js | revoking a session with no expiry kills its placeholders | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
 | requested-r3.test.js | the owner can add no expiry when approving, but not on top of a lifetime the agent asked for | `ported_gateway_core::r3_owner_can_approve_infinite_only_with_fresh_proof_and_without_a_proposed_lifetime` |
-| requested-r3.test.js | an authenticator assertion creates one from the UI, which marks it everywhere | not yet ported |
+| requested-r3.test.js | an authenticator assertion creates one from the UI, which marks it everywhere | `ported_gateway_core::ui_owner_options_bind_actual_grants_reject_swapped_proofs_and_mark_infinite_and_auto_sessions` |
 | requested-r3.test.js | the CLI refuses --ttl with --infinite, and lists an infinite session as never | av-cli |
 | requested-r3.test.js | the CLI on a vault with no factor says to set a passphrase first | av-cli |
 | requested-r3.test.js | a stored expiry that does not parse is never live | `ported_gateway_core::r3_null_or_unparseable_stored_expiry_is_never_live` |
@@ -1097,15 +1099,15 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | requested-seams.test.js | approving a request for a quarantined credential is refused and leaves it pending | `ported_gateway_core::requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending` |
 | requested-seams.test.js | a placeholder batch for a quarantined credential is refused whole, with the store's rule | `ported_gateway_core::requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins` |
 | requested-seams.test.js | a placeholder batch on a grant that has ended is refused by the store's grant check | `ported_gateway_core::requested_expired_grant_batch_issues_nothing_while_other_session_works` |
-| requested-ui.test.js | the page reads owner options exactly as the CLI and the daemon do | not yet ported |
-| requested-ui.test.js | a session with no expiry renders as never, and garbage as expired | not yet ported |
-| requested-ui.test.js | the decisions that can be elevated are re-verified by the daemon | not yet ported |
-| requested-ui.test.js | the page warns before it signs an elevated session | not yet ported |
-| requested-ui.test.js | the hand-off card offers an env command with no session token in it | not yet ported |
-| requested-ui.test.js | approving a request with owner options from the page creates the session they chose | not yet ported |
-| requested-ui.test.js | a signature for one owner option cannot be spent on another | not yet ported |
-| requested-ui.test.js | an auto-approving multi-credential session made from the page needs only its own signature | not yet ported |
-| requested-ui.test.js | the docs say how to start an auto-approving session, and that read-only needs nothing | not yet ported |
+| requested-ui.test.js | the page reads owner options exactly as the CLI and the daemon do | frontend: stays with the src/ui JS tests + Rust golden fixture tests/fixtures/ui-parity/server-browser-v1.json (`ported_gateway_core::ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server`); browser side must assert the same fixture at cutover (coordinator wiring) |
+| requested-ui.test.js | a session with no expiry renders as never, and garbage as expired | frontend: stays with the src/ui JS tests |
+| requested-ui.test.js | the decisions that can be elevated are re-verified by the daemon | `ported_gateway_core::ui_elevated_session_routes_are_both_locally_gated_and_daemon_verified_and_headline_cleaning_strips_bidi` |
+| requested-ui.test.js | the page warns before it signs an elevated session | frontend: stays with the src/ui JS tests |
+| requested-ui.test.js | the hand-off card offers an env command with no session token in it | frontend: stays with the src/ui JS tests |
+| requested-ui.test.js | approving a request with owner options from the page creates the session they chose | `ported_gateway_core::ui_owner_options_bind_actual_grants_reject_swapped_proofs_and_mark_infinite_and_auto_sessions` |
+| requested-ui.test.js | a signature for one owner option cannot be spent on another | `ported_gateway_core::ui_owner_options_bind_actual_grants_reject_swapped_proofs_and_mark_infinite_and_auto_sessions` |
+| requested-ui.test.js | an auto-approving multi-credential session made from the page needs only its own signature | `ported_gateway_core::ui_owner_options_bind_actual_grants_reject_swapped_proofs_and_mark_infinite_and_auto_sessions` |
+| requested-ui.test.js | the docs say how to start an auto-approving session, and that read-only needs nothing | frontend: stays with the src/ui JS tests |
 | response.test.js | a gzipped response is decompressed before it reaches the agent | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
 | response.test.js | deflate and brotli are handled too | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
 | response.test.js | a secret hidden inside a compressed body is still scrubbed | `ported_gateway_core::response_gzip_echo_replaces_secret_with_the_exact_injected_placeholder` |
@@ -1157,31 +1159,31 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | session-requests.test.js | a batch refuses the shapes that would hide an approval | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
 | session-requests.test.js | a batch settles through the same path as a single decision | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
 | session-requests.test.js | an item that stopped being pending is reported, not skipped in silence | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
-| ui-audit-growth.test.js | Prev from the old first page holds only the rows appended since, and then there is no Prev | not yet ported |
-| ui-audit-growth.test.js | a log with gaps that grows while it is walked: Next sees the first snapshot once, Prev reaches every new row once | not yet ported |
-| ui-audit-growth.test.js | a real daemon, a kind and a search, rows arriving all the time: both directions, no row twice, none skipped | not yet ported |
-| ui-audit-paging.test.js | the fixture wrote the log it claims to | not yet ported |
-| ui-audit-paging.test.js | the daemon: a bare limit is the tail it always was | not yet ported |
+| ui-audit-growth.test.js | Prev from the old first page holds only the rows appended since, and then there is no Prev | `ported_gateway_core::audit_growth_prev_preserves_boundaries_and_gap_log_walks_never_repeat_or_skip_new_rows` |
+| ui-audit-growth.test.js | a log with gaps that grows while it is walked: Next sees the first snapshot once, Prev reaches every new row once | `ported_gateway_core::audit_growth_prev_preserves_boundaries_and_gap_log_walks_never_repeat_or_skip_new_rows` |
+| ui-audit-growth.test.js | a real daemon, a kind and a search, rows arriving all the time: both directions, no row twice, none skipped | `ported_gateway_core::audit_growth_real_daemon_kind_search_snapshot_and_reverse_walk_reach_every_matching_append` |
+| ui-audit-paging.test.js | the fixture wrote the log it claims to | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the daemon: a bare limit is the tail it always was | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
 | ui-audit-paging.test.js | the daemon: kind filters before the limit | `tests::control::audit_paging_filters_kind_before_the_limit_and_walks_both_ways` |
-| ui-audit-paging.test.js | the daemon: before and after walk the whole log, each row once | not yet ported |
-| ui-audit-paging.test.js | the daemon: paging parameters are whole numbers in range or refused | not yet ported |
-| ui-audit-paging.test.js | the daemon: a kind-filtered tail is bounded at 500 even with no before or after | not yet ported |
-| ui-audit-paging.test.js | the daemon: the unfiltered tail keeps its old reading of limit | not yet ported |
-| ui-audit-paging.test.js | the CLI: audit tail reads the same tail as before | not yet ported |
-| ui-audit-paging.test.js | the page: a kind walks every row of that kind, newest first, across the whole log | not yet ported |
-| ui-audit-paging.test.js | the page: with no kind the whole log is walkable | not yet ported |
-| ui-audit-paging.test.js | the page: q searches visible fields across the whole log, a page at a time | not yet ported |
-| ui-audit-paging.test.js | the page: q never matches token or placeholder text in a row | not yet ported |
-| ui-audit-paging.test.js | the page: audit cursors and limits are checked like every other list | not yet ported |
-| ui-audit-paging.test.js | the page: without paged=1 the audit route is unchanged | not yet ported |
-| ui-complete-lists.test.js | fetchAll reads every row of a list longer than 50 pages of 200 | not yet ported |
-| ui-complete-lists.test.js | 32 tripwire rules: the list the page shows pages and searches; the snapshot has all 32 | not yet ported |
+| ui-audit-paging.test.js | the daemon: before and after walk the whole log, each row once | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the daemon: paging parameters are whole numbers in range or refused | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the daemon: a kind-filtered tail is bounded at 500 even with no before or after | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the daemon: the unfiltered tail keeps its old reading of limit | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the CLI: audit tail reads the same tail as before | av-cli (CLI audit-tail rendering against the daemon) |
+| ui-audit-paging.test.js | the page: a kind walks every row of that kind, newest first, across the whole log | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the page: with no kind the whole log is walkable | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the page: q searches visible fields across the whole log, a page at a time | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the page: q never matches token or placeholder text in a row | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the page: audit cursors and limits are checked like every other list | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-audit-paging.test.js | the page: without paged=1 the audit route is unchanged | `ported_gateway_core::audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log` |
+| ui-complete-lists.test.js | fetchAll reads every row of a list longer than 50 pages of 200 | `ported_gateway_core::complete_lists_read_more_than_fifty_pages_of_two_hundred_and_all_thirty_two_rules` |
+| ui-complete-lists.test.js | 32 tripwire rules: the list the page shows pages and searches; the snapshot has all 32 | `ported_gateway_core::complete_lists_read_more_than_fifty_pages_of_two_hundred_and_all_thirty_two_rules` |
 | ui-dist-serving.test.js | the policy is exactly the strict one, with nothing inline allowed | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | with a session, / is the built index.html under the strict policy and no-store | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | each allowlisted asset is served with its exact type, no-store and the strict policy | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | assets need the session cookie, as the page does | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | traversal, encoded slashes, backslashes and dot segments are all 404 | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
-| ui-dist-serving.test.js | a path is routed only as it arrived: the literal / and literal asset names still work | not yet ported; production mismatch, fix pending: absolute-form target is routed as index; preserved 404 regression `ported_gateway_core::dist_absolute_form_target_is_never_routed_as_literal_index` (temporarily ignored); literal-path controls: `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
+| ui-dist-serving.test.js | a path is routed only as it arrived: the literal / and literal asset names still work | `ported_gateway_core::dist_absolute_form_target_is_never_routed_as_literal_index`; production parity fixed by 173e82c; literal-path controls: `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | literalPath: only a path the parser leaves as it is, with no dot segment or encoded separator | `ported_gateway_core::dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts` |
 | ui-dist-serving.test.js | dotfiles, unlisted types, nested files and symlinks are never served | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | only GET serves an asset | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
@@ -1195,15 +1197,15 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | ui-dist-serving.test.js | no response the server makes allows unsafe-inline once the bundle is there | `ported_gateway_core::dist_serving_exact_bytes_headers_cookie_guard_raw_path_refusals_and_startup_memory_snapshot` |
 | ui-dist-serving.test.js | U2: with no dist/index.html the server refuses to start and names npm run build:ui | `ported_gateway_core::dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_and_indexes_and_missing_bundles` |
 | ui-dist-serving.test.js | U2: the shipped dist is what the server loads by default | `ported_gateway_core::dist_literal_path_and_load_allowlist_and_shipped_manifest_have_exact_contracts` |
-| ui-paging.test.js | without paged=1 every list route answers exactly as it always has | not yet ported |
-| ui-paging.test.js | each list pages through every item once, in its documented order, and back | not yet ported |
-| ui-paging.test.js | pending pages newest first, with both kinds of decision | not yet ported |
-| ui-paging.test.js | an object answer keeps its other fields beside the page | not yet ported |
-| ui-paging.test.js | limit is a whole number from 1 to 200; anything else is AV_BAD_LIMIT | not yet ported |
-| ui-paging.test.js | a cursor that was not made by this server for this list and filter is AV_BAD_CURSOR | not yet ported |
-| ui-paging.test.js | q is a case-insensitive match over visible fields, and filters before paging | not yet ported |
-| ui-paging.test.js | q never matches a token, a placeholder or a value, even one the daemon leaked | not yet ported |
-| ui-paging.test.js | the cursors in an answer survive the scrub that every answer passes | not yet ported |
+| ui-paging.test.js | without paged=1 every list route answers exactly as it always has | `ported_gateway_core::ui_paging_every_list_has_opt_in_envelope_exact_order_backwards_walk_and_preserved_metadata` |
+| ui-paging.test.js | each list pages through every item once, in its documented order, and back | `ported_gateway_core::ui_paging_every_list_has_opt_in_envelope_exact_order_backwards_walk_and_preserved_metadata` |
+| ui-paging.test.js | pending pages newest first, with both kinds of decision | `ported_gateway_core::ui_paging_every_list_has_opt_in_envelope_exact_order_backwards_walk_and_preserved_metadata` |
+| ui-paging.test.js | an object answer keeps its other fields beside the page | `ported_gateway_core::ui_paging_every_list_has_opt_in_envelope_exact_order_backwards_walk_and_preserved_metadata` |
+| ui-paging.test.js | limit is a whole number from 1 to 200; anything else is AV_BAD_LIMIT | `ported_gateway_core::ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages` |
+| ui-paging.test.js | a cursor that was not made by this server for this list and filter is AV_BAD_CURSOR | `ported_gateway_core::ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages` |
+| ui-paging.test.js | q is a case-insensitive match over visible fields, and filters before paging | `ported_gateway_core::ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages` |
+| ui-paging.test.js | q never matches a token, a placeholder or a value, even one the daemon leaked | `ported_gateway_core::ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages` |
+| ui-paging.test.js | the cursors in an answer survive the scrub that every answer passes | `ported_gateway_core::ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages` |
 | ui.test.js | the relying party id is a domain, not an IP literal | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
 | ui.test.js | arriving by IP is redirected to the domain the authenticator accepts | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |
 | ui.test.js | the launch link works exactly once | `ported_gateway_core::ui_claiming_http_guards_metadata_and_docs_have_ordinary_read_controls_without_enrollment` |

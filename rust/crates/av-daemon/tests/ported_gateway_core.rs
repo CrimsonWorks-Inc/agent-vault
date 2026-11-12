@@ -20011,6 +20011,7 @@ struct UiContractFixture {
     ui: av_daemon::ui::server::UiServer,
     cookie: String,
     auth: ported_common::FakeAuthenticator,
+    audit_rows: Arc<Mutex<Option<Vec<Value>>>>,
     replies: Arc<Mutex<std::collections::HashMap<String, (u16, Value)>>>,
     calls: Arc<Mutex<Vec<(String, Value)>>>,
     peer: tokio::task::JoinHandle<()>,
@@ -20027,11 +20028,14 @@ impl UiContractFixture {
         let calls: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
         let queries: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
         let captured_queries = queries.clone();
+        let audit_rows: Arc<Mutex<Option<Vec<Value>>>> = Arc::default();
+        let dynamic_audit = audit_rows.clone();
         let responses = replies.clone();
         let observed = calls.clone();
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let peer = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                let dynamic_audit = dynamic_audit.clone();
                 let captured_queries = captured_queries.clone();
                 let responses = responses.clone();
                 let observed = observed.clone();
@@ -20039,6 +20043,7 @@ impl UiContractFixture {
                 tokio::spawn(async move {
                     let svc = hyper::service::service_fn(
                         move |req: hyper::Request<hyper::body::Incoming>| {
+                            let dynamic_audit = dynamic_audit.clone();
                             let captured_queries = captured_queries.clone();
                             let responses = responses.clone();
                             let observed = observed.clone();
@@ -20046,6 +20051,13 @@ impl UiContractFixture {
                             async move {
                                 use base64::Engine;
                                 let key = format!("{} {}", req.method(), req.uri().path());
+                                let query: std::collections::HashMap<String, String> =
+                                    url::form_urlencoded::parse(
+                                        req.uri().query().unwrap_or("").as_bytes(),
+                                    )
+                                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                    .collect();
+                                let full_key = format!("{key}?{}", req.uri().query().unwrap_or(""));
                                 captured_queries
                                     .lock()
                                     .unwrap()
@@ -20066,12 +20078,46 @@ impl UiContractFixture {
                                         200,
                                         json!({"challengeId":format!("fixture-challenge-{n}"),"challenge":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([n as u8;32]),"allowCredentials":[{"id":fix_presence_record(42)["credentialId"],"type":"public-key"}],"rpId":"localhost"}),
                                     )
+                                } else if key == "GET /v1/audit"
+                                    && dynamic_audit.lock().unwrap().is_some()
+                                {
+                                    let locked = dynamic_audit.lock().unwrap();
+                                    let rows = locked.as_ref().unwrap();
+                                    let before =
+                                        query.get("before").and_then(|s| s.parse::<u64>().ok());
+                                    let after =
+                                        query.get("after").and_then(|s| s.parse::<u64>().ok());
+                                    let limit = query
+                                        .get("limit")
+                                        .and_then(|s| s.parse::<usize>().ok())
+                                        .unwrap_or(30);
+                                    let mut found: Vec<Value> = rows
+                                        .iter()
+                                        .filter(|r| {
+                                            before.is_none_or(|b| r["seq"].as_u64().unwrap() < b)
+                                                && after
+                                                    .is_none_or(|a| r["seq"].as_u64().unwrap() > a)
+                                                && query.get("kind").is_none_or(|k| {
+                                                    r["kind"] == *k
+                                                        || r["kind"]
+                                                            .as_str()
+                                                            .unwrap()
+                                                            .starts_with(&format!("{k}."))
+                                                })
+                                        })
+                                        .cloned()
+                                        .collect();
+                                    if after.is_some() {
+                                        found.truncate(limit);
+                                    } else if found.len() > limit {
+                                        found.drain(..found.len() - limit);
+                                    }
+                                    (200, json!(found))
                                 } else {
                                     observed.lock().unwrap().push((key.clone(), body));
-                                    responses
-                                        .lock()
-                                        .unwrap()
-                                        .get(&key)
+                                    let map = responses.lock().unwrap();
+                                    map.get(&full_key)
+                                        .or_else(|| map.get(&key))
                                         .cloned()
                                         .unwrap_or((200, json!({"ok":true})))
                                 };
@@ -20122,6 +20168,7 @@ impl UiContractFixture {
         )
         .await;
         assert_eq!(s, 302);
+        assert!(header(&h, "set-cookie").contains(&format!("Max-Age={}", idle_ms / 1000)));
         let cookie = h
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case("set-cookie"))
@@ -20149,6 +20196,7 @@ impl UiContractFixture {
             calls,
             peer,
             queries,
+            audit_rows,
             token,
             ph,
         }
@@ -20972,13 +21020,6 @@ async fn ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_recor
             } else {
                 ui_register_replacement(&w, &next).await
             };
-            let expected = if shape == "unsigned" {
-                401
-            } else if shape == "self signed" {
-                401
-            } else {
-                409
-            };
             match shape {
                 "unsigned" => {}
                 "self signed" => {
@@ -20999,7 +21040,11 @@ async fn ui_rotation_refuses_unsigned_self_signed_unregistered_and_changed_recor
             if shape == "self signed" {
                 assert_ne!(s, 200, "{v}");
             } else {
-                assert_eq!(s, expected, "{shape}: {v}");
+                assert_eq!(
+                    s,
+                    if shape == "unsigned" { 401 } else { 409 },
+                    "{shape}: {v}"
+                );
             }
             assert_eq!(
                 w.f.shared
@@ -21338,7 +21383,6 @@ async fn dist_loader_and_server_refuse_symlinked_or_non_directory_roots_assets_a
     .unwrap();
 }
 #[tokio::test]
-#[ignore = "production mismatch: absolute-form UI target is normalized to literal index; daemon fix pending"]
 async fn dist_absolute_form_target_is_never_routed_as_literal_index() {
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         let u = UiContractFixture::new(60000).await;
@@ -21584,4 +21628,1350 @@ async fn ui_presence_key_can_rotate_without_passphrase_but_never_by_an_unsigned_
     })
     .await
     .unwrap();
+}
+async fn paging_contract_fixture() -> UiContractFixture {
+    let u = UiContractFixture::new(60000).await;
+    let mut creds:Vec<Value>=(0..61).rev().map(|i|json!({"id":format!("cred_{i:03}"),"slug":format!("svc-{i:03}"),"kind":"http","connector":{"host":format!("h{i}.test")}})).collect();
+    creds.push(json!({"id":"cred_leaky","slug":"zz-leaky","kind":"http","label":format!("uses {} and {}",u.token,u.ph),"value":"sk-test-QORACLEVALUE00112233","secret":"sk-test-QORACLEVALUE00112233","token":u.token,"placeholder":u.ph}));
+    u.set("GET /v1/credentials", 200, json!(creds));
+    u.set("GET /v1/sessions",200,json!((0..75).rev().map(|i|json!({"id":format!("s_{i:03}"),"label":if i==7{format!("agent {}",u.token)}else{format!("agent-{}",i%9)},"state":if i%5==0{"revoked"}else{"active"},"created_at":if i%11==0{Value::Null}else{json!(format!("2026-10-{:02}T00:00:00.000Z",1+i%20))},"creds":[{"slug":format!("svc-{:03}",i%61),"grant_id":format!("g_{i}")}]})).collect::<Vec<_>>()));
+    u.set("GET /v1/approvals",200,json!((0..30).map(|i|json!({"id":format!("ap_{i:03}"),"summary":if i==3{format!("GET /repos?key={}",u.ph)}else{format!("GET /repos/{i}")},"created_at":format!("2026-10-{:02}T01:00:00.000Z",1+i%28),"grant_id":format!("g_{i}"),"reason":null,"preview":null})).collect::<Vec<_>>()));
+    u.set("GET /v1/session-requests",200,json!((0..30).map(|i|json!({"id":format!("sr_{i:03}"),"summary":if i==4{format!("wants {}",u.token)}else{format!("wants svc-{i:03}")},"created_at":format!("2026-10-{:02}T01:00:00.000Z",1+i%28),"agent_reason_untrusted":"please","proposal":{}})).collect::<Vec<_>>()));
+    let tpl:Vec<_>=(0..40).rev().map(|i|json!({"name":format!("tpl-{i:03}"),"version":1,"hash":format!("h{i}"),"creds":[format!("svc-{i:03}")],"summary":"GET only","elevated":[]})).collect();
+    u.set("GET /v1/templates", 200, json!(tpl));
+    u.set("GET /v1/templates?name=tpl-001", 200, tpl[0].clone());
+    u.set("GET /v1/listeners",200,json!((0..12).rev().map(|i|json!({"id":format!("l-{i:03}"),"address":format!("127.0.0.1:{}",7400+i),"surfaces":["gateway"],"state":"configured"})).collect::<Vec<_>>()));
+    let rules:Vec<_>=(0..9).map(|i|json!({"id":format!("rule-{i}"),"codes":["AV_PH_REPLAY"],"threshold":i+1,"window_s":600,"action":"revoke_session"})).collect();
+    u.set(
+        "GET /v1/tripwires",
+        200,
+        json!({"enabled":true,"rules":rules,"rules_saved":true,"defaults":rules[..2]}),
+    );
+    u.set("GET /v1/report/access",200,json!({"generated_at":"2026-11-01T00:00:00Z","since":"2026-10-25T00:00:00Z","complete":true,"credentials":(0..33).rev().map(|i|json!({"slug":format!("svc-{i:03}"),"requests":i,"denials":0})).collect::<Vec<_>>(),"sessions":(0..52).rev().map(|i|json!({"id":format!("s_{i:03}"),"label":format!("agent-{i}"),"state":"active","creds":[format!("svc-{i:03}")],"requests":i,"denials":0,"last_seen_at":if i%6==0{Value::Null}else{json!(format!("2026-10-{:02}T02:00:00.000Z",1+i%25))}})).collect::<Vec<_>>()}));
+    u.set("GET /v1/sessions/detail",200,json!({"session":{"id":"s_001","label":"agent","state":"active"},"grants":(0..45).rev().map(|i|json!({"grant_id":format!("g_{i:03}"),"cred":format!("svc-{:03}",i%15),"state":"active"})).collect::<Vec<_>>(),"activity":{"complete":true,"requests":{"allowed":1,"denied":0,"held":0}}}));
+    u
+}
+fn query_path(path: &str, params: &str) -> String {
+    format!(
+        "{path}{}{params}",
+        if path.contains('?') { "&" } else { "?" }
+    )
+}
+async fn walk_ui_pages(u: &UiContractFixture, path: &str, limit: usize) -> Vec<Value> {
+    let mut pages = vec![];
+    let mut cursor = Value::Null;
+    for _ in 0..500 {
+        let suffix = cursor
+            .as_str()
+            .map(|s| format!("&cursor={s}"))
+            .unwrap_or_default();
+        let (s, p) = u
+            .api(
+                "GET",
+                &query_path(path, &format!("paged=1&limit={limit}{suffix}")),
+                json!({}),
+            )
+            .await;
+        assert_eq!(s, 200, "{path}: {p}");
+        assert!(p["items"].as_array().unwrap().len() <= limit);
+        cursor = p["next_cursor"].clone();
+        pages.push(p);
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert!(cursor.is_null(), "walk did not end");
+    assert!(pages[0]["prev_cursor"].is_null());
+    for i in (1..pages.len()).rev() {
+        let (s, back) = u
+            .api(
+                "GET",
+                &query_path(
+                    path,
+                    &format!(
+                        "paged=1&limit={limit}&cursor={}",
+                        pages[i]["prev_cursor"].as_str().unwrap()
+                    ),
+                ),
+                json!({}),
+            )
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(back["items"], pages[i - 1]["items"]);
+    }
+    pages
+}
+fn key_string(v: &Value, k: &str) -> String {
+    v[k].as_str().unwrap_or("").into()
+}
+#[tokio::test]
+async fn ui_paging_every_list_has_opt_in_envelope_exact_order_backwards_walk_and_preserved_metadata(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(50), async {
+        let u = paging_contract_fixture().await;
+        for (path, field, order, limit) in [
+            ("credentials", "", "creds", 9),
+            ("sessions", "", "sessions", 8),
+            ("templates", "", "templates", 7),
+            ("listeners", "", "listeners", 5),
+            ("tripwires", "rules", "rules", 4),
+            ("report/access", "sessions", "report", 10),
+            ("report/access?list=credentials", "credentials", "creds", 10),
+            ("sessions/detail?sid=s_001", "grants", "detail", 6),
+            ("pending", "", "pending", 11),
+        ] {
+            let (s, plain) = u.api("GET", path, json!({})).await;
+            assert_eq!(s, 200, "{path}: {plain}");
+            let mut expected = if field.is_empty() {
+                plain.as_array().unwrap().clone()
+            } else {
+                plain[field].as_array().unwrap().clone()
+            };
+            let cmp = |a: &Value, b: &Value| {
+                let compare = |k: &str| key_string(a, k).cmp(&key_string(b, k));
+                match order {
+                    "creds" => compare("slug").then_with(|| compare("id")),
+                    "sessions" => compare("created_at")
+                        .reverse()
+                        .then_with(|| compare("id").reverse()),
+                    "templates" => compare("name"),
+                    "listeners" => compare("id"),
+                    "report" => compare("last_seen_at")
+                        .reverse()
+                        .then_with(|| compare("id")),
+                    "detail" => compare("cred").then_with(|| compare("grant_id")),
+                    "pending" => compare("created_at")
+                        .reverse()
+                        .then_with(|| compare("kind"))
+                        .then_with(|| compare("id").reverse()),
+                    _ => std::cmp::Ordering::Equal,
+                }
+            };
+            expected.sort_by(cmp);
+            let pages = walk_ui_pages(&u, path, limit).await;
+            let actual: Vec<Value> = pages
+                .iter()
+                .flat_map(|p| p["items"].as_array().unwrap().clone())
+                .collect();
+            assert_eq!(actual, expected, "{path}");
+            for p in &pages {
+                assert_eq!(p["total"], expected.len());
+            }
+            assert_eq!(
+                u.api("GET", &query_path(path, "limit=5&q=nothing"), json!({}))
+                    .await
+                    .1,
+                plain,
+                "without paged=1 changed {path}"
+            );
+            if field == "rules" {
+                assert_eq!(pages[0]["enabled"], true);
+                assert_eq!(pages[0]["rules_saved"], true);
+                assert_eq!(pages[0]["defaults"], plain["defaults"]);
+                assert!(pages[0].get("rules").is_none());
+            }
+            if order == "report" || field == "credentials" {
+                assert_eq!(pages[0]["generated_at"], plain["generated_at"]);
+                assert_eq!(pages[0]["complete"], true);
+                assert!(pages[0].get("sessions").is_none());
+                assert!(pages[0].get("credentials").is_none());
+            }
+            if field == "grants" {
+                assert_eq!(pages[0]["session"], plain["session"]);
+                assert_eq!(pages[0]["activity"], plain["activity"]);
+            }
+        }
+        assert_eq!(
+            u.api("GET", "report/access?paged=1&list=everything", json!({}))
+                .await
+                .0,
+            400
+        );
+        let one = u
+            .api("GET", "templates?name=tpl-001&paged=1", json!({}))
+            .await
+            .1;
+        assert_eq!(
+            one,
+            u.replies.lock().unwrap()["GET /v1/templates?name=tpl-001"].1
+        );
+        u.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_paging_bad_limits_forged_cross_context_cursors_and_secret_searches_never_become_pages()
+{
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine};
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let u = paging_contract_fixture().await;
+        for limit in [
+            "0", "201", "-1", "1e2", "010", "2.5", "", "abc", "20%30", "1000", "+5", " 5",
+        ] {
+            let q = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("limit", limit)
+                .finish();
+            let (s, v) = u
+                .api("GET", &format!("credentials?paged=1&{q}"), json!({}))
+                .await;
+            assert_eq!(s, 400, "{limit}: {v}");
+            assert_eq!(v["code"], "AV_BAD_LIMIT");
+        }
+        for path in [
+            "credentials?paged=1&limit=5&limit=6",
+            "credentials?paged=yes",
+        ] {
+            assert_eq!(u.api("GET", path, json!({})).await.0, 400);
+        }
+        for (limit, len) in [("1", 1), ("200", 62), ("", 25)] {
+            let q = if limit.is_empty() {
+                String::new()
+            } else {
+                format!("&limit={limit}")
+            };
+            assert_eq!(
+                u.api("GET", &format!("credentials?paged=1{q}"), json!({}))
+                    .await
+                    .1["items"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                len
+            );
+        }
+        let first = u
+            .api("GET", "credentials?paged=1&limit=5", json!({}))
+            .await
+            .1;
+        let good = first["next_cursor"].as_str().unwrap();
+        assert!(good
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
+        assert_eq!(
+            u.api(
+                "GET",
+                &format!("credentials?paged=1&limit=5&cursor={good}"),
+                json!({})
+            )
+            .await
+            .0,
+            200
+        );
+        let bytes = B64.decode(good).unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes[16..]).unwrap();
+        let mut bad = vec![
+            good[..good.len() - 3].into(),
+            good[..20].into(),
+            "AAAA".into(),
+            "not*base64".into(),
+            "%00".into(),
+            B64.encode(br#"{"v":1,"l":"credentials","d":"next","k":["a"]}"#),
+            "A".repeat(3000),
+        ];
+        for (k, v) in [
+            ("k", json!(["svc-040", "cred_040"])),
+            ("l", json!("templates")),
+        ] {
+            let mut changed = parsed.clone();
+            changed[k] = v;
+            let mut forged = bytes[..16].to_vec();
+            forged.extend(serde_json::to_vec(&changed).unwrap());
+            bad.push(B64.encode(forged));
+        }
+        let mut flipped = good.as_bytes().to_vec();
+        flipped[10] = if flipped[10] == b'A' { b'B' } else { b'A' };
+        bad.push(String::from_utf8(flipped).unwrap());
+        bad.push(av_daemon::ui::list_paging::Cursors::new().seal(
+            "credentials",
+            &json!({"q":""}),
+            "next",
+            &[json!("svc-010"), json!("cred_010")],
+        ));
+        for cursor in bad {
+            let q = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("cursor", &cursor)
+                .finish();
+            let (s, v) = u
+                .api(
+                    "GET",
+                    &format!("credentials?paged=1&limit=5&{q}"),
+                    json!({}),
+                )
+                .await;
+            assert_eq!(s, 400, "{cursor}: {v}");
+            assert_eq!(v["code"], "AV_BAD_CURSOR");
+        }
+        for path in [
+            format!("templates?paged=1&limit=5&cursor={good}"),
+            format!("credentials?paged=1&limit=5&q=svc&cursor={good}"),
+            format!("report/access?paged=1&limit=5&list=credentials&cursor={good}"),
+            format!("credentials?cursor={good}"),
+            format!("credentials?paged=1&cursor={good}&cursor={good}"),
+        ] {
+            let (s, v) = u.api("GET", &path, json!({})).await;
+            assert_eq!(s, 400, "{path}: {v}");
+            assert_eq!(v["code"], "AV_BAD_CURSOR");
+        }
+        for (first, other) in [
+            (
+                "sessions/detail?sid=s_001&paged=1&limit=5",
+                "sessions/detail?sid=s_002&paged=1&limit=5",
+            ),
+            (
+                "report/access?paged=1&limit=5&since=7d",
+                "report/access?paged=1&limit=5&since=24h",
+            ),
+        ] {
+            let cursor = u.api("GET", first, json!({})).await.1["next_cursor"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(
+                u.api("GET", &format!("{other}&cursor={cursor}"), json!({}))
+                    .await
+                    .1["code"],
+                "AV_BAD_CURSOR"
+            );
+        }
+        let v = u
+            .api("GET", "credentials?paged=1&limit=3&q=SVC-01", json!({}))
+            .await
+            .1;
+        assert_eq!(v["total"], 10);
+        assert_eq!(
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["slug"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("svc-010"), json!("svc-011"), json!("svc-012")]
+        );
+        let all = walk_ui_pages(&u, "credentials?q=svc-01", 3).await;
+        assert_eq!(
+            all.iter()
+                .flat_map(|p| p["items"].as_array().unwrap())
+                .count(),
+            10
+        );
+        assert_eq!(
+            u.api("GET", "sessions?paged=1&q=svc-060", json!({}))
+                .await
+                .1["total"],
+            1
+        );
+        assert!(!u
+            .api("GET", "pending?paged=1&q=GET%20/repos/1", json!({}))
+            .await
+            .1["items"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            u.api("GET", "templates?paged=1&q=nothing-like-this", json!({}))
+                .await
+                .1["total"],
+            0
+        );
+        let nonce = u.ph.split('.').nth(3).unwrap();
+        for list in [
+            "credentials",
+            "sessions",
+            "pending",
+            "templates",
+            "listeners",
+            "report/access",
+        ] {
+            for needle in [
+                u.token.as_str(),
+                "avs1.",
+                u.ph.as_str(),
+                nonce,
+                "av1.",
+                "sk-test-QORACLEVALUE00112233",
+                "QORACLEVALUE",
+            ] {
+                let q = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("q", needle)
+                    .finish();
+                let (s, v) = u
+                    .api("GET", &format!("{list}?paged=1&{q}"), json!({}))
+                    .await;
+                assert_eq!(s, 200, "{list}: {v}");
+                assert_eq!(v["items"], json!([]), "{list} found secret {needle}");
+                assert_eq!(v["total"], 0);
+            }
+        }
+        let leaky = u
+            .api("GET", "credentials?paged=1&q=zz-leaky", json!({}))
+            .await
+            .1;
+        assert_eq!(leaky["total"], 1);
+        for secret in [&u.token, &u.ph, &"sk-test-QORACLEVALUE00112233".to_owned()] {
+            assert!(!leaky.to_string().contains(secret));
+        }
+        assert!(leaky["items"][0].get("value").is_none());
+        assert!(leaky["items"][0].get("token").is_none());
+        assert_eq!(
+            u.api("GET", "sessions?paged=1&q=s_007", json!({})).await.1["total"],
+            1
+        );
+        assert_eq!(
+            u.api("GET", "pending?paged=1&q=ap_003", json!({})).await.1["total"],
+            1
+        );
+        let next = u.api("GET", "sessions?paged=1&limit=10", json!({})).await.1["next_cursor"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(next.len() >= 40);
+        let (s, v) = u
+            .api(
+                "GET",
+                &format!("sessions?paged=1&limit=10&cursor={next}"),
+                json!({}),
+            )
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(v["items"].as_array().unwrap().len(), 10);
+        u.stop().await;
+    })
+    .await
+    .unwrap();
+}
+fn seqs(rows: &Value) -> Vec<u64> {
+    rows.as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["seq"].as_u64().unwrap())
+        .collect()
+}
+#[tokio::test]
+async fn audit_control_range_bounds_kind_tail_and_ui_walk_search_cursor_guards_preserve_the_whole_log(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        let w = WidenFixture::setup(false).await;
+        let ph = w.f.ph.clone();
+        let token = "avs1.AuditOracleSid.AuditOracleSecret99";
+        w.f.shared
+            .run(move |c| {
+                for i in 0..3300 {
+                    let fields =
+                        json!({"session_id":format!("s_{}",i%1000),"credential_slug":"demo","n":i});
+                    c.vault
+                        .audit_mut()
+                        .unwrap()
+                        .write(
+                            if i % 3 == 0 {
+                                "test.beta"
+                            } else {
+                                "test.alpha"
+                            },
+                            fields.as_object().unwrap().clone(),
+                        )
+                        .unwrap();
+                }
+                c.vault
+                    .audit_mut()
+                    .unwrap()
+                    .write(
+                        "test.alpha",
+                        json!({"session_id":token,"credential_slug":ph,"n":-1})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    )
+                    .unwrap();
+                for i in 0..40 {
+                    c.vault
+                        .audit_mut()
+                        .unwrap()
+                        .write(
+                            "other.gamma",
+                            json!({"session_id":"s_tail","n":3300+i})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        )
+                        .unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        let all = audit_records(&w.f).await;
+        assert!(all.len() > 3340);
+        let alpha: Vec<_> = all
+            .iter()
+            .filter(|r| r["kind"] == "test.alpha")
+            .cloned()
+            .collect();
+        assert!(alpha.len() > 1000);
+        assert!(all.iter().rev().take(30).all(|r| r["kind"] != "test.alpha"));
+        for (limit, count) in [("?limit=20", 20), ("", 30)] {
+            let (s, v) = w.ctl("GET", &format!("/v1/audit{limit}"), json!({})).await;
+            assert_eq!(s, 200);
+            assert_eq!(v, json!(all[all.len() - count..]));
+        }
+        let (s, v) = w
+            .ctl("GET", "/v1/audit?kind=test.alpha&limit=25", json!({}))
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(v, json!(alpha[alpha.len() - 25..]));
+        let (s, v) = w
+            .ctl(
+                "GET",
+                "/v1/audit?kind=test&limit=500&before=999999",
+                json!({}),
+            )
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(v.as_array().unwrap().len(), 500);
+        assert!(v
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"].as_str().unwrap().starts_with("test.")));
+        for kind in [None, Some("test.alpha")] {
+            let expected = if kind.is_some() {
+                alpha.clone()
+            } else {
+                all.clone()
+            };
+            let suffix = kind.map(|k| format!("&kind={k}")).unwrap_or_default();
+            for after in [false, true] {
+                let mut boundary = if after { 0 } else { 9_007_199_254_740_991 };
+                let mut seen = vec![];
+                for _ in 0..100 {
+                    let (s, v) = w
+                        .ctl(
+                            "GET",
+                            &format!(
+                                "/v1/audit?{}={boundary}&limit=137{suffix}",
+                                if after { "after" } else { "before" }
+                            ),
+                            json!({}),
+                        )
+                        .await;
+                    assert_eq!(s, 200, "{v}");
+                    let rows = v.as_array().unwrap();
+                    if rows.is_empty() {
+                        break;
+                    }
+                    if after {
+                        boundary = rows.last().unwrap()["seq"].as_u64().unwrap();
+                        seen.extend(rows.clone());
+                    } else {
+                        boundary = rows[0]["seq"].as_u64().unwrap();
+                        let mut older = rows.clone();
+                        older.extend(seen);
+                        seen = older;
+                    }
+                }
+                assert_eq!(seen, expected, "{kind:?}, after={after}");
+            }
+        }
+        for q in [
+            "before=10&limit=0",
+            "before=10&limit=501",
+            "before=10&limit=1.5",
+            "before=10&limit=1e2",
+            "before=10&limit=",
+            "before=-1",
+            "before=abc",
+            "before=1.5",
+            "before=",
+            "after=x",
+            "before=5&after=1",
+            "kind=../../v1/credentials",
+            "kind=Test.Alpha",
+            "kind=",
+        ] {
+            let (s, v) = w.ctl("GET", &format!("/v1/audit?{q}"), json!({})).await;
+            assert_eq!(s, 403, "{q}: {v}");
+            assert_eq!(v["code"], "AV_POLICY_DENIED");
+            assert_eq!(v["rule"], "audit_range");
+        }
+        assert_eq!(
+            w.ctl("GET", "/v1/audit?before=10&limit=500", json!({}))
+                .await
+                .0,
+            200
+        );
+        for limit in [
+            "1000000000",
+            "501",
+            "Infinity",
+            "0",
+            "-1",
+            "1e3",
+            "2.5",
+            "",
+            "x",
+            "0500",
+        ] {
+            let q = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("limit", limit)
+                .finish();
+            let (s, v) = w
+                .ctl("GET", &format!("/v1/audit?kind=test.alpha&{q}"), json!({}))
+                .await;
+            assert_eq!(s, 403, "{limit}: {v}");
+            assert_eq!(v["rule"], "audit_range");
+        }
+        for (query, n) in [("kind=test.alpha&limit=500", 500), ("kind=test.alpha", 30)] {
+            assert_eq!(
+                w.ctl("GET", &format!("/v1/audit?{query}"), json!({}))
+                    .await
+                    .1,
+                json!(alpha[alpha.len() - n..])
+            );
+        }
+        assert_eq!(
+            w.ctl("GET", "/v1/audit?limit=1000000000", json!({}))
+                .await
+                .1,
+            json!(all)
+        );
+        let (s, nonnum) = w.ctl("GET", "/v1/audit?limit=x", json!({})).await;
+        assert_eq!(s, 200);
+        assert_eq!(nonnum, json!(all));
+        for (query, expected, limit) in [
+            (
+                "audit?kind=test.alpha",
+                alpha
+                    .iter()
+                    .rev()
+                    .map(|r| r["seq"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                200,
+            ),
+            (
+                "audit",
+                all.iter()
+                    .rev()
+                    .map(|r| r["seq"].as_u64().unwrap())
+                    .collect(),
+                200,
+            ),
+            (
+                "audit?kind=test.alpha&q=S_5",
+                alpha
+                    .iter()
+                    .rev()
+                    .filter(|r| {
+                        r["session_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains("s_5")
+                    })
+                    .map(|r| r["seq"].as_u64().unwrap())
+                    .collect(),
+                7,
+            ),
+        ] {
+            let mut pages = vec![];
+            let mut cursor = Value::Null;
+            for _ in 0..1000 {
+                let extra = cursor
+                    .as_str()
+                    .map(|s| format!("&cursor={s}"))
+                    .unwrap_or_default();
+                let (s, v) = w
+                    .api(
+                        "GET",
+                        &query_path(query, &format!("paged=1&limit={limit}{extra}")),
+                        json!({}),
+                    )
+                    .await;
+                assert_eq!(s, 200, "{v}");
+                cursor = v["next_cursor"].clone();
+                pages.push(v);
+                if cursor.is_null() {
+                    break;
+                }
+            }
+            assert!(cursor.is_null());
+            let actual: Vec<_> = pages.iter().flat_map(|p| seqs(&p["items"])).collect();
+            assert_eq!(actual, expected, "{query}");
+            for i in (1..pages.len()).rev() {
+                let (s, v) = w
+                    .api(
+                        "GET",
+                        &query_path(
+                            query,
+                            &format!(
+                                "paged=1&limit={limit}&cursor={}",
+                                pages[i]["prev_cursor"].as_str().unwrap()
+                            ),
+                        ),
+                        json!({}),
+                    )
+                    .await;
+                assert_eq!(s, 200);
+                assert_eq!(v["items"], pages[i - 1]["items"]);
+            }
+        }
+        let ph = &w.f.ph;
+        let nonce = ph.split('.').nth(3).unwrap();
+        for needle in [
+            token,
+            "AuditOracleSecret99",
+            "avs1.",
+            ph.as_str(),
+            nonce,
+            "av1.",
+        ] {
+            let q = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("q", needle)
+                .finish();
+            let (s, v) = w.api("GET", &format!("audit?paged=1&{q}"), json!({})).await;
+            assert_eq!(s, 200);
+            assert_eq!(v["items"], json!([]), "{needle}");
+        }
+        let (s, first) = w
+            .api("GET", "audit?paged=1&kind=test.alpha&limit=25", json!({}))
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(first["items"].as_array().unwrap().len(), 25);
+        assert!(first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"] == "test.alpha"));
+        assert!(!first.to_string().contains(token));
+        assert!(!first.to_string().contains(ph));
+        let cursor = first["next_cursor"].as_str().unwrap();
+        for path in [
+            format!("audit?paged=1&kind=test.beta&limit=25&cursor={cursor}"),
+            format!("audit?paged=1&limit=25&cursor={cursor}"),
+            format!("audit?paged=1&kind=test.alpha&q=s_1&limit=25&cursor={cursor}"),
+            format!("credentials?paged=1&limit=25&cursor={cursor}"),
+            format!(
+                "audit?paged=1&kind=test.alpha&limit=25&cursor={}",
+                &cursor[..cursor.len() - 2]
+            ),
+            format!("audit?kind=test.alpha&limit=25&cursor={cursor}"),
+        ] {
+            let (s, v) = w.api("GET", &path, json!({})).await;
+            assert_eq!(s, 400, "{path}: {v}");
+            assert_eq!(v["code"], "AV_BAD_CURSOR");
+        }
+        for limit in ["0", "201", "x"] {
+            assert_eq!(
+                w.api("GET", &format!("audit?paged=1&limit={limit}"), json!({}))
+                    .await
+                    .1["code"],
+                "AV_BAD_LIMIT"
+            );
+        }
+        let toward = av_daemon::ui::server::toward_page;
+        assert_eq!(
+            w.api("GET", "audit?limit=5", json!({})).await.1,
+            toward(&json!(all[all.len() - 5..]), 0)
+        );
+        let beta: Vec<_> = all
+            .iter()
+            .filter(|r| r["kind"] == "test.beta")
+            .cloned()
+            .collect();
+        assert_eq!(
+            seqs(
+                &w.api("GET", "audit?kind=test.beta&limit=4", json!({}))
+                    .await
+                    .1
+            ),
+            beta[beta.len() - 4..]
+                .iter()
+                .map(|r| r["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        );
+        let (s, v) = w
+            .api("GET", "audit?kind=test.alpha&limit=100000", json!({}))
+            .await;
+        assert_eq!(s, 200);
+        assert_eq!(
+            seqs(&v),
+            alpha[alpha.len() - 500..]
+                .iter()
+                .map(|r| r["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        );
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+async fn ui_audit_page(u: &UiContractFixture, cursor: &Value, limit: usize) -> Value {
+    let extra = cursor
+        .as_str()
+        .map(|s| format!("&cursor={s}"))
+        .unwrap_or_default();
+    let (s, v) = u
+        .api(
+            "GET",
+            &format!("audit?paged=1&limit={limit}{extra}"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    v
+}
+#[tokio::test]
+async fn audit_growth_prev_preserves_boundaries_and_gap_log_walks_never_repeat_or_skip_new_rows() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let u = UiContractFixture::new(60000).await;
+        *u.audit_rows.lock().unwrap() = Some(
+            (1..=10)
+                .map(|n| json!({"seq":n,"kind":"test.review"}))
+                .collect(),
+        );
+        let first = ui_audit_page(&u, &Value::Null, 3).await;
+        assert_eq!(seqs(&first["items"]), vec![10, 9, 8]);
+        let second = ui_audit_page(&u, &first["next_cursor"], 3).await;
+        assert_eq!(seqs(&second["items"]), vec![7, 6, 5]);
+        u.audit_rows
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .push(json!({"seq":11,"kind":"test.review"}));
+        let old = ui_audit_page(&u, &second["prev_cursor"], 3).await;
+        assert_eq!(seqs(&old["items"]), vec![10, 9, 8]);
+        assert!(old["prev_cursor"].is_string());
+        let newest = ui_audit_page(&u, &old["prev_cursor"], 3).await;
+        assert_eq!(seqs(&newest["items"]), vec![11]);
+        assert!(newest["prev_cursor"].is_null());
+        assert_eq!(
+            seqs(&ui_audit_page(&u, &newest["next_cursor"], 3).await["items"]),
+            vec![10, 9, 8]
+        );
+        *u.audit_rows.lock().unwrap() = Some(
+            (0..61)
+                .map(|i| json!({"seq":i*3,"kind":"test.review","session_id":format!("s_{i}")}))
+                .collect(),
+        );
+        let initial: Vec<u64> = (0..61).rev().map(|i| i * 3).collect();
+        let mut page = ui_audit_page(&u, &Value::Null, 7).await;
+        let mut seen = seqs(&page["items"]);
+        while !page["next_cursor"].is_null() {
+            {
+                let mut guard = u.audit_rows.lock().unwrap();
+                let rows = guard.as_mut().unwrap();
+                let seq = rows.last().unwrap()["seq"].as_u64().unwrap() + 3;
+                rows.push(json!({"seq":seq,"kind":"test.review"}));
+            }
+            page = ui_audit_page(&u, &page["next_cursor"], 7).await;
+            seen.extend(seqs(&page["items"]));
+        }
+        assert_eq!(seen, initial);
+        let bottom = seqs(&page["items"])[0];
+        let mut back = vec![];
+        for _ in 0..40 {
+            if page["prev_cursor"].is_null() {
+                break;
+            }
+            {
+                let mut guard = u.audit_rows.lock().unwrap();
+                let rows = guard.as_mut().unwrap();
+                let seq = rows.last().unwrap()["seq"].as_u64().unwrap() + 3;
+                rows.push(json!({"seq":seq,"kind":"test.review"}));
+            }
+            page = ui_audit_page(&u, &page["prev_cursor"], 7).await;
+            let mut newer = seqs(&page["items"]);
+            newer.extend(back);
+            back = newer;
+        }
+        assert!(page["prev_cursor"].is_null());
+        assert!(back.windows(2).all(|p| p[0] > p[1]));
+        let expected: Vec<_> = {
+            let guard = u.audit_rows.lock().unwrap();
+            let rows = guard.as_ref().unwrap();
+            assert_eq!(back[0], rows.last().unwrap()["seq"].as_u64().unwrap());
+            rows.iter()
+                .rev()
+                .map(|r| r["seq"].as_u64().unwrap())
+                .filter(|s| *s > bottom && *s <= back[0])
+                .collect()
+        };
+        assert_eq!(back, expected);
+        u.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn audit_growth_real_daemon_kind_search_snapshot_and_reverse_walk_reach_every_matching_append(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let w = WidenFixture::setup(false).await;
+        w.f.shared
+            .run(|c| {
+                for i in 0..400 {
+                    c.vault
+                        .audit_mut()
+                        .unwrap()
+                        .write(
+                            if i % 4 == 3 {
+                                "test.beta"
+                            } else {
+                                "test.alpha"
+                            },
+                            json!({"session_id":format!("s_{}{}",if i%3==0{1}else{2},i)})
+                                .as_object()
+                                .unwrap()
+                                .clone(),
+                        )
+                        .unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        let matching = |rows: Vec<Value>| -> Vec<u64> {
+            rows.iter()
+                .rev()
+                .filter(|r| {
+                    r["kind"] == "test.alpha"
+                        && r["session_id"].as_str().unwrap_or("").contains("s_1")
+                })
+                .map(|r| r["seq"].as_u64().unwrap())
+                .collect()
+        };
+        let initial = matching(audit_records(&w.f).await);
+        assert!(initial.len() > 60);
+        let mut cursor = Value::Null;
+        let mut seen = vec![];
+        let mut page;
+        let mut next_i = 400;
+        loop {
+            let extra = cursor
+                .as_str()
+                .map(|s| format!("&cursor={s}"))
+                .unwrap_or_default();
+            let (s, v) = w
+                .api(
+                    "GET",
+                    &format!("audit?paged=1&kind=test.alpha&q=S_1&limit=6{extra}"),
+                    json!({}),
+                )
+                .await;
+            assert_eq!(s, 200, "{v}");
+            seen.extend(seqs(&v["items"]));
+            cursor = v["next_cursor"].clone();
+            page = v;
+            if cursor.is_null() {
+                break;
+            }
+            let start = next_i;
+            w.f.shared
+                .run(move |c| {
+                    for i in start..start + 5 {
+                        c.vault
+                            .audit_mut()
+                            .unwrap()
+                            .write(
+                                if i % 4 == 3 {
+                                    "test.beta"
+                                } else {
+                                    "test.alpha"
+                                },
+                                json!({"session_id":format!("s_{}{}",if i%3==0{1}else{2},i)})
+                                    .as_object()
+                                    .unwrap()
+                                    .clone(),
+                            )
+                            .unwrap();
+                    }
+                })
+                .await
+                .unwrap();
+            next_i += 5;
+        }
+        assert_eq!(seen, initial);
+        let bottom = seqs(&page["items"])[0];
+        let mut back = vec![];
+        for _ in 0..100 {
+            if page["prev_cursor"].is_null() {
+                break;
+            }
+            let (s, v) = w
+                .api(
+                    "GET",
+                    &format!(
+                        "audit?paged=1&kind=test.alpha&q=S_1&limit=6&cursor={}",
+                        page["prev_cursor"].as_str().unwrap()
+                    ),
+                    json!({}),
+                )
+                .await;
+            assert_eq!(s, 200);
+            let mut newer = seqs(&v["items"]);
+            newer.extend(back);
+            back = newer;
+            page = v;
+        }
+        assert!(page["prev_cursor"].is_null());
+        let all = matching(audit_records(&w.f).await);
+        assert_eq!(
+            back,
+            all.iter()
+                .copied()
+                .filter(|s| *s > bottom)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(seqs(&page["items"])[0], all[0]);
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+async fn readonly_ui_over(f: Fixture) -> WidenFixture {
+    let ui = av_daemon::ui::server::UiServer::start(
+        &f._dir.path().join("control.sock"),
+        av_daemon::ui::server::UiServerOptions {
+            port: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let url = url::Url::parse(&ui.url()).unwrap();
+    let (s, h, _) = loopback_http_host(
+        ui.bound_port(),
+        "localhost",
+        "GET",
+        &format!("{}?{}", url.path(), url.query().unwrap()),
+        vec![],
+        vec![],
+    )
+    .await;
+    assert_eq!(s, 302);
+    let cookie = header(&h, "set-cookie").split(';').next().unwrap().into();
+    WidenFixture {
+        f,
+        ui,
+        cookie,
+        auth: ported_common::FakeAuthenticator::new(7),
+    }
+}
+#[tokio::test]
+async fn complete_lists_read_more_than_fifty_pages_of_two_hundred_and_all_thirty_two_rules() {
+    tokio::time::timeout(std::time::Duration::from_secs(600),async{
+ let f=Fixture::new(&["header:x-key"]).await;let rules:Vec<_>=(0..32).map(|i|json!({"id":format!("rule-{i:02}"),"codes":["AV_PH_REPLAY"],"threshold":1,"window_s":60,"action":"revoke_session"})).collect();let stored=rules.clone();let f=control_session_restart_after_seed(f,move|dir|{ported_common::seed_complete_sessions(dir,10000);ported_common::seed_tripwires(dir,&json!({"enabled":false,"rules":stored}));}).await;let w=readonly_ui_over(f).await;let mut cursor=Value::Null;let mut ids=std::collections::HashSet::new();let mut calls=0;loop{let extra=cursor.as_str().map(|s|format!("&cursor={s}")).unwrap_or_default();let(s,v)=w.api("GET",&format!("sessions?paged=1&limit=200{extra}"),json!({})).await;assert_eq!(s,200,"{v}");calls+=1;eprintln!("complete-list page {calls}");assert_eq!(v["total"],10001);for row in v["items"].as_array().unwrap(){assert!(ids.insert(row["id"].as_str().unwrap().to_owned()));assert!(!row.to_string().contains(SECRET));}cursor=v["next_cursor"].clone();if cursor.is_null(){break;}assert!(calls<100);}assert_eq!(ids.len(),10001);assert_eq!(calls,51);let(s,first)=w.api("GET","tripwires?paged=1&limit=25",json!({})).await;assert_eq!(s,200);assert_eq!(first["total"],32);assert_eq!(first["items"],json!(rules[..25]));let(s,next)=w.api("GET",&format!("tripwires?paged=1&limit=25&cursor={}",first["next_cursor"].as_str().unwrap()),json!({})).await;assert_eq!(s,200);assert_eq!(next["items"],json!(rules[25..]));assert!(next["next_cursor"].is_null());assert_eq!(w.api("GET","tripwires?paged=1&limit=25&q=rule-07",json!({})).await.1["items"],json!([rules[7]]));let(s,full)=w.api("GET","tripwires",json!({})).await;assert_eq!(s,200);assert_eq!(full["rules"],json!(rules));assert_eq!(w.f.get().await.status,200);w.stop().await;
+ }).await.unwrap();
+}
+#[test]
+fn ui_browser_and_cli_golden_operations_and_narrowing_match_the_rust_server() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/ui-parity/server-browser-v1.json")).unwrap();
+    let mut digested = av_core::operation::DIGESTED
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    digested.sort();
+    assert_eq!(json!(digested), fixture["digested"]);
+    for c in fixture["operations"].as_array().unwrap() {
+        assert_eq!(
+            av_daemon::util::operation_for(c["op"].as_str().unwrap(), &c["params"]).unwrap(),
+            c["expected"],
+            "{}",
+            c["name"]
+        );
+    }
+    for c in fixture["overrides"].as_array().unwrap() {
+        let parsed = av_store::pending::parse_overrides(c["raw"].as_object().unwrap()).unwrap();
+        let parsed = serde_json::to_value(parsed).unwrap();
+        assert_eq!(
+            av_core::operation::canonical_operation(&parsed),
+            av_core::operation::canonical_operation(&c["expected"]),
+            "{}",
+            c["name"]
+        );
+        let mut params = json!({"id":"sr_x","granted":true});
+        for (k, v) in parsed.as_object().unwrap() {
+            params[k] = v.clone();
+        }
+        assert_eq!(
+            av_core::operation::canonical_operation(
+                &av_daemon::util::operation_for("session_request.decide", &params).unwrap()
+            ),
+            av_core::operation::canonical_operation(&c["operation"]),
+            "{}",
+            c["name"]
+        );
+    }
+    let mut keys = av_store::pending::OVERRIDE_KEYS
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    keys.sort();
+    assert_eq!(json!(keys), fixture["override_keys"]);
+}
+async fn integration_ui_change(
+    w: &WidenFixture,
+    track: (&mut std::collections::HashSet<String>, &mut Vec<String>),
+    method: &str,
+    path: &str,
+    op: &str,
+    mut body: Value,
+    bind: Option<Value>,
+) -> Value {
+    let (seen, checked) = track;
+    let key = format!("{method} {}", path.split('?').next().unwrap());
+    seen.insert(key.clone());
+    let params = bind.as_ref().unwrap_or(&body);
+    let proof = w.proof(op, params).await;
+    body["presence"] = proof;
+    let before = audit_records(&w.f)
+        .await
+        .iter()
+        .filter(|r| r["kind"] == "presence.verified")
+        .count();
+    let (s, v) = w.api(method, path, body).await;
+    assert_eq!(s, 200, "{key}: {v}");
+    let after = if key == "POST lock" {
+        assert_eq!(
+            w.ctl("GET", "/v1/lockstate", json!({})).await.1["locked"],
+            true
+        );
+        0
+    } else {
+        audit_records(&w.f)
+            .await
+            .iter()
+            .filter(|r| r["kind"] == "presence.verified")
+            .count()
+    };
+    if av_daemon::ui::server::DAEMON_VERIFIED.contains(&key.as_str()) {
+        assert!(after > before, "daemon did not verify {key}");
+    } else if after != before {
+        // JS counts a lock's cleared audit handle (a negative delta) as truthy too.
+        checked.push(key);
+    }
+    v
+}
+#[tokio::test]
+async fn integration_every_gated_ui_route_binds_the_exact_operation_and_daemon_verification_contract(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(90),async{
+ let w=WidenFixture::new().await;let mut seen=std::collections::HashSet::new();let mut checked=vec![];
+ for slug in ["added","spare","pinned"]{integration_ui_change(&w,(&mut seen,&mut checked),"POST","credentials","cred.add",json!({"slug":slug,"kind":"http","value":"test-fake-added-value-0011223344556677","host":"api.example.test"}),None).await;}
+ integration_ui_change(&w,(&mut seen,&mut checked),"POST","credentials/rotate","cred.rotate",json!({"slug":"spare","value":"test-fake-rotated-value-0011223344556677","mode":"keep","retire_hours":1}),None).await;let scrub=integration_ui_change(&w,(&mut seen,&mut checked),"POST","credentials/scrub","cred.scrub_add",json!({"slug":"spare","pattern":"acme_[A-Za-z0-9]{20}","sample":"token acme_abcdefghijklmnopqrst"}),None).await;let id=scrub.get("id").or_else(||scrub.get("pattern").and_then(|v|v.get("id"))).unwrap().as_str().unwrap();integration_ui_change(&w,(&mut seen,&mut checked),"DELETE",&format!("credentials/scrub?slug=spare&id={id}"),"cred.scrub_remove",json!({}),Some(json!({"slug":"spare","id":id}))).await;
+ integration_ui_change(&w,(&mut seen,&mut checked),"POST","credentials/expiry","cred.expiry_set",json!({"slug":"spare","expires_at":"2031-01-31T00:00:00.000Z"}),None).await;assert_eq!(w.ctl("POST","/v1/credentials/quarantine",json!({"slug":"spare"})).await.0,200);integration_ui_change(&w,(&mut seen,&mut checked),"POST","credentials/release","cred.release",json!({"slug":"spare"}),None).await;
+ let pin_a=format!("sha256/{}=","A".repeat(43));let pin_b=format!("sha256/{}=","B".repeat(43));let pins=vec![pin_a.clone(),pin_b.clone()];w.f.shared.run(move|c|c.vault.set_pins("pinned","api.example.test",&pins).unwrap()).await.unwrap();let q=url::form_urlencoded::Serializer::new(String::new()).append_pair("spki",&pin_a).finish();integration_ui_change(&w,(&mut seen,&mut checked),"DELETE",&format!("credentials/pins?slug=pinned&host=api.example.test&{q}"),"cred.pins_remove",json!({}),Some(json!({"slug":"pinned","host":"api.example.test","spki":pin_a}))).await;assert_eq!(w.f.shared.run(|c|serde_json::to_value(c.vault.find_credential("pinned").unwrap().unwrap()).unwrap()["pins"]["api.example.test"].clone()).await.unwrap(),json!([pin_b]));integration_ui_change(&w,(&mut seen,&mut checked),"DELETE","credentials/pins?slug=pinned&host=api.example.test","cred.pins_remove",json!({}),Some(json!({"slug":"pinned","host":"api.example.test","spki":null}))).await;
+ integration_ui_change(&w,(&mut seen,&mut checked),"POST","templates","template.save",json!({"name":"gh-read","spec":{"cred":"demo","methods":["GET"],"paths":["/repos/**"]}}),None).await;integration_ui_change(&w,(&mut seen,&mut checked),"DELETE","templates?name=gh-read","template.delete",json!({}),Some(json!({"name":"gh-read"}))).await;integration_ui_change(&w,(&mut seen,&mut checked),"POST","tripwires","tripwires.set",json!({"enabled":false}),None).await;
+ let made=integration_ui_change(&w,(&mut seen,&mut checked),"POST","sessions","session.create",json!({"cred":"demo","methods":["GET","POST"],"paths":["/**"],"approval":"each","ttl_hours":1}),None).await;integration_ui_change(&w,(&mut seen,&mut checked),"POST","sessions/narrow","session.narrow",json!({"sid":made["session_id"],"narrow":{"methods":["POST"]}}),None).await;let(s,_,b)=loopback_http_host(w.f.daemon.gateway_port().unwrap(),"127.0.0.1","POST","/p/demo/things",vec![("av-session".into(),made["token"].as_str().unwrap().into()),("authorization".into(),format!("Bearer {}",made["placeholder"].as_str().unwrap())),("content-type".into(),"application/json".into())],br#"{"a":1}"#.to_vec()).await;assert_eq!(s,202,"{}",String::from_utf8_lossy(&b));assert!(w.f.up.hits.lock().unwrap().is_empty());let held:Value=serde_json::from_slice(&b).unwrap();integration_ui_change(&w,(&mut seen,&mut checked),"POST","approvals","approval.approve",json!({"id":held["approval_id"],"granted":true}),None).await;
+ for bulk in [false,true]{let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":["/**"],"reason":if bulk{"two"}else{"one"}})).await;assert_eq!(s,200,"{asked}");if bulk{integration_ui_change(&w,(&mut seen,&mut checked),"POST","pending/decide-many","pending.decide_many",json!({"decisions":[{"kind":"session","id":asked["id"],"granted":false}]}),None).await;}else{integration_ui_change(&w,(&mut seen,&mut checked),"POST","session-requests/decide","session_request.decide",json!({"id":asked["id"],"granted":false}),None).await;}}
+ integration_ui_change(&w,(&mut seen,&mut checked),"DELETE",&format!("sessions?sid={}",made["session_id"].as_str().unwrap()),"session.revoke",json!({}),Some(json!({"sid":made["session_id"]}))).await;integration_ui_change(&w,(&mut seen,&mut checked),"DELETE","credentials?slug=added","cred.remove",json!({}),Some(json!({"slug":"added"}))).await;integration_ui_change(&w,(&mut seen,&mut checked),"POST","touchid/enroll","touchid.enroll",fake_touchid_body(),None).await;integration_ui_change(&w,(&mut seen,&mut checked),"POST","touchid/remove","touchid.remove",json!({}),None).await;integration_ui_change(&w,(&mut seen,&mut checked),"POST","lock","vault.lock",json!({}),None).await;let expected:std::collections::HashSet<String>=av_daemon::ui::server::GATED.iter().filter(|k|**k!="POST presence/rotate").map(|s|(*s).into()).collect();assert_eq!(seen,expected);checked.sort();assert_eq!(checked,vec!["POST approvals","POST lock","POST touchid/enroll","POST touchid/remove"]);assert_eq!(w.ctl("POST","/v1/unlock",json!({"passphrase":WIDEN_PASS})).await.0,200);w.stop().await;
+ }).await.unwrap();
+}
+fn ui_source_text(at: &std::path::Path) -> String {
+    let mut text = String::new();
+    for e in std::fs::read_dir(at).unwrap() {
+        let e = e.unwrap();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().unwrap().is_dir() {
+            if !["fixtures", "test"].contains(&name.as_str()) {
+                text.push_str(&ui_source_text(&e.path()));
+            }
+        } else if (name.ends_with(".js") || name.ends_with(".jsx")) && !name.contains(".test.") {
+            text.push_str(&std::fs::read_to_string(e.path()).unwrap());
+            text.push('\n');
+        }
+    }
+    text
+}
+#[test]
+fn ui_docs_catalog_count_and_every_documented_tool_match_the_rust_mcp_catalog() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let docs = std::fs::read_to_string(root.join("web/src/components/docs/sections.jsx")).unwrap();
+    let all = ui_source_text(&root.join("web/src"));
+    let tools = av_daemon::mcp::tools();
+    let mut names = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    let words = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve",
+    ];
+    for text in [&readme, &all] {
+        let tokens = text
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let counts = tokens
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| {
+                words.contains(&t.as_str())
+                    && (tokens.get(i + 1).is_some_and(|s| s == "tools")
+                        || (tokens.get(i + 1).is_some_and(|s| s == "mcp")
+                            && tokens.get(i + 2).is_some_and(|s| s == "tools")))
+            })
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(counts, vec![words[names.len()]]);
+    }
+    let block = docs
+        .split_once("const MCP_TOOLS = [")
+        .unwrap()
+        .1
+        .split_once("\n]\n")
+        .unwrap()
+        .0;
+    let mut listed = block
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("['vault_")
+                .map(|s| format!("vault_{}", s.split('\'').next().unwrap()))
+        })
+        .collect::<Vec<_>>();
+    listed.sort();
+    assert_eq!(listed, names);
+    assert!(docs.contains("MCP_TOOLS.map(([name, what])"));
+    assert!(docs.contains("<li key={name}>"));
+    assert!(docs.contains("<C>{name}</C>"));
+    for name in &names {
+        assert!(readme.contains(&format!("`{name}`")));
+        assert!(docs.contains(&format!("['{name}', ")));
+    }
+    let mut fix_docs = String::new();
+    for name in [
+        "web/src/components/docs/sections.jsx",
+        "web/src/components/docs/RefusedTable.jsx",
+        "web/src/components/docs/Prose.jsx",
+        "web/src/pages/Docs.jsx",
+    ] {
+        fix_docs.push_str(&std::fs::read_to_string(root.join(name)).unwrap());
+    }
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("src/ui/dist/manifest.json")).unwrap())
+            .unwrap();
+    for entry in manifest.as_object().unwrap().values() {
+        if entry["isEntry"] == true {
+            fix_docs.push_str(
+                &std::fs::read_to_string(
+                    root.join("src/ui/dist")
+                        .join(entry["file"].as_str().unwrap()),
+                )
+                .unwrap(),
+            );
+        }
+    }
+    assert!(!fix_docs.to_lowercase().contains("x-agent-vault-cred"));
+    assert!(!(fix_docs.clone() + &readme).contains("up to a minute"));
+    assert!(!fix_docs.contains("is this one still valid"));
+}
+#[test]
+fn ui_elevated_session_routes_are_both_locally_gated_and_daemon_verified_and_headline_cleaning_strips_bidi(
+) {
+    for key in [
+        "POST sessions",
+        "POST session-requests/decide",
+        "POST pending/decide-many",
+    ] {
+        assert!(av_daemon::ui::server::GATED.contains(&key));
+        assert!(av_daemon::ui::server::DAEMON_VERIFIED.contains(&key));
+    }
+    let hostile="a\u{202a}b\u{202b}c\u{202c}d\u{202d}e\u{202e}f\u{2066}g\u{2067}h\u{2068}i\u{2069}j\u{2028}k\u{2029}l";
+    assert_eq!(av_daemon::notify::clean_headline(hostile), "abcdefghij k l");
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/ui-parity/server-browser-v1.json")).unwrap();
+    for c in fixture["cleaners"].as_array().unwrap() {
+        assert_eq!(
+            av_daemon::notify::clean_headline(c["input"].as_str().unwrap()),
+            c["headline"]
+        );
+    }
+}
+#[tokio::test]
+async fn ui_owner_options_bind_actual_grants_reject_swapped_proofs_and_mark_infinite_and_auto_sessions(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let w=WidenFixture::new().await;let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET","POST"],"reason":"owner options"})).await;assert_eq!(s,200,"{asked}");let id=asked["id"].clone();let wrong=w.proof("session_request.decide",&json!({"id":id,"granted":true,"approval":"each"})).await;assert_eq!(w.api("POST","session-requests/decide",json!({"id":id,"granted":true,"overrides":{"approval":"auto"},"presence":wrong})).await.0,409);assert!(w.ctl("GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().iter().any(|r|r["id"]==id&&r["state"]=="pending"));w.f.shared.run(|c|c.dm.presence_grace_until=av_daemon::util::now_ms()+60000).await.unwrap();let proof=w.proof("session_request.decide",&json!({"id":id,"granted":true,"approval":"auto"})).await;let(s,v)=w.api("POST","session-requests/decide",json!({"id":id,"granted":true,"overrides":{"approval":"auto"},"presence":proof})).await;assert_eq!(s,200,"{v}");assert!(!v.to_string().contains("avs1."));let sid=v["recorded"]["session_id"].as_str().unwrap().to_owned();let grants=w.f.shared.run(move|c|serde_json::to_value(c.vault.grants_for_session(&sid).unwrap()).unwrap()).await.unwrap();assert_eq!(grants[0]["policy"]["approval"],"auto");assert!(audit_records(&w.f).await.iter().any(|r|r["kind"]=="presence.verified"&&r["fresh"]==true&&r["op"]=="session request approval"));w.f.shared.run(|c|c.dm.presence_grace_until=0).await.unwrap();
+ for infinite in [false,true]{let mut body=json!({"label":"ui","grants":[{"cred":"demo","methods":if infinite{json!(["GET"])}else{json!(["GET","POST"])},"paths":["/**"],"budget":5,"approval":if infinite{"on-write"}else{"auto"}}]});if infinite{body["infinite"]=json!(true);}else{body["ttl_hours"]=json!(8);}body["presence"]=w.proof("session.create",&body).await;let(s,made)=w.api("POST","sessions",body).await;assert_eq!(s,200,"{made}");assert_eq!(made["grants"].as_array().unwrap().len(),1);let row=w.api("GET","sessions",json!({})).await.1.as_array().unwrap().iter().find(|r|r["id"]==made["session_id"]).unwrap().clone();if infinite{assert_eq!(made["infinite"],true);assert_eq!(row["infinite"],true);}else{assert_eq!(row["elevated"],json!(["approval_auto_writes"]));}}w.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn ui_pending_preview_keeps_hostile_markup_as_text_and_never_shows_the_routed_placeholder() {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let w = WidenFixture::new().await;
+        let gid = w.f.grant_id.clone();
+        w.f.shared
+            .run(move |c| {
+                c.vault
+                    .narrow_grant(&gid, &json!({"approval":"on-write"}))
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let hostile = "<img src=x onerror=alert(1)>";
+        let r =
+            w.f.send(
+                "POST",
+                "/preview-ui",
+                vec![
+                    ("authorization".into(), format!("Bearer {}", w.f.ph)),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                Some(json!({"title":hostile}).to_string()),
+            )
+            .await;
+        assert_eq!(r.status, 202);
+        assert!(w.f.up.hits.lock().unwrap().is_empty());
+        let raw = w.ctl("GET", "/v1/approvals", json!({})).await.1;
+        let preview = raw[0]["preview"].clone();
+        assert_eq!(preview["method"], "POST");
+        assert!(preview["body"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("onerror"));
+        assert!(!preview.to_string().contains(&w.f.ph));
+        let (s, pending) = w.api("GET", "pending", json!({})).await;
+        assert_eq!(s, 200);
+        let row = pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == "request")
+            .unwrap();
+        assert_eq!(row["preview"]["body"]["text"], preview["body"]["text"]);
+        assert!(row["preview"]["body"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(hostile));
+        w.stop().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn ui_narrowing_every_golden_field_reaches_the_real_grant_and_unreadable_or_unapplied_keys_stay_pending(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(90),async{
+ let w=WidenFixture::new().await;let mut body=json!({"slug":"openai","kind":"openai","value":"test-fake-model-value-0011223344556677","host":"api.openai.com"});body["presence"]=w.proof("cred.add",&body).await;let(s,v)=w.api("POST","credentials",body).await;assert_eq!(s,200,"{v}");let fixture:Value=serde_json::from_str(include_str!("fixtures/ui-parity/server-browser-v1.json")).unwrap();for c in fixture["overrides"].as_array().unwrap().iter().filter(|c|{let n=c["name"].as_str().unwrap();n=="fix-control-page combined narrowing"||n.strip_prefix("narrowing ").and_then(|s|s.parse::<usize>().ok()).is_some_and(|i|i<17)}){let cred=if c["raw"].get("spend_tokens").is_some()||c["raw"].get("spend_usd").is_some(){"openai"}else{"demo"};let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":cred,"methods":["GET","HEAD","POST"],"paths":["/**"],"budget":50,"ttl_minutes":120,"reason":c["name"]})).await;assert_eq!(s,200,"{asked}");let overrides=c["expected"].clone();let mut params=overrides.clone();params["id"]=asked["id"].clone();params["granted"]=json!(true);let proof=w.proof("session_request.decide",&params).await;let(s,v)=w.api("POST","session-requests/decide",json!({"id":asked["id"],"granted":true,"overrides":overrides,"presence":proof})).await;assert_eq!(s,200,"{}: {v}",c["name"]);for(k,value)in overrides.as_object().unwrap(){assert_eq!(av_core::operation::canonical_operation(&v["granted"][k]),av_core::operation::canonical_operation(value),"{} field {k}: {v}",c["name"]);}let sid=v["recorded"]["session_id"].as_str().unwrap().to_owned();let grant=w.f.shared.run(move|core|serde_json::to_value(core.vault.grants_for_session(&sid).unwrap()).unwrap()).await.unwrap();assert_eq!(grant.as_array().unwrap().len(),1);if c["name"]=="fix-control-page combined narrowing"{assert_eq!(grant[0]["policy"]["methods"],json!(["GET"]));assert_eq!(grant[0]["policy"]["paths"],json!(["/user","/user/repos"]));assert_eq!(grant[0]["policy"]["budget"]["limit"],10);}}
+ let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET","POST"],"budget":50,"reason":"refuse bad narrowing"})).await;assert_eq!(s,200);let id=asked["id"].clone();let before=w.ctl("GET","/v1/sessions",json!({})).await.1.as_array().unwrap().len();let unreadable=[("budget",json!({"budget":"abc"})),("max_concurrent",json!({"max_concurrent":"5x"})),("spend_usd",json!({"spend_usd":"Infinity"})),("ttl_minutes",json!({"ttl_minutes":"NaN"})),("grant_ttl_minutes",json!({"grant_ttl_minutes":"10 min"})),("routes",json!({"routes":"[not json"})),("routes",json!({"routes":"\"GET /repos/**\""})),("payload",json!({"payload":"{"})),("hosts",json!({"hosts":"evil.test","budget":"6"})),("deny_paths",json!({"deny_paths":"/admin/**"})),("not_a_field",json!({"not_a_field":"x","budget":"6"}))];for(field,bad)in unreadable{assert!(av_store::pending::parse_overrides(bad.as_object().unwrap()).is_err());for granted in [true,false]{let(s,v)=w.api("POST","session-requests/decide",json!({"id":id,"granted":granted,"overrides":bad})).await;assert_eq!(s,400,"{field}: {v}");assert!(v.to_string().contains(field));}w.f.shared.run(|c|c.dm.presence_grace_until=av_daemon::util::now_ms()+60000).await.unwrap();let(s,v)=w.ctl("POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":bad})).await;assert!((400..500).contains(&s),"{field}: {v}");assert!(w.ctl("GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().iter().any(|r|r["id"]==id&&r["state"]=="pending"));assert_eq!(w.ctl("GET","/v1/sessions",json!({})).await.1.as_array().unwrap().len(),before);}w.f.shared.run(|c|c.dm.presence_grace_until=0).await.unwrap();assert_eq!(w.api("POST","session-requests/decide",json!({"id":id,"granted":true,"overrides":{"budget":"6"}})).await.0,401);let proof=w.proof("session_request.decide",&json!({"id":id,"granted":true,"budget":5})).await;assert_eq!(w.api("POST","session-requests/decide",json!({"id":id,"granted":true,"overrides":{"budget":5},"presence":proof})).await.0,200);w.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn ui_cookie_refreshes_same_session_and_anonymous_traffic_cannot_extend_the_idle_deadline() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let u=UiContractFixture::new(60000).await;let(s,h,_)=u.wire("GET","status",json!({}),true).await;assert_eq!(s,200);let set=header(&h,"set-cookie");assert_eq!(set.split(';').next().unwrap(),u.cookie);for attr in ["Max-Age=60","HttpOnly","SameSite=Strict"]{assert!(set.contains(attr));}let(s,h,_)=u.wire("GET","status",json!({}),false).await;assert_eq!(s,401);assert!(!h.iter().any(|(k,_)|k.eq_ignore_ascii_case("set-cookie")));u.stop().await;let stranger=UiContractFixture::new(5000).await;let human=UiContractFixture::new(5000).await;let started=tokio::time::Instant::now();let mut closed=false;while started.elapsed()<std::time::Duration::from_secs(34){match tokio::net::TcpStream::connect(("127.0.0.1",stranger.ui.bound_port())).await{Ok(mut stream)=>{stream.write_all(format!("GET /api/status HTTP/1.1\r\nHost: localhost:{}\r\nX-AV-UI: 1\r\nConnection: close\r\n\r\n",stranger.ui.bound_port()).as_bytes()).await.unwrap();let mut raw=vec![];stream.read_to_end(&mut raw).await.unwrap();assert!(raw.starts_with(b"HTTP/1.1 401"));},Err(_)=>{closed=true;break;}}assert_eq!(human.api("GET","status",json!({})).await.0,200);tokio::time::sleep(std::time::Duration::from_millis(200)).await;}assert!(closed,"unauthenticated traffic kept the UI listener alive");assert_eq!(human.api("GET","status",json!({})).await.0,200);stranger.stop().await;human.stop().await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn ui_nonobject_narrowing_is_refused_instead_of_discarded_even_with_a_valid_empty_override_proof(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(35),async{
+ for bad in [json!("budget=5"),json!(["budget"])]{let w=WidenFixture::new().await;let(s,asked)=w.ctl("POST","/v1/session-requests",json!({"cred":"demo","methods":["GET","POST"],"budget":50,"reason":"refuse non-object narrowing"})).await;assert_eq!(s,200);let id=asked["id"].clone();let before=w.ctl("GET","/v1/sessions",json!({})).await.1;let proof=w.proof("session_request.decide",&json!({"id":id,"granted":true})).await;let(s,v)=w.api("POST","session-requests/decide",json!({"id":id,"granted":true,"overrides":bad,"presence":proof})).await;assert_eq!(s,400,"non-object narrowing was ignored: {v}");assert_eq!(w.ctl("GET","/v1/sessions",json!({})).await.1,before);assert!(w.ctl("GET","/v1/session-requests",json!({})).await.1.as_array().unwrap().iter().any(|r|r["id"]==id&&r["state"]=="pending"));w.stop().await;}
+ }).await.unwrap();
 }
