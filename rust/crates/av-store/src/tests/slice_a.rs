@@ -11,7 +11,6 @@ fn sopts() -> CreateSessionOptions {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_infinite_session_never_expires_and_says_so_in_its_record_and_its_audit() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -45,7 +44,6 @@ fn an_infinite_session_never_expires_and_says_so_in_its_record_and_its_audit() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_infinite_session_is_revocable_and_its_placeholders_die_with_it() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -72,7 +70,6 @@ fn an_infinite_session_is_revocable_and_its_placeholders_die_with_it() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_finite_session_expires_and_idle_activity_extends_it_only_up_to_its_ceiling() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -127,7 +124,6 @@ fn a_finite_session_expires_and_idle_activity_extends_it_only_up_to_its_ceiling(
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_lifetime_that_is_not_a_positive_number_or_infinite_with_one_is_refused_and_writes_nothing() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -188,7 +184,6 @@ fn a_lifetime_that_is_not_a_positive_number_or_infinite_with_one_is_refused_and_
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_fork_of_an_infinite_session_is_finite() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -208,7 +203,6 @@ fn a_fork_of_an_infinite_session_is_finite() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn expiry_ms_absent_is_no_limit_a_date_is_that_date_and_anything_else_has_passed() {
     assert_eq!(expiry_ms(None), f64::INFINITY);
     assert_eq!(
@@ -245,7 +239,6 @@ fn srec(infinite: bool, expires_at: Option<&str>) -> crate::model::SessionRecord
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn session_expiry_ms_only_exactly_infinite_with_exactly_null_lives_forever() {
     let iso_ = iso(now() + HOUR);
     assert_eq!(session_expiry_ms(&srec(true, None)), f64::INFINITY);
@@ -269,7 +262,6 @@ fn session_expiry_ms_only_exactly_infinite_with_exactly_null_lives_forever() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_session_record_with_an_unreadable_or_missing_expiry_is_expired_not_live_forever() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -292,7 +284,6 @@ fn a_session_record_with_an_unreadable_or_missing_expiry_is_expired_not_live_for
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_placeholder_row_exactly_null_never_expires_an_unreadable_date_always_has() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -317,7 +308,6 @@ fn a_placeholder_row_exactly_null_never_expires_an_unreadable_date_always_has() 
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_grant_with_a_lifetime_ends_on_its_own_kills_its_placeholders_and_leaves_the_other_grant_working(
 ) {
     let mut fx = fresh();
@@ -385,7 +375,6 @@ fn a_grant_with_a_lifetime_ends_on_its_own_kills_its_placeholders_and_leaves_the
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_expired_grant_refuses_issuance_with_its_own_code() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -408,7 +397,6 @@ fn an_expired_grant_refuses_issuance_with_its_own_code() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn idle_activity_on_the_session_does_not_revive_a_grant() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -428,7 +416,6 @@ fn idle_activity_on_the_session_does_not_revive_a_grant() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_grant_lifetime_longer_than_the_session_is_clamped_and_a_grant_of_an_infinite_session_still_ends(
 ) {
     let mut fx = fresh();
@@ -464,7 +451,6 @@ fn a_grant_lifetime_longer_than_the_session_is_clamped_and_a_grant_of_an_infinit
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_grant_lifetime_that_is_not_a_positive_number_is_refused_and_writes_nothing() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -483,7 +469,6 @@ fn a_grant_lifetime_that_is_not_a_positive_number_is_refused_and_writes_nothing(
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn no_grant_is_added_to_a_session_that_has_ended() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -494,7 +479,6 @@ fn no_grant_is_added_to_a_session_that_has_ended() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_locked_vault_refuses_an_expired_grant_without_recording_what_it_cannot_audit() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -514,7 +498,6 @@ fn a_locked_vault_refuses_an_expired_grant_without_recording_what_it_cannot_audi
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn find_grant_returns_the_newest_grant_for_the_pair_in_any_state_and_none_for_none() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -536,7 +519,6 @@ fn find_grant_returns_the_newest_grant_for_the_pair_in_any_state_and_none_for_no
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn charge_grant_charges_up_to_the_budget_and_refuses_past_it() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -572,7 +554,6 @@ fn charge_grant_charges_up_to_the_budget_and_refuses_past_it() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn charge_grant_reads_a_decimal_string_budget_as_its_integer() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -588,7 +569,6 @@ fn charge_grant_reads_a_decimal_string_budget_as_its_integer() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn charge_grant_charges_nothing_when_the_budget_the_count_or_the_grant_cannot_be_read() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -659,7 +639,6 @@ fn charge_grant_charges_nothing_when_the_budget_the_count_or_the_grant_cannot_be
 }
 
 #[test]
-#[ignore = "blocked on av-core: a budget of {limit: null} deserializes to no limit (Budget.limit is a plain Option), where the JS budgetLimit reads it as unreadable"]
 fn charge_grant_refuses_a_null_budget_limit() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -674,7 +653,6 @@ fn charge_grant_refuses_a_null_budget_limit() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn credential_expiry_is_stored_as_one_iso_date_audited_and_flagged_when_near() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -717,7 +695,6 @@ fn credential_expiry_is_stored_as_one_iso_date_audited_and_flagged_when_near() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_credential_expiry_that_is_not_a_date_is_refused_and_writes_nothing() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -738,7 +715,6 @@ fn a_credential_expiry_that_is_not_a_date_is_refused_and_writes_nothing() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_thousand_identical_health_observations_write_one_audit_record() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -783,7 +759,6 @@ fn a_thousand_identical_health_observations_write_one_audit_record() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_sooner_of_the_humans_expiry_and_the_observed_one_wins() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -811,7 +786,6 @@ fn the_sooner_of_the_humans_expiry_and_the_observed_one_wins() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_health_patch_keeps_only_well_formed_fields_and_a_locked_vault_records_nothing() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -888,7 +862,6 @@ fn default_rules() -> Value {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn settings_the_default_tripwire_rules_are_stored_merged_per_key_audited_and_handed_out_as_a_copy()
 {
     let mut fx = fresh();
@@ -928,7 +901,6 @@ fn settings_the_default_tripwire_rules_are_stored_merged_per_key_audited_and_han
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_tripwire_rule_that_is_not_the_rule_shape_is_refused_and_nothing_is_kept() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -999,7 +971,6 @@ fn a_tripwire_rule_that_is_not_the_rule_shape_is_refused_and_nothing_is_kept() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_quarantined_credential_issues_nothing_gets_no_new_grant_and_release_restores_a_live_session() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1040,7 +1011,6 @@ fn a_quarantined_credential_issues_nothing_gets_no_new_grant_and_release_restore
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn quarantining_twice_keeps_who_did_it_first_and_a_bad_quarantine_is_refused() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1105,7 +1075,6 @@ fn quarantining_twice_keeps_who_did_it_first_and_a_bad_quarantine_is_refused() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn shortening_an_infinite_session_makes_it_finite_and_brings_its_placeholders_down() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1138,7 +1107,6 @@ fn shortening_an_infinite_session_makes_it_finite_and_brings_its_placeholders_do
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn shortening_never_lengthens() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1168,7 +1136,6 @@ fn shortening_never_lengthens() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn shortening_a_session_whose_expiry_cannot_be_read_ends_it_now_instead_of_throwing() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1194,7 +1161,6 @@ fn shortening_a_session_whose_expiry_cannot_be_read_ends_it_now_instead_of_throw
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn shortening_with_a_lifetime_that_is_not_positive_or_a_session_that_is_gone_is_refused() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1228,7 +1194,6 @@ fn shortening_with_a_lifetime_that_is_not_positive_or_a_session_that_is_gone_is_
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn shortening_a_grant_bounds_it_and_its_live_placeholders_and_is_audited() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1253,7 +1218,6 @@ fn shortening_a_grant_bounds_it_and_its_live_placeholders_and_is_audited() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_narrow_is_audited_by_field_name_and_may_only_turn_redirects_off() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1284,7 +1248,6 @@ fn a_narrow_is_audited_by_field_name_and_may_only_turn_redirects_off() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_elevation_a_session_was_created_with_is_recorded_and_empty_by_default() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1319,7 +1282,6 @@ fn the_elevation_a_session_was_created_with_is_recorded_and_empty_by_default() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_elevation_the_store_does_not_recognise_is_refused_and_nothing_is_written() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -1344,7 +1306,6 @@ fn an_elevation_the_store_does_not_recognise_is_refused_and_nothing_is_written()
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_placeholder_of_a_session_that_expired_idle_is_refused_at_use_though_its_own_date_has_not_passed(
 ) {
     let mut fx = fresh();
@@ -1367,7 +1328,6 @@ fn a_placeholder_of_a_session_that_expired_idle_is_refused_at_use_though_its_own
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn settings_never_carry_the_webhook_url_locked_or_unlocked() {
     let mut fx = fresh();
     let v = &mut fx.vault;

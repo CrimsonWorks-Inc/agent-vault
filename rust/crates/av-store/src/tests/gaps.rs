@@ -8,7 +8,6 @@ use crate::model::FactorClass;
 use crate::vault::*;
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_requested_lifetime_is_clamped_to_the_cap() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -49,7 +48,6 @@ fn a_requested_lifetime_is_clamped_to_the_cap() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_fingerprint_is_keyed_apart_from_the_placeholder_checksum() {
     let fx = fresh();
     let vmk = crate::vault::tests_support::vmk(&fx.vault);
@@ -65,7 +63,6 @@ fn the_fingerprint_is_keyed_apart_from_the_placeholder_checksum() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_one_time_placeholders_successor_is_one_time_too() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -89,7 +86,6 @@ fn a_one_time_placeholders_successor_is_one_time_too() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn touch_id_unlock_needs_a_passphrase_first() {
     let fx = fresh();
     assert_eq!(
@@ -101,7 +97,6 @@ fn touch_id_unlock_needs_a_passphrase_first() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_template_hash_is_the_js_canonical_operation_hash() {
     let mut fx = fresh();
     // Golden value from Node: canonicalOperation in src/ui/webauthn.js.
@@ -125,7 +120,6 @@ fn the_template_hash_is_the_js_canonical_operation_hash() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_bundle_that_carries_more_than_credentials_and_templates_is_named_as_such() {
     let mut fx = fresh();
     let bundle = super::backup::v1_bundle(
@@ -153,7 +147,6 @@ fn a_bundle_that_carries_more_than_credentials_and_templates_is_named_as_such() 
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_infinite_session_is_refused_on_a_network_listener_and_the_refusal_recorded() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -199,7 +192,6 @@ fn an_infinite_session_is_refused_on_a_network_listener_and_the_refusal_recorded
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_scrub_pattern_the_gateway_grammar_refuses_is_not_stored() {
     let mut fx = fresh();
     for bad in ["(abc)+", "^anchored", "a.b.c.d"] {
@@ -215,7 +207,6 @@ fn a_scrub_pattern_the_gateway_grammar_refuses_is_not_stored() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn placeholder_records_never_carry_the_use_ceiling() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -245,7 +236,6 @@ fn placeholder_records_never_carry_the_use_ceiling() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_session_or_grant_made_from_a_request_records_only_whether_it_has_an_end() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -284,7 +274,6 @@ fn a_session_or_grant_made_from_a_request_records_only_whether_it_has_an_end() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn session_created_records_whether_there_is_a_label_never_the_label() {
     let mut fx = fresh();
     session_with(
@@ -301,7 +290,6 @@ fn session_created_records_whether_there_is_a_label_never_the_label() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_quarantine_reason_restored_from_a_bundle_is_cleaned_before_it_is_recorded() {
     let (_t, mut t) = super::backup::target();
     let cred = json!({ "slug": "demo", "kind": "http", "connector": { "host": "api.example.com" },
@@ -328,7 +316,6 @@ fn a_quarantine_reason_restored_from_a_bundle_is_cleaned_before_it_is_recorded()
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_audit_read_picks_one_requests_records() {
     let mut fx = fresh();
     let a = fx.vault.audit_mut().unwrap();
@@ -358,7 +345,6 @@ fn the_audit_read_picks_one_requests_records() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_operation_that_fails_after_writing_its_record_leaves_the_chain_where_it_was() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -379,7 +365,6 @@ fn an_operation_that_fails_after_writing_its_record_leaves_the_chain_where_it_wa
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_failed_migration_leaves_no_database_behind() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("v");
@@ -447,7 +432,6 @@ fn a_failed_migration_leaves_no_database_behind() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_device_key_of_the_wrong_length_is_refused_by_name() {
     let mut fx = fresh();
     fx.vault.lock().unwrap();

@@ -43,7 +43,6 @@ fn passphrase_wrap(v: &Vault) -> crate::model::VmkWrap {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn after_a_passphrase_change_the_old_wrap_is_in_neither_the_database_nor_the_wal() {
     let mut fx = fresh_with(FactorClass::Passphrase, Some("the-first-passphrase"));
     let old = passphrase_wrap(&fx.vault);
@@ -89,7 +88,6 @@ fn after_a_passphrase_change_the_old_wrap_is_in_neither_the_database_nor_the_wal
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn after_a_credential_delete_its_ciphertext_is_in_neither_the_database_nor_the_wal() {
     let mut fx = fresh();
     let sealed = fx.vault.find_credential("demo").unwrap().unwrap().fields[0]
@@ -130,7 +128,6 @@ fn after_a_credential_delete_its_ciphertext_is_in_neither_the_database_nor_the_w
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn after_a_rotation_with_no_retire_window_the_old_ciphertext_is_gone() {
     let mut fx = fresh();
     let sealed = fx.vault.find_credential("demo").unwrap().unwrap().fields[0]
@@ -158,7 +155,6 @@ fn after_a_rotation_with_no_retire_window_the_old_ciphertext_is_gone() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn no_plaintext_value_is_ever_written_to_the_files() {
     let mut fx = fresh();
     fx.vault

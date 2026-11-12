@@ -1895,7 +1895,18 @@ fn commit_factors(
 /// Ports `assertSessionLive` over a transaction.
 fn session_live_in(t: &mut Tx<'_>, session: Option<&SessionRecord>) -> Result<SessionRecord> {
     let Some(s) = session else {
-        return Err(plain(ErrorCode::SessionRequired, "no session"));
+        return Err(deny(
+            ErrorCode::SessionRequired,
+            "no session",
+            DenyExtra {
+                next: Some(json!({
+                    "cli": ["agent-vault session create --cred <slug>"],
+                    "mcp": { "tool": "vault_request_session" },
+                })),
+                ..Default::default()
+            },
+        )
+        .into());
     };
     if s.state == SessionState::Revoked {
         return Err(plain(
@@ -1944,14 +1955,19 @@ fn grant_live_in(t: &mut Tx<'_>, grant: Option<&GrantRecord>) -> Result<GrantRec
         }
     };
     if expiry_ms(g.expires_at.as_deref()) <= t.now as f64 {
-        let expired = plain(
+        let expired: Error = deny(
             ErrorCode::GrantExpired,
             format!(
                 "grant {} expired at {}",
                 g.id,
                 g.expires_at.as_deref().unwrap_or("null")
             ),
-        );
+            DenyExtra {
+                next: Some(json!({ "mcp": { "tool": "vault_request_session" } })),
+                ..Default::default()
+            },
+        )
+        .into();
         if t.vmk.is_none() {
             return Err(expired);
         }
@@ -2306,8 +2322,16 @@ fn issue_in(t: &mut Tx<'_>, opts: &IssueOptions) -> Result<IssuedPlaceholder> {
     })
 }
 
+/// Where an agent goes for a usable placeholder. Ports the `next` object of
+/// the refusals in `consumePlaceholder` in `src/store/vault.js`.
 fn ph_next_hint() -> DenyExtra {
-    DenyExtra::default()
+    DenyExtra {
+        next: Some(json!({
+            "cli": ["agent-vault ph next <cred>"],
+            "mcp": { "tool": "vault_get_placeholder" },
+        })),
+        ..Default::default()
+    }
 }
 
 impl Vault {

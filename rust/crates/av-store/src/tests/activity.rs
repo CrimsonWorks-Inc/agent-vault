@@ -120,7 +120,6 @@ fn path_list(a: &SessionActivity) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_normal_session_reports_complete_activity_with_the_right_counts() {
     let mut f = fixture();
     traffic(&mut f);
@@ -176,7 +175,6 @@ fn a_normal_session_reports_complete_activity_with_the_right_counts() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_log_written_before_holds_were_marked_reads_the_same() {
     let mut f = fixture();
     traffic(&mut f);
@@ -208,7 +206,6 @@ fn a_log_written_before_holds_were_marked_reads_the_same() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_activity_carries_no_placeholder_no_query_no_secret_and_no_detail_text() {
     let mut f = fixture();
     let ph =
@@ -261,7 +258,6 @@ fn the_activity_carries_no_placeholder_no_query_no_secret_and_no_detail_text() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_log_that_starts_after_the_session_or_was_cut_back_is_reported_incomplete() {
     let mut f = fixture();
     traffic(&mut f);
@@ -289,7 +285,6 @@ fn a_log_that_starts_after_the_session_or_was_cut_back_is_reported_incomplete() 
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn another_sessions_rows_are_not_this_sessions_activity() {
     let mut f = fixture();
     traffic(&mut f);
@@ -309,7 +304,6 @@ fn another_sessions_rows_are_not_this_sessions_activity() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_tripwire_that_fired_on_the_session_is_listed() {
     let f = fixture();
     let mut rows = rows_of(&f.fx.vault);
@@ -330,7 +324,6 @@ fn a_tripwire_that_fired_on_the_session_is_listed() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_access_report_counts_use_per_credential_and_per_session_and_names_granted_methods_never_used(
 ) {
     let mut f = fixture();
@@ -381,7 +374,6 @@ fn the_access_report_counts_use_per_credential_and_per_session_and_names_granted
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_report_window_an_expired_session_and_a_missing_creation_record_are_all_honest() {
     let mut f = fixture();
     traffic(&mut f);
@@ -450,7 +442,6 @@ fn the_report_window_an_expired_session_and_a_missing_creation_record_are_all_ho
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_row_the_gateway_marks_as_held_is_a_hold_whatever_else_it_says() {
     let f = fixture();
     let created = rows_of(&f.fx.vault)

@@ -9,7 +9,6 @@ use crate::vault::*;
 const PATTERN: &str = "acme_[A-Za-z0-9]{20,40}";
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_scrub_pattern_is_added_listed_persisted_and_audited_by_digest_only() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -50,7 +49,6 @@ fn a_scrub_pattern_is_added_listed_persisted_and_audited_by_digest_only() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn removing_a_pattern_removes_that_one_once() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -76,7 +74,6 @@ fn removing_a_pattern_removes_that_one_once() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_pattern_that_is_too_short_or_too_long_is_refused() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -93,7 +90,6 @@ fn a_pattern_that_is_too_short_or_too_long_is_refused() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_pattern_that_contains_a_stored_credential_value_or_a_placeholder_is_refused() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -128,7 +124,6 @@ fn a_pattern_that_contains_a_stored_credential_value_or_a_placeholder_is_refused
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn at_most_16_patterns_per_credential_and_64_in_the_vault() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -165,7 +160,6 @@ fn at_most_16_patterns_per_credential_and_64_in_the_vault() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn scrub_pattern_writes_need_the_credential_to_exist_and_the_vault_to_be_unlocked() {
     let mut fx = fresh();
     let v = &mut fx.vault;

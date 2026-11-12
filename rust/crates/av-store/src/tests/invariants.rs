@@ -17,7 +17,6 @@ fn rng(seed: u64) -> impl FnMut() -> f64 {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_placeholder_was_never_spent_more_times_than_it_had_uses() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -57,7 +56,6 @@ fn a_placeholder_was_never_spent_more_times_than_it_had_uses() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn nothing_sensitive_reached_the_audit_log_and_its_chain_still_verifies() {
     let mut fx = fresh();
     let v = &mut fx.vault;

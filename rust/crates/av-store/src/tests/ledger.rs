@@ -33,7 +33,6 @@ fn set_pp(v: &Vault, gid: &str, pp: serde_json::Value) {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn asking_for_a_placeholder_and_using_it_over_and_over_stays_within_max_active() {
     let (mut fx, sid, gid) = setup();
     for _ in 0..12 {
@@ -45,7 +44,6 @@ fn asking_for_a_placeholder_and_using_it_over_and_over_stays_within_max_active()
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_max_active_that_is_not_a_number_is_not_an_unbounded_ledger() {
     let (mut fx, sid, gid) = setup();
     set_pp(&fx.vault, &gid, json!({ "max_active": "lots" }));
@@ -56,7 +54,6 @@ fn a_max_active_that_is_not_a_number_is_not_an_unbounded_ledger() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_placeholder_in_use_keeps_working_while_fewer_than_max_active_are_live() {
     let (mut fx, _sid, gid) = setup();
     let kept = issue(&mut fx.vault, &gid);
@@ -72,7 +69,6 @@ fn a_placeholder_in_use_keeps_working_while_fewer_than_max_active_are_live() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_rotated_placeholder_says_to_ask_again_and_the_newest_still_works() {
     let (mut fx, _sid, gid) = setup();
     let first = issue(&mut fx.vault, &gid);
@@ -90,7 +86,6 @@ fn a_rotated_placeholder_says_to_ask_again_and_the_newest_still_works() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_explicit_placeholder_ttl_cannot_outlast_the_grants() {
     let (mut fx, _sid, gid) = setup();
     set_pp(&fx.vault, &gid, json!({ "ttl": 1 }));
@@ -109,7 +104,6 @@ fn an_explicit_placeholder_ttl_cannot_outlast_the_grants() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_explicit_placeholder_ttl_shorter_than_the_grants_is_kept() {
     let (mut fx, _sid, gid) = setup();
     set_pp(&fx.vault, &gid, json!({ "ttl": 3600 }));

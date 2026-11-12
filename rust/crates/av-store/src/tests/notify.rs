@@ -16,7 +16,6 @@ fn url_of(v: &Vault) -> String {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_webhook_is_sealed_at_rest_and_only_its_host_is_shown_or_audited() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -68,7 +67,6 @@ fn a_webhook_is_sealed_at_rest_and_only_its_host_is_shown_or_audited() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn loopback_http_and_the_headline_detail_are_accepted() {
     let mut fx = fresh();
     for url in [
@@ -90,7 +88,6 @@ fn loopback_http_and_the_headline_detail_are_accepted() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_webhook_that_is_not_https_has_userinfo_or_is_not_a_url_is_refused_and_nothing_is_kept() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -118,7 +115,6 @@ fn a_webhook_that_is_not_https_has_userinfo_or_is_not_a_url_is_refused_and_nothi
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_sealed_url_is_bound_to_what_it_is_a_credentials_ciphertext_does_not_open_as_one() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -133,7 +129,6 @@ fn the_sealed_url_is_bound_to_what_it_is_a_credentials_ciphertext_does_not_open_
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn clearing_the_webhook_removes_it_once_and_a_locked_vault_reveals_nothing() {
     let mut fx = fresh();
     let v = &mut fx.vault;

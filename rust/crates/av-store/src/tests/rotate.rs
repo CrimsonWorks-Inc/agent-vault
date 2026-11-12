@@ -42,7 +42,6 @@ fn reveal(v: &Vault, id: &str) -> String {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn keep_mode_the_new_value_is_substituted_at_once_and_placeholders_already_handed_out_keep_working()
 {
     let mut fx = fresh();
@@ -78,7 +77,6 @@ fn keep_mode_the_new_value_is_substituted_at_once_and_placeholders_already_hande
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_rotation_is_audited_with_fingerprints_and_counts_never_a_value() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -121,7 +119,6 @@ fn the_rotation_is_audited_with_fingerprints_and_counts_never_a_value() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_old_value_is_still_scrubbed_within_the_retire_window_and_not_after_it() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -165,7 +162,6 @@ fn the_old_value_is_still_scrubbed_within_the_retire_window_and_not_after_it() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_zero_retire_window_keeps_nothing_of_the_old_value() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -184,7 +180,6 @@ fn a_zero_retire_window_keeps_nothing_of_the_old_value() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_retired_value_still_counts_as_a_stored_value_for_scrub_patterns() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -198,7 +193,6 @@ fn a_retired_value_still_counts_as_a_stored_value_for_scrub_patterns() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn revoke_mode_revokes_the_credentials_grants_and_kills_their_placeholders_and_nobody_elses() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -233,7 +227,6 @@ fn revoke_mode_revokes_the_credentials_grants_and_kills_their_placeholders_and_n
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_expiry_is_cleared_by_default_and_set_when_given() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -262,7 +255,6 @@ fn the_expiry_is_cleared_by_default_and_set_when_given() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_bad_rotation_is_refused_before_anything_changes_revoke_mode_included() {
     let mut fx = fresh();
     let v = &mut fx.vault;

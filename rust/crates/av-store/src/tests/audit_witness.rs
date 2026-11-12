@@ -59,7 +59,6 @@ pub(super) fn unprotect(v: &Vault) {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn export_returns_the_records_after_since_seq_exactly_as_stored_and_is_recorded_after_reading() {
     let mut fx = fresh();
     let placeholder = busy(&mut fx);
@@ -117,7 +116,6 @@ fn export_returns_the_records_after_since_seq_exactly_as_stored_and_is_recorded_
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_export_limit_is_clamped_to_1_to_5000() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -165,7 +163,6 @@ fn the_export_limit_is_clamped_to_1_to_5000() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_export_range_that_is_not_a_whole_number_is_refused_and_nothing_is_recorded() {
     // Negative, fractional and string ranges cannot be typed; the one
     // spelling left is past the JS safe-integer range.
@@ -183,7 +180,6 @@ fn an_export_range_that_is_not_a_whole_number_is_refused_and_nothing_is_recorded
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_checkpoint_names_a_stable_vault_id_the_head_and_a_mac_and_keeps_the_chain_intact() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -220,7 +216,6 @@ fn a_checkpoint_names_a_stable_vault_id_the_head_and_a_mac_and_keeps_the_chain_i
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_untouched_log_reports_its_witnesses_ok_the_genesis_one_included() {
     let mut fx = fresh();
     let mut w =
@@ -252,7 +247,6 @@ fn an_untouched_log_reports_its_witnesses_ok_the_genesis_one_included() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_log_cut_back_after_a_witness_reports_it_ahead() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -278,7 +272,6 @@ fn a_log_cut_back_after_a_witness_reports_it_ahead() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_record_whose_hash_was_changed_reports_mismatched_and_a_changed_witness_reports_forged() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -336,7 +329,6 @@ fn a_record_whose_hash_was_changed_reports_mismatched_and_a_changed_witness_repo
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_witness_for_another_vault_is_reported_and_does_not_by_itself_fail_the_check() {
     let mut fx = fresh();
     let c = serde_json::to_value(fx.vault.audit_mut().unwrap().checkpoint().unwrap()).unwrap();
@@ -365,7 +357,6 @@ fn a_witness_for_another_vault_is_reported_and_does_not_by_itself_fail_the_check
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_witness_list_that_is_too_long_is_refused() {
     let mut fx = fresh();
     let many: Vec<Value> = (0..10_001).map(|_| json!({})).collect();
@@ -377,7 +368,6 @@ fn a_witness_list_that_is_too_long_is_refused() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_caller_cannot_set_a_chain_field_write_refuses_it_naming_the_field_and_appends_nothing() {
     let mut fx = fresh();
     for k in CHAIN_FIELDS {
@@ -460,7 +450,6 @@ fn audit_literal_keys(src: &str) -> Vec<Vec<String>> {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn no_audit_write_in_the_store_passes_a_chain_field() {
     let mut calls = 0;
     let mut bad = Vec::new();
@@ -491,7 +480,6 @@ fn no_audit_write_in_the_store_passes_a_chain_field() {
 // --------------------------------------------- anchor, truncation, corruption
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_log_cut_back_while_stopped_is_reported_and_the_report_survives_new_writes() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -525,7 +513,6 @@ fn busy_on(v: &mut Vault) {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_removed_anchor_on_an_anchored_vault_is_tampering_not_an_upgrade() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -541,7 +528,6 @@ fn a_removed_anchor_on_an_anchored_vault_is_tampering_not_an_upgrade() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_unreadable_row_is_reported_as_corruption_and_does_not_lock_the_owner_out() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -565,7 +551,6 @@ fn an_unreadable_row_is_reported_as_corruption_and_does_not_lock_the_owner_out()
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_ordinary_restart_reports_nothing_and_verifies() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -578,7 +563,6 @@ fn an_ordinary_restart_reports_nothing_and_verifies() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn read_filters_by_kind_session_since_and_request_and_keeps_the_newest() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -629,7 +613,6 @@ fn reopen(fx: &Fx) -> Vault {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_untouched_log_reopens_and_verifies_clean() {
     let fx = audit_fixture();
     let v = reopen(&fx);
@@ -637,7 +620,6 @@ fn an_untouched_log_reopens_and_verifies_clean() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_brand_new_vault_verifies_clean() {
     let fx = fresh();
     let r = fx.vault.audit().unwrap().verify().unwrap();
@@ -646,7 +628,6 @@ fn a_brand_new_vault_verifies_clean() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn emptying_the_log_is_not_a_fresh_start() {
     // "deleting the log is not a fresh start": the table emptied, the anchor
     // left in place.
@@ -661,7 +642,6 @@ fn emptying_the_log_is_not_a_fresh_start() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn emptying_the_log_and_deleting_its_anchor_together_is_not_a_fresh_start() {
     let fx = audit_fixture();
     unprotect(&fx.vault);
@@ -674,7 +654,6 @@ fn emptying_the_log_and_deleting_its_anchor_together_is_not_a_fresh_start() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_log_emptied_while_the_vault_is_open_is_reported_not_passed() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -686,7 +665,6 @@ fn a_log_emptied_while_the_vault_is_open_is_reported_not_passed() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_float_in_caller_fields_is_recorded_not_thrown_after_the_fact() {
     let mut fx = fresh();
     let rec = fx
@@ -708,7 +686,6 @@ fn a_float_in_caller_fields_is_recorded_not_thrown_after_the_fact() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn ordinary_records_checkpoints_included_are_all_recognised_as_records() {
     let mut fx = fresh();
     for i in 0..1005 {
@@ -727,7 +704,6 @@ fn ordinary_records_checkpoints_included_are_all_recognised_as_records() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_record_shaped_wrongly_is_unreadable_even_when_it_parses() {
     // isRecord: parsing is not enough; a hash that is not 64 hex characters
     // is not a record.
@@ -748,7 +724,6 @@ fn a_record_shaped_wrongly_is_unreadable_even_when_it_parses() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_chain_verifies_and_editing_a_record_breaks_it() {
     let mut fx = fresh();
     busy(&mut fx);
@@ -771,7 +746,6 @@ fn the_chain_verifies_and_editing_a_record_breaks_it() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn truncating_and_then_deleting_the_anchor_does_not_launder_the_truncation() {
     let mut fx = fresh();
     for i in 0..10 {
@@ -819,7 +793,6 @@ fn unprotect_if_needed(v: &Vault) {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_vault_upgraded_from_a_build_without_anchors_is_not_accused_of_tampering() {
     let mut fx = fresh();
     for i in 0..4 {

@@ -110,7 +110,6 @@ pub(super) fn refused_with_one_record<T>(
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_export_seals_everything_holds_no_secret_in_the_clear_and_is_logged_by_digest_only() {
     let mut p = populated();
     let out = export_backup(&mut p.fx.vault, &s(RECOVERY)).unwrap();
@@ -171,7 +170,6 @@ fn an_export_seals_everything_holds_no_secret_in_the_clear_and_is_logged_by_dige
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn the_plaintext_is_credentials_and_templates_only() {
     let mut p = populated();
     let v = &mut p.fx.vault;
@@ -228,7 +226,6 @@ fn the_plaintext_is_credentials_and_templates_only() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn inspect_lists_what_a_bundle_holds_without_a_single_value() {
     let mut p = populated();
     let b = bundle_of(&export_backup(&mut p.fx.vault, &s(RECOVERY)).unwrap());
@@ -251,7 +248,6 @@ fn inspect_lists_what_a_bundle_holds_without_a_single_value() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_restore_brings_back_credentials_patterns_expiry_and_templates_and_no_session() {
     let mut p = populated();
     let (_t, mut t) = target();
@@ -313,7 +309,6 @@ fn a_restore_brings_back_credentials_patterns_expiry_and_templates_and_no_sessio
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn conflicts_skip_by_default_rename_within_24_characters_and_fail_writes_nothing() {
     let mut p = populated();
     let v = &mut p.fx.vault;
@@ -368,7 +363,6 @@ fn conflicts_skip_by_default_rename_within_24_characters_and_fail_writes_nothing
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_wrong_passphrase_or_an_altered_bundle_is_one_answer_and_a_restore_writes_nothing_but_the_refusal(
 ) {
     let mut p = populated();
@@ -410,7 +404,6 @@ fn a_wrong_passphrase_or_an_altered_bundle_is_one_answer_and_a_restore_writes_no
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn an_envelope_that_is_not_this_format_is_refused_before_any_key_is_derived() {
     let mut p = populated();
     let (_t, mut t) = target();
@@ -476,7 +469,6 @@ fn plain_cred() -> Value {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_correctly_sealed_bundle_that_carries_anything_outside_the_list_is_refused_whole() {
     let (_t, mut t) = target();
     let cred = plain_cred();
@@ -517,7 +509,6 @@ fn a_correctly_sealed_bundle_that_carries_anything_outside_the_list_is_refused_w
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_scrub_pattern_in_a_bundle_that_would_carry_a_secret_into_this_vault_is_refused() {
     let (_t, mut t) = target();
     let mut cred = plain_cred();
@@ -535,7 +526,6 @@ fn a_scrub_pattern_in_a_bundle_that_would_carry_a_secret_into_this_vault_is_refu
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_locked_vault_neither_exports_nor_restores() {
     let mut p = populated();
     let v = &mut p.fx.vault;
@@ -549,7 +539,6 @@ fn a_locked_vault_neither_exports_nor_restores() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_v1_bundle_restores_and_a_v2_bundle_round_trips() {
     let (_t, mut t) = target();
     let b1 = v1_bundle(
@@ -570,7 +559,6 @@ fn a_v1_bundle_restores_and_a_v2_bundle_round_trips() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn renamed_trims_to_24_characters_and_counts_up() {
     let mut taken = std::collections::HashSet::new();
     assert_eq!(renamed("demo", &taken), "demo-restored");

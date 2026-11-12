@@ -14,7 +14,6 @@ fn sha(v: &Value) -> String {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_template_is_saved_with_a_version_and_the_hash_of_its_canonical_form_and_audited() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -71,7 +70,6 @@ fn a_template_is_saved_with_a_version_and_the_hash_of_its_canonical_form_and_aud
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn reads_hand_out_copies_sorted_and_know_nothing_of_names_that_are_not_templates() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -97,7 +95,6 @@ fn reads_hand_out_copies_sorted_and_know_nothing_of_names_that_are_not_templates
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn deleting_a_template_removes_it_once_and_records_the_version_it_had() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -117,7 +114,6 @@ fn deleting_a_template_removes_it_once_and_records_the_version_it_had() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn a_bad_template_name_shape_or_size_is_refused_and_nothing_is_kept() {
     let mut fx = fresh();
     let v = &mut fx.vault;
@@ -178,7 +174,6 @@ fn a_bad_template_name_shape_or_size_is_refused_and_nothing_is_kept() {
 }
 
 #[test]
-#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
 fn session_created_records_the_template_and_version_a_session_came_from_or_null() {
     let mut fx = fresh();
     let v = &mut fx.vault;
