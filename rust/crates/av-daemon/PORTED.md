@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 613 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **483 not yet ported**.
+Totals: 1207 JS tests: 627 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **469 not yet ported**.
 
 ## Mutation check
 
@@ -99,21 +99,21 @@ the vault on every call instead of caching an audit handle.
 | connectors-pinning.test.js | Round 5 F-1: a getter or a Proxy cannot pass the Host check and then put another host on the wire | not yet ported |
 | connectors-pinning.test.js | Round 5 F-1: headers that are not names with string values are refused before a connection | not yet ported |
 | connectors-pinning.test.js | Round 5 F-2: an IPv6 URL connects, the certificate is checked against the IP SAN, and pins apply | not yet ported |
-| connectors-probe.test.js | the probe hits only the profile method and path, and ignores a caller path, method and body | not yet ported |
-| connectors-probe.test.js | slack is a POST to the profile path with an empty form body, not the caller body | not yet ported |
-| connectors-probe.test.js | a header site with no scheme sends the raw secret, and the first header site wins | not yet ported |
-| connectors-probe.test.js | the result and the health record never contain the secret, a placeholder, or the body | not yet ported |
-| connectors-probe.test.js | status classes: 401, 403, other codes, and a network error | not yet ported |
-| connectors-probe.test.js | http and postgres have no probe, and a credential with no header site is refused before any request | not yet ported |
-| connectors-probe.test.js | a host that is not a hostname is refused and nothing is sent | not yet ported |
-| connectors-probe.test.js | an ordinary host, port and http scheme are used as declared | not yet ported |
+| connectors-probe.test.js | the probe hits only the profile method and path, and ignores a caller path, method and body | `ported_gateway_core::connector_probe_fixed_methods_paths_first_header_site_and_declared_http_destination` |
+| connectors-probe.test.js | slack is a POST to the profile path with an empty form body, not the caller body | `ported_gateway_core::connector_probe_fixed_methods_paths_first_header_site_and_declared_http_destination` |
+| connectors-probe.test.js | a header site with no scheme sends the raw secret, and the first header site wins | `ported_gateway_core::connector_probe_fixed_methods_paths_first_header_site_and_declared_http_destination` |
+| connectors-probe.test.js | the result and the health record never contain the secret, a placeholder, or the body | `ported_gateway_core::connector_probe_outputs_health_and_logs_never_return_secret_marker_or_body_and_statuses_classify` |
+| connectors-probe.test.js | status classes: 401, 403, other codes, and a network error | `ported_gateway_core::connector_probe_outputs_health_and_logs_never_return_secret_marker_or_body_and_statuses_classify` |
+| connectors-probe.test.js | http and postgres have no probe, and a credential with no header site is refused before any request | `ported_gateway_core::connector_probe_absent_profile_header_site_and_bad_destinations_refuse_before_reading_secret` |
+| connectors-probe.test.js | a host that is not a hostname is refused and nothing is sent | `ported_gateway_core::connector_probe_absent_profile_header_site_and_bad_destinations_refuse_before_reading_secret` |
+| connectors-probe.test.js | an ordinary host, port and http scheme are used as declared | `ported_gateway_core::connector_probe_fixed_methods_paths_first_header_site_and_declared_http_destination` |
 | connectors-probe.test.js | pins for the host are forwarded, and a missing recordHealth still returns the result | not yet ported |
-| connectors-probe.test.js | the second probe inside 60 seconds is throttled, and one after the window is not | not yet ported |
-| connectors-probe.test.js | V-Q5: a now on the call does not skip the throttle | not yet ported |
-| connectors-probe.test.js | V-Q5: a far-future now on the call does not lock the credential out | not yet ported |
-| connectors-probe.test.js | V-Q7: a body that never ends is cut off and destroyed, and the probe returns | not yet ported |
-| connectors-probe.test.js | V-Q7: an ordinary short body is drained to its end and not cut | not yet ported |
-| connectors-probe.test.js | V-Q8: a recordHealth failure after a 200 is a store error, not unreachable | not yet ported |
+| connectors-probe.test.js | the second probe inside 60 seconds is throttled, and one after the window is not | `ported_gateway_core::connector_probe_real_time_throttle_ignores_caller_now_and_expires_after_sixty_seconds` |
+| connectors-probe.test.js | V-Q5: a now on the call does not skip the throttle | `ported_gateway_core::connector_probe_real_time_throttle_ignores_caller_now_and_expires_after_sixty_seconds` |
+| connectors-probe.test.js | V-Q5: a far-future now on the call does not lock the credential out | `ported_gateway_core::connector_probe_real_time_throttle_ignores_caller_now_and_expires_after_sixty_seconds` |
+| connectors-probe.test.js | V-Q7: a body that never ends is cut off and destroyed, and the probe returns | `ported_gateway_core::connector_probe_bounded_drain_drops_endless_fast_or_trickle_bodies_and_finishes_ordinary_short_body` |
+| connectors-probe.test.js | V-Q7: an ordinary short body is drained to its end and not cut | `ported_gateway_core::connector_probe_bounded_drain_drops_endless_fast_or_trickle_bodies_and_finishes_ordinary_short_body` |
+| connectors-probe.test.js | V-Q8: a recordHealth failure after a 200 is a store error, not unreachable | `ported_gateway_core::connector_probe_real_lock_during_health_write_surfaces_store_error_after_success_or_network_failure` |
 | connectors-probe.test.js | V-Q9: pins of the wrong shape refuse the probe before the secret is read | not yet ported |
 | connectors-probe.test.js | pins under two spellings of the same host are joined, and an empty one does not hide the other | not yet ported |
 | connectors-probe.test.js | F-1: pins are looked up by the host of the URL the probe sends to, however the key or the declared host spells it | not yet ported |
