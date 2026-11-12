@@ -268,8 +268,7 @@ async fn the_probe_reads_its_destination_and_pins_as_the_js_does() {
         json!({}),
     );
     let e = crate::connectors::probe::prepare_for_test(&c, secret)
-        .err()
-        .expect("file is not a scheme a probe uses");
+        .expect_err("file is not a scheme a probe uses");
     assert_eq!(e.extra.rule.as_deref(), Some("credential_host"));
     for (host, pins) in [
         ("[::1]:8443", json!({"::1": [pin]})),

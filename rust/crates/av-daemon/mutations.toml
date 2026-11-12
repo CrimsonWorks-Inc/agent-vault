@@ -3,11 +3,13 @@
 # fail. Fields: name, file (relative to this crate), from (must appear exactly
 # once), to.
 #
-# Each entry reproduces one src/daemon/*, src/ui/*, src/connectors/pinning.js
-# or src/connectors/probe.js entry of test/mutation-check.js (read as text,
-# never imported) and carries its `what` as the name. src/pending.js entries
-# are av-store's (crates/av-store/mutations.toml). The JS entries not yet
-# reproduced here are listed, by name, in PORTED.md ("Mutation check").
+# Every entry of test/mutation-check.js (read as text, never imported) whose
+# file is src/daemon/*, src/ui/*, src/pending.js or src/connectors/* is here,
+# under its `what` as the name, or is in another crate's mutations.toml (named
+# where it applies), or is a NOT APPLICABLE comment block giving the reason the
+# protection cannot be removed in the Rust code. A few entries break a
+# protection that lives in av-core or av-store (`file = "../av-core/..."`):
+# the daemon calls it, and the daemon's own tests catch the mutant.
 
 
 [[mutation]]
