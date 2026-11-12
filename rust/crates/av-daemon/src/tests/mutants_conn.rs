@@ -314,9 +314,12 @@ impl Upstream for Odd {
                     return Ok(json_response(200, &json!({})));
                 }
                 "endless" => {
-                    tokio::spawn(
-                        async move { while tx.send(Ok(vec![b'x'; 8192])).await.is_ok() {} },
-                    );
+                    let sent = self.sent.clone();
+                    tokio::spawn(async move {
+                        while tx.send(Ok(vec![b'x'; 8192])).await.is_ok() {
+                            sent.fetch_add(8192, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
                 }
                 _ => {
                     // Never ends and never sends.
@@ -361,6 +364,10 @@ async fn a_probe_stops_reading_past_the_drain_bound() {
     let r = crate::connectors::probe::run_probe(&w.shared, "gh".into(), Some(up)).await;
     assert!(r.is_ok(), "{r:?}");
     let n = sent.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        n >= crate::connectors::probe::DRAIN_LIMIT_BYTES,
+        "the probe read up to its bound, got {n} bytes"
+    );
     assert!(
         n < 4 * crate::connectors::probe::DRAIN_LIMIT_BYTES,
         "the probe stopped reading near its bound, not after {n} bytes"
