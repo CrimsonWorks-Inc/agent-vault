@@ -5944,3 +5944,705 @@ async fn placeholder_only_authentication_touches_session_only_after_checksum_ver
             .contains(SECRET));
     }
 }
+
+struct SeededGateway {
+    _dir: tempfile::TempDir,
+    shared: VaultRef,
+    pipeline: av_daemon::pipeline::Pipeline,
+    upstream: Arc<RecordingUpstream>,
+    request: GatewayRequest,
+    sid: String,
+    gid: String,
+}
+
+fn seeded_policy() -> Value {
+    json!({"hosts":["api.example.test"],"methods":["GET","POST"],"paths":["/**"],"approval":"auto","budget":{"unit":"requests","limit":100}})
+}
+
+impl SeededGateway {
+    fn new(session_patch: Value, grant_patch: Value) -> Self {
+        Self::with_tripwires(session_patch, grant_patch, None)
+    }
+    fn with_tripwires(session_patch: Value, grant_patch: Value, tripwires: Option<Value>) -> Self {
+        use av_core::secret::ExposeSecret;
+        use av_store::vault::{CreateGrantOptions, IssueOptions, NewCredential};
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+        let credential = vault
+            .add_credential(NewCredential {
+                slug: "seeded".into(),
+                kind: "http".into(),
+                connector: serde_json::from_value(json!({"host":"api.example.test"})).unwrap(),
+                fields: vec![("key".into(), SECRET.to_string().into())],
+                sites: std::collections::BTreeMap::from([(
+                    "key".into(),
+                    vec!["header:x-key".into()],
+                )]),
+            })
+            .unwrap();
+        let session = vault.create_session(Default::default()).unwrap();
+        let token = session.token.expose_secret().to_string();
+        let sid = session.session.id;
+        let grant = vault
+            .create_grant(CreateGrantOptions {
+                session_id: sid.clone(),
+                credential_id: credential.id,
+                policy: serde_json::from_value(seeded_policy()).unwrap(),
+                ..Default::default()
+            })
+            .unwrap();
+        let gid = grant.id;
+        let marker = vault
+            .issue_placeholder(IssueOptions {
+                grant_id: gid.clone(),
+                ..Default::default()
+            })
+            .unwrap()
+            .placeholder;
+        drop(vault);
+        ported_common::seed_gateway_rows(dir.path(), &sid, &gid, &session_patch, &grant_patch);
+        if let Some(value) = tripwires {
+            ported_common::seed_tripwires(dir.path(), &value);
+        }
+        let mut reopened = av_store::vault::Vault::open(dir.path()).unwrap();
+        reopened.unlock(None).unwrap();
+        let shared = Shared::new(reopened);
+        let upstream = Arc::new(RecordingUpstream::default());
+        let pipeline = av_daemon::pipeline::Pipeline::new(
+            shared.clone(),
+            PipelineOptions {
+                upstream: Some(upstream.clone()),
+                ..Default::default()
+            },
+        );
+        let request = GatewayRequest {
+            method: "GET".into(),
+            path: "/p/seeded/ordinary".into(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token),
+                ("x-key".into(), marker),
+            ],
+            ..Default::default()
+        };
+        Self {
+            _dir: dir,
+            shared,
+            pipeline,
+            upstream,
+            request,
+            sid,
+            gid,
+        }
+    }
+    async fn snapshot(&self) -> Value {
+        let sid = self.sid.clone();
+        let gid = self.gid.clone();
+        self.shared.run(move |core| json!({"session":core.vault.session(&sid).unwrap(),"grant":core.vault.grant(&gid).unwrap(),"placeholders":core.vault.list_placeholders(None).unwrap()})).await.unwrap()
+    }
+    async fn clean(&self, response: &GatewayResponse) {
+        assert!(!String::from_utf8_lossy(&response.body).contains(SECRET));
+        assert!(!serde_json::to_string(&response.headers)
+            .unwrap()
+            .contains(SECRET));
+        self.shared
+            .run(|core| {
+                assert!(!serde_json::to_string(
+                    &core
+                        .vault
+                        .audit()
+                        .unwrap()
+                        .read(&Default::default())
+                        .unwrap()
+                )
+                .unwrap()
+                .contains(SECRET));
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stored_invalid_limits_and_quota_counters_fail_closed_without_consumption() {
+    for (name, patch, rule) in [
+        (
+            "NaN rate serialized as null",
+            json!({"rate":{"count":null,"per":"second"}}),
+            "rate_invalid",
+        ),
+        (
+            "string rate",
+            json!({"rate":{"count":"5","per":"min"}}),
+            "rate_invalid",
+        ),
+        (
+            "fractional concurrency",
+            json!({"max_concurrent":1.5}),
+            "max_concurrent_invalid",
+        ),
+        (
+            "NaN quota serialized as null",
+            json!({"quota":{"count":null,"window":"day"}}),
+            "quota_invalid",
+        ),
+        (
+            "NaN budget serialized as null",
+            json!({"budget":{"limit":null}}),
+            "budget_invalid",
+        ),
+        (
+            "corrupt quota counter",
+            json!({"quota":{"count":10,"window":"hour"}}),
+            "quota_invalid",
+        ),
+    ] {
+        let mut policy = seeded_policy();
+        for (k, v) in patch.as_object().unwrap() {
+            policy[k] = v.clone();
+        }
+        let mut grant = json!({"policy":policy});
+        if name == "corrupt quota counter" {
+            grant["quota_state"] = json!({"window_ms":3600000,"start":0,"count":null,"prev":0});
+        }
+        let f = SeededGateway::new(json!({}), grant);
+        let response = f.pipeline.handle(f.request.clone()).await;
+        assert_eq!(response.status, 403, "{name}: {:?}", response.error);
+        assert_eq!(
+            response.error.as_ref().unwrap().extra.rule.as_deref(),
+            Some(rule),
+            "{name}"
+        );
+        assert!(f.upstream.hits.lock().unwrap().is_empty(), "{name}");
+        let after = f.snapshot().await;
+        assert_eq!(after["grant"]["budget_used"], 0, "{name}");
+        assert_eq!(after["placeholders"][0]["uses"], 0, "{name}");
+        f.clean(&response).await;
+    }
+    let control = SeededGateway::new(json!({}), json!({}));
+    let response = control.pipeline.handle(control.request.clone()).await;
+    assert_eq!(response.status, 200);
+    control.clean(&response).await;
+}
+
+#[tokio::test]
+async fn stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused() {
+    let mut policy = seeded_policy();
+    policy["budget"]["limit"] = json!("2");
+    let f = SeededGateway::new(json!({}), json!({"policy":policy}));
+    for _ in 0..2 {
+        let response = f.pipeline.handle(f.request.clone()).await;
+        assert_eq!(response.status, 200);
+        f.clean(&response).await;
+    }
+    let spent = f.pipeline.handle(f.request.clone()).await;
+    assert_eq!(
+        spent.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("budget")
+    );
+    f.clean(&spent).await;
+    for value in [
+        json!(""),
+        json!("5.5"),
+        json!("-1"),
+        json!("1e3"),
+        json!("abc"),
+        Value::Null,
+    ] {
+        let mut policy = seeded_policy();
+        policy["budget"]["limit"] = value.clone();
+        let f = SeededGateway::new(json!({}), json!({"policy":policy}));
+        let response = f.pipeline.handle(f.request.clone()).await;
+        assert_eq!(
+            response.error.as_ref().unwrap().extra.rule.as_deref(),
+            Some("budget_invalid"),
+            "{value}"
+        );
+        assert!(f.upstream.hits.lock().unwrap().is_empty());
+        f.clean(&response).await;
+    }
+}
+
+#[tokio::test]
+async fn stored_session_and_grant_expiry_predicates_agree_in_preflight_and_execution() {
+    let iso = |offset| {
+        (time::OffsetDateTime::now_utc() + time::Duration::seconds(offset))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let future = iso(3600);
+    let past = iso(-60);
+    for approval in ["auto", "each"] {
+        for (name, expiry, infinite, expected) in [
+            ("finite", json!(future), false, "allow"),
+            ("expired", json!(past), false, "AV_SESSION_EXPIRED"),
+            ("infinite", Value::Null, true, "allow"),
+            (
+                "legacy absent expiry and false infinite",
+                Value::Null,
+                false,
+                "AV_SESSION_EXPIRED",
+            ),
+            ("invalid", json!("not a date"), false, "AV_SESSION_EXPIRED"),
+        ] {
+            let mut policy = seeded_policy();
+            policy["approval"] = json!(approval);
+            let f = SeededGateway::new(
+                json!({"expires_at":expiry,"infinite":infinite}),
+                json!({"policy":policy}),
+            );
+            let before = f.snapshot().await;
+            let pre = f.pipeline.preflight(f.request.clone(), false).await;
+            if expected == "allow" {
+                assert_eq!(
+                    pre.unwrap()["would"],
+                    if approval == "each" { "hold" } else { "allow" },
+                    "{name}"
+                );
+            } else {
+                assert_eq!(pre.unwrap_err().code.as_str(), expected, "{name}");
+            }
+            assert_eq!(
+                before,
+                f.snapshot().await,
+                "{name}: preflight mutated persistent state"
+            );
+            assert!(f.pipeline.pending_approvals().await.is_empty());
+            let real = f.pipeline.handle(f.request.clone()).await;
+            if expected == "allow" {
+                assert_eq!(
+                    real.status,
+                    if approval == "each" { 202 } else { 200 },
+                    "{name}: {:?}",
+                    real.error
+                );
+            } else {
+                assert_eq!(
+                    real.error.as_ref().unwrap().code.as_str(),
+                    expected,
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                f.upstream.hits.lock().unwrap().len(),
+                usize::from(expected == "allow" && approval == "auto")
+            );
+            f.clean(&real).await;
+        }
+    }
+    for (name, expiry, expected) in [
+        ("no ttl", Value::Null, "allow"),
+        ("future", json!(future), "allow"),
+        ("past", json!(past), "AV_GRANT_EXPIRED"),
+        ("garbage", json!("nope"), "AV_GRANT_EXPIRED"),
+    ] {
+        let f = SeededGateway::new(
+            json!({"infinite":true,"expires_at":null}),
+            json!({"expires_at":expiry}),
+        );
+        let before = f.snapshot().await;
+        let pre = f
+            .pipeline
+            .preflight(f.request.clone(), false)
+            .await
+            .unwrap();
+        if expected == "allow" {
+            assert_eq!(pre["would"], "allow", "{name}");
+        } else {
+            assert_eq!(pre["would"], "deny", "{name}");
+            assert_eq!(
+                pre["checks"].as_array().unwrap().last().unwrap()["code"],
+                expected,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            before,
+            f.snapshot().await,
+            "{name}: preflight changed state"
+        );
+        let real = f.pipeline.handle(f.request.clone()).await;
+        if expected == "allow" {
+            assert_eq!(real.status, 200, "{name}");
+        } else {
+            assert_eq!(
+                real.error.as_ref().unwrap().code.as_str(),
+                expected,
+                "{name}"
+            );
+        }
+        f.clean(&real).await;
+    }
+}
+
+#[tokio::test]
+async fn store_marked_expired_grant_retains_its_specific_gateway_error() {
+    let f = SeededGateway::new(json!({}), json!({"state":"expired"}));
+    let response = f.pipeline.handle(f.request.clone()).await;
+    assert_eq!(
+        response.error.as_ref().unwrap().code.as_str(),
+        "AV_GRANT_EXPIRED"
+    );
+    assert!(f.upstream.hits.lock().unwrap().is_empty());
+    assert_eq!(f.snapshot().await["placeholders"][0]["uses"], 0);
+    f.clean(&response).await;
+    let control = SeededGateway::new(json!({}), json!({}));
+    let response = control.pipeline.handle(control.request.clone()).await;
+    assert_eq!(response.status, 200);
+    control.clean(&response).await;
+}
+
+#[tokio::test]
+async fn redirect_guards_include_malformed_stored_maximum_and_per_request_approval() {
+    for (name, patch, method, location, expected) in [
+        (
+            "foreign host",
+            json!({"redirects":{"max":2}}),
+            "GET",
+            "https://evil.test/stolen",
+            "host",
+        ),
+        (
+            "foreign path",
+            json!({"redirects":{"max":2},"paths":["/ordinary"]}),
+            "GET",
+            "/other",
+            "path",
+        ),
+        (
+            "plaintext downgrade",
+            json!({"redirects":{"max":2}}),
+            "GET",
+            "http://api.example.test/ordinary",
+            "scheme",
+        ),
+        (
+            "write method",
+            json!({"redirects":{"max":2}}),
+            "POST",
+            "/ordinary",
+            "approval",
+        ),
+        (
+            "NaN maximum serialized as null",
+            json!({"redirects":{"max":null}}),
+            "GET",
+            "/ordinary",
+            "max",
+        ),
+        (
+            "per-request approval",
+            json!({"redirects":{"max":2},"approval":"each"}),
+            "GET",
+            "/ordinary",
+            "approval",
+        ),
+    ] {
+        let mut policy = seeded_policy();
+        for (k, v) in patch.as_object().unwrap() {
+            policy[k] = v.clone();
+        }
+        let f = SeededGateway::new(json!({}), json!({"policy":policy}));
+        *f.upstream.reply.lock().unwrap() = Some(redirect_reply(302, location));
+        let mut req = f.request.clone();
+        req.method = method.into();
+        if name == "per-request approval" {
+            let held = f.pipeline.handle(req.clone()).await;
+            let id = held_id(&held);
+            f.pipeline.decide_approval(id, true).await.unwrap();
+            assert!(f.upstream.hits.lock().unwrap().is_empty());
+        }
+        let result = f.pipeline.handle(req).await;
+        assert_eq!(result.status, 302, "{name}: {:?}", result.error);
+        assert_eq!(
+            result.header("av-redirect-stopped"),
+            Some(expected),
+            "{name}"
+        );
+        assert_eq!(f.upstream.hits.lock().unwrap().len(), 1, "{name}");
+        f.clean(&result).await;
+    }
+    let mut policy = seeded_policy();
+    policy["redirects"] = json!({"max":2});
+    let control = SeededGateway::new(json!({}), json!({"policy":policy}));
+    *control.upstream.sequence.lock().unwrap() =
+        std::collections::VecDeque::from([Ok(redirect_reply(302, "/next")), Ok(done_reply())]);
+    let response = control.pipeline.handle(control.request.clone()).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"done");
+    assert_eq!(control.upstream.hits.lock().unwrap().len(), 2);
+    control.clean(&response).await;
+}
+
+#[tokio::test]
+async fn pin_problem_is_safe_and_refunded_and_real_profile_health_receives_metadata() {
+    let f = Fixture::configured_kind(
+        &["header:x-key"],
+        SECRET,
+        None,
+        json!({}),
+        "github",
+        "api.github.com",
+    )
+    .await;
+    *f.up.failure.lock().unwrap() = Some(UpstreamError {
+        code: "AV_PIN_MISMATCH".into(),
+        message: SECRET.into(),
+        presented: vec!["sha256/presented".into()],
+        ..Default::default()
+    });
+    let response = f.get().await;
+    assert_eq!(
+        response.error.as_ref().unwrap().code.as_str(),
+        "AV_PIN_MISMATCH"
+    );
+    assert_eq!(response.error.as_ref().unwrap().extra.refunded, Some(true));
+    assert_eq!(grant_counters(&f).await, (0, vec![0]));
+    f.clean(&response).await;
+    *f.up.failure.lock().unwrap() = None;
+    *f.up.reply.lock().unwrap() = Some(Reply {
+        streaming: false,
+        status: 401,
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            (
+                "github-authentication-token-expiration".into(),
+                "2027-01-01T00:00:00.000Z".into(),
+            ),
+        ],
+        body: b"{}".to_vec(),
+    });
+    let executed = f.get().await;
+    assert_eq!(executed.status, 401);
+    f.shared
+        .run(|core| {
+            let health = serde_json::to_value(
+                core.vault
+                    .find_credential("demo")
+                    .unwrap()
+                    .unwrap()
+                    .health
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(health["status"], "unauthorized");
+            assert_eq!(health["observed_expires_at"], "2027-01-01T00:00:00.000Z");
+        })
+        .await
+        .unwrap();
+    f.clean(&executed).await;
+    f.reply(200, "application/json", "{}".into());
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn malformed_tripwire_rules_keep_defaults_and_only_bad_location_requests_count() {
+    use av_store::model::SessionState;
+    let f = SeededGateway::with_tripwires(
+        json!({}),
+        json!({}),
+        Some(json!({"enabled":true,"rules":"not a list"})),
+    );
+    for _ in 0..10 {
+        let response = f.pipeline.handle(f.request.clone()).await;
+        assert_eq!(response.status, 200);
+        f.clean(&response).await;
+    }
+    let marker = f
+        .request
+        .headers
+        .iter()
+        .find(|(k, _)| k == "x-key")
+        .unwrap()
+        .1
+        .clone();
+    let mut bad = f.request.clone();
+    bad.method = "POST".into();
+    bad.headers
+        .push(("content-type".into(), "application/json".into()));
+    bad.body = Some(json!({"x":marker}).to_string().into_bytes());
+    for n in 0..3 {
+        let response = f.pipeline.handle(bad.clone()).await;
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_BAD_LOCATION"
+        );
+        let sid = f.sid.clone();
+        let state = f
+            .shared
+            .run(move |core| core.vault.session(&sid).unwrap().unwrap().state)
+            .await
+            .unwrap();
+        assert_eq!(
+            state,
+            if n < 2 {
+                SessionState::Active
+            } else {
+                SessionState::Revoked
+            }
+        );
+        f.clean(&response).await;
+    }
+    assert_eq!(f.upstream.hits.lock().unwrap().len(), 10);
+    assert_eq!(f.snapshot().await["placeholders"][0]["uses"], 10);
+}
+
+#[tokio::test]
+async fn unissued_placeholder_replay_counts_only_after_session_authentication() {
+    use av_core::placeholder::{mint, MintInput};
+    use av_store::model::SessionState;
+    let f = SeededGateway::with_tripwires(json!({}), json!({}), Some(json!({"enabled":true})));
+    let sid = f.sid.clone();
+    let marker = f
+        .shared
+        .run(move |core| {
+            mint(&MintInput {
+                k_ph: &core.vault.k_ph().unwrap(),
+                sid: &sid,
+                slug: "seeded",
+                field: "key",
+            })
+            .unwrap()
+            .text
+        })
+        .await
+        .unwrap();
+    let mut unauthenticated = f.request.clone();
+    unauthenticated.headers = vec![
+        ("host".into(), "localhost".into()),
+        ("x-key".into(), marker),
+    ];
+    for _ in 0..3 {
+        let response = f.pipeline.handle(unauthenticated.clone()).await;
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_PH_REPLAY"
+        );
+        f.clean(&response).await;
+    }
+    let sid = f.sid.clone();
+    f.shared
+        .run(move |core| {
+            assert_eq!(
+                core.vault.session(&sid).unwrap().unwrap().state,
+                SessionState::Active
+            );
+            let row = core.vault.list_placeholders(Some(&sid)).unwrap().remove(0);
+            core.vault
+                .burn_placeholder(&row.id, "fixture replay")
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    let response = f.pipeline.handle(f.request.clone()).await;
+    assert_eq!(
+        response.error.as_ref().unwrap().code.as_str(),
+        "AV_PH_REPLAY"
+    );
+    f.clean(&response).await;
+    let sid = f.sid.clone();
+    f.shared
+        .run(move |core| {
+            assert_eq!(
+                core.vault.session(&sid).unwrap().unwrap().state,
+                SessionState::Revoked
+            )
+        })
+        .await
+        .unwrap();
+    assert!(f.upstream.hits.lock().unwrap().is_empty());
+    let ordinary =
+        SeededGateway::with_tripwires(json!({}), json!({}), Some(json!({"enabled":true})));
+    let response = ordinary.pipeline.handle(ordinary.request.clone()).await;
+    assert_eq!(response.status, 200);
+    ordinary.clean(&response).await;
+}
+
+#[tokio::test]
+async fn pending_notice_contains_only_safe_summary_and_refusing_webhook_cannot_release_request() {
+    use tokio::io::AsyncWriteExt;
+    for status in [200, 503] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (_, body) = read_wire_request(&mut socket).await;
+            assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+            socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let f = approval_fixture("each", &["header:x-key"]).await;
+        let mut notices = f
+            .shared
+            .run(move |core| {
+                core.vault
+                    .set_notify_webhook(
+                        &format!("http://127.0.0.1:{port}/hook").into(),
+                        av_store::model::NotifyDetail::Headline,
+                    )
+                    .unwrap();
+                core.notifier.as_ref().unwrap().subscribe(vec![]).unwrap()
+            })
+            .await
+            .unwrap();
+        assert!(notices.recv().await.unwrap().starts_with("event: snapshot"));
+        let held = f
+            .send(
+                "GET",
+                "/ordinary",
+                vec![
+                    ("x-key".into(), f.ph.clone()),
+                    ("av-reason".into(), "please <script>".into()),
+                ],
+                None,
+            )
+            .await;
+        let id = held_id(&held);
+        let frame = notices.recv().await.unwrap();
+        let notice = payloads(&frame).next().unwrap();
+        let mut keys = notice
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(keys, vec!["created_at", "headline", "id", "kind"]);
+        assert_eq!(notice["id"], id);
+        assert_eq!(notice["kind"], "request");
+        for unsafe_text in [SECRET, f.ph.as_str(), "script"] {
+            assert!(!frame.contains(unsafe_text));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        if status == 503 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if audit_records(&f)
+                        .await
+                        .iter()
+                        .any(|r| r["kind"] == "notify.failed")
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let pending = f.daemon.pipeline().pending_approvals().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["id"], id);
+        assert_eq!(grant_counters(&f).await, (0, vec![0]));
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        f.clean(&held).await;
+        f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+        let allowed = f.get().await;
+        assert_eq!(allowed.status, 200);
+        f.clean(&allowed).await;
+    }
+}
