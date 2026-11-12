@@ -2071,3 +2071,638 @@ to = '''            let inline: Value = {
             };
             let pol = policy::grant_policy_from_input(
                 &inline,'''
+
+# ---------------------------------------------------- src/daemon/pipeline.js
+
+[[mutation]]
+name = 'an approval is bound to which placeholder carried the credential'
+file = "src/pipeline.rs"
+from = '''            .map(|s| format!("{}:{}", s.row.grant_id, s.row.field))
+            .collect();
+        let hash_headers'''
+to = '''            .map(|s| s.row.id.clone())
+            .collect();
+        let hash_headers'''
+
+[[mutation]]
+name = 'an approval is not bound to its request'
+file = "src/pipeline.rs"
+from = '''            .iter_mut()
+            .find(|(h, _)| h == hash)
+            .map(|(_, a)| a)'''
+to = '''            .iter_mut()
+            .find(|(h, _)| { let _ = (h, hash); true })
+            .map(|(_, a)| a)'''
+
+[[mutation]]
+name = 'an approval that already ran can be decided again'
+file = "src/pipeline.rs"
+from = '''        if a.state != "pending" {
+            return Err(dr(
+                C::PolicyDenied,
+                format!("already {}", a.state),
+                "approval",'''
+to = '''        if false && a.state != "pending" {
+            return Err(dr(
+                C::PolicyDenied,
+                format!("already {}", a.state),
+                "approval",'''
+
+[[mutation]]
+name = "a request carrying the hash marker's text literally collides with one carrying the placeholder"
+file = "src/pipeline.rs"
+from = '''            let mut out = value.replace('<', "<<");'''
+to = '''            let mut out = value.to_string();'''
+
+[[mutation]]
+name = 'a method-override header escapes the approval rule'
+file = "src/pipeline.rs"
+from = '''        let needs_human = std::iter::once(decision.method.as_str())
+            .chain(overrides.iter().map(String::as_str))'''
+to = '''        let needs_human = std::iter::once(decision.method.as_str())
+            .chain(overrides.iter().map(String::as_str).filter(|_| false))'''
+
+[[mutation]]
+name = 'a pre-connect failure refunds only the last placeholder'
+file = "src/pipeline.rs"
+from = '''            for row in std::mem::take(&mut ctx.consumed) {
+                let _ = self.vault.refund_placeholder(&row);'''
+to = '''            for row in std::mem::take(&mut ctx.consumed).into_iter().rev().take(1) {
+                let _ = self.vault.refund_placeholder(&row);'''
+
+[[mutation]]
+name = 'a spent approval with nothing to replay holds its resend forever'
+file = "src/pipeline.rs"
+from = '''                    if existing.executed_at.is_none() {
+                        return Ok(("pending".into(), existing.id.clone()));
+                    }'''
+to = '''                    if true {
+                        return Ok(("pending".into(), existing.id.clone()));
+                    }'''
+
+[[mutation]]
+name = 'a case-folded secret in a response header name reaches the agent'
+file = "src/pipeline.rs"
+from = '''if kit.check.scrub(&lower).redactions > 0 || kit.check.contains_ignoring_case(&lower) {'''
+to = '''if kit.check.scrub(&lower).redactions > 0 {'''
+
+[[mutation]]
+name = 'a secret split across one JSON field of two events is not reassembled'
+file = "src/sse.rs"
+from = '''        match parse_event_json(&data.join("\n")) {
+            Parsed::Value(v) => self.runs.add(&v, &mut self.check),'''
+to = '''        match parse_event_json(&data.join("\n")) {
+            Parsed::Value(_) => None,'''
+
+[[mutation]]
+name = 'an event that never ends is held without bound'
+file = "src/sse.rs"
+from = '''        if self.pending.len() > MAX_EVENT_BYTES {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = 'a compressed event stream is bounded per chunk only'
+file = "src/sse.rs"
+from = '''        if self.total > self.max_bytes {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = "an event stream's source is piped without its errors"
+file = "src/pipeline.rs"
+from = '''                    Some(Err(_)) => crate::sse::Input::Failed,'''
+to = '''                    Some(Err(_)) => crate::sse::Input::End,'''
+
+[[mutation]]
+name = 'a failing event stream throws at the response writer'
+file = "src/sse.rs"
+from = '''            Input::Failed => st.fail(),'''
+to = '''            Input::Failed => panic!("the upstream failed part way"),'''
+
+[[mutation]]
+name = 'a forged placeholder touches the session it names'
+file = "src/pipeline.rs"
+from = '''            if !av_core::placeholder::verify(&k_ph, &carrier.parsed) {
+                return Err(malformed(&carrier.location));
+            }'''
+to = '''            if false && !av_core::placeholder::verify(&k_ph, &carrier.parsed) {
+                return Err(malformed(&carrier.location));
+            }'''
+
+[[mutation]]
+name = '/t/https/ to an http credential goes out in the clear'
+file = "src/pipeline.rs"
+from = '''                let use_scheme = if scheme == "https" {
+                    "https".to_string()
+                } else {
+                    cred_scheme
+                };'''
+to = '''                let use_scheme = cred_scheme;'''
+
+[[mutation]]
+name = 'an event-stream path run is trimmed before the new value is searched'
+file = "src/sse.rs"
+from = '''            let r = scrubber.scrub(&run);'''
+to = '''            let r = scrubber.scrub(&tail(&run, self.keep));'''
+
+[[mutation]]
+name = 'the joined event-stream view is trimmed before the new event is searched'
+file = "src/sse.rs"
+from = '''        if let Some(r) = self.leaked(&joined) {'''
+to = '''        let trimmed = self.assembled.clone();
+        if let Some(r) = self.leaked(&trimmed) {'''
+
+[[mutation]]
+name = 'an event stream past the key-path limit forgets the oldest path and carries on'
+file = "src/sse.rs"
+from = '''        if self.runs.contains_key(key) || self.runs.len() < MAX_SSE_PATHS {
+            None
+        } else {
+            Some("too_many_paths")
+        }'''
+to = '''        let _ = key;
+        None'''
+
+[[mutation]]
+name = 'a buffered upstream reset mid-body escapes as an internal error'
+file = "src/pipeline.rs"
+from = '''                        Some(Err(m)) => {
+                            return Err(dr(
+                                C::UpstreamUnreachable,'''
+to = '''                        Some(Err(m)) => {
+                            return Err(crate::err::internal(m));
+                            #[allow(unreachable_code)]
+                            return Err(dr(
+                                C::UpstreamUnreachable,'''
+
+[[mutation]]
+name = 'the placeholder in a Basic header is not made stable for the request hash'
+file = "src/pipeline.rs"
+from = '''                    if crate::util::b64(decoded.as_bytes()) == enc {
+                        return format!('''
+to = '''                    if false && crate::util::b64(decoded.as_bytes()) == enc {
+                        return format!('''
+
+[[mutation]]
+name = 'a Basic header that does not encode back to itself shares an approval with one that does'
+file = "src/pipeline.rs"
+from = '''                    if crate::util::b64(decoded.as_bytes()) == enc {'''
+to = '''                    if true {'''
+
+[[mutation]]
+name = 'an event-stream key path is the keys joined with a dot, so a dotted key names another path'
+file = "src/sse.rs"
+from = '''    let path_json = Value::Array(path.iter().map(seg_json).collect());
+    let mut out = vec![Way {
+        gathering: js_stringify(&path_json),'''
+to = '''    let path_json = Value::Array(path.iter().map(seg_json).collect());
+    let _ = &path_json;
+    let mut out = vec![Way {
+        gathering: path.iter().map(|s| match s { Seg::I(i) => i.to_string(), Seg::K(k) => k.clone() }).collect::<Vec<_>>().join("."),'''
+
+[[mutation]]
+name = 'an event-stream array index is the same path segment as a key spelled like it'
+file = "src/sse.rs"
+from = '''                path.push(Seg::I(i));'''
+to = '''                path.push(Seg::K(i.to_string()));'''
+
+[[mutation]]
+name = 'an event-stream value is gathered by key path only, not by the indexes a client groups it by'
+file = "src/sse.rs"
+from = '''                next.push(c.clone());
+                for v in values {'''
+to = '''                next.push(c.clone());
+                for v in values.iter().filter(|_| false) {'''
+
+[[mutation]]
+name = 'an event-stream value is gathered by all of its indexes at once, so a decoy index splits the run'
+file = "src/sse.rs"
+from = '''                next.push(c.clone());
+                for v in values {'''
+to = '''                for v in values {'''
+
+[[mutation]]
+name = 'an event payload with NaN or Infinity, which Python reads, is not reassembled by path'
+file = "src/sse.rs"
+from = '''    swapped.extend(&chars[from..]);
+    match parse_js_json(&swapped) {'''
+to = '''    swapped.extend(&chars[from..]);
+    if true {
+        return Parsed::No;
+    }
+    match parse_js_json(&swapped) {'''
+
+[[mutation]]
+name = 'an event-stream value under more index fields than are combined is passed instead of cut'
+file = "src/sse.rs"
+from = '''        if slots.len() > MAX_SSE_INDEXES {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = 'an event-stream array element is gathered by its position only, not wherever its index puts it'
+file = "src/sse.rs"
+from = '''    if path.iter().any(|s| matches!(s, Seg::I(_))) {'''
+to = '''    if false {'''
+
+[[mutation]]
+name = "a content block's starting text is not gathered with the deltas that continue it"
+file = "src/sse.rs"
+from = '''        out.push(Way {
+            gathering: format!("#{continued}"),'''
+to = '''        if true {
+            continue;
+        }
+        out.push(Way {
+            gathering: format!("#{continued}"),'''
+
+[[mutation]]
+name = "a Responses item's content position is not read as its content_index"
+file = "src/sse.rs"
+from = '''            indexes: own.into_iter().chain(positions).collect(),'''
+to = '''            indexes: { let _ = (own, positions); indexes.to_vec() },'''
+
+[[mutation]]
+name = 'an index field missing from one event is not read as zero or as a group of its own'
+file = "src/sse.rs"
+from = '''            if !way.indexes.iter().any(|(d, k, _)| *d == depth && *k == key) {
+                slots.push((depth, key, missing()));'''
+to = '''            if false && !way.indexes.iter().any(|(d, k, _)| *d == depth && *k == key) {
+                slots.push((depth, key, missing()));'''
+
+[[mutation]]
+name = 'a missing index that came before the field was first seen is not filed with it'
+file = "src/sse.rs"
+from = '''                        let text = self.runs.get(&from).cloned().unwrap_or_default();'''
+to = '''                        let text = { let _ = &from; String::new() };'''
+
+[[mutation]]
+name = 'a missing index field is read as zero only, never as a group of its own'
+file = "src/sse.rs"
+from = '''    vec![Value::from(0u64), Value::Null]'''
+to = '''    vec![Value::from(0u64)]'''
+
+[[mutation]]
+name = 'an index written as a string is not also read as its number'
+file = "src/sse.rs"
+from = '''        if numeric {
+            if let Ok(n) = s.parse::<u64>() {'''
+to = '''        if false && numeric {
+            if let Ok(n) = s.parse::<u64>() {'''
+
+[[mutation]]
+name = "an annotation's character offsets are counted as index fields"
+file = "src/sse.rs"
+from = '''            && !k.starts_with("start_")
+            && !k.starts_with("end_"))'''
+to = '''            )'''
+
+[[mutation]]
+name = 'a response too nested to finish scanning is forwarded instead of refused'
+file = "src/pipeline.rs"
+from = '''        if scrubbed.unscannable {
+            return Err(dr(C::Unscannable, "the response nested encodings deeper'''
+to = '''        if false && scrubbed.unscannable {
+            return Err(dr(C::Unscannable, "the response nested encodings deeper'''
+
+[[mutation]]
+name = 'a concurrency slot is released only when the upstream answered'
+file = "src/pipeline.rs"
+from = '''                            let streaming = p.stream.is_some();
+                            if !streaming {'''
+to = '''                            let streaming = p.stream.is_some();
+                            if !streaming && ctx.upstream_opened {'''
+
+[[mutation]]
+name = 'a stored scrub pattern that no longer compiles is skipped instead of withholding the response'
+file = "src/pipeline.rs"
+from = '''                if av_core::scrub::compile_scrub_pattern(&p.source).is_err() {
+                    return Err(dr(
+                        C::Unscannable,
+                        "a stored scrub pattern is invalid",
+                        "scrub_pattern_invalid",
+                    ));
+                }'''
+to = '''                if av_core::scrub::compile_scrub_pattern(&p.source).is_err() {
+                    continue;
+                }'''
+
+[[mutation]]
+name = 'the spend check ignores what calls in flight have reserved'
+file = "src/pipeline.rs"
+from = '''let committed = state[format!("{key}_used")].as_i64().unwrap_or(0) + reserved(key);'''
+to = '''let committed = state[format!("{key}_used")].as_i64().unwrap_or(0) + 0 * reserved(key);'''
+
+[[mutation]]
+name = 'redirects are followed for every method'
+file = "src/pipeline.rs"
+from = '''        let mut asked = vec![plan.decision.method.clone()];
+        asked.extend(plan.overrides.iter().cloned());
+        asked.push(method.clone());'''
+to = '''        let asked = vec![method.clone()];'''
+
+[[mutation]]
+name = 'a request a method override made a DELETE has its redirect followed'
+file = "src/pipeline.rs"
+from = '''        asked.extend(plan.overrides.iter().cloned());
+        asked.push(method.clone());'''
+to = '''        asked.push(method.clone());'''
+
+[[mutation]]
+name = 'a redirect may choose another port on an allowed host'
+file = "src/pipeline.rs"
+from = '''                if next_port != cred_port {
+                    reason = Some("host");
+                }'''
+to = '''                let _ = (next_port, cred_port);'''
+
+[[mutation]]
+name = 'an approval preview is not scrubbed'
+file = "src/pipeline.rs"
+from = '''        let mut scrub = |text: &str| {
+            let r = scrubber.scrub(text);
+            if r.unscannable {
+                "[withheld: unscannable]".to_string()
+            } else {
+                r.text
+            }
+        };'''
+to = '''        let _ = &mut scrubber;
+        let mut scrub = |text: &str| text.to_string();'''
+
+[[mutation]]
+name = 'a tripwire counts a denial against the session its placeholder names, before authentication'
+file = "src/pipeline.rs"
+from = '''                .map(|s| s.id.clone())
+                .unwrap_or_default(),
+            credential_id: ctx.route.as_ref().map(|r| r.cred.id.clone()),'''
+to = '''                .map(|s| s.id.clone())
+                .unwrap_or_else(|| av_core::placeholder::find_all(&ctx.path).first().map(|p| p.sid.clone()).unwrap_or_default()),
+            credential_id: ctx.route.as_ref().map(|r| r.cred.id.clone()),'''
+
+[[mutation]]
+name = 'a quarantined credential is not refused before its use is spent'
+file = "src/pipeline.rs"
+from = '''            st.stage("quarantine");
+            Self::pl_check_quarantine(&cred)?;
+            st.stage("grant");
+            let grant = self
+                .vault
+                .grants_for_session(&session.id)'''
+to = '''            st.stage("grant");
+            let grant = self
+                .vault
+                .grants_for_session(&session.id)'''
+
+[[mutation]]
+name = 'the gateway does not ask the store whether the grant is still live'
+file = "src/pipeline.rs"
+from = '''            let grant = if peek {
+                self.pl_peek_grant(&grant)?;
+                grant
+            } else {
+                self.vault.assert_grant_live(Some(&grant)).v()?
+            };'''
+to = '''            let grant = if peek {
+                self.pl_peek_grant(&grant)?;
+                grant
+            } else {
+                grant
+            };'''
+
+[[mutation]]
+name = 'a preflight denial is fed to the tripwires'
+file = "src/pipeline.rs"
+from = '''            Err(e) => {
+                let mut scrubber = self.pl_error_scrubber().ok();
+                let detail = self.pl_safe_message(&e.detail, scrubber.as_mut());
+                let mut check = Map::new();'''
+to = '''            Err(e) => {
+                let _ = self.tw_observe(&crate::tripwire::Observation { session_id: session.id.clone(), credential_id: None, code: e.code.as_str().to_string(), rule: rule_of(&e).map(str::to_string), preflight: false });
+                let mut scrubber = self.pl_error_scrubber().ok();
+                let detail = self.pl_safe_message(&e.detail, scrubber.as_mut());
+                let mut check = Map::new();'''
+
+[[mutation]]
+name = 'a method-override header is not held to the route pairs'
+file = "src/pipeline.rs"
+from = '''        let mut p = effective.clone();
+        p.methods = None;
+        policy::evaluate_http(
+            &p,'''
+to = '''        let mut p = effective.clone();
+        p.methods = None;
+        p.routes = None;
+        p.paths = None;
+        policy::evaluate_http(
+            &p,'''
+
+[[mutation]]
+name = 'a redirect hop skips the GraphQL rules'
+file = "src/pipeline.rs"
+from = '''                let sets = policy::describe_effective(effective).payload;'''
+to = '''                let mut sets = policy::describe_effective(effective).payload;
+                if let Checked::Valid(v) = &mut sets { for s in v.iter_mut() { s.graphql = None; } }'''
+
+[[mutation]]
+name = 'a redirect hop silently drops the body rules'
+file = "src/pipeline.rs"
+from = '''                let sets = policy::describe_effective(effective).payload;'''
+to = '''                let mut sets = policy::describe_effective(effective).payload;
+                if let Checked::Valid(v) = &mut sets { for s in v.iter_mut() { s.json = None; s.form = None; } }'''
+
+[[mutation]]
+name = 'a request is checked on headers that were never folded'
+file = "src/pipeline.rs"
+from = '''        let mut req = req;
+        req.headers = fold_headers(&req.headers)?;
+        let session = self.pl_authenticate(&req, true)?;'''
+to = '''        let req = req;
+        let session = self.pl_authenticate(&req, true)?;'''
+
+[[mutation]]
+name = 'preflight reads headers that were never folded'
+file = "src/pipeline.rs"
+from = '''        let mut req = req;
+        req.headers = fold_headers(&req.headers)?;
+        let session = self.pl_authenticate(&req, false)?;'''
+to = '''        let req = req;
+        let session = self.pl_authenticate(&req, false)?;'''
+
+[[mutation]]
+name = 'two header keys differing only in case reach the client, and the last one wins'
+file = "src/util.rs"
+from = '''                let sep = if e.0 == "cookie" { "; " } else { ", " };
+                e.1.push_str(sep);
+                e.1.push_str(&v);'''
+to = '''                e.1 = v;'''
+
+[[mutation]]
+name = "a redirect hop copies the request's headers, method overrides included"
+file = "src/pipeline.rs"
+from = '''        if HOP_FORWARDED.contains(&lower.as_str()) || cred_headers.contains(&lower) {'''
+to = '''        if { let _ = cred_headers; true } {'''
+
+[[mutation]]
+name = 'a redirect hop sends a body or framing header a credential is declared at'
+file = "src/pipeline.rs"
+from = '''        if hop_never(&lower) {
+            continue;
+        }
+        if HOP_FORWARDED'''
+to = '''        if HOP_FORWARDED'''
+
+[[mutation]]
+name = 'a redirect hop follows a Location carrying a method-override field'
+file = "src/pipeline.rs"
+from = '''                if check_overrides(effective, &hv, &h.host, &h.path).is_err() {
+                    reason = Some("path");
+                }'''
+to = ''''''
+
+[[mutation]]
+name = 'a 307 or 308 hop is sent as a GET whatever the request was'
+file = "src/pipeline.rs"
+from = '''        let method = if status == 307 || status == 308 || plan.decision.method == "HEAD" {
+            plan.decision.method.clone()
+        } else {
+            "GET".into()
+        };'''
+to = '''        let method: String = { let _ = status; "GET".into() };'''
+
+[[mutation]]
+name = 'a hop drops the API-version headers a provider needs'
+file = "src/pipeline.rs"
+from = '''const HOP_FORWARDED: [&str; 14] = [
+    "accept",
+    "user-agent",
+    "accept-language",
+    "cache-control",
+    "if-none-match",
+    "if-modified-since",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-beta",
+    "openai-organization",
+    "openai-project",
+    "x-api-version",
+    "api-version",
+    "x-github-api-version",
+];'''
+to = '''const HOP_FORWARDED: [&str; 6] = [
+    "accept",
+    "user-agent",
+    "accept-language",
+    "cache-control",
+    "if-none-match",
+    "if-modified-since",
+];'''
+
+[[mutation]]
+name = "a hop forwards the agent's cookie and forwarding headers"
+file = "src/pipeline.rs"
+from = '''const HOP_FORWARDED: [&str; 14] = [
+    "accept",'''
+to = '''const HOP_FORWARDED: [&str; 17] = [
+    "cookie",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "accept",'''
+
+[[mutation]]
+name = "a hop's override check reads the raw URL instead of the view"
+file = "src/pipeline.rs"
+from = '''                if check_overrides(effective, &hv, &h.host, &h.path).is_err() {'''
+to = '''                if n.query_pairs().any(|(k, v)| k == "_method" && v.to_uppercase() != hv.method) {'''
+
+[[mutation]]
+name = 'a hop to a Location with a stray name is followed'
+file = "src/pipeline.rs"
+from = '''                if hv.stray_name {
+                    reason = Some("path");
+                }'''
+to = ''''''
+
+[[mutation]]
+name = "the gateway's upstream drops the credential's pins"
+file = "src/pipeline.rs"
+from = '''            body: plan.body.clone(),
+            pins,
+        };'''
+to = '''            body: plan.body.clone(),
+            pins: { let _ = pins; Pins::None },
+        };'''
+
+[[mutation]]
+name = 'the gateway looks pins up by exact key, so a malformed pin table means no pins'
+file = "src/pipeline.rs"
+from = '''        Pins::from_lookup(av_core::pins::pins_for(
+            table.as_ref(),
+            &av_core::pins::url_identity(&u),
+        ))'''
+to = '''        let _ = table;
+        match cred.pins.get(&av_core::pins::url_identity(&u)) {
+            Some(v) => Pins::List(v.iter().map(|s| Value::from(s.clone())).collect()),
+            None => Pins::None,
+        }'''
+
+[[mutation]]
+name = 'a refusal from pinnedRequest is reported as an unreachable upstream and not refunded'
+file = "src/pipeline.rs"
+from = '''        if let Some(v) = e.vault.as_ref().filter(|v| v.code == C::PolicyDenied) {
+            let mut out = d(C::PolicyDenied, v.detail.clone()).refunded(true);
+            out.extra.rule = v.extra.rule.clone();
+            return out;
+        }'''
+to = ''''''
+
+[[mutation]]
+name = 'a repeated header reaches pinnedRequest as a list and the request is refused'
+file = "src/pipeline.rs"
+from = '''                v.join(if n.eq_ignore_ascii_case("cookie") {
+                    "; "
+                } else {
+                    ", "
+                }),'''
+to = '''                v.first().cloned().unwrap_or_default(),'''
+
+[[mutation]]
+name = 'a denial row records the method the agent sent, whatever it is (C28)'
+file = "src/pipeline.rs"
+from = '''    if AUDIT_METHODS.contains(&up.as_str()) {
+        up
+    } else {
+        "OTHER".into()
+    }'''
+to = '''    let _ = up;
+    m.to_string()'''
+
+[[mutation]]
+name = 'the explain-denial sentences are not bounded by count (C28)'
+file = "src/pipeline.rs"
+from = '''            if self.pl.denials.len() < MAX_DENIALS && now - first.at < DENIAL_TTL_MS as i64 {'''
+to = '''            if now - first.at < DENIAL_TTL_MS as i64 {'''
+
+[[mutation]]
+name = 'an explain-denial sentence is served past its hour (C28)'
+file = "src/pipeline.rs"
+from = '''        if now_ms() - d.at >= DENIAL_TTL_MS as i64 || d.session_id.as_deref() != session_id {'''
+to = '''        if d.session_id.as_deref() != session_id {'''
+
+[[mutation]]
+name = 'a refused redirect records the host the upstream named (C28)'
+file = "src/pipeline.rs"
+from = '''"to_host": hop.as_ref().map(|h| h.host.clone()), "reason": reason}))?;'''
+to = '''"to_host": hop.as_ref().map(|h| h.host.clone()).or_else(|| next.as_ref().map(url_hostname)), "reason": reason}))?;'''
+
+[[mutation]]
+name = "a held request's reason is recorded unbounded (C28)"
+file = "src/pipeline.rs"
+from = '''                let safe = self.pl_safe_message(r, None);
+                Some(self.vault.untrusted_text(&safe, 200).v()?)'''
+to = '''                let safe = self.pl_safe_message(r, None);
+                Some(safe)'''
+
+[[mutation]]
+name = "r6 F1 (Grok): response.streamed records the upstream's own Content-Type"
+file = "src/pipeline.rs"
+from = '''"content_type": "text/event-stream", "content_encoding": audit_encoding(&enc_c)}))?;'''
+to = '''"content_type": up_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()), "content_encoding": audit_encoding(&enc_c)}))?;'''
