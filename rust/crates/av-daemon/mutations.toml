@@ -2831,3 +2831,21 @@ name = "r6 F1 (Grok): response.streamed records the upstream's own Content-Type"
 file = "src/pipeline.rs"
 from = '''"content_type": "text/event-stream", "content_encoding": audit_encoding(&enc_c)}))?;'''
 to = '''"content_type": up_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()), "content_encoding": audit_encoding(&enc_c)}))?;'''
+
+# connectors-pinning.test.js:383 (DEPTH_ZERO_SELF_SIGNED_CERT): Node names an
+# untrusted chain by the leaf's own issuer path, not by what is appended.
+
+[[mutation]]
+name = 'a leaf with a non-CA certificate appended under its issuer name is named by the append, not as self-signed'
+file = "src/connectors/pinning.rs"
+from = '''        E::UnknownIssuer
+        | E::EndEntityUsedAsCa
+'''
+to = '''        E::UnknownIssuer
+'''
+
+[[mutation]]
+name = 'an untrusted chain is named by the order of the appended certificates, not the leaf issuer path'
+file = "src/connectors/pinning.rs"
+from = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| sub == issuer));'''
+to = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| !sub.is_empty() || sub == issuer));'''

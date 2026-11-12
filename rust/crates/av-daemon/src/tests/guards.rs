@@ -366,3 +366,112 @@ async fn a_reservation_left_by_a_previous_process_is_charged_in_full() {
     assert_eq!(spend["tokens_used"], 100);
     assert_eq!(spend["reserved"], json!({}));
 }
+
+/// A public key copied from a real certificate (no private half).
+struct PublicOnly(Vec<u8>);
+
+impl rcgen::PublicKeyData for PublicOnly {
+    fn der_bytes(&self) -> &[u8] {
+        &self.0
+    }
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &rcgen::PKCS_ECDSA_P256_SHA256
+    }
+}
+
+/// connectors-pinning.test.js:383: an untrusted chain is refused with the
+/// code OpenSSL gives for the leaf's own issuer path, whatever is appended
+/// behind it.
+#[test]
+fn an_untrusted_chain_is_refused_by_the_code_of_the_leafs_own_issuer_path() {
+    let c = chain((-1, 30));
+    let anchors = [anchor(&c.root)];
+    let code = |presented: &[Vec<u8>], pins: Option<&[String]>, anchors: &[_]| {
+        verdict_with(presented, &name("localhost"), pins, anchors)
+            .expect("refused")
+            .code
+    };
+    // A valid self-signed leaf, with a certificate carrying a copy of the
+    // intermediate's key (and the leaf's own subject name) behind it.
+    let (_, parsed) = x509_parser::parse_x509_certificate(&c.inter).unwrap();
+    let copied_key = PublicOnly(parsed.public_key().subject_public_key.data.to_vec());
+    let (ap, ak) = ca("attacker");
+    let copied = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .signed_by(&copied_key, &rcgen::Issuer::new(ap, ak))
+        .unwrap()
+        .der()
+        .to_vec();
+    assert_eq!(spki_of(&copied), spki_of(&c.inter));
+    let lk = rcgen::KeyPair::generate().unwrap();
+    let selfie = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .self_signed(&lk)
+        .unwrap()
+        .der()
+        .to_vec();
+    let behind = vec![selfie.clone(), copied.clone()];
+    let inter_pin = [spki_of(&c.inter).unwrap()];
+    assert_eq!(
+        code(&behind, Some(&inter_pin), &anchors),
+        "DEPTH_ZERO_SELF_SIGNED_CERT"
+    );
+    assert_eq!(code(&behind, None, &anchors), "DEPTH_ZERO_SELF_SIGNED_CERT");
+    assert_eq!(
+        code(std::slice::from_ref(&selfie), None, &anchors),
+        "DEPTH_ZERO_SELF_SIGNED_CERT"
+    );
+    // The refusal still stands: only the leaf's own pin admits it.
+    assert!(verdict_with(
+        &behind,
+        &name("localhost"),
+        Some(&[spki_of(&selfie).unwrap()]),
+        &anchors
+    )
+    .is_none());
+    // The other codes, each from the walk up the leaf's issuers.
+    assert_eq!(
+        code(std::slice::from_ref(&c.leaf), None, &[]),
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+    );
+    assert_eq!(
+        code(&[c.leaf.clone(), c.stray.clone()], None, &[]),
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "an appended certificate that issued nothing is not the leaf's path"
+    );
+    assert_eq!(
+        code(&[c.leaf.clone(), c.inter.clone()], None, &[]),
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"
+    );
+    assert_eq!(
+        code(
+            &[c.leaf.clone(), c.stray.clone(), c.inter.clone()],
+            None,
+            &[]
+        ),
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "the issuer is found wherever it sits"
+    );
+    assert_eq!(
+        code(
+            &[c.leaf.clone(), c.inter.clone(), c.root.clone()],
+            None,
+            &[]
+        ),
+        "SELF_SIGNED_CERT_IN_CHAIN"
+    );
+    assert_eq!(
+        code(
+            &[
+                c.leaf.clone(),
+                c.root.clone(),
+                c.stray.clone(),
+                c.inter.clone()
+            ],
+            None,
+            &[]
+        ),
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "a self-signed certificate counts only once the walk reaches it"
+    );
+}

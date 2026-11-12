@@ -187,24 +187,61 @@ fn node_code(e: &webpki::Error, chain: &[Vec<u8>]) -> String {
         E::CertExpired { .. } => "CERT_HAS_EXPIRED".into(),
         E::CertNotValidYet { .. } => "CERT_NOT_YET_VALID".into(),
         E::CertNotValidForName(_) => "ERR_TLS_CERT_ALTNAME_INVALID".into(),
-        E::UnknownIssuer => {
-            let self_signed = |der: &[u8]| {
-                x509_parser::parse_x509_certificate(der).is_ok_and(|(_, c)| {
-                    c.tbs_certificate.issuer.as_raw() == c.tbs_certificate.subject.as_raw()
-                })
-            };
-            if chain.len() == 1 && self_signed(&chain[0]) {
-                "DEPTH_ZERO_SELF_SIGNED_CERT".into()
-            } else if chain.len() == 1 {
-                "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into()
-            } else if chain.last().is_some_and(|c| self_signed(c)) {
-                "SELF_SIGNED_CERT_IN_CHAIN".into()
-            } else {
-                "UNABLE_TO_GET_ISSUER_CERT_LOCALLY".into()
-            }
-        }
         E::CertRevoked => "CERT_REVOKED".into(),
+        // No path to an anchor: webpki tried the presented certificates as
+        // issuers and none served (missing, a forged signature, or one that
+        // is no CA at all).
+        E::UnknownIssuer
+        | E::EndEntityUsedAsCa
+        | E::InvalidSignatureForPublicKey
+        | E::SignatureAlgorithmMismatch
+        | E::UnsupportedSignatureAlgorithmContext(_)
+        | E::UnsupportedSignatureAlgorithmForPublicKeyContext(_) => untrusted_code(chain),
         _ => "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into(),
+    }
+}
+
+/// Why OpenSSL finds no trusted path: it follows the leaf's issuer names
+/// through the presented certificates, so the code comes from the leaf's own
+/// issuer path, never from whatever else was appended. A leaf that issued
+/// itself stops the walk at depth zero.
+fn untrusted_code(chain: &[Vec<u8>]) -> String {
+    let names: Vec<Option<(Vec<u8>, Vec<u8>)>> = chain
+        .iter()
+        .map(|der| {
+            x509_parser::parse_x509_certificate(der).ok().map(|(_, c)| {
+                (
+                    c.tbs_certificate.subject.as_raw().to_vec(),
+                    c.tbs_certificate.issuer.as_raw().to_vec(),
+                )
+            })
+        })
+        .collect();
+    let mut used = vec![false; chain.len()];
+    let mut at = 0usize;
+    let mut depth = 0usize;
+    loop {
+        let Some(Some((subject, issuer))) = names.get(at) else {
+            return "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into();
+        };
+        used[at] = true;
+        if subject == issuer {
+            return if depth == 0 {
+                "DEPTH_ZERO_SELF_SIGNED_CERT".into()
+            } else {
+                "SELF_SIGNED_CERT_IN_CHAIN".into()
+            };
+        }
+        let next = (1..chain.len())
+            .find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| sub == issuer));
+        match next {
+            Some(j) if depth < CHAIN_HOPS => {
+                at = j;
+                depth += 1;
+            }
+            _ if depth == 0 => return "UNABLE_TO_VERIFY_LEAF_SIGNATURE".into(),
+            _ => return "UNABLE_TO_GET_ISSUER_CERT_LOCALLY".into(),
+        }
     }
 }
 
