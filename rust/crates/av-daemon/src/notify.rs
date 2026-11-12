@@ -418,6 +418,12 @@ impl Notifier {
         Ok(rx)
     }
 
+    /// Whether a later item waits for the next slot (`notifier.timer`).
+    #[cfg(test)]
+    pub(crate) fn timer_set(&self) -> bool {
+        self.inner().timer
+    }
+
     /// `Notifier.test()`.
     pub async fn test(self: &Arc<Self>) -> Result<Value, VaultError> {
         let Some(shared) = self

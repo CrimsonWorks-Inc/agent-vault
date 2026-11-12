@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
 use crate::notify::NotifierOptions;
@@ -161,4 +161,13 @@ async fn events_back_to_back_make_one_post() {
     posted(&posts, 1).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(posts.lock().unwrap().len(), 1, "one post per interval");
+    assert!(
+        w.daemon.notifier.timer_set(),
+        "the later items wait for the next slot"
+    );
+    let body: Value = serde_json::from_str(&posts.lock().unwrap()[0]).unwrap();
+    assert_eq!(
+        body["waiting"], 1,
+        "the POST carries what waited when it took the slot"
+    );
 }
