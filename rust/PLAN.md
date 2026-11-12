@@ -90,7 +90,13 @@ exit codes, `backup export` on a pipe, `cred test` single vs `--all`, and
 `POST /v1/sessions` with `{}` / rotating to the same value. A ninth, found by
 the scaffold: the JS CLI **ignores unknown flags** on every command outside its
 `knownFlags` set (`status --frob` runs normally), while clap refuses them; the
-Rust CLI must accept and ignore them on exactly those commands. **The port
+Rust CLI must accept and ignore them on exactly those commands. A tenth,
+pinned by the conformance suite: when a request carries **two
+`Authorization` headers**, Node keeps only the first, so the gateway sees just
+that one (401 `AV_SESSION_REQUIRED`, rule `no_placeholder`, when the first is
+not a session token). hyper keeps both; the Rust gateway must read only the
+first value of `Authorization` and must never substitute into, forward, or
+match against the second. **The port
 reproduces all of them exactly.** Fixing them is a separate change after the
 port, so the conformance suite stays a pure equivalence check.
 
