@@ -349,3 +349,26 @@ async fn a_template_request_is_approved_as_it_was_asked_not_as_the_template_now_
     assert!(!text.contains("DELETE"), "{text}");
     assert!(!text.contains("\"limit\":50"), "{text}");
 }
+
+/// 'a panic that locks leaves the passphrase window open'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_that_locks_closes_the_window() {
+    let w = gated().await;
+    let (s, v) = w
+        .control("POST", "/v1/presence/window", json!({"passphrase": PASS}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w.control("POST", "/v1/panic", json!({"lock": true})).await;
+    assert_eq!((s, v["locked"].as_bool()), (200, Some(true)), "{v}");
+    let (s, v) = w
+        .control("POST", "/v1/unlock", json!({"passphrase": PASS}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control("POST", "/v1/credentials/release", json!({"slug": "demo"}))
+        .await;
+    assert!(
+        s == 401 && human(&v),
+        "the window did not outlive the lock: {s} {v}"
+    );
+}
