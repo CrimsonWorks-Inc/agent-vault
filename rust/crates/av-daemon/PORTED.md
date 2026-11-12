@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 648 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **448 not yet ported**.
+Totals: 1207 JS tests: 668 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 105 CLI-only, 1 not applicable, **408 not yet ported**.
 
 ## Mutation check
 
@@ -115,8 +115,8 @@ the vault on every call instead of caching an audit handle.
 | connectors-probe.test.js | V-Q7: an ordinary short body is drained to its end and not cut | `ported_gateway_core::connector_probe_bounded_drain_drops_endless_fast_or_trickle_bodies_and_finishes_ordinary_short_body` |
 | connectors-probe.test.js | V-Q8: a recordHealth failure after a 200 is a store error, not unreachable | `ported_gateway_core::connector_probe_real_lock_during_health_write_surfaces_store_error_after_success_or_network_failure` |
 | connectors-probe.test.js | V-Q9: pins of the wrong shape refuse the probe before the secret is read | not yet ported |
-| connectors-probe.test.js | pins under two spellings of the same host are joined, and an empty one does not hide the other | not yet ported |
-| connectors-probe.test.js | F-1: pins are looked up by the host of the URL the probe sends to, however the key or the declared host spells it | not yet ported |
+| connectors-probe.test.js | pins under two spellings of the same host are joined, and an empty one does not hide the other | `ported_gateway_core::connector_probe_joins_legacy_host_aliases_uses_url_identity_and_preserves_no_pin_controls` |
+| connectors-probe.test.js | F-1: pins are looked up by the host of the URL the probe sends to, however the key or the declared host spells it | `ported_gateway_core::connector_probe_joins_legacy_host_aliases_uses_url_identity_and_preserves_no_pin_controls` |
 | connectors-probe.test.js | with the real upstream: a root pin adds to CA verification, a mismatch sends nothing, and a match probes only /user | not yet ported |
 | control-api-backup-audit.test.js | export needs a fresh proof: the window is refused, the passphrase works, and the bundle holds no secret | `ported_gateway_core::control_backup_export_requires_factor_and_fresh_proof_even_with_window_and_hides_every_secret` |
 | control-api-backup-audit.test.js | export is refused on a vault with no human factor, and while locked | `ported_gateway_core::control_backup_export_requires_factor_and_fresh_proof_even_with_window_and_hides_every_secret` |
@@ -404,11 +404,11 @@ the vault on every call instead of caching an audit handle.
 | fix-control-listeners.test.js | an allow-cidr that cannot be parsed is refused, not stored and ignored | not yet ported |
 | fix-control-listeners.test.js | a TLS peer connected before listen rm is not served after it | not yet ported |
 | fix-control-listeners.test.js | an established TLS connection is dropped by listen rm, and a fresh one is served before it | not yet ported |
-| fix-control-mcp.test.js | a streamed response comes back as a body, and the stream is read to the end | not yet ported |
-| fix-control-mcp.test.js | a buffered response is unchanged | not yet ported |
-| fix-control-mcp.test.js | vault_http does not leave a live placeholder behind per call | not yet ported |
-| fix-control-mcp.test.js | the session token is what authenticates, so a query-site credential works | not yet ported |
-| fix-control-mcp.test.js | vault_request_session carries ttl_minutes and uses to the human | not yet ported |
+| fix-control-mcp.test.js | a streamed response comes back as a body, and the stream is read to the end | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
+| fix-control-mcp.test.js | a buffered response is unchanged | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
+| fix-control-mcp.test.js | vault_http does not leave a live placeholder behind per call | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
+| fix-control-mcp.test.js | the session token is what authenticates, so a query-site credential works | `ported_gateway_core::fix_mcp_query_credential_authenticates_by_session_and_proposals_preserve_ttl_and_uses` |
+| fix-control-mcp.test.js | vault_request_session carries ttl_minutes and uses to the human | `ported_gateway_core::fix_mcp_query_credential_authenticates_by_session_and_proposals_preserve_ttl_and_uses` |
 | fix-control-page.test.js | what the page signs for a narrowing is what the server rebuilds | not yet ported |
 | fix-control-page.test.js | a narrowed approval made the way the page makes it goes through | not yet ported |
 | fix-control-page.test.js | the hand-off example sends the token where it cannot displace the placeholder | not yet ported |
@@ -1043,35 +1043,35 @@ the vault on every call instead of caching an audit handle.
 | requested-r1.test.js | the CLI exits with the refusal code’s own exit status | not yet ported |
 | requested-r1.test.js | approvals offers the owner options, and approve validates them | not yet ported |
 | requested-r1.test.js | the help text documents how to start an auto-approving session | not yet ported |
-| requested-r2.test.js | a new file is created 0600 even under umask 000, and an existing one is refused | not yet ported |
-| requested-r2.test.js | a symlink is never followed, with or without force | not yet ported |
-| requested-r2.test.js | force replaces a regular file atomically and leaves it 0600 | not yet ported |
-| requested-r2.test.js | a temporary file swapped for a symlink before the rename is refused, and no link is left | not yet ported |
-| requested-r2.test.js | a destination that becomes a symlink just before the rename is replaced, and the target is untouched | not yet ported |
-| requested-r2.test.js | appending makes the file 0600 whatever the umask, and tightens one that was not | not yet ported |
-| requested-r2.test.js | appending creates 0600, appends whole lines, and refuses a symlink | not yet ported |
-| requested-r2.test.js | the final check passes placeholders for the session and loopback gateway URLs | not yet ported |
-| requested-r2.test.js | the final check refuses everything else, and never says what it refused | not yet ported |
-| requested-r2.test.js | one session holds several credentials, each with its own grant and placeholder | not yet ported |
-| requested-r2.test.js | an ambiguous or mixed session body is refused, and leaves nothing behind | not yet ported |
-| requested-r2.test.js | two credentials for one host stay apart: /p/ picks by name, /t/ refuses the other one | not yet ported |
-| requested-r2.test.js | a batch is gated like a single placeholder | not yet ported |
-| requested-r2.test.js | a batch issues one placeholder per item, in order, and records the batch | not yet ported |
-| requested-r2.test.js | a batch is all or nothing | not yet ported |
-| requested-r2.test.js | a batch with one quarantined credential issues nothing, not even the items before it | not yet ported |
-| requested-r2.test.js | a batch of the wrong shape is refused before anything is resolved | not yet ported |
-| requested-r2.test.js | the grant’s use ceiling beats what a batch asks for | not yet ported |
-| requested-r2.test.js | env writes a 0600 file of placeholders and URLs, and never a secret or the token | not yet ported |
-| requested-r2.test.js | env never replaces a file unless told to, and never follows a link | not yet ported |
-| requested-r2.test.js | env refuses bad mappings before it calls anything, without echoing what was pasted | not yet ported |
-| requested-r2.test.js | env with a map file and no --out prints the lines | not yet ported |
-| requested-r2.test.js | env without a session says how to make one | not yet ported |
-| requested-r2.test.js | env warns when the file would be committed | not yet ported |
-| requested-r2.test.js | a batch answer that is not a placeholder is never written | not yet ported |
-| requested-r2.test.js | the same fake answering a real placeholder shape is written: the check is not a wall | not yet ported |
-| requested-r2.test.js | exec --map puts a placeholder in the child under the name a tool reads | not yet ported |
-| requested-r2.test.js | exec reports a missing command as 127 | not yet ported |
-| requested-r2.test.js | session create takes several credentials and prints a block for each | not yet ported |
+| requested-r2.test.js | a new file is created 0600 even under umask 000, and an existing one is refused | av-cli |
+| requested-r2.test.js | a symlink is never followed, with or without force | av-cli |
+| requested-r2.test.js | force replaces a regular file atomically and leaves it 0600 | av-cli |
+| requested-r2.test.js | a temporary file swapped for a symlink before the rename is refused, and no link is left | av-cli |
+| requested-r2.test.js | a destination that becomes a symlink just before the rename is replaced, and the target is untouched | av-cli |
+| requested-r2.test.js | appending makes the file 0600 whatever the umask, and tightens one that was not | av-cli |
+| requested-r2.test.js | appending creates 0600, appends whole lines, and refuses a symlink | av-cli |
+| requested-r2.test.js | the final check passes placeholders for the session and loopback gateway URLs | av-cli |
+| requested-r2.test.js | the final check refuses everything else, and never says what it refused | av-cli |
+| requested-r2.test.js | one session holds several credentials, each with its own grant and placeholder | `ported_gateway_core::requested_multicred_response_preserves_grant_order_profiles_mirrors_and_listing` |
+| requested-r2.test.js | an ambiguous or mixed session body is refused, and leaves nothing behind | `ported_gateway_core::requested_multicred_mixed_duplicate_empty_oversized_and_missing_are_atomic` |
+| requested-r2.test.js | two credentials for one host stay apart: /p/ picks by name, /t/ refuses the other one | `ported_gateway_core::requested_same_host_credentials_remain_separate_on_named_and_transparent_routes` |
+| requested-r2.test.js | a batch is gated like a single placeholder | `ported_gateway_core::requested_batch_presence_order_ledger_ceilings_and_audit_are_exact` |
+| requested-r2.test.js | a batch issues one placeholder per item, in order, and records the batch | `ported_gateway_core::requested_batch_presence_order_ledger_ceilings_and_audit_are_exact` |
+| requested-r2.test.js | a batch is all or nothing | `ported_gateway_core::requested_batch_missing_ungranted_field_session_and_bad_shapes_create_no_rows` |
+| requested-r2.test.js | a batch with one quarantined credential issues nothing, not even the items before it | `ported_gateway_core::requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins` |
+| requested-r2.test.js | a batch of the wrong shape is refused before anything is resolved | `ported_gateway_core::requested_batch_missing_ungranted_field_session_and_bad_shapes_create_no_rows` |
+| requested-r2.test.js | the grant’s use ceiling beats what a batch asks for | `ported_gateway_core::requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins` |
+| requested-r2.test.js | env writes a 0600 file of placeholders and URLs, and never a secret or the token | av-cli |
+| requested-r2.test.js | env never replaces a file unless told to, and never follows a link | av-cli |
+| requested-r2.test.js | env refuses bad mappings before it calls anything, without echoing what was pasted | av-cli |
+| requested-r2.test.js | env with a map file and no --out prints the lines | av-cli |
+| requested-r2.test.js | env without a session says how to make one | av-cli |
+| requested-r2.test.js | env warns when the file would be committed | av-cli |
+| requested-r2.test.js | a batch answer that is not a placeholder is never written | av-cli |
+| requested-r2.test.js | the same fake answering a real placeholder shape is written: the check is not a wall | av-cli |
+| requested-r2.test.js | exec --map puts a placeholder in the child under the name a tool reads | av-cli |
+| requested-r2.test.js | exec reports a missing command as 127 | av-cli |
+| requested-r2.test.js | session create takes several credentials and prints a block for each | av-cli |
 | requested-r3.test.js | a session with no expiry needs a fresh proof, and gets one from the passphrase | not yet ported |
 | requested-r3.test.js | a vault with no factor refuses a session with no expiry | not yet ported |
 | requested-r3.test.js | a session with no expiry is never remote, and says so before asking for anything | not yet ported |
@@ -1084,10 +1084,10 @@ the vault on every call instead of caching an audit handle.
 | requested-r3.test.js | the CLI on a vault with no factor says to set a passphrase first | not yet ported |
 | requested-r3.test.js | a stored expiry that does not parse is never live | not yet ported |
 | requested-r3.test.js | an infinite session is the default for an implicit placeholder when it is the only one | not yet ported |
-| requested-seams.test.js | a session for a quarantined credential is refused before the gate asks for anything | not yet ported |
-| requested-seams.test.js | approving a request for a quarantined credential is refused and leaves it pending | not yet ported |
-| requested-seams.test.js | a placeholder batch for a quarantined credential is refused whole, with the store's rule | not yet ported |
-| requested-seams.test.js | a placeholder batch on a grant that has ended is refused by the store's grant check | not yet ported |
+| requested-seams.test.js | a session for a quarantined credential is refused before the gate asks for anything | `ported_gateway_core::requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending` |
+| requested-seams.test.js | approving a request for a quarantined credential is refused and leaves it pending | `ported_gateway_core::requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending` |
+| requested-seams.test.js | a placeholder batch for a quarantined credential is refused whole, with the store's rule | `ported_gateway_core::requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins` |
+| requested-seams.test.js | a placeholder batch on a grant that has ended is refused by the store's grant check | `ported_gateway_core::requested_expired_grant_batch_issues_nothing_while_other_session_works` |
 | requested-ui.test.js | the page reads owner options exactly as the CLI and the daemon do | not yet ported |
 | requested-ui.test.js | a session with no expiry renders as never, and garbage as expired | not yet ported |
 | requested-ui.test.js | the decisions that can be elevated are re-verified by the daemon | not yet ported |

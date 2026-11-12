@@ -14606,3 +14606,654 @@ async fn connector_probe_real_lock_during_health_write_surfaces_store_error_afte
         }
     }).await.expect("real store failure after probe response timed out");
 }
+
+#[tokio::test]
+async fn connector_probe_joins_legacy_host_aliases_uses_url_identity_and_preserves_no_pin_controls()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let pin = format!("sha256/{}=", "C".repeat(43));
+        let other = format!("sha256/{}=", "E".repeat(43));
+        for (host, table, want) in [
+            (
+                "api.github.com",
+                json!({"api.github.com":[],"API.GitHub.com":[pin],"other.test":[other]}),
+                json!([pin]),
+            ),
+            ("[0:0::1]:8443", json!({"[::1]":[pin]}), json!([pin])),
+            ("[::1]:8443", json!({"[0:0::1]":[pin]}), json!([pin])),
+            (
+                "[::1]:8443",
+                json!({"[0:0:0:0:0:0:0:1]:8443":[pin]}),
+                json!([pin]),
+            ),
+            ("[::1]:8443", json!({"::1":[pin]}), json!([pin])),
+            ("[::1]:8443", json!({" 0:0::1 ":[pin]}), json!([pin])),
+            (
+                "api.github.com",
+                json!({"API.GitHub.com.":[pin]}),
+                json!([pin]),
+            ),
+            (
+                "api.github.com:443",
+                json!({"api.github.com":[pin]}),
+                json!([pin]),
+            ),
+            ("api.github.com", json!({}), Value::Null),
+            ("api.github.com", json!({"api.github.com":[]}), Value::Null),
+        ] {
+            let f = probe_fixture(
+                "github",
+                json!({"host":host,"scheme":"https"}),
+                vec![("token", vec!["header:authorization:Bearer"])],
+            )
+            .await;
+            let f = control_session_restart_after_seed(f, move |dir| {
+                ported_common::seed_credential_pins(dir, "probe", &table)
+            })
+            .await;
+            let v = run_public_probe(&f).await.unwrap();
+            assert_eq!(v["status"], "ok");
+            {
+                let hits = f.up.hits.lock().unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].pins.as_value(), want, "{host}");
+                assert!(hits[0].url.ends_with("/user"));
+            }
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn requested_finish(f: &Fixture) {
+    for row in audit_records(f).await {
+        for secret in [
+            "test-secret-requested-oai-0123456789",
+            "test-secret-same-host-second-0123456789",
+        ] {
+            assert!(!row.to_string().contains(secret));
+        }
+    }
+    credential_finish(f).await;
+}
+async fn requested_second_credential(f: &Fixture) {
+    f.shared
+        .run(|c| {
+            c.vault
+                .add_credential(av_store::vault::NewCredential {
+                    slug: "oai".into(),
+                    kind: "openai".into(),
+                    connector: serde_json::from_value(
+                        json!({"host":"api.openai.com","scheme":"https"}),
+                    )
+                    .unwrap(),
+                    fields: Vec::from([(
+                        "apikey".into(),
+                        "test-secret-requested-oai-0123456789".to_owned().into(),
+                    )]),
+                    sites: std::collections::BTreeMap::from([(
+                        "apikey".into(),
+                        vec!["header:authorization:Bearer".into()],
+                    )]),
+                })
+                .unwrap()
+        })
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn requested_multicred_response_preserves_grant_order_profiles_mirrors_and_listing() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),async{let f=Fixture::new(&["header:x-key"]).await;requested_second_credential(&f).await;
+ let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"grants":[{"cred":"demo","methods":["GET"]},{"cred":"oai","methods":["GET","POST"]}]})).await;assert_eq!(s,200,"{v}");assert_eq!(v["grants"].as_array().unwrap().iter().map(|g|g["cred"].as_str().unwrap()).collect::<Vec<_>>(),vec!["demo","oai"]);
+ for g in v["grants"].as_array().unwrap(){let p=av_core::placeholder::parse_at(g["placeholder"].as_str().unwrap(),0).unwrap();assert_eq!(p.sid,v["session_id"].as_str().unwrap());assert_eq!(p.slug,g["cred"].as_str().unwrap());}
+ assert_eq!(v["grants"][0]["env"],Value::Null);assert_eq!(v["grants"][1]["env"],json!({"base":"OPENAI_BASE_URL","key":"OPENAI_API_KEY"}));for k in ["grant_id","placeholder","usage","base_url","probe_path","lint"]{assert_eq!(v[k],v["grants"][0][k],"{k}");}assert_eq!(v["infinite"],false);
+ let(_,listed)=credential_api(&f,"GET","/v1/sessions",json!({})).await;let row=listed.as_array().unwrap().iter().find(|r|r["id"]==v["session_id"]).unwrap();assert_eq!(row["grants"],2);assert_eq!(row["creds"].as_array().unwrap().iter().map(|r|r["slug"].as_str().unwrap()).collect::<Vec<_>>(),vec!["demo","oai"]);assert_eq!(control_session_request(&f,&v,"demo","GET","/ordinary").await.status,200);requested_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn requested_multicred_mixed_duplicate_empty_oversized_and_missing_are_atomic() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        requested_second_credential(&f).await;
+        let before = store_snapshot(&f).await;
+        for body in [
+            json!({"grants":[{"cred":"demo"}],"cred":"demo"}),
+            json!({"grants":[{"cred":"demo"}],"methods":["GET"]}),
+            json!({"grants":[{"cred":"demo"},{"cred":"demo"}]}),
+            json!({"grants":[]}),
+            json!({"grants":(0..17).map(|i|json!({"cred":format!("c{i}")})).collect::<Vec<_>>()}),
+            json!({"grants":"demo"}),
+            json!({"grants":[["demo"]]}),
+            json!({"template":"x","cred":"demo"}),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/sessions", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["rule"], "session_shape");
+            if v["detail"].as_str().unwrap_or("").contains("twice") {
+                assert!(v["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("credential demo appears twice"));
+            }
+        }
+        for body in [
+            json!({"template":"x"}),
+            json!({"grants":[{"cred":"demo"},{"cred":"nope"}]}),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/sessions", body).await;
+            assert_eq!(s, 404, "{v}");
+            assert_eq!(v["code"], "AV_NOT_FOUND");
+        }
+        let (_, duplicate) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"grants":[{"cred":"demo"},{"cred":"demo"}]}),
+        )
+        .await;
+        assert!(duplicate["detail"]
+            .as_str()
+            .unwrap()
+            .contains("credential demo appears twice"));
+        assert_eq!(store_snapshot(&f).await, before);
+        assert_eq!(f.get().await.status, 200);
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn requested_batch_presence_order_ledger_ceilings_and_audit_are_exact() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;requested_second_credential(&f).await;credential_factor(&f).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"grants":[{"cred":"demo"},{"cred":"oai"}]})).await;assert_eq!(s,200,"{v}");credential_gate(&f,false).await;let before=store_snapshot(&f).await;let records=audit_records(&f).await;
+ let body=json!({"sid":v["session_id"],"items":[{"cred":"oai"},{"cred":"demo","field":"token","uses":3}],"purpose":"env"});let(s,no)=credential_api(&f,"POST","/v1/placeholders/batch",body.clone()).await;assert_eq!(s,401,"{no}");assert_eq!(no["code"],"AV_PRESENCE_REQUIRED");assert_eq!(store_snapshot(&f).await,before);assert_eq!(audit_records(&f).await,records);credential_gate(&f,true).await;
+ let(s,b)=credential_api(&f,"POST","/v1/placeholders/batch",body).await;assert_eq!(s,200,"{b}");assert_eq!(b["session_id"],v["session_id"]);assert_eq!(b["gateway_url"],format!("http://127.0.0.1:{}",f.daemon.gateway_port().unwrap()));assert_eq!(b["items"][0]["cred"],"oai");assert_eq!(b["items"][0]["field"],"apikey");assert_eq!(b["items"][0]["env"],json!({"base":"OPENAI_BASE_URL","key":"OPENAI_API_KEY"}));assert_eq!(b["items"][1]["cred"],"demo");assert_eq!(b["items"][1]["field"],"token");for item in b["items"].as_array().unwrap(){let text=item["placeholder"].as_str().unwrap();let p=av_core::placeholder::parse_at(text,0).unwrap();assert_eq!(p.text,text);assert_eq!(p.sid,v["session_id"].as_str().unwrap());}
+ let gid=v["grants"][0]["grant_id"].as_str().unwrap().to_owned();f.shared.run(move|c|assert!(c.vault.list_placeholders(None).unwrap().iter().any(|r|r.grant_id==gid&&r.max_uses==3))).await.unwrap();let rows=audit_records(&f).await;let batch=rows.iter().filter(|r|r["kind"]=="placeholder.issued_batch").collect::<Vec<_>>();assert_eq!(batch.len(),1);assert_eq!(batch[0]["count"],2);assert_eq!(batch[0]["credential_slugs"],json!(["oai","demo"]));assert_eq!(batch[0]["purpose"],"env");assert!(!batch[0].to_string().contains("av1."));assert_eq!(control_session_request(&f,&v,"demo","GET","/ordinary").await.status,200);requested_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn requested_batch_missing_ungranted_field_session_and_bad_shapes_create_no_rows() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        requested_second_credential(&f).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{v}");
+        let sid = &v["session_id"];
+        let before = store_snapshot(&f).await;
+        let issued = audit_records(&f)
+            .await
+            .into_iter()
+            .filter(|r| r["kind"] == "placeholder.issued")
+            .count();
+        for (body, status, code) in [
+            (
+                json!({"sid":sid,"items":[{"cred":"demo"},{"cred":"nope"}]}),
+                404,
+                "AV_NOT_FOUND",
+            ),
+            (
+                json!({"sid":sid,"items":[{"cred":"demo"},{"cred":"oai"}]}),
+                403,
+                "AV_NO_GRANT",
+            ),
+            (
+                json!({"sid":sid,"items":[{"cred":"demo","field":"other"}]}),
+                403,
+                "AV_NO_GRANT",
+            ),
+            (
+                json!({"sid":"nosuchsession","items":[{"cred":"demo"}]}),
+                404,
+                "AV_NOT_FOUND",
+            ),
+        ] {
+            let (s, r) = credential_api(&f, "POST", "/v1/placeholders/batch", body).await;
+            assert_eq!(s, status, "{r}");
+            assert_eq!(r["code"], code);
+        }
+        for body in [
+            json!({"items":[{"cred":"demo"}]}),
+            json!({"sid":sid,"items":[]}),
+            json!({"sid":sid,"items":vec![json!({"cred":"demo"});33]}),
+            json!({"sid":sid,"items":["demo"]}),
+            json!({"sid":sid,"items":[{"cred":"demo"},{"cred":"demo"}]}),
+            json!({"sid":sid,"items":[{"cred":"demo","uses":0}]}),
+            json!({"sid":sid,"items":[{"cred":"demo","uses":1.5}]}),
+            json!({"sid":sid,"items":[{"cred":"demo"}],"purpose":"curl"}),
+        ] {
+            let (s, r) = credential_api(&f, "POST", "/v1/placeholders/batch", body).await;
+            assert_eq!(s, 403, "{r}");
+            assert_eq!(r["rule"], "batch_shape");
+        }
+        assert_eq!(store_snapshot(&f).await, before);
+        assert_eq!(
+            audit_records(&f)
+                .await
+                .into_iter()
+                .filter(|r| r["kind"] == "placeholder.issued")
+                .count(),
+            issued
+        );
+        assert_eq!(
+            control_session_request(&f, &v, "demo", "GET", "/ordinary")
+                .await
+                .status,
+            200
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "DELETE",
+                &format!("/v1/sessions?sid={}", sid.as_str().unwrap()),
+                json!({})
+            )
+            .await
+            .0,
+            200
+        );
+        let (_, r) = credential_api(
+            &f,
+            "POST",
+            "/v1/placeholders/batch",
+            json!({"sid":sid,"items":[{"cred":"demo"}]}),
+        )
+        .await;
+        assert_eq!(r["code"], "AV_SESSION_REVOKED");
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","reason":"job"}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            ids.push(v["id"].clone());
+        }
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo"})
+            )
+            .await
+            .0,
+            200
+        );
+        let before = store_snapshot(&f).await;
+        let created = audit_records(&f)
+            .await
+            .into_iter()
+            .filter(|r| r["kind"] == "session.created")
+            .count();
+        for body in [
+            json!({"cred":"demo"}),
+            json!({"cred":"demo","infinite":true}),
+            json!({"grants":[{"cred":"demo","approval":"auto","methods":["POST"]}]}),
+            json!({"cred":"demo","infinite":true,"presence":{"passphrase":WIDEN_PASS}}),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/sessions", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["code"], "AV_QUARANTINED");
+            assert_eq!(v["rule"], "quarantine");
+        }
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id":ids[0],"granted":true}),
+        )
+        .await;
+        assert_eq!(s, 403, "{v}");
+        assert_eq!(v["code"], "AV_QUARANTINED");
+        assert_eq!(v["rule"], "quarantine");
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/pending/decide-many",
+            json!({"decisions":[{"id":ids[1],"kind":"session","granted":true}]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["decided"][0]["outcome"], "skipped");
+        assert!(v["decided"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("quarantined"));
+        let (_, pending) = credential_api(&f, "GET", "/v1/session-requests", json!({})).await;
+        for id in ids {
+            assert_eq!(
+                pending
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["id"] == id)
+                    .unwrap()["state"],
+                "pending"
+            );
+        }
+        assert_eq!(store_snapshot(&f).await, before);
+        assert_eq!(
+            audit_records(&f)
+                .await
+                .into_iter()
+                .filter(|r| r["kind"] == "session.created")
+                .count(),
+            created
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"demo"})
+            )
+            .await
+            .0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::configured(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({"placeholder_policy":{"max_uses":1}}),
+        )
+        .await;
+        requested_second_credential(&f).await;
+        let sid = control_session_sid(&f).await;
+        let count_before = f
+            .shared
+            .run(|c| c.vault.list_placeholders(None).unwrap().len())
+            .await
+            .unwrap();
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/placeholders/batch",
+            json!({"sid":sid,"items":[{"cred":"demo","uses":40}]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let gid = f.grant_id.clone();
+        f.shared
+            .run(move |c| {
+                let rows = c.vault.list_placeholders(None).unwrap();
+                assert_eq!(rows.len(), count_before + 1);
+                assert!(rows
+                    .iter()
+                    .filter(|r| r.grant_id == gid)
+                    .all(|r| r.max_uses == 1));
+            })
+            .await
+            .unwrap();
+        let (s, multi) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"grants":[{"cred":"demo"},{"cred":"oai"}]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{multi}");
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"oai"})
+            )
+            .await
+            .0,
+            200
+        );
+        let before = store_snapshot(&f).await;
+        let issued = audit_records(&f)
+            .await
+            .into_iter()
+            .filter(|r| r["kind"] == "placeholder.issued")
+            .count();
+        for items in [
+            json!([{"cred":"demo"},{"cred":"oai"}]),
+            json!([{"cred":"oai"}]),
+        ] {
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/placeholders/batch",
+                json!({"sid":multi["session_id"],"items":items}),
+            )
+            .await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["code"], "AV_QUARANTINED");
+            assert_eq!(v["rule"], "quarantine");
+        }
+        assert_eq!(store_snapshot(&f).await, before);
+        assert_eq!(
+            audit_records(&f)
+                .await
+                .into_iter()
+                .filter(|r| r["kind"] == "placeholder.issued")
+                .count(),
+            issued
+        );
+        assert_eq!(f.get().await.status, 200);
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn requested_expired_grant_batch_issues_nothing_while_other_session_works() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{v}");
+        let sid = v["session_id"].as_str().unwrap().to_owned();
+        let gid = v["grant_id"].as_str().unwrap().to_owned();
+        let seeded_sid = sid.clone();
+        let f = control_session_restart_after_seed(f, move |dir| {
+            ported_common::seed_gateway_rows(
+                dir,
+                &seeded_sid,
+                &gid,
+                &json!({}),
+                &json!({"expires_at":"2000-01-01T00:00:00.000Z"}),
+            )
+        })
+        .await;
+        let before = store_snapshot(&f).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/placeholders/batch",
+            json!({"sid":sid,"items":[{"cred":"demo"}]}),
+        )
+        .await;
+        assert!(s >= 400, "{v}");
+        assert!(v["code"].as_str().unwrap().starts_with("AV_GRANT_"));
+        let after = store_snapshot(&f).await;
+        assert_eq!(
+            after["placeholders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].clone())
+                .collect::<Vec<_>>(),
+            before["placeholders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(f.get().await.status, 200);
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn requested_same_host_credentials_remain_separate_on_named_and_transparent_routes() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),async{let f=Fixture::new(&["header:x-key"]).await;let(s,v)=credential_api(&f,"POST","/v1/credentials",json!({"slug":"second","kind":"http","host":"api.example.test","value":"test-secret-same-host-second-0123456789","sites":["header:x-key"]})).await;assert_eq!(s,200,"{v}");let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"grants":[{"cred":"demo"},{"cred":"second"}]})).await;assert_eq!(s,200,"{v}");let req=|path:&str|GatewayRequest{method:"GET".into(),path:path.into(),headers:vec![("host".into(),"localhost".into()),("av-session".into(),v["token"].as_str().unwrap().into()),("x-key".into(),v["grants"][1]["placeholder"].as_str().unwrap().into())],..Default::default()};
+ let r=f.daemon.pipeline().handle(req("/p/second/x")).await;assert_eq!(r.status,200);f.clean(&r).await;assert!(!String::from_utf8_lossy(&r.body).contains("test-secret-same-host-second-0123456789"));assert_eq!(f.up.hits.lock().unwrap().last().unwrap().headers.iter().find(|(n,_)|n.eq_ignore_ascii_case("x-key")).unwrap().1,"test-secret-same-host-second-0123456789");let r=f.daemon.pipeline().handle(req("/t/https/api.example.test/x")).await;assert_eq!(r.status,403);assert_eq!(serde_json::from_slice::<Value>(&r.body).unwrap()["code"],"AV_PH_WRONG_CONNECTOR");assert_eq!(f.up.hits.lock().unwrap().len(),1);requested_finish(&f).await;}).await.unwrap();
+}
+
+#[tokio::test]
+async fn fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:authorization:Bearer"]).await;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = ended.clone();
+        let producer = tokio::spawn(async move {
+            tx.send(Ok(b"data: {\"n\":1}\n\n".to_vec())).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tx.send(Ok(b"data: {\"n\":2}\n\n".to_vec())).await.unwrap();
+            drop(tx);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: true,
+            status: 200,
+            headers: vec![("content-type".into(), "text/event-stream".into())],
+            body: vec![],
+        });
+        let (error, v) = control_mcp_call(
+            &f,
+            "vault_http",
+            json!({"cred":"demo","method":"GET","path":"/stream","reason":"test"}),
+            true,
+        )
+        .await;
+        assert!(!error, "{v}");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["body"], "data: {\"n\":1}\n\ndata: {\"n\":2}\n\n");
+        producer.await.unwrap();
+        assert!(ended.load(std::sync::atomic::Ordering::SeqCst));
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: false,
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: b"{\"ok\":true}".to_vec(),
+        });
+        let (error, v) = control_mcp_call(
+            &f,
+            "vault_http",
+            json!({"cred":"demo","method":"GET","path":"/user","reason":"test"}),
+            true,
+        )
+        .await;
+        assert!(!error, "{v}");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["body"], "{\"ok\":true}");
+        assert_eq!(
+            f.up.hits
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+                .unwrap()
+                .1,
+            format!("Bearer {SECRET}")
+        );
+        let sid = control_session_sid(&f).await;
+        let live = || {
+            let sid = sid.clone();
+            f.shared.run(move |c| {
+                c.vault
+                    .list_placeholders(Some(&sid))
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p.state == av_store::model::PlaceholderState::Active)
+                    .count()
+            })
+        };
+        let before = live().await.unwrap();
+        for i in 0..20 {
+            let (error, v) = control_mcp_call(
+                &f,
+                "vault_http",
+                json!({"cred":"demo","method":"GET","path":format!("/n/{i}"),"reason":"test"}),
+                true,
+            )
+            .await;
+            assert!(!error, "{v}");
+            assert_eq!(v["status"], 200);
+        }
+        assert!(live().await.unwrap() <= before);
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn fix_mcp_query_credential_authenticates_by_session_and_proposals_preserve_ttl_and_uses() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let f = Fixture::new(&["query:api_key"]).await;
+        let (error, v) = control_mcp_call(
+            &f,
+            "vault_http",
+            json!({"cred":"demo","method":"GET","path":"/things","reason":"test"}),
+            true,
+        )
+        .await;
+        assert!(!error, "{v}");
+        assert_eq!(v["status"], 200);
+        assert!(f
+            .up
+            .hits
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .url
+            .contains(&format!("api_key={SECRET}")));
+        let (error, v) = control_mcp_call(
+            &f,
+            "vault_request_session",
+            json!({"cred":"demo","reason":"short job","methods":["GET"],"ttl_minutes":15,"uses":3}),
+            false,
+        )
+        .await;
+        assert!(!error, "{v}");
+        assert_eq!(v["state"], "pending");
+        let (_, pending) = credential_api(&f, "GET", "/v1/session-requests", json!({})).await;
+        let row = pending
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == v["request_id"])
+            .unwrap();
+        assert_eq!(row["proposal"]["ttl_minutes"], 15);
+        assert_eq!(row["proposal"]["uses"], 3);
+        assert_eq!(row["proposal"]["methods"], json!(["GET"]));
+        requested_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}

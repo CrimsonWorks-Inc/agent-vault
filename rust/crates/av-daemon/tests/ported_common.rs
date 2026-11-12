@@ -246,3 +246,27 @@ pub fn seed_unaudited_session(dir: &std::path::Path, sid: &str, ghost: &str) {
         1
     );
 }
+
+/// Legacy connector pin tables, written only after the test vault is closed.
+pub fn seed_credential_pins(dir: &std::path::Path, slug: &str, pins: &serde_json::Value) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    let id: String = connection
+        .query_row("SELECT id FROM credentials WHERE slug=?1", [slug], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute("DELETE FROM pins WHERE credential_id=?1", [&id])
+        .unwrap();
+    for (host, list) in pins.as_object().unwrap() {
+        for (position, pin) in list.as_array().unwrap().iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO pins(credential_id,host,spki,position) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![id, host, pin.as_str().unwrap(), position as i64],
+                )
+                .unwrap();
+        }
+    }
+}

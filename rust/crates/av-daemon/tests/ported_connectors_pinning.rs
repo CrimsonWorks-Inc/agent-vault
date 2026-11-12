@@ -85,8 +85,16 @@ async fn peer_on(
                             break;
                         }
                         all.extend_from_slice(&b[..n]);
-                        if all.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
+                        if let Some(end) = all.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let length = String::from_utf8_lossy(&all[..end])
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if all.len() >= end + 4 + length {
+                                break;
+                            }
                         }
                     }
                     if !all.is_empty() {
@@ -154,6 +162,20 @@ async fn leaf_pin_controls_refuse_wrong_identity_untrusted_pin_and_out_of_date_b
             let e = pinned_request(request(s.port, p)).await.err().unwrap();
             assert_eq!(e.code, "DEPTH_ZERO_SELF_SIGNED_CERT");
             assert!(!format!("{e:?}").contains(SECRET));
+        }
+        let c = chain();
+        for pinset in [
+            vec![spki_of(c.leaf.der()).unwrap()],
+            vec![
+                spki_of(c.inter.der()).unwrap(),
+                spki_of(c.root.der()).unwrap(),
+            ],
+        ] {
+            let e = pinned_request(request(s.port, pins(&pinset)))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(e.code, "DEPTH_ZERO_SELF_SIGNED_CERT");
         }
         assert!(s.seen.lock().unwrap().is_empty());
         success(request(
@@ -234,6 +256,7 @@ async fn malformed_pin_tables_and_plaintext_pins_never_connect_with_valid_tls_co
         assert_eq!(e.reason.as_deref(), Some("plaintext"));
         assert!(e.presented.is_empty());
         assert!(p.seen.lock().unwrap().is_empty());
+        tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(p.connections.load(std::sync::atomic::Ordering::SeqCst), 0);
         success(request(p.port, pins(&[pin]))).await;
     })
@@ -275,6 +298,7 @@ async fn host_alias_port_list_and_repeated_foreign_fields_refuse_with_matching_c
             Some("host_mismatch")
         );
         assert!(p.seen.lock().unwrap().is_empty());
+        tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(p.connections.load(std::sync::atomic::Ordering::SeqCst), 0);
         let mut r = request(p.port, pins(&[pin]));
         r.headers
@@ -357,6 +381,9 @@ fn ca(name: &str) -> (rcgen::CertificateParams, rcgen::KeyPair) {
     let mut p = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
     p.distinguished_name.push(rcgen::DnType::CommonName, name);
     p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    if name == "TestIntermediate" {
+        p.key_identifier_method = rcgen::KeyIdMethod::PreSpecified(vec![0x42; 20]);
+    }
     p.key_usages = vec![
         rcgen::KeyUsagePurpose::KeyCertSign,
         rcgen::KeyUsagePurpose::DigitalSignature,
@@ -374,6 +401,7 @@ fn chain() -> Chain {
         let mut p = rcgen::CertificateParams::new(names).unwrap();
         p.distinguished_name
             .push(rcgen::DnType::CommonName, "localhost");
+        p.use_authority_key_identifier_extension = true;
         let k = rcgen::KeyPair::generate().unwrap();
         (p.signed_by(&k, issuer).unwrap(), k.serialize_der())
     };
@@ -452,6 +480,7 @@ async fn trusted_chain_leaf_intermediate_root_and_rotation_are_proven_before_sec
             let text = String::from_utf8_lossy(b);
             assert!(text.contains(SECRET));
             assert!(text.starts_with("POST /user "));
+            assert!(text.ends_with("SENTINEL"));
         }
         let rotated = peer(
             vec![c.rotated.der().to_vec(), c.inter.der().to_vec()],
@@ -685,6 +714,7 @@ async fn host_named_by_foreign_certificate_never_overrides_url_identity() {
         for r in out {
             assert_eq!(r["rule"], "host_mismatch");
         }
+        tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(p.connections.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(p.seen.lock().unwrap().is_empty());
         let out = trusted(
