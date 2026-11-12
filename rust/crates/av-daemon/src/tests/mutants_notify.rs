@@ -36,6 +36,16 @@ async fn hooked(answer: Result<u16, String>, detail: &str) -> (World, Posts) {
     (w, posts)
 }
 
+/// Wait (up to 10 s) until at least `n` webhooks were posted.
+async fn posted(posts: &Posts, n: usize) {
+    for _ in 0..200 {
+        if posts.lock().unwrap().len() >= n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn hold(w: &World, path: &str) {
     let r = w
         .send(
@@ -53,10 +63,10 @@ async fn hold(w: &World, path: &str) {
 async fn the_webhook_is_posted_once_per_interval() {
     let (w, posts) = hooked(Ok(204), "minimal").await;
     hold(&w, "/a").await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    posted(&posts, 1).await;
     hold(&w, "/b").await;
     hold(&w, "/c").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(posts.lock().unwrap().len(), 1, "one post per interval");
 }
 
@@ -79,7 +89,8 @@ async fn webhook_failures_are_recorded_at_most_once_per_window() {
     let (s, v) = w.control("POST", "/v1/notify/test", json!({})).await;
     assert_eq!((s, v["error"].as_str()), (200, Some("ECONNREFUSED")), "{v}");
     hold(&w, "/a").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    posted(&posts, 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(posts.lock().unwrap().len(), 2, "both were tried");
     let failed = w
         .audit()
@@ -104,7 +115,7 @@ async fn a_failure_code_that_is_not_an_errno_name_is_recorded_as_error() {
 async fn a_minimal_webhook_carries_no_headline() {
     let (w, posts) = hooked(Ok(204), "minimal").await;
     hold(&w, "/secret-looking-path").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    posted(&posts, 1).await;
     let body = posts.lock().unwrap().join("\n");
     assert!(body.contains("\"waiting\":1"), "{body}");
     assert!(!body.contains("secret-looking-path"), "{body}");

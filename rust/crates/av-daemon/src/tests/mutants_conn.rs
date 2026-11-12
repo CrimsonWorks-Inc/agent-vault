@@ -3,7 +3,7 @@
 //! protection (the `what` of test/mutation-check.js) it holds.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde_json::{json, Value};
@@ -285,6 +285,8 @@ async fn the_probe_reads_its_destination_and_pins_as_the_js_does() {
 struct Odd {
     dir: std::path::PathBuf,
     mode: &'static str,
+    /// Bytes the endless body managed to hand over.
+    sent: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Upstream for Odd {
@@ -333,6 +335,7 @@ async fn a_probe_whose_health_cannot_be_recorded_fails() {
     let up = Arc::new(Odd {
         dir: w._dir.path().to_path_buf(),
         mode: "failwrite",
+        sent: Arc::default(),
     });
     let r = crate::connectors::probe::run_probe(&w.shared, "gh".into(), Some(up)).await;
     assert!(r.is_err(), "{r:?}");
@@ -345,14 +348,15 @@ async fn a_probe_stops_reading_past_the_drain_bound() {
     let up = Arc::new(Odd {
         dir: w._dir.path().to_path_buf(),
         mode: "endless",
+        sent: Arc::default(),
     });
-    let t = Instant::now();
+    let sent = up.sent.clone();
     let r = crate::connectors::probe::run_probe(&w.shared, "gh".into(), Some(up)).await;
     assert!(r.is_ok(), "{r:?}");
+    let n = sent.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
-        t.elapsed() < Duration::from_millis(1500),
-        "{:?}",
-        t.elapsed()
+        n < 4 * crate::connectors::probe::DRAIN_LIMIT_BYTES,
+        "the probe stopped reading near its bound, not after {n} bytes"
     );
 }
 
@@ -363,6 +367,7 @@ async fn a_probe_gives_up_on_a_body_that_never_ends() {
     let up = Arc::new(Odd {
         dir: w._dir.path().to_path_buf(),
         mode: "silent",
+        sent: Arc::default(),
     });
     let r = tokio::time::timeout(
         Duration::from_secs(6),
