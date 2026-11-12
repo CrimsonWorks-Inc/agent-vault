@@ -18883,3 +18883,515 @@ async fn integration_fix_approval_denials_require_matching_presence_and_cached_a
     .await
     .unwrap();
 }
+
+fn fix_presence_record(seed: u8) -> Value {
+    use base64::Engine;
+    use p256::pkcs8::EncodePublicKey;
+    let key = p256::ecdsa::SigningKey::from_slice(&[seed; 32]).unwrap();
+    json!({"credentialId":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([seed;16]),"publicKeySpki":base64::engine::general_purpose::STANDARD.encode(key.verifying_key().to_public_key_der().unwrap().as_bytes()),"signCount":0})
+}
+async fn fix_presence_enroll(f: &Fixture, seed: u8) -> ported_common::FakeAuthenticator {
+    credential_factor(f).await;
+    let mut record = fix_presence_record(seed);
+    record["presence"] = json!({"passphrase":WIDEN_PASS});
+    let (s, v) = credential_api(f, "POST", "/v1/presence", record).await;
+    assert_eq!(s, 200, "{v}");
+    credential_gate(f, false).await;
+    ported_common::FakeAuthenticator::new(seed)
+}
+async fn fix_presence_proof(
+    f: &Fixture,
+    auth: &ported_common::FakeAuthenticator,
+    origin: &str,
+    op: &str,
+    params: &Value,
+) -> Value {
+    let operation = av_daemon::util::operation_for(op, params).unwrap();
+    let (s, ch) = credential_api(
+        f,
+        "POST",
+        "/v1/presence/challenge",
+        json!({"operation":operation,"origins":[origin]}),
+    )
+    .await;
+    assert_eq!(s, 200, "{ch}");
+    let mut proof = auth.assertion(ch["challenge"].as_str().unwrap(), origin);
+    proof["challengeId"] = ch["challengeId"].clone();
+    proof
+}
+#[tokio::test]
+async fn fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        use base64::Engine;
+        let f = Fixture::new(&["header:x-key"]).await;
+        let human = fix_presence_enroll(&f, 31).await;
+        credential_gate(&f, true).await;
+        let prf = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let enroll = json!({"action":"enroll","credential_id":"fake-unlock","prf_secret":prf});
+        let (s, v) = credential_api(&f, "POST", "/v1/factors/webauthn", enroll.clone()).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "fresh_presence");
+        assert_eq!(
+            json!(f
+                .shared
+                .run(|c| c.vault.has_webauthn_unlock().unwrap())
+                .await
+                .unwrap()),
+            false
+        );
+        let next = fix_presence_record(32);
+        let (s, v) = credential_api(&f, "POST", "/v1/presence", next.clone()).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/presence", json!({})).await.1["credentialId"],
+            human.id()
+        );
+        let mut bad = enroll.clone();
+        bad["presence"] = json!({"passphrase":"wrong fake passphrase"});
+        let (s, v) = credential_api(&f, "POST", "/v1/factors/webauthn", bad).await;
+        assert_eq!(s, 403, "{v}");
+        assert_eq!(v["code"], "AV_PRESENCE_DENIED");
+        assert_eq!(v["rule"], "fresh_presence");
+        let mut good = enroll;
+        good["presence"] = json!({"passphrase":WIDEN_PASS});
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/factors/webauthn", good)
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            json!(f
+                .shared
+                .run(|c| c.vault.has_webauthn_unlock().unwrap())
+                .await
+                .unwrap()),
+            true
+        );
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/factors/webauthn",
+            json!({"action":"remove"}),
+        )
+        .await;
+        assert_eq!(s, 401, "{v}");
+        credential_gate(&f, false).await;
+        let proof = fix_presence_proof(
+            &f,
+            &human,
+            "http://localhost:7412",
+            "touchid.remove",
+            &json!({}),
+        )
+        .await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/factors/webauthn",
+            json!({"action":"remove","presence":proof}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            json!(f
+                .shared
+                .run(|c| c.vault.has_webauthn_unlock().unwrap())
+                .await
+                .unwrap()),
+            false
+        );
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/passphrase",
+            json!({"action":"remove","current":WIDEN_PASS}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/lockstate", json!({}))
+                .await
+                .1["has_passphrase"],
+            false
+        );
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/presence", next.clone())
+                .await
+                .0,
+            401
+        );
+        let proof = fix_presence_proof(
+            &f,
+            &human,
+            "http://localhost:7412",
+            "presence.enroll",
+            &next,
+        )
+        .await;
+        let mut sent = next.clone();
+        sent["presence"] = proof;
+        let (s, v) = credential_api(&f, "POST", "/v1/presence", sent).await;
+        assert_eq!(s, 200, "{v}");
+        let (_, stored) = credential_api(&f, "GET", "/v1/presence", json!({})).await;
+        assert_eq!(stored["credentialId"], next["credentialId"]);
+        assert!(stored.get("presence").is_none());
+        assert_eq!(
+            stored
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["credentialId", "enrolledAt", "publicKeySpki", "signCount"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/credentials",json!({"slug":"second","kind":"http","host":"api.other.test","value":"test-secret-second-fake-123456789","sites":["header:x-key"]})).await;assert_eq!(s,200,"{v}");let(s,cap)=credential_api(&f,"POST","/v1/sessions",json!({"cred":"second"})).await;assert_eq!(s,200,"{cap}");assert_eq!(credential_api(&f,"POST","/v1/placeholders",json!({"cred":"second","sid":cap["session_id"]})).await.0,200);assert_eq!(audit_records(&f).await.iter().filter(|r|r["kind"]=="presence.window_used").map(|r|r["op"].as_str().unwrap().to_owned()).collect::<Vec<_>>(),vec!["cred add","session create","placeholder issue"]);credential_gate(&f,false).await;assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,401);
+ let(s,v)=credential_api(&f,"POST","/v1/ui/origins",json!({"origin":"http://localhost:9125","presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,401);assert!(audit_records(&f).await.iter().any(|r|r["kind"]=="presence.verified"&&r["fresh"]==true&&r["factor"]=="passphrase"));assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+ let f=Fixture::new(&["header:x-key"]).await;let(s,v)=credential_api(&f,"POST","/v1/ui/origins",json!({"origin":"http://localhost:9124"})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"factor_required");assert_eq!(v["factors"],json!([]));assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,200);credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let auth = fix_presence_enroll(&f, 33).await;
+        let body = json!({"cred":"demo","methods":["GET"]});
+        let proof =
+            fix_presence_proof(&f, &auth, "http://localhost:6666", "session.create", &body).await;
+        let mut sent = body.clone();
+        sent["presence"] = proof;
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/sessions", sent).await.0,
+            401
+        );
+        let proof =
+            fix_presence_proof(&f, &auth, "http://localhost:7412", "session.create", &body).await;
+        let mut sent = body.clone();
+        sent["presence"] = proof;
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", sent).await;
+        assert_eq!(s, 200, "{v}");
+        let (s, ui) = credential_api(&f, "GET", "/v1/ui", json!({})).await;
+        assert_eq!(s, 200);
+        assert_eq!(ui["port"], 7412);
+        assert_eq!(ui["origins"], json!(["http://localhost:7412"]));
+        credential_gate(&f, true).await;
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/ui/origins",
+                json!({"origin":"http://localhost:9123"})
+            )
+            .await
+            .0,
+            401
+        );
+        credential_gate(&f, false).await;
+        for origin in [
+            "http://evil.example:9123",
+            "https://localhost:9123",
+            "http://localhost",
+            "http://localhost:99999",
+            "http://localhost:9123/x",
+        ] {
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/ui/origins",
+                json!({"origin":origin,"presence":{"passphrase":WIDEN_PASS}}),
+            )
+            .await;
+            assert!(s >= 400, "{v}");
+        }
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/ui/origins",
+            json!({"origin":"http://localhost:9123","presence":{"passphrase":WIDEN_PASS}}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert!(audit_records(&f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "ui.origin_added"));
+        let proof =
+            fix_presence_proof(&f, &auth, "http://localhost:9123", "session.create", &body).await;
+        let mut sent = body;
+        sent["presence"] = proof;
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/sessions", sent).await.0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn fix_ledger_mcp_native_requests_bound_live_rows_keep_unrotated_rows_and_refuse_rotated_rows(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let cap =
+            integration_create(&f, json!({"cred":"demo","methods":["GET"],"budget":100})).await;
+        let get = || {
+            integration_tool(
+                &f,
+                cap["token"].as_str(),
+                "vault_get_placeholder",
+                json!({"cred":"demo","reason":"native client"}),
+            )
+        };
+        let (_, v) = get().await;
+        let mut first = cap.clone();
+        first["placeholder"] = v["placeholder"].clone();
+        assert_eq!(
+            integration_cap(&f, &first, "GET", "/user", None)
+                .await
+                .status,
+            200
+        );
+        for _ in 0..6 {
+            assert!(get().await.1["placeholder"]
+                .as_str()
+                .unwrap()
+                .starts_with("av1."));
+        }
+        for i in 0..5 {
+            assert_eq!(
+                integration_cap(&f, &first, "GET", &format!("/again/{i}"), None)
+                    .await
+                    .status,
+                200
+            );
+        }
+        let mut newest = first.clone();
+        for i in 0..12 {
+            let (_, v) = get().await;
+            newest["placeholder"] = v["placeholder"].clone();
+            assert_eq!(
+                integration_cap(&f, &newest, "GET", &format!("/n/{i}"), None)
+                    .await
+                    .status,
+                200
+            );
+        }
+        let sid = cap["session_id"].as_str().unwrap().to_owned();
+        let gid = cap["grant_id"].as_str().unwrap().to_owned();
+        assert!(
+            f.shared
+                .run(move |c| c
+                    .vault
+                    .list_placeholders(Some(&sid))
+                    .unwrap()
+                    .iter()
+                    .filter(|p| p.grant_id == gid
+                        && p.state == av_store::model::PlaceholderState::Active)
+                    .count())
+                .await
+                .unwrap()
+                <= 8
+        );
+        let stale = integration_cap(&f, &first, "GET", "/user", None).await;
+        assert_ne!(stale.status, 200);
+        assert!(String::from_utf8_lossy(&stale.body).contains("AV_PH_STALE"));
+        assert_eq!(
+            integration_cap(&f, &newest, "GET", "/newest", None)
+                .await
+                .status,
+            200
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal() {
+    tokio::time::timeout(std::time::Duration::from_secs(50),async{
+ let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let unsigned=||credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo","methods":["GET"],"paths":["/**"]}));assert_eq!(unsigned().await.0,401);let before=f.shared.run(|c|c.vault.factors().unwrap()).await.unwrap();let(s,v)=credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":WIDEN_PASS})).await;assert_eq!(s,403,"{v}");assert_eq!(v["code"],"AV_POLICY_DENIED");assert_eq!(v["rule"],"last_factor");assert!(v["hint"].as_str().unwrap().contains("presence authenticator"));assert_eq!(v["next"],"agent-vault ui");assert_eq!(f.shared.run(|c|c.vault.factors().unwrap()).await.unwrap(),before);assert_eq!(unsigned().await.0,401);assert_eq!(credential_api(&f,"POST","/v1/lock",json!({})).await.0,200);assert_eq!(credential_api(&f,"POST","/v1/unlock",json!({})).await.0,423);assert_eq!(credential_api(&f,"POST","/v1/unlock",json!({"passphrase":WIDEN_PASS})).await.0,200);assert_eq!(unsigned().await.0,401);
+ let prf=av_core::secret::SecretBytes::from(vec![9u8;32]);f.shared.run(move|c|c.vault.add_webauthn_unlock("fake-c",&prf).unwrap()).await.unwrap();let(s,v)=credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":WIDEN_PASS})).await;assert_eq!(s,403);assert_eq!(v["rule"],"last_factor");assert!(v["detail"].as_str().unwrap().contains("remove Touch ID unlock first"));f.shared.run(|c|c.vault.remove_webauthn_unlock().unwrap()).await.unwrap();let(s,v)=credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":WIDEN_PASS})).await;assert_eq!(s,403);assert_eq!(v["rule"],"last_factor");assert!(f.shared.run(|c|c.vault.has_passphrase().unwrap()).await.unwrap());assert_eq!(unsigned().await.0,401);assert_eq!(credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":"not the passphrase"})).await.1["code"],"AV_LOCKED");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+ let f=Fixture::new(&["header:x-key"]).await;fix_presence_enroll(&f,36).await;let(s,v)=credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":WIDEN_PASS})).await;assert_eq!(s,200,"{v}");assert!(!f.shared.run(|c|c.vault.has_passphrase().unwrap()).await.unwrap());assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,401);let(s,v)=credential_api(&f,"POST","/v1/presence/window",json!({})).await;assert_eq!(s,200);assert_eq!(v["granted"],false);assert_eq!(v["ungated"],false);assert_eq!(v["factors"],json!(["authenticator"]));assert!(v["detail"].as_str().unwrap().contains("authenticator"));assert!(!v["detail"].as_str().unwrap().contains("nothing is gated"));assert!(v["next"].as_str().unwrap().contains("agent-vault ui"));assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,401);credential_finish(&f).await;
+ let f=Fixture::new(&["header:x-key"]).await;let(s,v)=credential_api(&f,"POST","/v1/presence/window",json!({})).await;assert_eq!(s,200);assert_eq!(v["granted"],false);assert_eq!(v["ungated"],true);assert_eq!(v["next"],"agent-vault passphrase set");assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"cred":"demo"})).await.0,200);credential_factor(&f).await;let(s,v)=credential_api(&f,"POST","/v1/passphrase",json!({"action":"set","passphrase":"test-brand-new-fake-passphrase","current":WIDEN_PASS})).await;assert_eq!(s,200,"{v}");f.shared.run(|c|{assert!(c.vault.verify_passphrase(&"test-brand-new-fake-passphrase".to_owned().into()).unwrap());assert!(!c.vault.verify_passphrase(&WIDEN_PASS.to_owned().into()).unwrap());}).await.unwrap();credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn fix_factors_invalid_presence_replacements_are_atomic_and_clean_valid_replacements_still_sign(
+) {
+    use base64::Engine;
+    tokio::time::timeout(std::time::Duration::from_secs(60),async{
+ let f=Fixture::new(&["header:x-key"]).await;let auth=fix_presence_enroll(&f,37).await;assert_eq!(credential_api(&f,"POST","/v1/passphrase",json!({"action":"remove","current":WIDEN_PASS})).await.0,200);let original=credential_api(&f,"GET","/v1/presence",json!({})).await.1;let valid=fix_presence_record(38);let mut malformed=valid.clone();malformed["publicKeySpki"]=json!(base64::engine::general_purpose::STANDARD.encode([0u8;91]));let mut ed=valid.clone();ed["publicKeySpki"]=json!("MCowBQYDK2VwAyEANKHnyqArQEggFNewEh0DeGGhdkEXN6EqPRccdq5NGPY=");let mut p384=valid.clone();p384["publicKeySpki"]=json!("MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEUdowsFF/At70p0OS5B1WmL45lPct9GSkIcvVrL/GRlJ3jz0rjHLUbBYWYJyKbK6CEeepfbOjPjsSQjUHyHp9ALK/p+0t7CQQNnzuMIWczU7Kox8hFtzHiEdWrYq/lsyo");let mut short=valid.clone();short["credentialId"]=json!("aGVsbG8");let mut negative=valid.clone();negative["signCount"]=json!(-1);let mut big=valid.clone();big["signCount"]=json!(1u64<<40);
+ for body in [json!({}),json!({"credentialId":"broken","publicKeySpki":"not-a-public-key","signCount":0}),json!({"credentialId":valid["credentialId"],"signCount":0}),malformed,ed,p384,short,negative,big]{let proof=fix_presence_proof(&f,&auth,"http://localhost:7412","presence.enroll",&body).await;let mut sent=body;sent["presence"]=proof;let(s,v)=credential_api(&f,"POST","/v1/presence",sent).await;assert_eq!(s,403,"{v}");assert_eq!(v["code"],"AV_POLICY_DENIED");assert_eq!(v["rule"],"presence_key");assert_eq!(credential_api(&f,"GET","/v1/presence",json!({})).await.1,original);assert_eq!(f.shared.run(|c|serde_json::to_value(c.vault.presence_key().unwrap().unwrap()).unwrap()).await.unwrap(),original);}
+ let mut body=valid.clone();body["attestation"]=json!("x".repeat(64));body["extra"]=json!({"anything":true});let proof=fix_presence_proof(&f,&auth,"http://localhost:7412","presence.enroll",&body).await;body["presence"]=proof;let(s,v)=credential_api(&f,"POST","/v1/presence",body).await;assert_eq!(s,200,"{v}");assert_eq!(v["replaced"],true);let stored=credential_api(&f,"GET","/v1/presence",json!({})).await.1;assert_eq!(stored["credentialId"],valid["credentialId"]);assert_eq!(stored.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),["credentialId","enrolledAt","publicKeySpki","signCount"].into_iter().collect());let body=json!({"cred":"demo","methods":["GET"],"paths":["/**"]});let proof=fix_presence_proof(&f,&ported_common::FakeAuthenticator::new(38),"http://localhost:7412","session.create",&body).await;let mut sent=body;sent["presence"]=proof;assert_eq!(credential_api(&f,"POST","/v1/sessions",sent).await.0,200);credential_finish(&f).await;
+ let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let(s,v)=credential_api(&f,"POST","/v1/presence",json!({"credentialId":"broken","publicKeySpki":"not-a-public-key","signCount":0,"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,403);assert_eq!(v["rule"],"presence_key");assert!(f.shared.run(|c|c.vault.presence_key().unwrap().is_none()).await.unwrap());credential_finish(&f).await;
+ }).await.unwrap();
+}
+#[tokio::test]
+async fn fix_factors_real_sqlite_contention_cannot_replace_the_existing_presence_key() {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        fix_presence_enroll(&f, 39).await;
+        let original = f
+            .shared
+            .run(|c| serde_json::to_value(c.vault.presence_key().unwrap().unwrap()).unwrap())
+            .await
+            .unwrap();
+        let lock = ported_common::TempWriteLock::acquire(f._dir.path());
+        let next = fix_presence_record(40);
+        let failed = f
+            .shared
+            .run(move |c| c.vault.set_presence_key(&next).is_err())
+            .await
+            .unwrap();
+        assert!(failed);
+        drop(lock);
+        assert_eq!(
+            f.shared
+                .run(|c| serde_json::to_value(c.vault.presence_key().unwrap().unwrap()).unwrap())
+                .await
+                .unwrap(),
+            original
+        );
+        f.shared
+            .run(|c| c.vault.set_presence_key(&fix_presence_record(40)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/presence", json!({})).await.1["credentialId"],
+            fix_presence_record(40)["credentialId"]
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/lock", json!({})).await.0,
+            200
+        );
+        let (s, v) = credential_api(&f, "GET", "/v1/audit?limit=10", json!({})).await;
+        assert_eq!(s, 423);
+        assert_eq!(v["code"], "AV_LOCKED");
+        assert!(v["detail"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("unlock"));
+        let (s, v) = credential_api(&f, "GET", "/v1/audit/verify", json!({})).await;
+        assert_eq!(s, 423);
+        assert_eq!(v["code"], "AV_LOCKED");
+        for path in ["/v1/status", "/v1/lockstate"] {
+            let (s, v) = credential_api(&f, "GET", path, json!({})).await;
+            assert_eq!(s, 200);
+            assert_eq!(v["locked"], true);
+            if path == "/v1/status" {
+                assert!(v["audit_records"].is_null());
+                assert_eq!(v["credentials"], 1);
+            }
+        }
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await.0,
+            200
+        );
+        let (s, v) = credential_api(&f, "GET", "/v1/audit?limit=10", json!({})).await;
+        assert_eq!(s, 200);
+        assert!(v
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "vault.lock"));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings() {
+    tokio::time::timeout(std::time::Duration::from_secs(45),async{
+ let w=SeamWorld::new(done_reply(),json!({}),json!({})).await;for(remote,token,expected)in[(false,false,200),(true,false,401),(true,true,200)]{let before=w.seen.lock().unwrap().len();let mut headers=vec![("host".into(),"127.0.0.1".into()),("authorization".into(),format!("Bearer {}",w.f.ph))];if token{headers.push(("av-session".into(),w.f.token.clone()));}let r=w.f.daemon.pipeline().handle(GatewayRequest{method:"GET".into(),path:"/p/demo/x".into(),headers,listener:Some(av_daemon::pipeline::ListenerInfo{id:if remote{"lan"}else{"local"}.into(),kind:if remote{"tls"}else{"loopback"}.into(),remote,advertise:vec![]}),..Default::default()}).await;assert_eq!(r.status,expected);assert!(!String::from_utf8_lossy(&r.body).contains(SECRET));if expected==401{let v:Value=serde_json::from_slice(&r.body).unwrap();assert_eq!(v["code"],"AV_SESSION_REQUIRED");assert_eq!(v["rule"],"remote_carrier");assert!(v["hint"].as_str().unwrap().contains("session token"));assert_eq!(w.seen.lock().unwrap().len(),before);}else{assert_eq!(w.seen.lock().unwrap().len(),before+1);assert!(w.seen.lock().unwrap().last().unwrap().contains(&format!("Bearer {SECRET}")));}}
+ w.f.shared.run(|c|{for surface in ["control","approver","l4"]{let e=c.vault.add_listener(serde_json::from_value(json!({"id":format!("bad-{surface}"),"address":"0.0.0.0:9999","surfaces":[surface]})).unwrap()).unwrap_err();assert_eq!(e.as_vault().unwrap().code.as_str(),"AV_REMOTE_FORBIDDEN");}let ok=c.vault.add_listener(serde_json::from_value(json!({"id":"loopback-control","address":"127.0.0.1:9998","surfaces":["control"]})).unwrap()).unwrap();assert_eq!(ok.id,"loopback-control");c.vault.remove_listener("loopback-control").unwrap();let local=c.vault.create_session(Default::default()).unwrap().session;let remote=c.vault.create_session(av_store::vault::CreateSessionOptions{remote:true,..Default::default()}).unwrap().session;assert!(remote.remote);assert!(remote.max_expires_at<local.max_expires_at);assert!(remote.idle_timeout_ms<local.idle_timeout_ms);}).await.unwrap();assert!(audit_records(&w.f).await.iter().any(|r|r["kind"]=="listen.refused"));w.finish().await;
+ }).await.unwrap();
+}
+
+#[test]
+fn fix_factor_factory_refuses_prf_only_before_writing_and_keeps_passphrase_and_none_controls() {
+    use av_store::model::FactorClass;
+    use av_store::vault::{CreateOptions, Vault};
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let target = dir.path().join("refused");
+    let e = Vault::create(
+        &target,
+        CreateOptions {
+            factor: FactorClass::WebauthnPrf,
+            passphrase: Some("test-fake-prf-not-a-recovery-factor".to_owned().into()),
+        },
+    )
+    .err()
+    .unwrap();
+    let e = e.as_vault().unwrap();
+    assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
+    assert_eq!(e.extra.rule.as_deref(), Some("factor_order"));
+    assert_eq!(e.extra.next.as_ref().unwrap(), "agent-vault passphrase set");
+    assert!(!target.join("vault.db").exists());
+    assert!(!target.join("device.key").exists());
+    assert!(serde_json::from_value::<FactorClass>(json!("webauthn")).is_err());
+    let target = dir.path().join("passphrase");
+    let pass: av_core::secret::SecretString = WIDEN_PASS.to_owned().into();
+    let mut v = Vault::create(
+        &target,
+        CreateOptions {
+            factor: FactorClass::Passphrase,
+            passphrase: Some(pass.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(v.factors().unwrap(), vec![FactorClass::Passphrase]);
+    v.lock().unwrap();
+    drop(v);
+    let mut v = Vault::open(&target).unwrap();
+    assert_eq!(
+        v.unlock(None)
+            .unwrap_err()
+            .as_vault()
+            .unwrap()
+            .code
+            .as_str(),
+        "AV_LOCKED"
+    );
+    assert!(v.unlock(Some(&pass)).unwrap());
+    v.lock().unwrap();
+    drop(v);
+    let target = dir.path().join("none");
+    let mut v = Vault::create(&target, CreateOptions::default()).unwrap();
+    assert_eq!(v.factors().unwrap(), vec![FactorClass::None]);
+    assert!(!v.remove_webauthn_unlock().unwrap());
+    assert!(!v
+        .remove_passphrase(&"anything fake".to_owned().into())
+        .unwrap());
+    v.lock().unwrap();
+    drop(v);
+    assert!(Vault::open(&target).unwrap().unlock(None).unwrap());
+}

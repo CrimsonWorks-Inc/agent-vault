@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 794 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 115 CLI-only, 4 not applicable, **269 not yet ported**.
+Totals: 1207 JS tests: 833 to an av-daemon Rust test, 1 covered by conformance, 27 ported in av-core or av-store, 115 CLI-only, 4 not applicable, **227 not yet ported**.
 
 ## Mutation check
 
@@ -377,26 +377,26 @@ the vault on every call instead of caching an audit handle.
 | fix-control-cli.test.js | the bridge resends only the refused calls of a mixed batch | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | fix-control-cli.test.js | the bridge leaves a batch alone when nothing in it was refused for want of a session | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | fix-control-cli.test.js | what the bridge resends is read from the answers, not searched for in their text | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
-| fix-control-factors.test.js | F1: the only passphrase cannot be removed, and the socket stays gated | not yet ported |
-| fix-control-factors.test.js | F1: removing Touch ID unlock first does not make the passphrase removable | not yet ported |
-| fix-control-factors.test.js | a wrong passphrase is still a failed proof, not a factor refusal | not yet ported |
-| fix-control-factors.test.js | control: with a presence authenticator left, the passphrase can be removed | not yet ported |
-| fix-control-factors.test.js | an authenticator-only vault says widening is still gated when no window can open | not yet ported |
-| fix-control-factors.test.js | control: a vault with no factor at all still says it is ungated | not yet ported |
-| fix-control-factors.test.js | control: a passphrase changes with the current one | not yet ported |
-| fix-control-factors.test.js | F2: a rotation to an unusable key is refused, and the sole key keeps working | not yet ported |
-| fix-control-factors.test.js | F2: a rotation stores the credential and nothing else the caller sent | not yet ported |
-| fix-control-factors.test.js | F2: a first enrolment is held to the same shape | not yet ported |
-| fix-control-factors.test.js | a presence key that fails to save leaves the old one in place | not yet ported |
-| fix-control-factors.test.js | F3: the store factory refuses a Touch ID unlock wrap with no passphrase | not yet ported |
-| fix-control-factors.test.js | control: a vault created with a passphrase opens with it and nothing else | not yet ported |
-| fix-control-factors.test.js | control: a vault with no passphrase keeps its none wrap | not yet ported |
-| fix-control-ledger.test.js | asking for a placeholder and using it, over and over, stays within max_active | not yet ported |
-| fix-control-ledger.test.js | a max_active that is not a number is not an unbounded ledger | not yet ported |
-| fix-control-ledger.test.js | a placeholder in use keeps working while fewer than max_active are live | not yet ported |
-| fix-control-ledger.test.js | a rotated placeholder says to ask again, and the newest still works | not yet ported |
-| fix-control-ledger.test.js | an explicit placeholder ttl cannot outlast the grant's | not yet ported |
-| fix-control-ledger.test.js | an explicit placeholder ttl shorter than the grant's is kept | not yet ported |
+| fix-control-factors.test.js | F1: the only passphrase cannot be removed, and the socket stays gated | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | F1: removing Touch ID unlock first does not make the passphrase removable | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | a wrong passphrase is still a failed proof, not a factor refusal | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | control: with a presence authenticator left, the passphrase can be removed | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | an authenticator-only vault says widening is still gated when no window can open | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | control: a vault with no factor at all still says it is ungated | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | control: a passphrase changes with the current one | `ported_gateway_core::fix_factors_last_passphrase_refusals_preserve_gating_across_unlock_and_touchid_removal` |
+| fix-control-factors.test.js | F2: a rotation to an unusable key is refused, and the sole key keeps working | `ported_gateway_core::fix_factors_invalid_presence_replacements_are_atomic_and_clean_valid_replacements_still_sign` |
+| fix-control-factors.test.js | F2: a rotation stores the credential and nothing else the caller sent | `ported_gateway_core::fix_factors_invalid_presence_replacements_are_atomic_and_clean_valid_replacements_still_sign` |
+| fix-control-factors.test.js | F2: a first enrolment is held to the same shape | `ported_gateway_core::fix_factors_invalid_presence_replacements_are_atomic_and_clean_valid_replacements_still_sign` |
+| fix-control-factors.test.js | a presence key that fails to save leaves the old one in place | `ported_gateway_core::fix_factors_real_sqlite_contention_cannot_replace_the_existing_presence_key` |
+| fix-control-factors.test.js | F3: the store factory refuses a Touch ID unlock wrap with no passphrase | `ported_gateway_core::fix_factor_factory_refuses_prf_only_before_writing_and_keeps_passphrase_and_none_controls` |
+| fix-control-factors.test.js | control: a vault created with a passphrase opens with it and nothing else | `ported_gateway_core::fix_factor_factory_refuses_prf_only_before_writing_and_keeps_passphrase_and_none_controls` |
+| fix-control-factors.test.js | control: a vault with no passphrase keeps its none wrap | `ported_gateway_core::fix_factor_factory_refuses_prf_only_before_writing_and_keeps_passphrase_and_none_controls` |
+| fix-control-ledger.test.js | asking for a placeholder and using it, over and over, stays within max_active | `ported_gateway_core::fix_ledger_mcp_native_requests_bound_live_rows_keep_unrotated_rows_and_refuse_rotated_rows` |
+| fix-control-ledger.test.js | a max_active that is not a number is not an unbounded ledger | ported in av-store: `tests::ledger::a_max_active_that_is_not_a_number_is_not_an_unbounded_ledger` (see rust/crates/av-store/PORTED.md) |
+| fix-control-ledger.test.js | a placeholder in use keeps working while fewer than max_active are live | `ported_gateway_core::fix_ledger_mcp_native_requests_bound_live_rows_keep_unrotated_rows_and_refuse_rotated_rows` |
+| fix-control-ledger.test.js | a rotated placeholder says to ask again, and the newest still works | `ported_gateway_core::fix_ledger_mcp_native_requests_bound_live_rows_keep_unrotated_rows_and_refuse_rotated_rows` |
+| fix-control-ledger.test.js | an explicit placeholder ttl cannot outlast the grant's | ported in av-store: `tests::ledger::an_explicit_placeholder_ttl_cannot_outlast_the_grants` (see rust/crates/av-store/PORTED.md) |
+| fix-control-ledger.test.js | an explicit placeholder ttl shorter than the grant's is kept | ported in av-store: `tests::ledger::an_explicit_placeholder_ttl_shorter_than_the_grants_is_kept` (see rust/crates/av-store/PORTED.md) |
 | fix-control-listeners.test.js | listen rm stops the listener at once, not at the next restart | not yet ported |
 | fix-control-listeners.test.js | removing a listener that is configured but not bound still works | not yet ported |
 | fix-control-listeners.test.js | --allow-cidr is enforced: a peer outside it is refused | not yet ported |
@@ -414,18 +414,18 @@ the vault on every call instead of caching an audit handle.
 | fix-control-page.test.js | the hand-off example sends the token where it cannot displace the placeholder | not yet ported |
 | fix-control-page.test.js | the docs name every MCP tool, and only injection sites that exist | not yet ported |
 | fix-control-page.test.js | without a passphrase the page gives the daemon's guidance instead of a tap | not yet ported |
-| fix-control-presence.test.js | the shared window cannot enrol an unlock factor or replace the authenticator | not yet ported |
-| fix-control-presence.test.js | with the passphrase in the request, the same changes go through | not yet ported |
-| fix-control-presence.test.js | a vault with only an authenticator can still rotate it, by assertion | not yet ported |
-| fix-control-presence.test.js | removing Touch ID unlock by assertion works; by window it does not | not yet ported |
-| fix-control-presence.test.js | one window still covers an ordinary multi-step flow, and each step is recorded | not yet ported |
-| fix-control-presence.test.js | locking closes the window | not yet ported |
+| fix-control-presence.test.js | the shared window cannot enrol an unlock factor or replace the authenticator | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
+| fix-control-presence.test.js | with the passphrase in the request, the same changes go through | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
+| fix-control-presence.test.js | a vault with only an authenticator can still rotate it, by assertion | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
+| fix-control-presence.test.js | removing Touch ID unlock by assertion works; by window it does not | `ported_gateway_core::fix_presence_shared_window_cannot_change_factors_but_fresh_passphrase_and_assertion_can` |
+| fix-control-presence.test.js | one window still covers an ordinary multi-step flow, and each step is recorded | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
+| fix-control-presence.test.js | locking closes the window | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
 | fix-control-presence.test.js | the web UI enrolment passes the passphrase through, with no window | not yet ported |
-| fix-control-presence.test.js | an assertion from a page the caller named is refused | not yet ported |
-| fix-control-presence.test.js | an assertion from the default UI origin is accepted | not yet ported |
-| fix-control-presence.test.js | trusting another UI origin needs the owner, and then it works | not yet ported |
-| fix-control-presence.test.js | with no factor enrolled, a fresh-presence change is refused, not waved through | not yet ported |
-| fix-control-presence.test.js | a fresh proof opens no window | not yet ported |
+| fix-control-presence.test.js | an assertion from a page the caller named is refused | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
+| fix-control-presence.test.js | an assertion from the default UI origin is accepted | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
+| fix-control-presence.test.js | trusting another UI origin needs the owner, and then it works | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
+| fix-control-presence.test.js | with no factor enrolled, a fresh-presence change is refused, not waved through | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
+| fix-control-presence.test.js | a fresh proof opens no window | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
 | fix-control-process.test.js | an uncaught error in the daemon is recorded, and the daemon keeps answering | not yet ported |
 | fix-control-process.test.js | an ordinary run records no fault, and stopping removes the guard | not yet ported |
 | fix-control-session-requests.test.js | asking returns a collect secret, and nothing lists it | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
@@ -868,7 +868,7 @@ the vault on every call instead of caching an audit handle.
 | integrate3-r5.test.js | C28: a denial row has the code, rule, method and path, and no sentence; explain-denial gives the sentence to its own session only | `ported_gateway_core::integration_c28_denials_keep_sentences_private_bounded_and_recover_codes_after_restart`; TTL: covered by av-daemon unit test: `tests::mcp::explain_denial_keeps_code_and_rule_after_the_sentence_ages_out` |
 | integrate3-r5.test.js | C28: a payload rule names its key by index, and a strict query names the parameter by position, on all three surfaces | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
 | integrate3-r5.test.js | C28: a redirect refused for its host records no host it was not allowed to reach | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
-| integrate3-r5.test.js | C28: a fault is recorded by class, never by message | not yet ported; production mismatch, fix pending: handler panic guard must return 500 and audit daemon.handler_error, and a non-Vault store failure must return generic AV_INTERNAL text instead of the raw SQLite conversion error; typed property: `ported_gateway_core::integration_c28_every_typed_fault_class_is_its_av_code_never_attacker_detail_or_hint`; real store failure: `ported_gateway_core::integration_c28_real_malformed_metadata_failure_returns_generic_internal_and_no_error_text_in_audits`; forged JS Error.name/plain-object classes cannot be represented by `server::error_class(&VaultError)` at server.rs:97 |
+| integrate3-r5.test.js | C28: a fault is recorded by class, never by message | not yet ported; production mismatch, fix pending: a non-Vault store failure must return generic AV_INTERNAL text instead of the raw SQLite conversion error; handler guard covered by av-daemon unit test: `tests::handler_guard::a_handler_that_panics_is_recorded_answered_500_and_the_next_request_works`; typed property: `ported_gateway_core::integration_c28_every_typed_fault_class_is_its_av_code_never_attacker_detail_or_hint`; real store failure: `ported_gateway_core::integration_c28_real_malformed_metadata_failure_returns_generic_internal_and_no_error_text_in_audits`; forged JS Error.name/plain-object classes cannot be represented by `server::error_class(&VaultError)` at server.rs:97 |
 | integrate3-r5.test.js | C28: a listener that cannot bind records its system code, not the message | `ported_gateway_core::integration_c28_busy_listener_audits_only_system_code_and_daemon_remains_usable` |
 | integrate3-r5.test.js | C28: session.created says whether a session has a label, not what it says | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
 | integrate3-r5.test.js | C28: a failed webhook records a system code or `error`, never other text from the error | `ported_gateway_core::integration_c28_real_webhook_connection_and_protocol_failures_log_only_closed_reasons` |
@@ -908,11 +908,11 @@ the vault on every call instead of caching an audit handle.
 | listener.test.js | a network listener with no TLS is refused at add time too | `tests::control::listeners_are_validated_and_bound_and_unbound` |
 | listener.test.js | a listener on a network address without TLS is refused | `tests::control::listeners_are_validated_and_bound_and_unbound` |
 | listener.test.js | the listener a request arrived on reaches the pipeline at all | not yet ported |
-| locked.test.js | reading the audit log says the vault is locked, not that something broke | not yet ported |
-| locked.test.js | verifying the audit chain says the same | not yet ported |
-| locked.test.js | a locked vault says its record count is unknown, not zero | not yet ported |
-| locked.test.js | the reads the unlock screen depends on still work | not yet ported |
-| locked.test.js | unlocking restores the audit log | not yet ported |
+| locked.test.js | reading the audit log says the vault is locked, not that something broke | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
+| locked.test.js | verifying the audit chain says the same | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
+| locked.test.js | a locked vault says its record count is unknown, not zero | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
+| locked.test.js | the reads the unlock screen depends on still work | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
+| locked.test.js | unlocking restores the audit log | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
 | mcp-tools.test.js | a request inside the grant works, so the refusals below mean something | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
 | mcp-tools.test.js | a path outside the grant never reaches the upstream | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
 | mcp-tools.test.js | traversal cannot climb out of the granted path | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
@@ -1007,12 +1007,12 @@ the vault on every call instead of caching an audit handle.
 | pipeline.test.js | a locked vault still answers questions that reveal nothing | `ported_gateway_core::locking_blocks_proxy_but_keeps_metadata_and_persists_until_explicit_unlock` |
 | pipeline.test.js | a held write is resendable with a freshly minted placeholder | `tests::mutants::an_approval_survives_a_fresh_placeholder_on_the_resend` |
 | pipeline.test.js | a resend cannot change what the human approved | `tests::mutants::hardening_a_resend_may_not_change_the_bytes_the_human_approved` |
-| remote.test.js | on loopback a placeholder alone authenticates, which is the point | not yet ported |
-| remote.test.js | over the network a placeholder alone does not authenticate | not yet ported |
-| remote.test.js | over the network the same request works with the session token alongside | not yet ported |
-| remote.test.js | a listener serving a surface that may never leave the machine is refused | not yet ported |
-| remote.test.js | a refused listener is recorded, not silently dropped | not yet ported |
-| remote.test.js | a remote session carries its own shorter ceiling | not yet ported |
+| remote.test.js | on loopback a placeholder alone authenticates, which is the point | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
+| remote.test.js | over the network a placeholder alone does not authenticate | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
+| remote.test.js | over the network the same request works with the session token alongside | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
+| remote.test.js | a listener serving a surface that may never leave the machine is refused | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
+| remote.test.js | a refused listener is recorded, not silently dropped | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
+| remote.test.js | a remote session carries its own shorter ceiling | `ported_gateway_core::fix_remote_carriers_real_upstream_listener_refusals_and_shorter_session_ceilings` |
 | requested-c3.test.js | a session the owner creates records its elevation, [] when ordinary | `ported_gateway_core::c3_owner_created_sessions_record_their_own_elevation_and_expiry` |
 | requested-c3.test.js | an approved request records the elevation of what the owner approved | `ported_gateway_core::c3_single_and_bulk_approved_sessions_record_each_final_proposal_elevation` |
 | requested-c3.test.js | a bulk decision records each session's own elevation, not the batch's | `ported_gateway_core::c3_single_and_bulk_approved_sessions_record_each_final_proposal_elevation` |
