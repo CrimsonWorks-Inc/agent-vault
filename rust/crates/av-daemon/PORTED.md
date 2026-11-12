@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 584 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **512 not yet ported**.
+Totals: 1207 JS tests: 604 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **492 not yet ported**.
 
 ## Mutation check
 
@@ -428,18 +428,18 @@ the vault on every call instead of caching an audit handle.
 | fix-control-presence.test.js | a fresh proof opens no window | not yet ported |
 | fix-control-process.test.js | an uncaught error in the daemon is recorded, and the daemon keeps answering | not yet ported |
 | fix-control-process.test.js | an ordinary run records no fault, and stopping removes the guard | not yet ported |
-| fix-control-session-requests.test.js | asking returns a collect secret, and nothing lists it | not yet ported |
-| fix-control-session-requests.test.js | another agent cannot collect a token by knowing the request id | not yet ported |
-| fix-control-session-requests.test.js | over MCP, polling needs the secret the request returned | not yet ported |
-| fix-control-session-requests.test.js | the human who approves gets the session in the gated decision itself | not yet ported |
-| fix-control-session-requests.test.js | settled requests do not fill the waiting room | not yet ported |
-| fix-control-session-requests.test.js | genuinely pending requests are still capped | not yet ported |
-| fix-control-session-requests.test.js | settled requests age out of memory | not yet ported |
-| fix-control-session-requests.test.js | tokenless MCP initialize cannot grow the session map or the audit log without bound | not yet ported |
-| fix-control-session-requests.test.js | issuing a placeholder with no live session says so, not TypeError | not yet ported |
+| fix-control-session-requests.test.js | asking returns a collect secret, and nothing lists it | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
+| fix-control-session-requests.test.js | another agent cannot collect a token by knowing the request id | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
+| fix-control-session-requests.test.js | over MCP, polling needs the secret the request returned | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
+| fix-control-session-requests.test.js | the human who approves gets the session in the gated decision itself | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
+| fix-control-session-requests.test.js | settled requests do not fill the waiting room | `ported_gateway_core::fix_session_requests_only_pending_count_toward_cap_and_old_settled_items_are_reclaimed_after_restart` |
+| fix-control-session-requests.test.js | genuinely pending requests are still capped | `ported_gateway_core::fix_session_requests_only_pending_count_toward_cap_and_old_settled_items_are_reclaimed_after_restart` |
+| fix-control-session-requests.test.js | settled requests age out of memory | `ported_gateway_core::fix_session_requests_only_pending_count_toward_cap_and_old_settled_items_are_reclaimed_after_restart` |
+| fix-control-session-requests.test.js | tokenless MCP initialize cannot grow the session map or the audit log without bound | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
+| fix-control-session-requests.test.js | issuing a placeholder with no live session says so, not TypeError | `ported_gateway_core::fix_session_requests_placeholder_without_live_session_reports_problem_and_selects_only_live_candidate` |
 | fix-control-session-requests.test.js | the web page never sees the token, single or batch | not yet ported |
-| fix-control-session-requests.test.js | anonymous MCP open and close cycles write nothing to the audit log | not yet ported |
-| fix-control-session-requests.test.js | an authenticated client's MCP session is recorded when it opens and when it closes | not yet ported |
+| fix-control-session-requests.test.js | anonymous MCP open and close cycles write nothing to the audit log | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
+| fix-control-session-requests.test.js | an authenticated client's MCP session is recorded when it opens and when it closes | `ported_gateway_core::fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded` |
 | fix-control-store.test.js | the no-wider check itself refuses a result that dropped a constraint | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | narrowGrant can only intersect, never widen | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | narrowGrant still narrows | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -1136,18 +1136,18 @@ the vault on every call instead of caching an audit handle.
 | session-requests.test.js | an agent cannot flood out a request a human is reading | `ported_gateway_core::session_requests_presence_never_authorizes_new_hosts_denial_cannot_flip_and_flood_cannot_evict` |
 | session-requests.test.js | every request and answer is in the audit log | `tests::control::session_requests_create_nothing_until_a_human_answers_and_only_the_asker_collects` |
 | session-requests.test.js | a request is audited on a vault that started locked, which is every real one | `ported_gateway_core::session_requests_started_locked_reacquires_audit_on_every_unlock` |
-| session-requests.test.js | approving records the session where a running agent will find it | not yet ported |
-| session-requests.test.js | a denial records nothing | not yet ported |
+| session-requests.test.js | approving records the session where a running agent will find it | `ported_gateway_core::session_request_client_collection_records_only_approval_once_in_private_temp_state` |
+| session-requests.test.js | a denial records nothing | `ported_gateway_core::session_request_client_collection_records_only_approval_once_in_private_temp_state` |
 | session-requests.test.js | a pending request survives a daemon restart | `tests::guards::pending_session_requests_survive_a_restart_and_approved_tokens_never_touch_disk` |
 | session-requests.test.js | an approved token is never written to disk | `tests::guards::pending_session_requests_survive_a_restart_and_approved_tokens_never_touch_disk` |
-| session-requests.test.js | a session request tells the human a command they can actually run | not yet ported |
-| session-requests.test.js | no hint anywhere names an agent-vault command that does not exist | not yet ported |
-| session-requests.test.js | an approved lifetime is a ceiling, not an opening bid | not yet ported |
-| session-requests.test.js | a requested lifetime cannot exceed the hard ceiling | not yet ported |
+| session-requests.test.js | a session request tells the human a command they can actually run | `ported_gateway_core::session_request_human_hints_and_all_daemon_error_string_commands_exist_in_cli_inventory` |
+| session-requests.test.js | no hint anywhere names an agent-vault command that does not exist | `ported_gateway_core::session_request_human_hints_and_all_daemon_error_string_commands_exist_in_cli_inventory` |
+| session-requests.test.js | an approved lifetime is a ceiling, not an opening bid | `ported_gateway_core::session_request_approved_ttl_is_immutable_under_touch_and_local_remote_hard_caps_bind` |
+| session-requests.test.js | a requested lifetime cannot exceed the hard ceiling | `ported_gateway_core::session_request_approved_ttl_is_immutable_under_touch_and_local_remote_hard_caps_bind` |
 | session-requests.test.js | an agent cannot settle a batch any more than it can settle one | `tests::mutants::hardening_every_answer_a_human_gives_needs_the_human` |
-| session-requests.test.js | a batch refuses the shapes that would hide an approval | not yet ported |
-| session-requests.test.js | a batch settles through the same path as a single decision | not yet ported |
-| session-requests.test.js | an item that stopped being pending is reported, not skipped in silence | not yet ported |
+| session-requests.test.js | a batch refuses the shapes that would hide an approval | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
+| session-requests.test.js | a batch settles through the same path as a single decision | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
+| session-requests.test.js | an item that stopped being pending is reported, not skipped in silence | `ported_gateway_core::session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing` |
 | ui-audit-growth.test.js | Prev from the old first page holds only the rows appended since, and then there is no Prev | not yet ported |
 | ui-audit-growth.test.js | a log with gaps that grows while it is walked: Next sees the first snapshot once, Prev reaches every new row once | not yet ported |
 | ui-audit-growth.test.js | a real daemon, a kind and a search, rows arriving all the time: both directions, no row twice, none skipped | not yet ported |

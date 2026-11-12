@@ -13673,3 +13673,922 @@ async fn notify_disconnect_monitor_preserves_stream_when_another_request_is_alre
         let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","reason":"ordinary pipelined-stream control"})).await;assert_eq!(s,200,"{asked}");until(&mut socket,&mut raw,asked["id"].as_str().unwrap()).await;let text=String::from_utf8_lossy(&raw);assert!(text.contains("event: pending"));assert_eq!(text.matches("HTTP/1.1 ").count(),1,"a later response must not be interleaved into the active SSE body");assert!(!text.contains(SECRET));drop(socket);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
     }).await.expect("notify pipelining timed out");
 }
+
+#[tokio::test]
+async fn session_request_client_collection_records_only_approval_once_in_private_temp_state() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use std::os::unix::fs::PermissionsExt;
+        let f=Fixture::new(&["header:x-key"]).await;let state_path=f._dir.path().join("fake-client-state.json");
+        for granted in [true,false] {
+            let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":[if granted{"/user"}else{"/denied"}],"reason":"to be recorded"})).await;assert_eq!(s,200);if granted{assert!(!state_path.exists());}
+            let(s,answered)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":granted})).await;assert_eq!(s,200,"{answered}");let item=av_store::pending::describe(av_store::pending::PendingKind::Session,&asked);let path=if granted {state_path.clone()}else{f._dir.path().join("denied-client-state.json")};let collected=av_store::pending::collect_approved(&item,&answered,|row|{assert!(granted,"a denial must never write client state");av_store::client_state::remember_session(&av_store::client_state::RememberedSession{session_id:row["session_id"].as_str().map(str::to_owned),token:row["token"].as_str().map(str::to_owned),placeholder:row["placeholder"].as_str().map(str::to_owned),base_url:None},&path).unwrap();});
+            if granted {let got=collected.unwrap();assert!(got["token"].as_str().unwrap().starts_with("avs1."));let stored:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();assert_eq!(stored["token"],got["token"]);assert_eq!(stored["session_id"],got["session_id"]);assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode()&0o077,0);let(_,again)=credential_api(&f,"GET",&format!("/v1/session-requests/collect?id={}&secret={}",asked["id"].as_str().unwrap(),asked["collect_secret"].as_str().unwrap()),json!({})).await;assert_eq!(again["state"],"collected");assert!(again.get("token").is_none());}else{assert!(collected.is_none());assert!(!path.exists());}
+        }
+        assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("private client collection timed out");
+}
+
+#[tokio::test]
+async fn session_request_approved_ttl_is_immutable_under_touch_and_local_remote_hard_caps_bind() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        f.shared
+            .run(|c| {
+                let made = c
+                    .vault
+                    .create_session(av_store::vault::CreateSessionOptions {
+                        ttl_ms: Some(30 * 60000),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let initial = made.session.expires_at.clone().unwrap();
+                assert!(
+                    av_daemon::util::parse_iso_ms(&initial).unwrap()
+                        <= av_daemon::util::now_ms() + 1801000
+                );
+                for _ in 0..5 {
+                    c.vault.touch_session(&made.session.id).unwrap();
+                }
+                let after = c.vault.session(&made.session.id).unwrap().unwrap();
+                assert_eq!(after.expires_at.as_ref(), Some(&initial));
+                assert!(
+                    av_daemon::util::parse_iso_ms(after.max_expires_at.as_ref().unwrap()).unwrap()
+                        <= av_daemon::util::parse_iso_ms(&initial).unwrap()
+                );
+                for (remote, cap) in [(false, 24), (true, 8)] {
+                    let made = c
+                        .vault
+                        .create_session(av_store::vault::CreateSessionOptions {
+                            ttl_ms: Some(48 * 3600000),
+                            remote,
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let expiry =
+                        av_daemon::util::parse_iso_ms(made.session.expires_at.as_ref().unwrap())
+                            .unwrap();
+                    assert!(expiry <= av_daemon::util::now_ms() + cap * 3600000 + 36000);
+                    assert!(
+                        expiry
+                            <= av_daemon::util::parse_iso_ms(
+                                made.session.max_expires_at.as_ref().unwrap()
+                            )
+                            .unwrap()
+                    );
+                }
+                let plain = c.vault.create_session(Default::default()).unwrap();
+                assert!(
+                    av_daemon::util::parse_iso_ms(plain.session.max_expires_at.as_ref().unwrap())
+                        .unwrap()
+                        > av_daemon::util::parse_iso_ms(plain.session.expires_at.as_ref().unwrap())
+                            .unwrap()
+                );
+            })
+            .await
+            .unwrap();
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("approved lifetime ceiling timed out");
+}
+
+#[tokio::test]
+async fn session_request_bulk_rejects_hidden_approval_shapes_and_settles_live_items_through_same_narrowing(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;credential_gate(&f,true).await;
+        let(_,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET","POST"],"paths":["/user"]})).await;let id=asked["id"].clone();
+        for(decisions,detail)in [(json!([]),"nothing was selected"),(json!("not-a-list"),"must be a list"),(json!([{"id":id,"kind":"session","granted":"false"}]),"must be true or false"),(json!([{"id":id,"kind":"session","granted":true},{"id":id,"kind":"session","granted":false}]),"appears twice"),(json!([{"id":id,"kind":"elsewhere","granted":true}]),"unknown kind"),(json!([{"id":id,"kind":"session","granted":true,"presence":"smuggled"}]),"cannot carry"),(json!(vec![json!({"id":id,"kind":"session","granted":true});26]),"too many at once")] {let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":decisions})).await;assert_eq!(s,403,"{v}");assert!(v["detail"].as_str().unwrap().contains(detail),"{detail}: {v}");}
+        let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;assert!(pending.as_array().unwrap().iter().any(|r|r["id"]==id&&r["state"]=="pending"));let before=f.shared.run(|c|c.vault.sessions().unwrap().len()).await.unwrap();let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":id,"kind":"session","granted":true,"overrides":{"methods":["GET"]}}]})).await;assert_eq!(s,200,"{v}");assert_eq!(v["decided"][0]["result"]["granted"]["methods"],json!(["GET"]));assert_eq!(f.shared.run(|c|c.vault.sessions().unwrap().len()).await.unwrap(),before+1);
+        let(_,gone)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":["/gone"]})).await;let(_,live)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":["/live"]})).await;assert_eq!(credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":gone["id"],"granted":false})).await.0,200);let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":gone["id"],"kind":"session","granted":true},{"id":live["id"],"kind":"session","granted":true}]})).await;assert_eq!(s,200,"{v}");let items=v["decided"].as_array().unwrap();let skipped=items.iter().find(|r|r["id"]==gone["id"]).unwrap();assert_eq!(skipped["outcome"],"skipped");assert!(skipped["reason"].as_str().unwrap().contains("already denied"));assert_eq!(items.iter().find(|r|r["id"]==live["id"]).unwrap()["outcome"],"decided");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("bulk session requests timed out");
+}
+
+#[tokio::test]
+async fn fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+        let(_,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":["/user"]})).await;let id=asked["id"].as_str().unwrap();let secret=asked["collect_secret"].as_str().unwrap();assert!(secret.len()>=20&&secret.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-'));let(_,listed)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;let listed=listed.to_string();assert!(!listed.contains(secret));assert!(!listed.contains("collect_hash"));assert!(!listed.contains("collect_secret"));assert!(!serde_json::to_string(&audit_records(&f).await).unwrap().contains(secret));
+        let(_,other)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","methods":["GET"],"paths":["/other"]})).await;credential_gate(&f,true).await;assert_eq!(credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":id,"kind":"session","granted":true},{"id":other["id"],"kind":"session","granted":true}]})).await.0,200);credential_gate(&f,false).await;
+        for query in [format!("id={id}"),format!("id={id}&secret="),format!("id={id}&secret={}","A".repeat(32))] {let(s,v)=credential_api(&f,"GET",&format!("/v1/session-requests/collect?{query}"),json!({})).await;assert!(s>=400,"{v}");assert!(!v.to_string().contains("avs1."));}let url=format!("/v1/session-requests/collect?id={id}&secret={secret}");let(s,mine)=credential_api(&f,"GET",&url,json!({})).await;assert_eq!(s,200,"{mine}");assert!(mine["token"].as_str().unwrap().starts_with("avs1."));assert!(credential_api(&f,"GET",&url,json!({})).await.1.get("token").is_none());
+        let(_,asked)=control_mcp_call(&f,"vault_request_session",json!({"cred":"demo","reason":"test","methods":["GET"]}),false).await;assert_eq!(asked["state"],"pending");assert!(asked["poll_secret"].is_string());let(_,stranger)=control_mcp_call(&f,"vault_request_session",json!({"poll_id":asked["request_id"],"reason":"peeking"}),false).await;assert!(stranger.get("error").is_some());assert_eq!(control_mcp_call(&f,"vault_request_session",json!({"poll_id":asked["request_id"],"poll_secret":asked["poll_secret"],"reason":"checking"}),false).await.1["state"],"pending");
+        let(_,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","paths":["/human"]})).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":true})).await;assert_eq!(s,200,"{v}");assert!(v["session"]["token"].as_str().unwrap().starts_with("avs1."));let token=v["session"]["token"].as_str().unwrap().to_owned();assert!(f.shared.run(move|c|c.vault.session_by_token(&token).unwrap().is_some()).await.unwrap());credential_gate(&f,false).await;let(_,v)=credential_api(&f,"GET",&format!("/v1/session-requests/collect?id={}&secret={}",asked["id"].as_str().unwrap(),asked["collect_secret"].as_str().unwrap()),json!({})).await;assert_eq!(v["state"],"collected");assert!(v.get("token").is_none());assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("private collection secret and one-time answers timed out");
+}
+
+#[tokio::test]
+async fn fix_session_requests_only_pending_count_toward_cap_and_old_settled_items_are_reclaimed_after_restart(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        for i in 0..av_daemon::session_requests::MAX_PENDING {
+            let (s, asked) = credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","paths":[format!("/denied/{i}")]}),
+            )
+            .await;
+            assert_eq!(s, 200, "{asked}");
+            assert_eq!(
+                credential_api(
+                    &f,
+                    "POST",
+                    "/v1/session-requests/decide",
+                    json!({"id":asked["id"],"granted":false})
+                )
+                .await
+                .0,
+                200
+            );
+        }
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","paths":["/next"]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let id = v["id"].as_str().unwrap().to_owned();
+        f.shared
+            .run(move |c| {
+                let item = c.sr.find_mut(&id).unwrap();
+                item.state = "collected".into();
+                item.decided_at = Some("2000-01-01T00:00:00.000Z".into());
+                item.result = None;
+                assert!(c.sr_get(&id).is_none());
+            })
+            .await
+            .unwrap();
+        let f = control_session_restart_after_seed(f, |_| {}).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","paths":["/after-restart"]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        for i in 1..av_daemon::session_requests::MAX_PENDING {
+            assert_eq!(
+                credential_api(
+                    &f,
+                    "POST",
+                    "/v1/session-requests",
+                    json!({"cred":"demo","paths":[format!("/pending/{i}")]})
+                )
+                .await
+                .0,
+                200
+            );
+        }
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","paths":["/overflow"]}),
+        )
+        .await;
+        assert_ne!(s, 200);
+        assert!(v["detail"].as_str().unwrap().contains("too many"));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("session request pending cap and retention timed out");
+}
+
+#[tokio::test]
+async fn fix_session_requests_mcp_anonymous_maps_and_audits_are_bounded_but_authenticated_lifetimes_are_recorded(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        let before = audit_records(&f).await.len();
+        let mut ids = Vec::new();
+        for _ in 0..600 {
+            let (s, h, _) = mcp_wire(&f, "POST", init.clone(), None, vec![]).await;
+            assert_eq!(s, 200);
+            ids.push(
+                h.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+                    .unwrap()
+                    .1
+                    .clone(),
+            );
+        }
+        assert!(ids.iter().filter(|s| f.daemon.mcp().has_session(s)).count() <= 256);
+        assert!(audit_records(&f).await.len() - before < 50);
+        let before = audit_records(&f).await.len();
+        for _ in 0..100 {
+            let (s, h, _) = mcp_wire(&f, "POST", init.clone(), None, vec![]).await;
+            assert_eq!(s, 200);
+            let id = h
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+                .unwrap()
+                .1
+                .clone();
+            assert_eq!(
+                mcp_wire(
+                    &f,
+                    "DELETE",
+                    Value::Null,
+                    None,
+                    vec![("mcp-session-id".into(), id.clone())]
+                )
+                .await
+                .0,
+                204
+            );
+            assert!(!f.daemon.mcp().has_session(&id));
+        }
+        assert!(audit_records(&f).await.len() - before < 10);
+        for close_authenticated in [true, false] {
+            let (s, h, _) = mcp_wire(&f, "POST", init.clone(), Some(&f.token), vec![]).await;
+            assert_eq!(s, 200);
+            let id = h
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("mcp-session-id"))
+                .unwrap()
+                .1
+                .clone();
+            assert!(f.daemon.mcp().has_session(&id));
+            assert!(audit_records(&f)
+                .await
+                .iter()
+                .any(|r| r["kind"] == "mcp.session_opened" && r["mcp_session_id"] == id));
+            assert_eq!(
+                mcp_wire(
+                    &f,
+                    "DELETE",
+                    Value::Null,
+                    close_authenticated.then_some(f.token.as_str()),
+                    vec![("mcp-session-id".into(), id.clone())]
+                )
+                .await
+                .0,
+                204
+            );
+            let events = audit_records(&f)
+                .await
+                .into_iter()
+                .filter(|r| r["mcp_session_id"] == id)
+                .map(|r| r["kind"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events,
+                vec![json!("mcp.session_opened"), json!("mcp.session_closed")]
+            );
+        }
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("anonymous MCP transport accounting timed out");
+}
+
+#[tokio::test]
+async fn fix_session_requests_placeholder_without_live_session_reports_problem_and_selects_only_live_candidate(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut f = Fixture::new(&["header:x-key"]).await;
+        let sid = control_session_sid(&f).await;
+        f.shared
+            .run(move |c| {
+                c.vault
+                    .revoke_session(&sid, "fixture no live session")
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/placeholders", json!({"cred":"demo"}))
+                .await
+                .1["code"],
+            "AV_SESSION_REQUIRED"
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/placeholders",
+                json!({"cred":"demo","sid":"nope"})
+            )
+            .await
+            .1["code"],
+            "AV_NOT_FOUND"
+        );
+        let (s, a) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{a}");
+        let (s, b) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{b}");
+        let dead = a["session_id"].as_str().unwrap().to_owned();
+        f = control_session_restart_after_seed(f, move |dir| {
+            ported_common::seed_session_expiry(dir, &dead, "2000-01-01T00:00:00.000Z")
+        })
+        .await;
+        let (s, v) = credential_api(&f, "POST", "/v1/placeholders", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(v["placeholder"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("av1.{}.", b["session_id"].as_str().unwrap())));
+        assert_eq!(
+            control_session_request(&f, &b, "demo", "GET", "/ordinary")
+                .await
+                .status,
+            200
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("live session selection for placeholder timed out");
+}
+
+fn ported_cli_command_names() -> Vec<String> {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../av-cli/src/lib.rs"),
+    )
+    .unwrap();
+    let block = src
+        .split("pub const COMMAND_NAMES:")
+        .nth(1)
+        .unwrap()
+        .split("= [")
+        .nth(1)
+        .unwrap()
+        .split("];")
+        .next()
+        .unwrap();
+    av_core::jsre::compile(r#""[a-z][a-z-]*(?: [a-z][a-z-]*)*""#)
+        .unwrap()
+        .find_iter(block)
+        .map(|m| m.as_str().trim_matches('"').to_string())
+        .collect()
+}
+#[tokio::test]
+async fn session_request_human_hints_and_all_daemon_error_string_commands_exist_in_cli_inventory() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let names = ported_cli_command_names();
+        assert!(names.len() > 60);
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","methods":["GET"],"paths":["/user"]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let hints = v["next"]["human"].as_array().unwrap();
+        assert!(!hints.is_empty());
+        for hint in hints {
+            let hint = hint.as_str().unwrap().strip_prefix("agent-vault ").unwrap();
+            assert!(
+                names
+                    .iter()
+                    .any(|name| hint == name || hint.starts_with(&format!("{name} "))),
+                "unknown command {hint}"
+            );
+        }
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() {
+                    if p.file_name().unwrap() != "tests" {
+                        walk(&p, out);
+                    }
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let first = names
+            .iter()
+            .map(|n| n.split_whitespace().next().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let prose = [
+            "needs",
+            "under",
+            "will",
+            "takes",
+            "notification",
+            "localhost",
+        ];
+        let strings = av_core::jsre::compile(r#""(?:\\.|[^"\\])*""#).unwrap();
+        let command = av_core::jsre::compile(r"\bagent-vault [a-z][a-z-]*").unwrap();
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        for file in files {
+            let src = std::fs::read_to_string(&file).unwrap();
+            for (line, source) in src
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap()
+                .lines()
+                .enumerate()
+            {
+                let source = source.trim();
+                if source.starts_with("//") || source.starts_with('*') {
+                    continue;
+                }
+                for literal in strings.find_iter(source) {
+                    for m in command.find_iter(literal.as_str()) {
+                        let name = m.as_str().strip_prefix("agent-vault ").unwrap();
+                        assert!(
+                            first.contains(name) || prose.contains(&name),
+                            "{}:{} unknown command {name}",
+                            file.display(),
+                            line + 1
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("CLI-backed daemon hints timed out");
+}
+
+async fn probe_fixture(kind: &str, connector: Value, fields: Vec<(&str, Vec<&str>)>) -> Fixture {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let kind = kind.to_string();
+    let sites = fields
+        .iter()
+        .map(|(n, s)| {
+            (
+                n.to_string(),
+                s.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let values = fields
+        .iter()
+        .map(|(n, _)| (n.to_string(), SECRET.to_string().into()))
+        .collect();
+    f.shared
+        .run(move |c| {
+            c.vault
+                .add_credential(av_store::vault::NewCredential {
+                    slug: "probe".into(),
+                    kind,
+                    connector: serde_json::from_value(connector).unwrap(),
+                    fields: values,
+                    sites,
+                })
+                .unwrap()
+        })
+        .await
+        .unwrap();
+    f
+}
+async fn probe_health(f: &Fixture) -> Value {
+    f.shared
+        .run(|c| {
+            serde_json::to_value(c.vault.find_credential("probe").unwrap().unwrap().health).unwrap()
+        })
+        .await
+        .unwrap()
+}
+async fn run_public_probe(f: &Fixture) -> Result<Value, av_core::errors::VaultError> {
+    av_daemon::connectors::probe::run_probe(&f.shared, "probe".into(), Some(f.up.clone())).await
+}
+
+#[tokio::test]
+async fn connector_probe_fixed_methods_paths_first_header_site_and_declared_http_destination() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for (kind, host, scheme, fields, url, method, header, value) in [
+            (
+                "github",
+                "api.github.com",
+                "https",
+                vec![("token", vec!["header:authorization:Bearer"])],
+                "https://api.github.com/user",
+                "GET",
+                "authorization",
+                format!("Bearer {SECRET}"),
+            ),
+            (
+                "slack",
+                "slack.com",
+                "https",
+                vec![("token", vec!["header:authorization:Bearer"])],
+                "https://slack.com/api/auth.test",
+                "POST",
+                "authorization",
+                format!("Bearer {SECRET}"),
+            ),
+            (
+                "anthropic",
+                "api.anthropic.com",
+                "https",
+                vec![
+                    ("password", vec!["basic:pass"]),
+                    (
+                        "key",
+                        vec!["header:x-api-key", "header:authorization:Bearer"],
+                    ),
+                ],
+                "https://api.anthropic.com/v1/models",
+                "GET",
+                "x-api-key",
+                SECRET.into(),
+            ),
+            (
+                "github",
+                "127.0.0.1:8443",
+                "HTTP",
+                vec![("token", vec!["header:authorization:Bearer"])],
+                "http://127.0.0.1:8443/user",
+                "GET",
+                "authorization",
+                format!("Bearer {SECRET}"),
+            ),
+        ] {
+            let f = probe_fixture(kind, json!({"host":host,"scheme":scheme}), fields).await;
+            *f.up.reply.lock().unwrap() = Some(Reply {
+                streaming: false,
+                status: if kind == "anthropic" { 204 } else { 200 },
+                headers: vec![
+                    ("x-oauth-scopes".into(), "repo, user".into()),
+                    ("x-ratelimit-remaining".into(), "7".into()),
+                ],
+                body: vec![],
+            });
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/test",
+                json!({"slug":"probe","path":"/user/keys","method":"DELETE","body":"token=stolen"}),
+            )
+            .await;
+            assert_eq!(s, 200, "{v}");
+            assert_eq!(v["ok"], true);
+            assert_eq!(v["status"], "ok");
+            assert!(v["latency_ms"].as_u64().is_some());
+            {
+                let sent = f.up.hits.lock().unwrap();
+                assert_eq!(sent.len(), 1);
+                assert_eq!(sent[0].url, url);
+                assert_eq!(sent[0].method, method);
+                assert!(sent[0].body.as_ref().is_none_or(|b| b.is_empty()));
+                assert!(!sent[0].url.contains(SECRET));
+                assert!(sent[0]
+                    .headers
+                    .iter()
+                    .any(|(k, v)| k.eq_ignore_ascii_case(header) && v == &value));
+                if kind == "anthropic" {
+                    assert!(!sent[0]
+                        .headers
+                        .iter()
+                        .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
+                }
+                if kind == "slack" {
+                    assert!(sent[0]
+                        .headers
+                        .iter()
+                        .any(|(k, v)| k.eq_ignore_ascii_case("content-type")
+                            && v == "application/x-www-form-urlencoded"));
+                }
+                if host.contains("8443") {
+                    assert_eq!(sent[0].pins.as_value(), Value::Null);
+                }
+            }
+            let health = probe_health(&f).await;
+            assert_eq!(health["source"], "probe");
+            assert_eq!(health["status"], "ok");
+            assert_eq!(
+                health["http_status"],
+                if kind == "anthropic" { 204 } else { 200 }
+            );
+            if kind == "github" {
+                assert_eq!(v["scopes"], json!(["repo", "user"]));
+                assert_eq!(v["ratelimit_remaining"], 7);
+            }
+            f.reply(200, "text/plain", "ordinary-traffic-control".into());
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .expect("fixed profile probe destination timed out");
+}
+
+#[tokio::test]
+async fn connector_probe_outputs_health_and_logs_never_return_secret_marker_or_body_and_statuses_classify(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = probe_fixture(
+            "github",
+            json!({"host":"api.github.com"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        let body = format!("{SECRET} {} BODY_SENTINEL_do_not_return", f.ph);
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: true,
+            status: 200,
+            headers: vec![
+                ("x-oauth-scopes".into(), format!("repo, {SECRET}, {}", f.ph)),
+                (
+                    "github-authentication-token-expiration".into(),
+                    "2027-01-31 00:00:00 UTC".into(),
+                ),
+            ],
+            body: body.into_bytes(),
+        });
+        let result = run_public_probe(&f).await.unwrap();
+        assert_eq!(result["observed_expires_at"], "2027-01-31T00:00:00.000Z");
+        assert!(result["scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str().unwrap().contains("repo")));
+        for v in [
+            result,
+            probe_health(&f).await,
+            json!(audit_records(&f).await),
+        ] {
+            for private in [SECRET, &f.ph, "BODY_SENTINEL_do_not_return"] {
+                assert!(!v.to_string().contains(private));
+            }
+        }
+        credential_finish(&f).await;
+        for (code, status) in [
+            (401, "unauthorized"),
+            (403, "forbidden"),
+            (404, "error"),
+            (500, "error"),
+            (302, "error"),
+        ] {
+            let f = probe_fixture(
+                "github",
+                json!({"host":"api.github.com"}),
+                vec![("token", vec!["header:authorization:Bearer"])],
+            )
+            .await;
+            f.reply(code, "text/plain", "ordinary response".into());
+            let v = run_public_probe(&f).await.unwrap();
+            assert_eq!(v["status"], status);
+            assert_eq!(v["ok"], false);
+            assert_eq!(v["http_status"], code);
+            let health = probe_health(&f).await;
+            assert_eq!(health["status"], status);
+            assert_eq!(health["source"], "probe");
+            credential_finish(&f).await;
+        }
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let f = probe_fixture(
+            "github",
+            json!({"host":format!("127.0.0.1:{port}"),"scheme":"http"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        let v = av_daemon::connectors::probe::run_probe(&f.shared, "probe".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(v["status"], "unreachable");
+        assert_eq!(v["ok"], false);
+        assert!(v["http_status"].is_null());
+        assert_eq!(probe_health(&f).await["status"], "unreachable");
+        assert!(!v.to_string().contains(SECRET));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("probe health result secrecy timed out");
+}
+
+#[tokio::test]
+async fn connector_probe_absent_profile_header_site_and_bad_destinations_refuse_before_reading_secret(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for (kind, fields) in [
+            ("http", vec![("token", vec!["header:authorization:Bearer"])]),
+            ("postgres", vec![("password", vec!["basic:pass"])]),
+            ("github", vec![("password", vec!["basic:pass"])]),
+        ] {
+            let f = probe_fixture(kind, json!({"host":"api.github.com"}), fields).await;
+            credential_api(&f, "POST", "/v1/lock", json!({})).await;
+            let e = run_public_probe(&f).await.unwrap_err();
+            assert_eq!(e.code.as_str(), "AV_NOT_FOUND");
+            assert_eq!(e.extra.rule.as_deref(), Some("no_probe"));
+            assert!(f.up.hits.lock().unwrap().is_empty());
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await;
+            assert!(probe_health(&f).await.is_null());
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(&f).await;
+        }
+        for (host, scheme) in [
+            ("api.github.com/steal", "https"),
+            ("https://evil.test", "https"),
+            ("api.github.com@evil.test", "https"),
+            ("api.github.com\nevil.test", "https"),
+            ("api.github.com?x=1", "https"),
+            ("*.github.com", "https"),
+            ("file://api.github.com", "https"),
+            ("api.github.com", "file"),
+        ] {
+            let f = probe_fixture(
+                "github",
+                json!({"host":host,"scheme":scheme}),
+                vec![("token", vec!["header:authorization:Bearer"])],
+            )
+            .await;
+            credential_api(&f, "POST", "/v1/lock", json!({})).await;
+            let e = run_public_probe(&f).await.unwrap_err();
+            assert_eq!(e.code.as_str(), "AV_POLICY_DENIED", "{host}: {e}");
+            assert_eq!(e.extra.rule.as_deref(), Some("credential_host"));
+            assert!(f.up.hits.lock().unwrap().is_empty());
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await;
+            assert!(probe_health(&f).await.is_null());
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .expect("probe refusal-before-secret-read timed out");
+}
+
+#[tokio::test]
+async fn connector_probe_real_time_throttle_ignores_caller_now_and_expires_after_sixty_seconds() {
+    tokio::time::timeout(std::time::Duration::from_secs(85), async {
+        let a = probe_fixture(
+            "github",
+            json!({"host":"api.github.com"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        let b = probe_fixture(
+            "github",
+            json!({"host":"api.github.com"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        let began = std::time::Instant::now();
+        assert_eq!(
+            credential_api(&a, "POST", "/v1/credentials/test", json!({"slug":"probe"}))
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            credential_api(
+                &b,
+                "POST",
+                "/v1/credentials/test",
+                json!({"slug":"probe","now":9007199254740991u64})
+            )
+            .await
+            .0,
+            200
+        );
+        for now in [
+            av_daemon::util::now_ms() + 61000,
+            av_daemon::util::now_ms() + 122000,
+            av_daemon::util::now_ms() + 183000,
+        ] {
+            let (s, v) = credential_api(
+                &a,
+                "POST",
+                "/v1/credentials/test",
+                json!({"slug":"probe","now":now}),
+            )
+            .await;
+            assert_eq!(s, 429, "{v}");
+            assert_eq!(v["code"], "AV_QUOTA_EXCEEDED");
+            assert_eq!(v["rule"], "probe_throttle");
+            assert!((1..=60).contains(&v["retry_after"].as_u64().unwrap()));
+        }
+        assert_eq!(a.up.hits.lock().unwrap().len(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(1010).saturating_sub(began.elapsed()))
+            .await;
+        let (s, v) =
+            credential_api(&a, "POST", "/v1/credentials/test", json!({"slug":"probe"})).await;
+        assert_eq!(s, 429);
+        assert!((1..=59).contains(&v["retry_after"].as_u64().unwrap()));
+        tokio::time::sleep(std::time::Duration::from_millis(59100).saturating_sub(began.elapsed()))
+            .await;
+        let (s, v) =
+            credential_api(&a, "POST", "/v1/credentials/test", json!({"slug":"probe"})).await;
+        assert_eq!(s, 429);
+        assert_eq!(v["retry_after"], 1);
+        assert_eq!(a.up.hits.lock().unwrap().len(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(61000).saturating_sub(began.elapsed()))
+            .await;
+        for f in [&a, &b] {
+            let (s, v) =
+                credential_api(f, "POST", "/v1/credentials/test", json!({"slug":"probe"})).await;
+            assert_eq!(s, 200, "{v}");
+            assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(f).await;
+        }
+    })
+    .await
+    .expect("real probe throttle interval timed out");
+}
+
+#[tokio::test]
+async fn connector_probe_bounded_drain_drops_endless_fast_or_trickle_bodies_and_finishes_ordinary_short_body(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        for slow in [false, true] {
+            let f = probe_fixture(
+                "github",
+                json!({"host":"api.github.com"}),
+                vec![("token", vec!["header:authorization:Bearer"])],
+            )
+            .await;
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            let producer = tokio::spawn(async move {
+                loop {
+                    if slow {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    if tx
+                        .send(Ok(vec![b'x'; if slow { 1 } else { 16384 }]))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+            f.reply(200, "text/plain", String::new());
+            let started = std::time::Instant::now();
+            let v = run_public_probe(&f).await.unwrap();
+            assert_eq!(v["status"], "ok");
+            assert!(
+                started.elapsed()
+                    < std::time::Duration::from_millis(if slow { 4000 } else { 1500 })
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(1), producer)
+                .await
+                .expect("probe did not drop endless body receiver")
+                .unwrap();
+            credential_finish(&f).await;
+        }
+        let f = probe_fixture(
+            "github",
+            json!({"host":"api.github.com"}),
+            vec![("token", vec!["header:authorization:Bearer"])],
+        )
+        .await;
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::spawn(async move {
+            tx.send(Ok(vec![0; 1024])).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tx.send(Ok(vec![0; 1024])).await.unwrap();
+            tokio::task::yield_now().await;
+            assert!(!tx.is_closed(), "ordinary producer was cut before EOF");
+            drop(tx);
+        });
+        *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+        f.reply(200, "text/plain", String::new());
+        let started = std::time::Instant::now();
+        assert_eq!(run_public_probe(&f).await.unwrap()["status"], "ok");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        producer.await.unwrap();
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("bounded probe body drain timed out");
+}
+
+struct GatedRealProbe {
+    ready: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+impl Upstream for GatedRealProbe {
+    fn send(&self, req: UpstreamRequest) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
+        self.ready.notify_one();
+        Box::pin(async move {
+            self.release.notified().await;
+            av_daemon::connectors::pinning::PinnedUpstream
+                .send(req)
+                .await
+        })
+    }
+}
+#[tokio::test]
+async fn connector_probe_real_lock_during_health_write_surfaces_store_error_after_success_or_network_failure(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use tokio::io::AsyncWriteExt;
+        for reachable in [true,false] {let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();let peer=if reachable{Some(tokio::spawn(async move{let(mut socket,_)=listener.accept().await.unwrap();read_wire_request(&mut socket).await;socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();}))}else{drop(listener);None};let f=probe_fixture("github",json!({"host":format!("127.0.0.1:{port}"),"scheme":"http"}),vec![("token",vec!["header:authorization:Bearer"])]).await;let ready=Arc::new(tokio::sync::Notify::new());let release=Arc::new(tokio::sync::Notify::new());let upstream=Arc::new(GatedRealProbe{ready:ready.clone(),release:release.clone()});let pending=av_daemon::connectors::probe::run_probe(&f.shared,"probe".into(),Some(upstream));tokio::pin!(pending);tokio::select!{_= &mut pending=>panic!("probe bypassed held real transport"),_=ready.notified()=>{}}
+            assert_eq!(credential_api(&f,"POST","/v1/lock",json!({})).await.0,200);release.notify_one();let e=pending.await.unwrap_err();assert_eq!(e.code.as_str(),"AV_LOCKED","{e}");assert!(!e.to_string().contains(SECRET));assert_eq!(credential_api(&f,"POST","/v1/unlock",json!({})).await.0,200);assert!(probe_health(&f).await.is_null());assert!(!audit_records(&f).await.iter().any(|r|r["kind"]=="cred.tested"&&r["credential_slug"]=="probe"));if let Some(peer)=peer{peer.await.unwrap();}assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+        }
+    }).await.expect("real store failure after probe response timed out");
+}
