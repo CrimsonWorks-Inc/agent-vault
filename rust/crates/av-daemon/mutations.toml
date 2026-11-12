@@ -1,0 +1,408 @@
+# Protections in av-daemon that the tests must catch. `cargo xtask mutation`
+# applies each swap to a temporary copy of rust/ and requires `cargo test` to
+# fail. Fields: name, file (relative to this crate), from (must appear exactly
+# once), to.
+#
+# Each entry reproduces one src/daemon/*, src/ui/*, src/connectors/pinning.js
+# or src/connectors/probe.js entry of test/mutation-check.js (read as text,
+# never imported) and carries its `what` as the name. src/pending.js entries
+# are av-store's (crates/av-store/mutations.toml). The JS entries not yet
+# reproduced here are listed, by name, in PORTED.md ("Mutation check").
+
+
+[[mutation]]
+name = 'a batch of decisions is settled with no human present'
+file = "src/server/routes.rs"
+from = 'self.gate_session("bulk decision", operation, &elevated, presence).await?;'
+to = 'let _ = (operation, elevated, presence);'
+
+[[mutation]]
+name = 'the human-presence gate never refuses'
+file = "src/server.rs"
+from = '''let factors = self.dm_factors()?;
+        if factors.is_empty() {
+            self.audit_opt("control.widening_ungated"'''
+to = '''let factors = self.dm_factors()?;
+        if true || factors.is_empty() {
+            self.audit_opt("control.widening_ungated"'''
+
+[[mutation]]
+name = 'the session token is forwarded upstream'
+file = "src/pipeline.rs"
+from = 'if token_re.is_match(v) {'
+to = 'if false && token_re.is_match(v) {'
+
+[[mutation]]
+name = 'the placeholder checksum is never checked'
+file = "src/pipeline.rs"
+from = 'if !av_core::placeholder::verify(&k_ph, &occ.parsed) {'
+to = 'if false && !av_core::placeholder::verify(&k_ph, &occ.parsed) {'
+
+[[mutation]]
+name = 'a compressed event stream bypasses the scrubber'
+file = "src/pipeline.rs"
+from = 'let compressed = !encoding.is_empty()'
+to = 'let compressed = false && !encoding.is_empty()'
+
+[[mutation]]
+name = 'error details reach the agent unscrubbed'
+file = "src/pipeline.rs"
+from = 'err.detail = detail;'
+to = 'let _ = detail;'
+
+[[mutation]]
+name = 'a resend may change the bytes the human approved'
+file = "src/pipeline.rs"
+from = 'let body_sha = view'
+to = 'let body_sha = String::new(); let _unused = view'
+
+[[mutation]]
+name = 'a policy denial is filed without the session that was refused'
+file = "src/pipeline.rs"
+from = '''"session_id".into(),
+                ctx.session
+                    .as_ref()
+                    .map_or(Value::Null, |s| s.id.clone().into()),'''
+to = '''"session_id".into(),
+                Value::Null,'''
+
+[[mutation]]
+name = 'denying a held request needs no human'
+file = "src/server/routes.rs"
+from = 'self.require_human(if granted { "approval grant" } else { "approval deny" }, op?, presence).await?;'
+to = 'if granted { self.require_human("approval grant", op?, presence).await?; }'
+
+[[mutation]]
+name = 'an agent can enrol a presence key on a fresh vault'
+file = "src/server/routes.rs"
+from = 'if !existed_pass.0 && !existed_pass.1 {'
+to = 'if false {'
+
+[[mutation]]
+name = 'a session request is created from what was asked, not what was approved'
+file = "src/server.rs"
+from = 'let mut spec = request_spec(&final_);'
+to = 'let mut spec = request_spec(&record.proposal);'
+
+[[mutation]]
+name = 'anyone with a request id collects its session'
+file = "src/server/routes.rs"
+from = '''if !record.may_collect(secret.as_deref()) {
+                            return Err(dr(C::PolicyDenied, "that is not the secret'''
+to = '''if false && !record.may_collect(secret.as_deref()) {
+                            return Err(dr(C::PolicyDenied, "that is not the secret'''
+
+[[mutation]]
+name = 'locking leaves the presence window open'
+file = "src/server/routes.rs"
+from = '''core.vault.lock().v()?;
+                        core.dm.presence_grace_until = 0;'''
+to = 'core.vault.lock().v()?;'
+
+[[mutation]]
+name = 'an assertion from an untrusted origin is accepted'
+file = "src/ui/webauthn.rs"
+from = 'expected_origins.iter().any'
+to = 'true || expected_origins.iter().any'
+
+[[mutation]]
+name = 'a method-override header escapes the methods allowlist'
+file = "src/pipeline.rs"
+from = 'if !methods.contains(m) {'
+to = 'if false && !methods.contains(m) {'
+
+[[mutation]]
+name = 'a secret in a response header name reaches the agent'
+file = "src/pipeline.rs"
+from = 'if kit.check.scrub(&lower).redactions > 0 || kit.check.contains_ignoring_case(&lower) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'an event stream is framed on LF only'
+file = "src/sse.rs"
+from = '''t.replace("\r\n", "\n").replace('\r', "\n")'''
+to = 't'
+
+[[mutation]]
+name = 'a request body goes upstream without a Content-Length'
+file = "src/pipeline.rs"
+from = 'put_header(&mut headers, "content-length", b.len().to_string());'
+to = 'let _ = b;'
+
+[[mutation]]
+name = 'the approvals route takes any verdict that is not literally false'
+file = "src/server/routes.rs"
+from = 'let Some(granted) = field(&input, "granted")?.and_then(Value::as_bool) else {'
+to = 'let Some(granted) = field(&input, "granted")?.map(|v| v != &Value::Bool(false)) else {'
+
+[[mutation]]
+name = 'elevationOf calls every session ordinary, so auto with writes rides the window'
+file = "src/session_requests.rs"
+from = 'unasked(g) && permits_write(g)'
+to = 'false && unasked(g) && permits_write(g)'
+
+[[mutation]]
+name = 'POST /v1/sessions gates an elevated body as ordinary widening'
+file = "src/server.rs"
+from = 'if !elevated.is_empty() {'
+to = 'if false && !elevated.is_empty() {'
+
+[[mutation]]
+name = 'the daemon lets an infinite session be remote'
+file = "src/server.rs"
+from = 'if infinite && remote {'
+to = 'if false && infinite && remote {'
+
+[[mutation]]
+name = 'a pin on a non-leaf certificate stands in for CA trust'
+file = "src/connectors/pinning.rs"
+from = 'let leaf_pinned'
+to = 'let leaf_pinned = chain_pins(chain, &[]).iter().any(|p| pins.contains(p)); let _leaf'
+
+[[mutation]]
+name = 'a pin on any presented certificate stands in for CA trust'
+file = "src/connectors/pinning.rs"
+from = 'if check.verified.iter().any'
+to = 'if chain_pins(chain, &check.verified).iter().any'
+
+[[mutation]]
+name = 'a pinned leaf skips the host name check'
+file = "src/connectors/pinning.rs"
+from = 'if let Err(code) = named {'
+to = 'if let Some(code) = named.err().filter(|_| false) {'
+
+[[mutation]]
+name = 'an expired pinned leaf is accepted'
+file = "src/connectors/pinning.rs"
+from = 'if now > not_after'
+to = 'if now > not_after + 100_000_000'
+
+[[mutation]]
+name = 'a pins value that is not an array is read as no pins'
+file = "src/connectors/pinning.rs"
+from = 'if state == PinListState::Invalid {'
+to = 'if false && state == PinListState::Invalid {'
+
+[[mutation]]
+name = 'a second probe inside a minute is sent anyway'
+file = "src/connectors/probe.rs"
+from = 'if now.saturating_sub(*prev) < PROBE_WINDOW_MS {'
+to = 'if false && now.saturating_sub(*prev) < PROBE_WINDOW_MS {'
+
+[[mutation]]
+name = 'probe scopes are returned without scrubbing the credential'
+file = "src/connectors/probe.rs"
+from = 'scrub_text(&crate::util::js_string(x), &mut scrubber)'
+to = 'crate::util::js_string(x)'
+
+[[mutation]]
+name = 'the rolling quota admits a request that would take it past the limit'
+file = "src/pipeline.rs"
+from = 'if enforce && estimate + 1.0 > q.count as f64 {'
+to = 'if false && enforce && estimate + 1.0 > q.count as f64 {'
+
+[[mutation]]
+name = 'a redirect hop is followed without checking the grant'
+file = "src/pipeline.rs"
+from = '''Ok(h) => hop = Some(h),
+                Err(e) => {'''
+to = '''Ok(h) => hop = Some(h),
+                Err(_) if true => hop = Some(policy::HttpDecision { host: url_hostname(n), path: n.path().to_string(), method: hv.method.clone(), path_rule: None, route_rule: None }),
+                Err(e) => {'''
+
+[[mutation]]
+name = 'preflight creates the approval it predicts'
+file = "src/pipeline.rs"
+from = '''        if preflight {
+            let held = self'''
+to = '''        if false && preflight {
+            let held = self'''
+
+[[mutation]]
+name = 'preflight extends the session it is asked about'
+file = "src/pipeline.rs"
+from = 'let session = self.pl_authenticate(&req, false)?;'
+to = 'let session = self.pl_authenticate(&req, true)?;'
+
+[[mutation]]
+name = 'a single-valued header sent twice with different values is let through'
+file = "src/pipeline.rs"
+from = 'if differs {'
+to = 'if false && differs {'
+
+[[mutation]]
+name = 'a method-override field naming another method is let through'
+file = "src/pipeline.rs"
+from = 'if value.to_uppercase() != view.method'
+to = 'if false && value.to_uppercase() != view.method'
+
+[[mutation]]
+name = 'a direct request with a stray name is sent'
+file = "src/pipeline.rs"
+from = 'if view.stray_name {'
+to = 'if false && view.stray_name {'
+
+[[mutation]]
+name = 'a daemon answer reaches the page without the token and placeholder guard'
+file = "src/ui/server.rs"
+from = 'WITHHELD_KEYS.contains'
+to = 'false && WITHHELD_KEYS.contains'
+
+[[mutation]]
+name = 'a withheld key in another case reaches the page'
+file = "src/ui/server.rs"
+from = 'for c in k.to_lowercase().chars()'
+to = 'for c in k.chars()'
+
+[[mutation]]
+name = 'U2: an asset path is matched after normalising instead of as it arrived'
+file = "src/ui/server.rs"
+from = 'lower.contains("%2e")'
+to = 'false && lower.contains("%2e")'
+
+[[mutation]]
+name = 'U2: a file of a type the build never makes (a source map, a text file) is served'
+file = "src/ui/server.rs"
+from = '''"ico" => "image/x-icon",
+        _ => return None,'''
+to = '''"ico" => "image/x-icon",
+        _ => "text/plain",'''
+
+[[mutation]]
+name = 'U2: assets are served without the session cookie'
+file = "src/ui/server.rs"
+from = 'if !self.authed(&parts.headers) {'
+to = 'if false && !self.authed(&parts.headers) {'
+
+[[mutation]]
+name = 'U3: a cursor is opened without checking its seal'
+file = "src/ui/list_paging.rs"
+from = 'if !ct_eq(mac, &self.mac(body))'
+to = 'if false && !ct_eq(mac, &self.mac(body))'
+
+[[mutation]]
+name = 'U3: a cursor made under one search or filter is accepted under another'
+file = "src/ui/list_paging.rs"
+from = 'if c["f"].as_str() != Some(digest_of(filters).as_str()) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'U3: a cursor made for one list is accepted by another'
+file = "src/ui/list_paging.rs"
+from = 'if c["l"].as_str() != Some(list) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'U3: a limit above 200 is accepted'
+file = "src/ui/list_paging.rs"
+from = 'if limit > LIMIT_MAX {'
+to = 'if false && limit > LIMIT_MAX {'
+
+[[mutation]]
+name = 'U3: a cursor without paged=1 is ignored instead of refused'
+file = "src/ui/list_paging.rs"
+from = 'n == "cursor"'
+to = 'false && n == "cursor"'
+
+[[mutation]]
+name = 'panic reads a string as a lock decision'
+file = "src/ui/server.rs"
+from = 'body.get("lock").is_some_and'
+to = 'false && body.get("lock").is_some_and'
+
+[[mutation]]
+name = '''the session_request.opened record quotes the agent's reason (C25)'''
+file = "src/session_requests.rs"
+from = '"actor": "agent",'
+to = '"actor": "agent", "reason": record.reason_untrusted,'
+
+[[mutation]]
+name = 'pending.decided_many writes every id the client sent, known or not (r4 F2)'
+file = "src/server/routes.rs"
+from = 'let logged = |dd: &Value| known.contains(&js_string(&dd["id"]));'
+to = 'let logged = |_dd: &Value| !known.is_empty() || true;'
+
+[[mutation]]
+name = 'presence.denied records the assertion error message, which quotes the client data type and origin (r5 F1)'
+file = "src/server.rs"
+from = '"reason": webauthn::failure_of(&err)'
+to = '"reason": err.message.clone()'
+
+[[mutation]]
+name = 'a gateway denial row keeps the free-text detail (C28)'
+file = "src/pipeline.rs"
+from = 'f.insert("decision".into(), "deny".into());'
+to = 'f.insert("decision".into(), "deny".into()); f.insert("detail".into(), err.detail.clone().into());'
+
+[[mutation]]
+name = '''explain-denial answers about another session's request'''
+file = "src/mcp.rs"
+from = 'x.get("session_id").and_then'
+to = 'true || x.get("session_id").and_then'
+
+[[mutation]]
+name = 'r6 N4: a headline leaves the daemon with its bidi controls'
+file = "src/notify.rs"
+from = '0x202a..=0x202e | 0x2066..=0x2069 => None,'
+to = '0x202a..=0x202e | 0x2066..=0x2069 => Some(c),'
+
+[[mutation]]
+name = 'a request held for approval is recorded as allowed'
+file = "src/pipeline.rs"
+from = '"decision": if held'
+to = '"decision": if held && false'
+
+[[mutation]]
+name = 'the placeholder text is hashed raw, so a resend never matches'
+file = "src/pipeline.rs"
+from = '.map(|(n, v)| (n.clone(), stable_header(n, v)))'
+to = '.map(|(n, v)| (n.clone(), { let _ = &stable_header; v.clone() }))'
+
+[[mutation]]
+name = 'listen rm leaves the bound server serving'
+file = "src/server/routes.rs"
+from = 'let unbound = self.unbind_listener(&lid).await;'
+to = 'let unbound = false;'
+
+[[mutation]]
+name = 'pending session requests are lost on a restart'
+file = "src/session_requests.rs"
+from = 'let rows = vault.session_requests()'
+to = 'let rows = Vec::<SessionRequestRecord>::new(); let _r = vault.session_requests()'
+
+[[mutation]]
+name = '--allow-cidr is stored and not enforced'
+file = "src/listen.rs"
+from = 'if !allow.allows(&addr) {'
+to = 'if false && !allow.allows(&addr) {'
+
+[[mutation]]
+name = 'an agent can enroll its own unlock factor'
+file = "src/server/routes.rs"
+from = 'self.require_fresh(if remove { "touch id removal" } else { "touch id enrollment" }, op?.unwrap_or(Value::Null), presence).await?;'
+to = 'let _ = (op, presence);'
+
+[[mutation]]
+name = 'overridesProblem lets through a key no decision reads'
+file = "src/session_requests.rs"
+from = 'filter(|k| !FIELDS.contains'
+to = 'filter(|k| false && !FIELDS.contains'
+
+[[mutation]]
+name = 'a multi-grant session may name one credential twice'
+file = "src/server.rs"
+from = 'if seen.contains(&c) {'
+to = 'if false && seen.contains(&c) {'
+
+[[mutation]]
+name = 'the agent-facing approval status carries the preview'
+file = "src/pipeline.rs"
+from = '"approval_id": a.id, "state": a.state,'
+to = '"approval_id": a.id, "state": a.state, "preview": a.preview,'
+
+[[mutation]]
+name = 'the MCP endpoint refuses the handshake without a live session'
+file = "src/server.rs"
+from = 'if !token.is_empty() && session.is_none() {'
+to = '''if session.is_none() { return send(401, Some(json!({"code": "AV_SESSION_REQUIRED"})), &[], &[]); }
+        if !token.is_empty() && session.is_none() {'''
