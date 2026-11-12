@@ -15792,3 +15792,96 @@ async fn c3_unknown_elevation_real_store_refusal_writes_nothing_and_valid_contro
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn control_notify_two_real_pending_records_queued_under_state_lock_reserve_only_one_post() {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let p = NotifyFixture::new(false).await;
+        p.configure(av_store::model::NotifyDetail::Minimal).await;
+        p.f.shared
+            .run(|c| {
+                for reason in ["ordinary job one", "ordinary job two"] {
+                    c.sr_propose(
+                        json!({"cred":"demo","methods":["GET"]}),
+                        Some(reason.into()),
+                        false,
+                    )
+                    .unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        p.wait_calls(1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let calls = p.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "both real pending events must share one interval reservation"
+        );
+        assert_eq!(calls[0].1["waiting"], 1);
+        assert_eq!(calls[0].1["kinds"]["session"], 1);
+        assert_eq!(p.f.shared.run(|c| c.sr_pending().len()).await.unwrap(), 2);
+        assert!(!calls[0].1.to_string().contains("ordinary job"));
+        assert!(!calls[0].1.to_string().contains(SECRET));
+        assert_eq!(p.f.get().await.status, 200);
+        p.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn integrate2_real_upstream_combines_repeated_list_headers_as_one_upstream_value() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let got = seen.clone();
+        let peer = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                let (head, body) = read_wire_request(&mut tcp).await;
+                assert!(body.is_empty());
+                got.lock().unwrap().push(head);
+                tcp.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let f = mcp_real_http_fixture(port).await;
+        for values in [vec!["a", "b"], vec!["ordinary"]] {
+            let mut headers = vec![("authorization".into(), format!("Bearer {}", f.ph))];
+            headers.extend(values.into_iter().map(|v| ("x-list".into(), v.into())));
+            let r = f.send("GET", "/safe/list", headers, None).await;
+            assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+            f.clean(&r).await;
+        }
+        peer.await.unwrap();
+        let heads = seen.lock().unwrap().clone();
+        assert_eq!(heads.len(), 2);
+        for (head, want) in heads.iter().zip(["a, b", "ordinary"]) {
+            let lines = head
+                .lines()
+                .filter_map(|s| s.split_once(':'))
+                .filter(|(n, _)| n.eq_ignore_ascii_case("x-list"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(|(_, v)| v.trim())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                want
+            );
+            assert!(head.contains(&format!("Bearer {SECRET}")));
+            assert!(!head.contains(&f.ph));
+        }
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}

@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 709 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **357 not yet ported**.
+Totals: 1207 JS tests: 710 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **356 not yet ported**.
 
 ## Mutation check
 
@@ -159,10 +159,10 @@ the vault on every call instead of caching an audit handle.
 | control-api-notify.test.js | a ninth watcher is refused | `ported_gateway_core::control_notify_stream_caps_eight_watchers_and_releases_closed_slot` |
 | control-api-notify.test.js | the stream resolves no session: a token sent to it is ignored and touches nothing (C20) | `ported_gateway_core::control_notify_real_stream_snapshots_updates_and_tokens_never_touch_session_or_disclose_agent_words` |
 | control-api-notify.test.js | setting a webhook needs the owner; only its host is ever shown or recorded | `ported_gateway_core::control_notify_webhook_configuration_is_gated_encrypted_and_only_host_is_public` |
-| control-api-notify.test.js | the minimal webhook is counts and ids only; one POST per interval | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot` |
+| control-api-notify.test.js | the minimal webhook is counts and ids only; one POST per interval | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot; ported_gateway_core::control_notify_two_real_pending_records_queued_under_state_lock_reserve_only_one_post` |
 | control-api-notify.test.js | the headline webhook adds the gateway's summary, never the agent's words | `ported_gateway_core::control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text` |
 | control-api-notify.test.js | a test notification is throttled, a failure is recorded once, and no webhook is not found | `ported_gateway_core::control_notify_test_route_throttles_and_real_http_500_failures_are_audited_once` |
-| control-api-notify.test.js | a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14) | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot` |
+| control-api-notify.test.js | a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14) | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot; ported_gateway_core::control_notify_two_real_pending_records_queued_under_state_lock_reserve_only_one_post` |
 | control-api-notify.test.js | a headline with no secret in it is sent as the summary, unchanged (F14) | `ported_gateway_core::control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text` |
 | control-api-overrides.test.js | parseOverrides is self-contained: built from its source in a fresh scope, it agrees on every field (C21, C23) | not yet ported |
 | control-api-overrides.test.js | routes and payload as JSON strings are parsed; a value passes through; bad JSON throws (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -798,7 +798,7 @@ the vault on every call instead of caching an audit handle.
 | integrate2-seams.test.js | on a chain the daemon trusts, an intermediate or leaf pin is honoured, and a pin that matches nothing is AV_PIN_MISMATCH, refunded and unsent | not yet ported |
 | integrate2-seams.test.js | the same chain with an intermediate pin is refused, unsent, when the daemon does not trust its root | not yet ported |
 | integrate2-seams.test.js | the agent's Host header never reaches the connector; a Host that did would be refused unsent (C9) | not yet ported |
-| integrate2-seams.test.js | a repeated list header goes out folded into one line, not refused as header_format | not yet ported |
+| integrate2-seams.test.js | a repeated list header goes out folded into one line, not refused as header_format | `ported_gateway_core::integrate2_real_upstream_combines_repeated_list_headers_as_one_upstream_value` |
 | integrate2-seams.test.js | a malformed pin table on a credential is pinned, not unpinned: refused before a connection | not yet ported |
 | integrate2-seams.test.js | the connectors health reader and the store record what a response says (F10) | not yet ported |
 | integrate2-seams.test.js | an expired grant is refused before anything is sent, and stays expired, not missing (F18) | not yet ported |
