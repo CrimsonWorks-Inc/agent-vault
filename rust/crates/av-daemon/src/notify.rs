@@ -521,4 +521,33 @@ mod tests {
         assert_eq!(v["ids"].as_array().unwrap().len(), 10);
         assert_eq!(v["ids"][0], "ap_19");
     }
+
+    /// "a notification headline keeps a stored secret an agent put in a
+    /// path (F14)" and "a notification headline keeps placeholder text".
+    #[test]
+    fn a_headline_carries_no_stored_secret_and_no_placeholder() {
+        let secret = "s3cr3t-value-in-a-path-0123456789";
+        let secrets = vec![av_core::scrub::StoredSecret {
+            secret: secret.to_string().into(),
+            label: "gh".into(),
+        }];
+        let e = json!({"kind": "request", "id": "ap_1", "headline": format!("GET /x/{secret}")});
+        let item = item_of(&e, Some(&secrets)).unwrap();
+        let h = item["headline"].as_str().unwrap();
+        assert!(!h.contains(secret), "{h}");
+        assert!(h.starts_with("GET /x/"), "{h}");
+        let k = av_core::secret::Key32::from_bytes([7; 32]);
+        let sid = av_core::placeholder::new_sid();
+        let ph = av_core::placeholder::mint(&av_core::placeholder::MintInput {
+            k_ph: &k,
+            sid: &sid,
+            slug: "gh",
+            field: "token",
+        })
+        .unwrap()
+        .text;
+        let h = clean_headline(&format!("GET /y?k={ph}"));
+        assert!(!h.contains(&ph), "{h}");
+        assert!(h.contains("«placeholder»"), "{h}");
+    }
 }

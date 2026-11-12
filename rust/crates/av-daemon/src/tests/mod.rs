@@ -18,6 +18,7 @@ mod gateway;
 mod guards;
 mod mcp;
 mod mutants;
+mod mutants_notify;
 mod mutants_sr;
 mod presence;
 mod ui;
@@ -92,6 +93,11 @@ pub struct World {
 impl World {
     /// A daemon with no credential.
     pub async fn bare() -> World {
+        World::bare_with(Default::default()).await
+    }
+
+    /// A daemon with no credential and the given notifier options.
+    pub async fn bare_with(notify: crate::notify::NotifierOptions) -> World {
         let dir = tempfile::tempdir().unwrap();
         let vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
         let shared = Shared::new(vault);
@@ -104,6 +110,7 @@ impl World {
                     upstream: Some(up.clone()),
                     ..Default::default()
                 },
+                notify,
                 ..Default::default()
             },
         )
@@ -124,7 +131,12 @@ impl World {
     /// A daemon with credential `demo` (host api.example.test, Bearer
     /// header) and one session over it.
     pub async fn seeded(session: Value) -> World {
-        let mut w = World::bare().await;
+        World::seeded_with(session, Default::default()).await
+    }
+
+    /// [`World::seeded`] with the given notifier options.
+    pub async fn seeded_with(session: Value, notify: crate::notify::NotifierOptions) -> World {
+        let mut w = World::bare_with(notify).await;
         let (s, v) = w.control("POST", "/v1/credentials", json!({"slug": "demo", "kind": "http", "host": "api.example.test", "value": SECRET, "sites": ["header:authorization:Bearer"]})).await;
         assert_eq!(s, 200, "{v}");
         let mut spec = json!({"cred": "demo", "label": "test", "methods": ["GET", "POST"], "paths": ["/**"], "budget": 40, "approval": "on-write", "ttl_hours": 1});

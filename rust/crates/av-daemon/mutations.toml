@@ -537,3 +537,59 @@ from = '''            Some("auto") | Some("first-use")
 to = '''            Some("auto")
         )
     };'''
+
+# ---------------------------------------------------- src/daemon/notify.js
+
+[[mutation]]
+name = 'a ninth watcher is let in (F14)'
+file = "src/notify.rs"
+from = '        if i.subscribers.len() >= MAX_SUBSCRIBERS {'
+to = '        if false {'
+
+[[mutation]]
+name = 'the minimal webhook payload carries headlines (F14)'
+file = "src/notify.rs"
+from = 'let mut its: Option<Vec<Value>> = (detail == "headline").then(|| {'
+to = 'let mut its: Option<Vec<Value>> = (!detail.is_empty()).then(|| {'
+
+[[mutation]]
+name = 'a notification headline keeps placeholder text (F14)'
+file = "src/notify.rs"
+from = '''        s = format!("{}«placeholder»{}", &s[..hit.offset], &s[hit.end..]);'''
+to = '''        let _ = hit;'''
+
+[[mutation]]
+name = 'the webhook is POSTed for every item, not once per interval (F14)'
+file = "src/notify.rs"
+from = 'let wait = (i.last_sent + WEBHOOK_INTERVAL_MS as i64 - now_ms()).max(0);'
+to = 'let wait = 0i64;'
+
+[[mutation]]
+name = 'a test notification is not throttled (F14)'
+file = "src/notify.rs"
+from = '            if now - i.last_test < TEST_INTERVAL_MS as i64 {'
+to = '            if false {'
+
+[[mutation]]
+name = 'every webhook failure is recorded, so a dead endpoint floods the log (F14)'
+file = "src/notify.rs"
+from = '''            if now - i.last_failure_recorded < FAILURE_RECORD_MS as i64 {
+                return;
+            }'''
+to = ''
+
+[[mutation]]
+name = 'a notification headline keeps a stored secret an agent put in a path (F14)'
+file = "src/notify.rs"
+from = '''            e.get("headline").and_then(Value::as_str).unwrap_or(""),
+            s,
+        )),'''
+to = '''            e.get("headline").and_then(Value::as_str).unwrap_or(""),
+            &s[..0],
+        )),'''
+
+[[mutation]]
+name = 'notify.failed records any string an error carries as its code (C28)'
+file = "src/notify.rs"
+from = '''let ok = code.starts_with('E')'''
+to = '''let ok = true || code.starts_with('E')'''
