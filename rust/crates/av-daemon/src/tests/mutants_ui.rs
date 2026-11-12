@@ -323,15 +323,24 @@ async fn a_missing_or_linked_bundle_is_refused() {
         d.path().join("ix/index.html"),
     )
     .unwrap();
-    assert!(crate::ui::server::load_dist(&d.path().join("ix")).is_err());
+    let e = crate::ui::server::load_dist(&d.path().join("ix")).unwrap_err();
+    assert!(e.to_string().contains("index.html is a symlink"), "{e}");
     // assets as a link
     std::fs::create_dir_all(d.path().join("as")).unwrap();
     std::fs::write(d.path().join("as/index.html"), "x").unwrap();
     std::os::unix::fs::symlink(d.path().join("real/assets"), d.path().join("as/assets")).unwrap();
-    assert!(crate::ui::server::load_dist(&d.path().join("as")).is_err());
+    let e = crate::ui::server::load_dist(&d.path().join("as")).unwrap_err();
+    assert!(
+        e.to_string().contains("the assets directory is a symlink"),
+        "{e}"
+    );
     // dist itself as a link
     std::os::unix::fs::symlink(d.path().join("real"), d.path().join("ln")).unwrap();
-    assert!(crate::ui::server::load_dist(&d.path().join("ln")).is_err());
+    let e = crate::ui::server::load_dist(&d.path().join("ln")).unwrap_err();
+    assert!(
+        e.to_string().contains("the dist directory is a symlink"),
+        "{e}"
+    );
 }
 
 /// 'U2 fix2: a path the parser changed counts as literal', 'U2 fix2:
@@ -342,6 +351,8 @@ fn a_literal_path_is_exactly_what_arrived() {
     assert!(literal_path("/", "/"));
     assert!(literal_path("/assets/app-1.js?x=1", "/assets/app-1.js"));
     assert!(!literal_path("/a/../b", "/b"));
+    assert!(!literal_path("/\u{e9}", "/%C3%A9"), "the parser changed it");
+    assert!(!literal_path("/a b", "/a%20b"), "the parser changed it");
     assert!(!literal_path("/assets/%2e%2e/x", "/assets/%2e%2e/x"));
     assert!(!literal_path("/assets/%2F/x", "/assets/%2F/x"));
     assert!(!literal_path("/a\\b", "/a\\b"));
@@ -442,6 +453,25 @@ async fn a_search_cannot_test_a_withheld_value() {
         )
         .await;
     assert_eq!(s, 200, "{v}");
+    // An audit row that carries the same text: the agent's reason.
+    let sess =
+        u._w.shared
+            .run({
+                let t = u._w.token.clone();
+                move |c| c.vault.session_by_token(&t).unwrap()
+            })
+            .await
+            .unwrap();
+    let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "vault_get_placeholder", "arguments": {"cred": "demo", "reason": format!("see {fake}")}}});
+    u._w.daemon
+        .mcp
+        .handle(msg, sess, Some(u._w.token.clone()), None)
+        .await
+        .unwrap();
+    assert!(
+        u._w.audit_text().await.contains("avs1."),
+        "the row holds it"
+    );
     u.claim().await;
     for list in ["sessions", "audit"] {
         let r = u
