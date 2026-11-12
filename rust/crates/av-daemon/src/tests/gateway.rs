@@ -177,7 +177,12 @@ async fn hardening_a_gzip_response_and_a_gzip_event_stream_are_decoded_and_scrub
     assert!(!leaks(&text), "{text}");
     assert!(text.contains("\"ordinary\":\"ok\""));
     assert!(r.header("content-encoding").is_none());
-    let stream = gz(&format!("data: {SECRET}\n\ndata: ordinary\n\n"));
+    // Long and repetitive, so deflate really compresses it: stored blocks
+    // would carry the plain text through even if nothing decoded it.
+    let stream = gz(&format!(
+        "data: {SECRET}\n\n{}",
+        "data: ordinary\n\n".repeat(64)
+    ));
     w.up.answer(Box::new(move |_| {
         Ok(UpstreamResponse {
             status: 200,
@@ -190,7 +195,11 @@ async fn hardening_a_gzip_response_and_a_gzip_event_stream_are_decoded_and_scrub
     }));
     let (_, text, _) = body_of(w.get("/sse").await).await;
     assert!(!leaks(&text), "{text}");
-    assert!(text.contains("ordinary"), "{text}");
+    assert!(
+        text.starts_with("data: "),
+        "the agent reads decoded events: {text:?}"
+    );
+    assert_eq!(text.matches("data: ordinary").count(), 64, "{text:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -500,6 +509,28 @@ async fn redirects_are_not_followed_unless_the_grant_says_so() {
         "a Location off the credential's hosts is not followed"
     );
     assert_eq!(w2.up.count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hardening_a_redirect_hop_is_checked_against_the_grant_paths() {
+    let w = World::seeded(json!({"redirects": 2, "deny_paths": ["/admin/**"]})).await;
+    w.up.answer(Box::new(|r| {
+        if r.url.ends_with("/start") {
+            let mut x = json_response(302, &json!({}));
+            x.headers.push(("location".into(), "/admin/keys".into()));
+            Ok(x)
+        } else {
+            Ok(json_response(200, &json!({"at": "admin"})))
+        }
+    }));
+    let r = w.get("/start").await;
+    assert_eq!(r.status, 302);
+    assert_eq!(
+        r.header("av-redirect-stopped"),
+        Some("path"),
+        "a hop on the same host is still a request the grant must allow"
+    );
+    assert_eq!(w.up.count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

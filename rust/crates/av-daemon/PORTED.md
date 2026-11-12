@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 67 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **914 not yet ported**.
+Totals: 1090 JS tests: 69 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **912 not yet ported**.
 
 ## Mutation check
 
@@ -584,7 +584,7 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | unpriced and unmodeled spend refuses while ordinary free GET passes | not yet ported |
 | gateway-w2-pipeline.test.js | missing usage and aborted SSE charge full reservation; completed SSE uses usage | not yet ported |
 | gateway-w2-pipeline.test.js | restart charges outstanding reservation and pre-connect failure releases it | not yet ported |
-| gateway-w2-pipeline.test.js | redirects check hosts, paths, scheme, method, approval and max before sending | not yet ported |
+| gateway-w2-pipeline.test.js | redirects check hosts, paths, scheme, method, approval and max before sending | `tests::gateway::redirects_are_not_followed_unless_the_grant_says_so`, `tests::gateway::hardening_a_redirect_hop_is_checked_against_the_grant_paths` (hosts, paths and max; the scheme, method and approval cases are not yet ported) |
 | gateway-w2-pipeline.test.js | allowed redirect follows, charges each hop and forwards correct pins without body | not yet ported |
 | gateway-w2-pipeline.test.js | pins map to safe problem and refund; health observer receives response metadata | not yet ported |
 | gateway-w2-pipeline.test.js | approval preview scrubs secrets and placeholders and notifications fire once | not yet ported |
@@ -986,7 +986,7 @@ the vault on every call instead of caching an audit handle.
 | response.test.js | an encoding we cannot decode is refused rather than passed through unread | not yet ported |
 | response.test.js | a binary body survives byte for byte | not yet ported |
 | response.test.js | a gzipped binary body round-trips through decompression unchanged | not yet ported |
-| response.test.js | a COMPRESSED event stream is decompressed before it is scrubbed | not yet ported |
+| response.test.js | a COMPRESSED event stream is decompressed before it is scrubbed | `tests::gateway::hardening_a_gzip_response_and_a_gzip_event_stream_are_decoded_and_scrubbed` |
 | response.test.js | an event stream in an encoding we cannot read is refused, not passed through | not yet ported |
 | response.test.js | a secret inside an event is scrubbed, and the rest survives | not yet ported |
 | response.test.js | the stream hold-back is bounded, not the whole response | not yet ported |

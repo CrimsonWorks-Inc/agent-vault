@@ -114,8 +114,8 @@ to = 'if false && !methods.contains(m) {'
 [[mutation]]
 name = 'a secret in a response header name reaches the agent'
 file = "src/pipeline.rs"
-from = 'kit.check.scrub(&lower).redactions > 0'
-to = 'false && kit.check.scrub(&lower).redactions > 0'
+from = 'if kit.check.scrub(&lower).redactions > 0 || kit.check.contains_ignoring_case(&lower) {'
+to = 'if false {'
 
 [[mutation]]
 name = 'an event stream is framed on LF only'
@@ -207,7 +207,8 @@ file = "src/pipeline.rs"
 from = '''Ok(h) => hop = Some(h),
                 Err(e) => {'''
 to = '''Ok(h) => hop = Some(h),
-                Err(e) if false => {'''
+                Err(_) if true => hop = Some(policy::HttpDecision { host: url_hostname(n), path: n.path().to_string(), method: hv.method.clone(), path_rule: None, route_rule: None }),
+                Err(e) => {'''
 
 [[mutation]]
 name = 'preflight creates the approval it predicts'
@@ -359,11 +360,9 @@ to = '.map(|(n, v)| (n.clone(), { let _ = &stable_header; v.clone() }))'
 
 [[mutation]]
 name = 'listen rm leaves the bound server serving'
-file = "src/server.rs"
-from = '''let _ = b.stop.send(true);
-        b.task.abort();
-        let _ = b.task.await;'''
-to = 'let _keep = b;'
+file = "src/server/routes.rs"
+from = 'let unbound = self.unbind_listener(&lid).await;'
+to = 'let unbound = false;'
 
 [[mutation]]
 name = 'pending session requests are lost on a restart'
