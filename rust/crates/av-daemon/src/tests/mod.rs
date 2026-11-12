@@ -19,6 +19,7 @@ mod guards;
 mod mcp;
 mod mutants;
 mod mutants_conn;
+mod mutants_hop;
 mod mutants_mcp;
 mod mutants_notify;
 mod mutants_pending;
