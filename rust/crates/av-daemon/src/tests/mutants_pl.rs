@@ -434,3 +434,101 @@ async fn repeated_request_headers_go_upstream_as_separate_lines_in_order() {
     );
     assert!(!crate::util::js_stringify(&json!(hit.headers)).contains(&w.placeholder));
 }
+
+/// 'the placeholder in a Basic header is not made stable for the request
+/// hash' and 'a Basic header that does not encode back to itself shares an
+/// approval with one that does'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_basic_header_hashes_by_its_decoded_pair_written_strictly() {
+    let w = World::bare().await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials",
+            json!({"slug": "bas", "kind": "http", "host": "bas.example.test", "value": SECRET, "sites": ["basic:pass"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "bas", "methods": ["GET", "POST"], "approval": "each", "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let fresh = || {
+        let (w, sid) = (&w, sid.clone());
+        async move {
+            let (s, v) = w
+                .control(
+                    "POST",
+                    "/v1/placeholders",
+                    json!({"cred": "bas", "sid": sid}),
+                )
+                .await;
+            assert_eq!(s, 200, "{v}");
+            v["placeholder"].as_str().unwrap().to_string()
+        }
+    };
+    let send = |header: String| {
+        let (w, token) = (&w, token.clone());
+        async move {
+            w.daemon
+                .pipeline
+                .handle(crate::pipeline::GatewayRequest {
+                    method: "POST".into(),
+                    path: "/p/bas/x".into(),
+                    query: String::new(),
+                    headers: vec![
+                        ("host".into(), "127.0.0.1".into()),
+                        ("av-session".into(), token),
+                        ("authorization".into(), header),
+                    ],
+                    body: None,
+                    listener: None,
+                })
+                .await
+        }
+    };
+    // A user whose pair base64-encodes with padding.
+    let ph1 = fresh().await;
+    let user = ["user", "users", "userss"]
+        .into_iter()
+        .find(|u| crate::util::b64(format!("{u}:{ph1}").as_bytes()).ends_with('='))
+        .unwrap();
+    let basic = |ph: &str| {
+        format!(
+            "Basic {}",
+            crate::util::b64(format!("{user}:{ph}").as_bytes())
+        )
+    };
+    let a = send(basic(&ph1)).await;
+    assert_eq!(a.status, 202);
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/approvals",
+            json!({"id": approval_id(&a), "granted": true}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    // The unpadded spelling with a fresh placeholder is another request.
+    let ph2 = fresh().await;
+    let unpadded = basic(&ph2).trim_end_matches('=').to_string();
+    assert_eq!(
+        send(unpadded).await.status,
+        202,
+        "unpadded is not the approved request"
+    );
+    // The same pair with a fresh placeholder is the approved request.
+    let ph3 = fresh().await;
+    let r = send(basic(&ph3)).await;
+    assert_eq!(
+        r.status, 200,
+        "renewing the placeholder keeps the approval: {:?}",
+        r.error
+    );
+}
