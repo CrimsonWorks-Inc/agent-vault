@@ -74,3 +74,57 @@ pub fn seed_tripwires(dir: &std::path::Path, value: &serde_json::Value) {
     let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
     connection.execute("INSERT INTO settings(key,value) VALUES('tripwires',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [value.to_string()]).unwrap();
 }
+
+/// Mirrors gateway-w2-pipeline corrupting scrub_patterns on a credential
+/// other than the routed one. The public pipeline must still fail closed.
+pub fn seed_scrub_patterns(dir: &std::path::Path, slug: &str, patterns: &serde_json::Value) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE credentials SET scrub_patterns=?1 WHERE slug=?2",
+                rusqlite::params![patterns.to_string(), slug]
+            )
+            .unwrap(),
+        1
+    );
+}
+
+/// Mirrors gateway-w2-seams' unavailable session-request side system with
+/// a real deserialization failure in a referenced credential. All values
+/// satisfy SQLite's JSON constraints; the public panic must report partial.
+pub fn seed_panic_side_system_failure(dir: &std::path::Path) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE credentials SET health=?1 WHERE slug='broken-health'",
+                ["\"unreadable legacy health\""]
+            )
+            .unwrap(),
+        1
+    );
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    connection.execute("INSERT INTO session_requests(id,collect_hash,proposal,fingerprint,summary,state,created_at) VALUES(?1,?2,?3,?4,?5,'pending',?6)",rusqlite::params!["sr_fixture_partial","fake-collect-hash","{\"cred\":\"broken-health\"}","fake-fingerprint","fixture pending request",now]).unwrap();
+}
+
+/// Real lock contention for gateway-w2-seams health recording; no row writes,
+/// schema edits, or PRAGMA changes. Dropping always releases the lock.
+pub struct TempWriteLock(rusqlite::Connection);
+impl TempWriteLock {
+    pub fn acquire(dir: &std::path::Path) -> Self {
+        assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+        let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        Self(connection)
+    }
+}
+impl Drop for TempWriteLock {
+    fn drop(&mut self) {
+        let _ = self.0.execute_batch("ROLLBACK");
+    }
+}

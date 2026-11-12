@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 256 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **724 not yet ported**.
+Totals: 1090 JS tests: 264 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **716 not yet ported**.
 
 ## Mutation check
 
@@ -579,7 +579,7 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | concurrency releases after success, pre-connect failure and post-connect failure | tests/ported_gateway_core.rs::concurrency_slots_release_after_success_and_both_classes_of_upstream_failure |
 | gateway-w2-pipeline.test.js | SSE slots release on completion, immediate close and scrubber cut | tests/ported_gateway_core.rs::sse_concurrency_slots_release_on_completion_agent_close_and_scrubber_cut |
 | gateway-w2-pipeline.test.js | payload and method-bound routes run before approval and consume | tests/ported_gateway_core.rs::payload_and_method_bound_routes_refuse_before_approval_or_consume |
-| gateway-w2-pipeline.test.js | custom patterns from every credential scrub bodies, headers and errors; corrupt pattern withholds | not yet ported |
+| gateway-w2-pipeline.test.js | custom patterns from every credential scrub bodies, headers and errors; corrupt pattern withholds | `ported_gateway_core::global_custom_patterns_scrub_other_credentials_and_corrupt_sources_withhold_output` |
 | gateway-w2-pipeline.test.js | token reservations block concurrent overspend and settle buffered usage | tests/ported_gateway_core.rs::token_reservations_refuse_concurrent_overspend_and_settle_buffered_usage |
 | gateway-w2-pipeline.test.js | unpriced and unmodeled spend refuses while ordinary free GET passes | tests/ported_gateway_core.rs::unpriced_and_unmodeled_spend_refuse_while_free_get_uses_no_spend_ledger |
 | gateway-w2-pipeline.test.js | missing usage and aborted SSE charge full reservation; completed SSE uses usage | tests/ported_gateway_core.rs::missing_or_cut_usage_charges_full_reservation_and_complete_crlf_streams_charge_actual_usage |
@@ -590,9 +590,9 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | approval preview scrubs secrets and placeholders and notifications fire once | tests/ported_gateway_core.rs::approval_preview_hides_secrets_and_placeholders_and_notifies_exactly_once |
 | gateway-w2-pipeline.test.js | quarantine and grant expiry stop before consume, and denyApprovals returns only a count | tests/ported_gateway_core.rs::quarantine_and_grant_expiry_stop_before_consume_and_bulk_deny_returns_count |
 | gateway-w2-pipeline.test.js | preflight is observational, peeks limits and reports a hold without creating approval | tests/ported_gateway_core.rs::preflight_observes_limits_without_mutating_vault_or_creating_approval |
-| gateway-w2-pipeline.test.js | preflight denial never trips and the eleventh call is throttled | not yet ported |
+| gateway-w2-pipeline.test.js | preflight denial never trips and the eleventh call is throttled | `ported_gateway_core::preflight_bad_location_denials_do_not_trip_and_eleventh_call_is_throttled` |
 | gateway-w2-pipeline.test.js | tripwires revoke only authenticated matching session and deny its approvals | `ported_gateway_core::authenticated_replay_revokes_only_its_session_and_denies_held_approvals` |
-| gateway-w2-pipeline.test.js | tripwires default off; panic hook awaits and reports unwired or failed denial honestly | not yet ported |
+| gateway-w2-pipeline.test.js | tripwires default off; panic hook awaits and reports unwired or failed denial honestly | `ported_gateway_core::tripwire_panic_is_opt_in_and_reports_real_success_and_failure_counts` |
 | gateway-w2-pipeline.test.js | legacy decimal budgets work while noncanonical values never reach comparisons | `ported_gateway_core::stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused` |
 | gateway-w2-pipeline.test.js | a held request previews its label, a redacted secret and no placeholder, token or audit body | tests/ported_gateway_core.rs::held_preview_labels_injection_redacts_secret_and_token_and_keeps_comment_out_of_audit |
 | gateway-w2-pipeline.test.js | the preview builder replaces encoded placeholders, keeps duplicate JSON keys as sent, and stays under 8 KiB | tests/ported_gateway_core.rs::preview_builder_replaces_encoded_placeholders_preserves_duplicate_json_and_caps_size |
@@ -649,12 +649,12 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-scrub.test.js | a stream that mentions a pattern prefix keeps flowing, and its holdback stays bounded | tests/ported_gateway_scrub.rs::ordinary_prefix_traffic_keeps_flowing_with_bounded_holdback |
 | gateway-w2-scrub.test.js | a custom token straddling every possible cut is redacted whole, in any chunking | tests/ported_gateway_scrub.rs::custom_token_is_redacted_at_every_two_chunk_cut_and_every_odd_chunk_width |
 | gateway-w2-seams.test.js | pins on a plaintext credential refuse before any connection; no pins still connects | `ported_gateway_core::plaintext_pins_refuse_before_connecting_and_unpinned_control_connects` |
-| gateway-w2-seams.test.js | a throwing health reader or recorder never turns an executed request into a failure | not yet ported |
+| gateway-w2-seams.test.js | a throwing health reader or recorder never turns an executed request into a failure | `ported_gateway_core::real_health_write_contention_preserves_executed_response_consumption_and_audit` |
 | gateway-w2-seams.test.js | onPending gets the id and headline only, and a throwing hook still holds the request | `ported_gateway_core::pending_notice_contains_only_safe_summary_and_refusing_webhook_cannot_release_request` |
 | gateway-w2-seams.test.js | denyApprovals filters by session, credential and grant ids, records the reason, and returns a count | tests/ported_gateway_core.rs::deny_approvals_filters_by_session_or_grant_records_reason_and_skips_consumed_requests |
-| gateway-w2-seams.test.js | panic denies held requests, revokes every session including an infinite one, then the hook, then the record, then the lock | not yet ported |
-| gateway-w2-seams.test.js | a panic whose hook fails still revokes everything and records a partial panic | not yet ported |
-| gateway-w2-seams.test.js | a tripwire that throws while firing cannot cost the agent its denial | not yet ported |
+| gateway-w2-seams.test.js | panic denies held requests, revokes every session including an infinite one, then the hook, then the record, then the lock | `ported_gateway_core::panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before_record_and_lock` |
+| gateway-w2-seams.test.js | a panic whose hook fails still revokes everything and records a partial panic | `ported_gateway_core::real_session_request_metadata_failure_does_not_prevent_panic_revocation_and_partial_record` |
+| gateway-w2-seams.test.js | a tripwire that throws while firing cannot cost the agent its denial | `ported_gateway_core::failing_tripwire_quarantine_write_preserves_original_agent_denial` |
 | gateway-w2-seams.test.js | with tripwires on, a bad-location run revokes the session; ordinary requests never count | `ported_gateway_core::malformed_tripwire_rules_keep_defaults_and_only_bad_location_requests_count` |
 | gateway-w2-seams.test.js | an unauthenticated replay never counts against the session its placeholder names | `ported_gateway_core::unissued_placeholder_replay_counts_only_after_session_authentication` |
 | gateway-w2-seams.test.js | a quarantined credential is refused before anything is spent, and works again once released | tests/ported_gateway_core.rs::quarantine_refuses_without_spending_limits_and_release_restores_ordinary_request |
@@ -668,7 +668,7 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-seams.test.js | a spend refusal says what is left and what the call could cost; a call that fits passes | tests/ported_gateway_core.rs::spend_denial_explains_remaining_and_worst_case_while_bounded_call_settles_real_usage |
 | gateway-w2-seams.test.js | a CRLF-framed stream settles on its usage; a cut stream charges the full reservation | tests/ported_gateway_core.rs::missing_or_cut_usage_charges_full_reservation_and_complete_crlf_streams_charge_actual_usage |
 | gateway-w2-seams.test.js | a pipeline built while the vault is locked charges stale reservations at the first request after unlock | tests/ported_gateway_core.rs::locked_pipeline_recovers_stale_reservation_on_first_request_after_unlock |
-| gateway-w2-seams.test.js | an extra pattern scrubs an error detail, is redacted within an event, and cuts a stream that splits it | not yet ported |
+| gateway-w2-seams.test.js | an extra pattern scrubs an error detail, is redacted within an event, and cuts a stream that splits it | `ported_gateway_core::custom_pattern_redacts_error_and_single_event_and_cuts_split_stream_with_prefix_control` |
 | gateway-w2-seams.test.js | a method-override header is held to the route pairs as well as the methods list | tests/ported_gateway_core.rs::method_override_is_bound_by_route_pairs_and_allowed_tmp_control_runs |
 | gateway-w2-seams.test.js | a held request is recorded as held, an allowed one as allow, a refused one as deny (C11) | tests/ported_gateway_core.rs::held_allowed_and_denied_requests_are_recorded_with_the_right_decisions |
 | integrate2-c12-surfaces.test.js | /p/ on a network listener: the infinite token is refused before anything is sent, a finite one works | not yet ported |

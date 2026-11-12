@@ -5964,6 +5964,14 @@ impl SeededGateway {
         Self::with_tripwires(session_patch, grant_patch, None)
     }
     fn with_tripwires(session_patch: Value, grant_patch: Value, tripwires: Option<Value>) -> Self {
+        Self::configured(session_patch, grant_patch, tripwires, None)
+    }
+    fn configured(
+        session_patch: Value,
+        grant_patch: Value,
+        tripwires: Option<Value>,
+        patterns: Option<Value>,
+    ) -> Self {
         use av_core::secret::ExposeSecret;
         use av_store::vault::{CreateGrantOptions, IssueOptions, NewCredential};
         let dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -5999,8 +6007,30 @@ impl SeededGateway {
             })
             .unwrap()
             .placeholder;
+        if patterns.is_some() {
+            vault
+                .add_credential(NewCredential {
+                    slug: "pattern-source".into(),
+                    kind: "http".into(),
+                    connector: serde_json::from_value(json!({"host":"other.example.test"}))
+                        .unwrap(),
+                    fields: vec![(
+                        "key".into(),
+                        "fake-other-secret-0123456789".to_string().into(),
+                    )],
+                    sites: std::collections::BTreeMap::from([(
+                        "key".into(),
+                        vec!["header:x-key".into()],
+                    )]),
+                })
+                .unwrap();
+        }
         drop(vault);
         ported_common::seed_gateway_rows(dir.path(), &sid, &gid, &session_patch, &grant_patch);
+        if let Some(patterns) = patterns {
+            ported_common::seed_scrub_patterns(dir.path(), "pattern-source", &patterns);
+        }
+
         if let Some(value) = tripwires {
             ported_common::seed_tripwires(dir.path(), &value);
         }
@@ -6645,4 +6675,564 @@ async fn pending_notice_contains_only_safe_summary_and_refusing_webhook_cannot_r
         assert_eq!(allowed.status, 200);
         f.clean(&allowed).await;
     }
+}
+
+#[tokio::test]
+async fn failing_tripwire_quarantine_write_preserves_original_agent_denial() {
+    use av_store::model::SessionState;
+    // Legacy rule id reaches set_quarantine, whose actual store validation
+    // returns an error; pl_fail must preserve the original security denial.
+    let f = SeededGateway::with_tripwires(
+        json!({}),
+        json!({}),
+        Some(
+            json!({"enabled":true,"rules":[{"id":"not allowed!","codes":["AV_BAD_LOCATION"],"threshold":1,"window_s":10,"action":"quarantine_credential"}]}),
+        ),
+    );
+    let ordinary = f.pipeline.handle(f.request.clone()).await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+    let sid = f.sid.clone();
+    f.shared
+        .run(move |core| {
+            let error = core
+                .vault
+                .set_quarantine(
+                    "seeded",
+                    av_store::vault::QuarantineOptions {
+                        rule_id: Some("not allowed!".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("rule id"));
+            assert_eq!(
+                core.vault.session(&sid).unwrap().unwrap().state,
+                SessionState::Active
+            );
+        })
+        .await
+        .unwrap();
+    let mut bad = f.request.clone();
+    bad.method = "POST".into();
+    bad.headers
+        .push(("content-type".into(), "application/json".into()));
+    let marker = bad
+        .headers
+        .iter()
+        .find(|(k, _)| k == "x-key")
+        .unwrap()
+        .1
+        .clone();
+    bad.body = Some(json!({"x":marker}).to_string().into_bytes());
+    let response = f.pipeline.handle(bad).await;
+    assert_eq!(response.status, 403);
+    assert_eq!(
+        response.error.as_ref().unwrap().code.as_str(),
+        "AV_BAD_LOCATION"
+    );
+    assert_eq!(f.upstream.hits.lock().unwrap().len(), 1);
+    f.clean(&response).await;
+    let control = f.pipeline.handle(f.request.clone()).await;
+    assert_eq!(control.status, 200);
+    f.clean(&control).await;
+}
+
+#[tokio::test]
+async fn global_custom_patterns_scrub_other_credentials_and_corrupt_sources_withhold_output() {
+    let custom = "xyz_CUSTOM123456";
+    for (name, source) in [("valid", "xyz_[A-Z0-9]{6,30}"), ("corrupt", "(a+)+")] {
+        let f = SeededGateway::configured(
+            json!({}),
+            json!({}),
+            None,
+            Some(
+                json!([{"id":"sp_fixture","source":source,"added_at":"2026-01-01T00:00:00.000Z"}]),
+            ),
+        );
+        *f.upstream.reply.lock().unwrap() = Some(Reply {
+            streaming: false,
+            status: 200,
+            headers: vec![("x-test".into(), custom.into())],
+            body: format!("{custom} ordinary").into_bytes(),
+        });
+        let response = f.pipeline.handle(f.request.clone()).await;
+        if name == "valid" {
+            assert_eq!(response.status, 200);
+            assert!(String::from_utf8_lossy(&response.body).contains("ordinary"));
+            assert!(!String::from_utf8_lossy(&response.body).contains(custom));
+            assert!(!serde_json::to_string(&response.headers)
+                .unwrap()
+                .contains(custom));
+            *f.upstream.failure.lock().unwrap() = Some(UpstreamError::new(
+                "ECONNREFUSED",
+                format!("refused for {custom}"),
+            ));
+            let failed = f.pipeline.handle(f.request.clone()).await;
+            assert_eq!(
+                failed.error.as_ref().unwrap().code.as_str(),
+                "AV_UPSTREAM_UNREACHABLE"
+            );
+            assert!(!String::from_utf8_lossy(&failed.body).contains(custom));
+            f.clean(&failed).await;
+        } else {
+            assert_eq!(
+                response.error.as_ref().unwrap().extra.rule.as_deref(),
+                Some("scrub_pattern_invalid")
+            );
+            assert!(!String::from_utf8_lossy(&response.body).contains(custom));
+        }
+        f.clean(&response).await;
+        f.shared
+            .run(move |core| {
+                let audit = serde_json::to_string(
+                    &core
+                        .vault
+                        .audit()
+                        .unwrap()
+                        .read(&Default::default())
+                        .unwrap(),
+                )
+                .unwrap();
+                assert!(!audit.contains(custom));
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn custom_pattern_redacts_error_and_single_event_and_cuts_split_stream_with_prefix_control() {
+    let custom = format!("acme_{}", "K".repeat(30));
+    let f = Fixture::new(&["header:x-key"]).await;
+    f.shared
+        .run(|core| {
+            core.vault
+                .add_scrub_pattern("demo", "acme_[A-Z]{20,40}")
+                .unwrap()
+        })
+        .await
+        .unwrap();
+    *f.up.failure.lock().unwrap() = Some(UpstreamError::new(
+        "ECONNREFUSED",
+        format!("refused for {custom}"),
+    ));
+    let failed = f.get().await;
+    assert_eq!(
+        failed.error.as_ref().unwrap().code.as_str(),
+        "AV_UPSTREAM_UNREACHABLE"
+    );
+    assert!(!String::from_utf8_lossy(&failed.body).contains(&custom));
+    f.clean(&failed).await;
+    *f.up.failure.lock().unwrap() = None;
+    for (events, cut) in [
+        (data(json!({"text":custom})), false),
+        (
+            format!(
+                "{}{}",
+                data(json!({"d":&custom[..12]})),
+                data(json!({"d":&custom[12..]}))
+            ),
+            true,
+        ),
+        (data(json!({"text":"we use acme_ tooling"})), false),
+    ] {
+        let ordinary = events.contains("tooling");
+        stream_reply(&f, &events, false);
+        let response = drain(f.get().await).await;
+        let text = String::from_utf8_lossy(&response.body);
+        assert!(!text.contains(&custom));
+        assert_eq!(text.contains("AV_UNSCANNABLE"), cut);
+        if ordinary {
+            assert_eq!(text, events);
+        }
+        f.clean(&response).await;
+    }
+    let log = serde_json::to_string(&audit_records(&f).await).unwrap();
+    assert!(!log.contains(&custom));
+}
+
+#[tokio::test]
+async fn panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before_record_and_lock() {
+    use av_store::model::SessionState;
+    let f = approval_fixture("each", &["header:x-key"]).await;
+    let held = f.get().await;
+    let id = held_id(&held);
+    f.clean(&held).await;
+    f.shared
+        .run(|core| {
+            core.vault
+                .create_session(av_store::vault::CreateSessionOptions {
+                    infinite: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            for reason in ["first", "second"] {
+                core.sr_propose(json!({"cred":"demo"}), Some(reason.into()), false)
+                    .unwrap();
+            }
+            assert_eq!(core.sr_pending().len(), 2);
+        })
+        .await
+        .unwrap();
+    let out = f
+        .daemon
+        .pipeline()
+        .panic(Some("it looked wrong".into()), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        json!({"revoked_sessions":2,"denied_approvals":1,"denied_session_requests":2,"locked":true})
+    );
+    let e = f.daemon.pipeline().panic(None, false).await.unwrap_err();
+    assert_eq!(e.code.as_str(), "AV_LOCKED");
+    f.shared
+        .run(move |core| {
+            assert!(core.vault.locked());
+            assert!(core
+                .vault
+                .sessions()
+                .unwrap()
+                .iter()
+                .all(|s| s.state == SessionState::Revoked));
+            let approval = core.pl.approvals.iter().find(|(_, a)| a.id == id).unwrap();
+            assert_eq!(approval.1.state, "denied");
+            assert_eq!(approval.1.denied_reason.as_deref(), Some("panic"));
+            assert!(core.sr_pending().is_empty());
+        })
+        .await
+        .unwrap();
+    let mut reopened = av_store::vault::Vault::open(f._dir.path()).unwrap();
+    reopened.unlock(None).unwrap();
+    let rows = reopened
+        .audit()
+        .unwrap()
+        .read(&av_store::audit::ReadFilter {
+            limit: 1000,
+            ..Default::default()
+        })
+        .unwrap();
+    let rows = serde_json::to_value(rows).unwrap();
+    let mut rows = rows.as_array().unwrap().clone();
+    rows.sort_by_key(|r| r["seq"].as_u64().unwrap());
+    let positions = |kind: &str| {
+        rows.iter()
+            .enumerate()
+            .filter_map(|(i, r)| (r["kind"] == kind).then_some(i))
+            .collect::<Vec<_>>()
+    };
+    let denied = positions("approval.denied");
+    let revoked = positions("session.revoked");
+    let requests = positions("session_request.denied");
+    let panic = positions("panic.triggered");
+    assert_eq!(denied.len(), 1);
+    assert_eq!(revoked.len(), 2);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(panic.len(), 1);
+    assert!(denied[0] < *revoked.iter().min().unwrap());
+    assert!(*revoked.iter().max().unwrap() < *requests.iter().min().unwrap());
+    assert!(*requests.iter().max().unwrap() < panic[0]);
+    assert!(!serde_json::to_string(&rows).unwrap().contains(SECRET));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    let ordinary = Fixture::new(&["header:x-key"]).await;
+    let response = ordinary.get().await;
+    assert_eq!(response.status, 200);
+    ordinary.clean(&response).await;
+}
+
+#[tokio::test]
+async fn real_session_request_metadata_failure_does_not_prevent_panic_revocation_and_partial_record(
+) {
+    use av_store::model::SessionState;
+    let (_dir, shared, pipeline, sid) = panic_failure_fixture();
+    shared
+        .run(|core| {
+            assert_eq!(core.sr_pending().len(), 1);
+            assert!(
+                core.dm_deny_pending_session_requests("fixture probe")
+                    .is_err(),
+                "the side-system fixture must actually fail"
+            );
+        })
+        .await
+        .unwrap();
+    let out = pipeline.panic(None, false).await.unwrap();
+    assert_eq!(out["revoked_sessions"], 1);
+    assert!(out["denied_session_requests"].is_null());
+    shared
+        .run(move |core| {
+            assert_eq!(
+                core.vault.session(&sid).unwrap().unwrap().state,
+                SessionState::Revoked
+            );
+            let audit = core
+                .vault
+                .audit()
+                .unwrap()
+                .read(&av_store::audit::ReadFilter {
+                    limit: 1000,
+                    ..Default::default()
+                })
+                .unwrap();
+            let audit = serde_json::to_value(audit).unwrap();
+            let rows = audit.as_array().unwrap();
+            assert_eq!(
+                rows.iter()
+                    .filter(|r| r["kind"] == "tripwire.panic_partial")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|r| r["kind"] == "panic.triggered")
+                    .count(),
+                1
+            );
+            assert!(!serde_json::to_string(&audit).unwrap().contains(SECRET));
+        })
+        .await
+        .unwrap();
+    let ordinary = SeededGateway::new(json!({}), json!({}));
+    let clean = ordinary.pipeline.panic(None, false).await.unwrap();
+    assert_eq!(clean["revoked_sessions"], 1);
+    assert_eq!(clean["denied_session_requests"], 0);
+}
+
+fn panic_failure_fixture() -> (
+    tempfile::TempDir,
+    VaultRef,
+    av_daemon::pipeline::Pipeline,
+    String,
+) {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    vault
+        .add_credential(av_store::vault::NewCredential {
+            slug: "broken-health".into(),
+            kind: "http".into(),
+            connector: serde_json::from_value(json!({"host":"api.example.test"})).unwrap(),
+            fields: vec![("key".into(), SECRET.to_string().into())],
+            sites: std::collections::BTreeMap::from([("key".into(), vec!["header:x-key".into()])]),
+        })
+        .unwrap();
+    let sid = vault.create_session(Default::default()).unwrap().session.id;
+    drop(vault);
+    ported_common::seed_panic_side_system_failure(dir.path());
+    let mut vault = av_store::vault::Vault::open(dir.path()).unwrap();
+    vault.unlock(None).unwrap();
+    let shared = Shared::new(vault);
+    let pipeline = av_daemon::pipeline::Pipeline::new(shared.clone(), Default::default());
+    (dir, shared, pipeline, sid)
+}
+
+#[tokio::test]
+async fn tripwire_panic_is_opt_in_and_reports_real_success_and_failure_counts() {
+    use av_daemon::tripwire::Observation;
+    use av_store::model::SessionState;
+    for enabled in [false, true] {
+        let f = SeededGateway::with_tripwires(
+            json!({}),
+            json!({}),
+            Some(
+                json!({"enabled":enabled,"rules":[{"id":"panic","codes":["AV_PH_REPLAY"],"threshold":1,"window_s":10,"action":"panic"}]}),
+            ),
+        );
+        let sid = f.sid.clone();
+        f.shared
+            .run(move |core| {
+                for _ in 0..3 {
+                    core.sr_propose(json!({"cred":"seeded"}), None, false)
+                        .unwrap();
+                }
+                let rule = core
+                    .tw_observe(&Observation {
+                        session_id: sid.clone(),
+                        code: "AV_PH_REPLAY".into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(rule.is_some(), enabled);
+                assert_eq!(
+                    core.vault.session(&sid).unwrap().unwrap().state,
+                    if enabled {
+                        SessionState::Revoked
+                    } else {
+                        SessionState::Active
+                    }
+                );
+                if enabled {
+                    assert_eq!(
+                        core.tw.last_panic.as_ref().unwrap()["denied_session_requests"],
+                        3
+                    );
+                    assert!(core.sr_pending().is_empty());
+                } else {
+                    assert!(core.tw.last_panic.is_none());
+                    assert_eq!(core.sr_pending().len(), 3);
+                }
+            })
+            .await
+            .unwrap();
+        let response = f.pipeline.handle(f.request.clone()).await;
+        if enabled {
+            assert_eq!(
+                response.error.as_ref().unwrap().code.as_str(),
+                "AV_SESSION_REVOKED"
+            );
+        } else {
+            assert_eq!(response.status, 200);
+        }
+        f.clean(&response).await;
+    }
+    let (_dir, shared, _pipeline, sid) = panic_failure_fixture();
+    shared.run(move |core| {
+        core.vault.update_settings(&json!({"tripwires":{"enabled":true,"rules":[{"id":"panic","codes":["AV_PH_REPLAY"],"threshold":1,"window_s":10,"action":"panic"}]}})).unwrap();
+        let fired=core.tw_observe(&Observation{session_id:sid.clone(),code:"AV_PH_REPLAY".into(),..Default::default()}).unwrap();assert!(fired.is_some());
+        assert_eq!(core.vault.session(&sid).unwrap().unwrap().state,SessionState::Revoked);
+        assert!(core.tw.last_panic.as_ref().unwrap()["denied_session_requests"].is_null());
+        let records=serde_json::to_value(core.vault.audit().unwrap().read(&av_store::audit::ReadFilter{limit:1000,..Default::default()}).unwrap()).unwrap();
+        assert_eq!(records.as_array().unwrap().iter().filter(|r|r["kind"]=="tripwire.panic_partial").count(),1);
+        assert!(!serde_json::to_string(&records).unwrap().contains(SECRET));
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn preflight_bad_location_denials_do_not_trip_and_eleventh_call_is_throttled() {
+    // Use a real monotonic bucket. Retry a fresh fixture only if scheduling
+    // paused this process long enough to cross its one-second boundary.
+    let mut checked = false;
+    for _ in 0..4 {
+        let f = SeededGateway::with_tripwires(json!({}), json!({}), Some(json!({"enabled":true})));
+        let mut bad = f.request.clone();
+        bad.method = "POST".into();
+        bad.body = Some(
+            bad.headers
+                .iter()
+                .find(|(k, _)| k == "x-key")
+                .unwrap()
+                .1
+                .as_bytes()
+                .to_vec(),
+        );
+        let before = f.snapshot().await;
+        let at = std::time::Instant::now();
+        for _ in 0..10 {
+            let pre = f.pipeline.preflight(bad.clone(), false).await.unwrap();
+            assert_eq!(pre["would"], "deny");
+        }
+        if at.elapsed() >= std::time::Duration::from_millis(900) {
+            continue;
+        }
+        let last = f.pipeline.preflight(bad, false).await;
+        if at.elapsed() >= std::time::Duration::from_secs(1) {
+            continue;
+        }
+        let error = last.unwrap_err();
+        assert_eq!(error.extra.rule.as_deref(), Some("preflight_rate"));
+        assert_eq!(
+            before,
+            f.snapshot().await,
+            "preflight denials must not change session or consumption state"
+        );
+        assert!(f.upstream.hits.lock().unwrap().is_empty());
+        assert!(f.pipeline.pending_approvals().await.is_empty());
+        checked = true;
+        break;
+    }
+    assert!(
+        checked,
+        "scheduler prevented four complete preflight rate windows"
+    );
+    let ordinary =
+        SeededGateway::with_tripwires(json!({}), json!({}), Some(json!({"enabled":true})));
+    assert_eq!(
+        ordinary
+            .pipeline
+            .preflight(ordinary.request.clone(), false)
+            .await
+            .unwrap()["would"],
+        "allow"
+    );
+    let response = ordinary.pipeline.handle(ordinary.request.clone()).await;
+    assert_eq!(response.status, 200);
+    ordinary.clean(&response).await;
+}
+
+#[tokio::test]
+async fn real_health_write_contention_preserves_executed_response_consumption_and_audit() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    f.reply(401, "application/json", "{}".into());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.up.gate.lock().unwrap() = Some(gate.clone());
+    let request = f.get();
+    tokio::pin!(request);
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        tokio::select! {
+            _=&mut request=>panic!("upstream did not wait"),
+            _=async {loop {if !f.up.hits.lock().unwrap().is_empty(){break;}tokio::task::yield_now().await;}}=>{}
+        }
+    }).await.unwrap();
+    // Consume and charge have finished before send; only response-side work
+    // competes with this real SQLite writer. RAII also releases on panic.
+    assert_eq!(grant_counters(&f).await, (1, vec![1]));
+    let lock = ported_common::TempWriteLock::acquire(f._dir.path());
+    gate.notify_one();
+    let response = tokio::select! {
+        response=&mut request=>{drop(lock);response},
+        _=tokio::time::sleep(std::time::Duration::from_secs(6))=>{
+            drop(lock);
+            tokio::time::timeout(std::time::Duration::from_secs(5),&mut request).await.unwrap()
+        }
+    };
+    assert_eq!(
+        response.status, 401,
+        "health failure changed an executed response: {:?}",
+        response.error
+    );
+    assert_eq!(response.body, b"{}");
+    assert_eq!(grant_counters(&f).await, (1, vec![1]));
+    f.shared
+        .run(|core| {
+            assert!(
+                core.vault
+                    .find_credential("demo")
+                    .unwrap()
+                    .unwrap()
+                    .health
+                    .is_none(),
+                "fixture must actually prevent the health write"
+            )
+        })
+        .await
+        .unwrap();
+    let rows = audit_records(&f).await;
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r["kind"] == "request.allowed" && r["req"]["status"] == 401)
+            .count(),
+        1
+    );
+    f.clean(&response).await;
+    *f.up.gate.lock().unwrap() = None;
+    let control = f.get().await;
+    assert_eq!(control.status, 401);
+    assert_eq!(grant_counters(&f).await, (2, vec![2]));
+    f.shared
+        .run(|core| {
+            assert!(core
+                .vault
+                .find_credential("demo")
+                .unwrap()
+                .unwrap()
+                .health
+                .is_some())
+        })
+        .await
+        .unwrap();
+    f.clean(&control).await;
+    f.reply(200, "application/json", "{}".into());
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
 }
