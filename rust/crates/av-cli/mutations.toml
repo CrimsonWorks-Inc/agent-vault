@@ -1,0 +1,84 @@
+# Protections in av-cli. Each `from` is the Rust text of one check.
+# Names are unique across crates/*/mutations.toml.
+
+[[mutation]]
+name = "the installer accepts a symlinked checkout"
+file = "src/setup.rs"
+from = 'assert_no_symlinks(&source, &["src", "bin", "package.json"])?;'
+to = "let _ = source.as_os_str();"
+test = "installer_refuses_a_symlinked"
+
+[[mutation]]
+name = "the install copy keeps a symlink instead of the target bytes"
+file = "src/setup.rs"
+from = "    std::fs::copy(src, dst)?;"
+to = "    std::os::unix::fs::symlink(src, dst)?;"
+test = "copy_dereference_writes_the_target_bytes"
+
+[[mutation]]
+name = "a missing privileged helper falls back to PATH"
+file = "src/setup.rs"
+from = '''    Err(format!(
+        "cannot find {cmd} at {}. Refusing to fall back to PATH: this process is root, and PATH came from a user account an agent may control.",
+        candidates.join(" or ")
+    ))'''
+to = "    Ok(std::path::PathBuf::from(cmd))"
+test = "resolve_bin_is_absolute"
+
+[[mutation]]
+name = "an unknown helper is run by its bare name"
+file = "src/setup.rs"
+from = '''        return Err(format!(
+            "refusing to run \"{cmd}\": not in the allow-list of privileged helpers"
+        ));'''
+to = "        return Ok(std::path::PathBuf::from(cmd));"
+test = "resolve_bin_is_absolute"
+
+[[mutation]]
+name = "the installer will install the app directory over itself"
+file = "src/setup.rs"
+from = "    source == app"
+to = "    false"
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "a reinstall starts systemd instead of restarting it"
+file = "src/setup.rs"
+from = '&["restart", "agent-vault.service"]'
+to = '&["start", "agent-vault.service"]'
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "an installer without --from is treated as able to upgrade itself"
+file = "src/commands.rs"
+from = "contains_bytes(bytes, marker_js) || contains_bytes(bytes, marker_rs)"
+to = "true"
+test = "self_install_and_systemd"
+
+[[mutation]]
+name = "the CLI accepts secret-bearing flags"
+file = "src/lib.rs"
+from = "    if cli.secret_traps.any() {"
+to = "    if false {"
+test = "secret_flags_are_refused"
+
+[[mutation]]
+name = "a boolean flag reads any value as true"
+file = "src/policy_input.rs"
+from = "    if value.is_some_and(|v| !v.is_empty()) {"
+to = "    if false {"
+test = "boolean_flag_rejects_a_value"
+
+[[mutation]]
+name = "session and approve ignore unknown limit flags"
+file = "src/policy_input.rs"
+from = '        if *flag != "_" && !allowed.contains(flag) {'
+to = "        if false {"
+test = "known_flags_refuses_an_unknown_limit"
+
+[[mutation]]
+name = "cleanText lets bidi through"
+file = "src/control_commands.rs"
+from = "            || (0x202a..=0x202e).contains(&u)"
+to = "            || false"
+test = "clean_text_drops_controls"
