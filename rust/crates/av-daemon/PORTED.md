@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 710 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **356 not yet ported**.
+Totals: 1207 JS tests: 720 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **346 not yet ported**.
 
 ## Mutation check
 
@@ -783,16 +783,16 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-seams.test.js | an extra pattern scrubs an error detail, is redacted within an event, and cuts a stream that splits it | `ported_gateway_core::custom_pattern_redacts_error_and_single_event_and_cuts_split_stream_with_prefix_control` |
 | gateway-w2-seams.test.js | a method-override header is held to the route pairs as well as the methods list | tests/ported_gateway_core.rs::method_override_is_bound_by_route_pairs_and_allowed_tmp_control_runs |
 | gateway-w2-seams.test.js | a held request is recorded as held, an allowed one as allow, a refused one as deny (C11) | tests/ported_gateway_core.rs::held_allowed_and_denied_requests_are_recorded_with_the_right_decisions |
-| integrate2-c12-surfaces.test.js | /p/ on a network listener: the infinite token is refused before anything is sent, a finite one works | not yet ported |
-| integrate2-c12-surfaces.test.js | /mcp on a network listener: every tool that needs a session refuses the infinite token as AV_REMOTE_FORBIDDEN, sends nothing, mints nothing, and records it | not yet ported |
-| integrate2-c12-surfaces.test.js | /mcp on a network listener: the handshake and the ungated tools treat the infinite token as a dead one | not yet ported |
-| integrate2-c12-surfaces.test.js | /mcp on a network listener: a finite token is unchanged | not yet ported |
-| integrate2-c12-surfaces.test.js | /v1 on a network listener: every session route refuses the infinite token with 403 infinite_remote; /v1/status stays open | not yet ported |
-| integrate2-c12-surfaces.test.js | /v1 on a network listener: a finite token is unchanged | not yet ported |
-| integrate2-c12-surfaces.test.js | on loopback (built-in gateway, TCP and TLS listeners) the infinite token works on every surface | not yet ported |
-| integrate2-c12-surfaces.test.js | stdio MCP has no network listener and stays loopback for an infinite session | not yet ported |
-| integrate2-c12-surfaces.test.js | vault_http hands its listener to the pipeline, which refuses an infinite session there by itself | not yet ported |
-| integrate2-c12-surfaces.test.js | the vault answers C12 for a peek and for a use alike, and records only the use | not yet ported |
+| integrate2-c12-surfaces.test.js | /p/ on a network listener: the infinite token is refused before anything is sent, a finite one works | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | /mcp on a network listener: every tool that needs a session refuses the infinite token as AV_REMOTE_FORBIDDEN, sends nothing, mints nothing, and records it | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | /mcp on a network listener: the handshake and the ungated tools treat the infinite token as a dead one | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | /mcp on a network listener: a finite token is unchanged | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | /v1 on a network listener: every session route refuses the infinite token with 403 infinite_remote; /v1/status stays open | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | /v1 on a network listener: a finite token is unchanged | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-c12-surfaces.test.js | on loopback (built-in gateway, TCP and TLS listeners) the infinite token works on every surface | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
+| integrate2-c12-surfaces.test.js | stdio MCP has no network listener and stays loopback for an infinite session | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
+| integrate2-c12-surfaces.test.js | vault_http hands its listener to the pipeline, which refuses an infinite session there by itself | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
+| integrate2-c12-surfaces.test.js | the vault answers C12 for a peek and for a use alike, and records only the use | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
 | integrate2-seams.test.js | a correct leaf pin goes out through the real pinnedRequest, with the secret and the URL host | not yet ported |
 | integrate2-seams.test.js | a wrong pin on an untrusted self-signed upstream sends nothing and is refunded; its own leaf pin is reached | not yet ported |
 | integrate2-seams.test.js | on a chain the daemon trusts, an intermediate or leaf pin is honoured, and a pin that matches nothing is AV_PIN_MISMATCH, refunded and unsent | not yet ported |
