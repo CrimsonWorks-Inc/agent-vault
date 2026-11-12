@@ -662,19 +662,33 @@ pub fn emit(err: &CliError, json: bool) -> Exit {
 /// instead; returns `Some(Exit::Usage)` when refused. Runs before argument
 /// parsing. Ports the R3 check at the top of `main(argv)` in
 /// `src/cli/index.js`.
-pub fn refuse_root(argv: &[String]) -> Option<Exit> {
-    if std::env::var_os("AGENT_VAULT_ALLOW_ROOT").is_some() {
-        return None;
+/// Whether this process may continue. An empty `AGENT_VAULT_ALLOW_ROOT` is
+/// unset, matching `!!process.env.AGENT_VAULT_ALLOW_ROOT` in
+/// `src/cli/index.js`. A missing uid (`id` failed) is treated as root so the
+/// check fails closed.
+pub(crate) fn root_is_allowed(allow_root: Option<&str>, uid: Option<u32>) -> bool {
+    if allow_root.is_some_and(|value| !value.is_empty()) {
+        return true;
     }
-    let uid = std::process::Command::new("/usr/bin/id")
+    match uid {
+        Some(0) | None => false,
+        Some(_) => true,
+    }
+}
+
+fn own_uid() -> Option<u32> {
+    std::process::Command::new("/usr/bin/id")
         .arg("-u")
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(1);
-    if uid != 0 {
+}
+
+pub fn refuse_root(argv: &[String]) -> Option<Exit> {
+    let allow = std::env::var("AGENT_VAULT_ALLOW_ROOT").ok();
+    if root_is_allowed(allow.as_deref(), own_uid()) {
         return None;
     }
     let asked = argv.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
@@ -1162,5 +1176,7 @@ fn refused(answer: &Value) -> bool {
         == Some(NEEDS_SESSION)
 }
 
+#[cfg(test)]
+mod review_probes;
 #[cfg(test)]
 mod tests;

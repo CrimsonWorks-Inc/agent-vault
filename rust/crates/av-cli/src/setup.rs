@@ -268,8 +268,9 @@ fn is_mac() -> bool {
 
 fn root_dir() -> PathBuf {
     // A non-root dry run may relocate the tree so tests never touch the real
-    // install. The privileged install does not read this variable.
-    if !is_root() {
+    // install. The privileged install does not read this variable. An unknown
+    // uid (`id` failed) is treated as root, so the relocation stays closed.
+    if current_uid().is_some_and(|uid| uid != 0) {
         if let Ok(path) = std::env::var("AGENT_VAULT_SETUP_DRY_ROOT") {
             if !path.is_empty() {
                 return PathBuf::from(path);
@@ -390,17 +391,18 @@ fn run_opts(ctx: &Ctx, cmd: &str, args: &[&str], allow_fail: bool) -> Result<Str
 }
 
 fn is_root() -> bool {
-    current_uid() == 0
+    current_uid() == Some(0)
 }
 
-fn current_uid() -> u32 {
+/// `None` when `id -u` fails. Callers treat that as root (fail closed).
+fn current_uid() -> Option<u32> {
     Command::new("/usr/bin/id")
         .arg("-u")
         .output()
         .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(1)
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|text| text.trim().parse().ok())
 }
 
 fn username() -> String {
@@ -412,14 +414,20 @@ fn require_root(ctx: &Ctx) -> Result<(), Die> {
     if ctx.dry {
         return Ok(());
     }
-    if !is_root() {
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-vault-setup"));
-        return Err(Die::new(
-            "this must run as root.",
-            format!("try: sudo {} {}", exe.display(), ctx.verb),
-        ));
+    match current_uid() {
+        Some(0) => Ok(()),
+        None => Err(Die::msg(
+            "cannot tell whether this process is root (`id -u` failed). Refusing to continue.",
+        )),
+        Some(_) => {
+            let exe =
+                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-vault-setup"));
+            Err(Die::new(
+                "this must run as root.",
+                format!("try: sudo {} {}", exe.display(), ctx.verb),
+            ))
+        }
     }
-    Ok(())
 }
 
 struct Enrolled {
@@ -446,7 +454,7 @@ fn enrolled_user(ctx: &Ctx) -> Result<Enrolled, Die> {
     }
     let uid = if ctx.dry {
         if name == username() {
-            current_uid()
+            current_uid().unwrap_or(0)
         } else {
             0
         }
@@ -536,7 +544,130 @@ fn group_exists(ctx: &Ctx, name: &str) -> Result<bool, Die> {
     }
 }
 
-fn create_service_user(ctx: &Ctx) -> Result<(), Die> {
+/// One thing `record` noted, so uninstall can remove it. Field order matches
+/// the JS `{ kind, id }` object.
+struct CreatedItem {
+    kind: String,
+    id: String,
+}
+
+/// The installer's `state.json` document. `version` is 1. `retired` is set
+/// when uninstall moves the vault aside.
+struct InstallState {
+    created: Vec<CreatedItem>,
+    version: u32,
+    retired: Option<String>,
+}
+
+fn empty_state() -> InstallState {
+    InstallState {
+        created: Vec::new(),
+        version: 1,
+        retired: None,
+    }
+}
+
+fn record(state: &mut InstallState, kind: &str, id: &str) {
+    if !state
+        .created
+        .iter()
+        .any(|item| item.kind == kind && item.id == id)
+    {
+        state.created.push(CreatedItem {
+            kind: kind.to_string(),
+            id: id.to_string(),
+        });
+    }
+}
+
+fn load_state() -> InstallState {
+    let text = match std::fs::read_to_string(state_path()) {
+        Ok(text) => text,
+        Err(_) => return empty_state(),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return empty_state();
+    };
+    let mut state = empty_state();
+    if let Some(version) = value.get("version").and_then(|v| v.as_u64()) {
+        state.version = version as u32;
+    }
+    if let Some(retired) = value.get("retired").and_then(|v| v.as_str()) {
+        state.retired = Some(retired.to_string());
+    }
+    if let Some(created) = value.get("created").and_then(|v| v.as_array()) {
+        for item in created {
+            let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if !kind.is_empty() && !id.is_empty() {
+                record(&mut state, kind, id);
+            }
+        }
+    }
+    state
+}
+
+/// `JSON.stringify(state, null, 2)`: `created`, then `version`, then
+/// `retired` when uninstall set it.
+pub(crate) fn state_document(
+    created: &[(String, String)],
+    version: u32,
+    retired: Option<&str>,
+) -> String {
+    let mut items = Vec::new();
+    for (kind, id) in created {
+        let mut obj = serde_json::Map::new();
+        obj.insert("kind".into(), serde_json::Value::String(kind.clone()));
+        obj.insert("id".into(), serde_json::Value::String(id.clone()));
+        items.push(serde_json::Value::Object(obj));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert("created".into(), serde_json::Value::Array(items));
+    root.insert("version".into(), serde_json::json!(version));
+    if let Some(retired) = retired {
+        root.insert(
+            "retired".into(),
+            serde_json::Value::String(retired.to_string()),
+        );
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(root)).unwrap_or_else(|_| "{}".into())
+}
+
+fn save_state(ctx: &Ctx, state: &InstallState) -> Result<(), Die> {
+    if ctx.dry {
+        return Ok(());
+    }
+    let created: Vec<(String, String)> = state
+        .created
+        .iter()
+        .map(|item| (item.kind.clone(), item.id.clone()))
+        .collect();
+    let body = state_document(&created, state.version, state.retired.as_deref());
+    write_root_file(ctx, &state_path(), &body)
+}
+
+/// Remove recorded dirs (except the vault, which uninstall retired) and
+/// files. Returns the paths it removed or would remove.
+pub(crate) fn delete_recorded(dry: bool, items: &[(String, String)], vault: &Path) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    for (kind, id) in items.iter().rev() {
+        let path = PathBuf::from(id);
+        if kind == "dir" && path != vault {
+            if !dry {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            removed.push(path);
+        } else if kind == "file" {
+            if !dry {
+                let _ = std::fs::remove_file(&path);
+            }
+            removed.push(path);
+        }
+    }
+    removed
+}
+
+fn create_service_user(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     // Under a dry run the service user was only described, not created, so
     // the plan shows this step anyway.
     if ctx.dry || user_exists(ctx, SERVICE_USER)? {
@@ -609,6 +740,7 @@ fn create_service_user(ctx: &Ctx) -> Result<(), Die> {
             ],
         )?;
     }
+    record(state, "user", SERVICE_USER);
     step(
         ctx,
         &format!(
@@ -637,7 +769,11 @@ fn mac_free_uid(ctx: &Ctx) -> Result<u32, Die> {
     Err(Die::msg("no free system uid between 300 and 399."))
 }
 
-fn create_client_group(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
+fn create_client_group(
+    ctx: &Ctx,
+    enrolled: &Enrolled,
+    state: &mut InstallState,
+) -> Result<(), Die> {
     if !group_exists(ctx, CLIENT_GROUP)? {
         if is_mac() {
             run(
@@ -648,6 +784,7 @@ fn create_client_group(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
         } else {
             run(ctx, "groupadd", &["--system", CLIENT_GROUP])?;
         }
+        record(state, "group", CLIENT_GROUP);
         step(
             ctx,
             &format!("created client group {}", paint("1", CLIENT_GROUP)),
@@ -672,6 +809,11 @@ fn create_client_group(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
     } else {
         run(ctx, "usermod", &["-aG", CLIENT_GROUP, &enrolled.name])?;
     }
+    record(
+        state,
+        "group-member",
+        &format!("{CLIENT_GROUP}:{}", enrolled.name),
+    );
     step(
         ctx,
         &format!(
@@ -772,13 +914,15 @@ fn make_dir(ctx: &Ctx, path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(),
     Ok(())
 }
 
-fn build_tree(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
+fn build_tree(ctx: &Ctx, enrolled: &Enrolled, state: &mut InstallState) -> Result<(), Die> {
     let root = root_dir();
     assert_root_owned_chain(root.parent().unwrap_or(&root), "the install root")?;
     make_dir(ctx, &root, 0o755, 0, 0)?;
+    record(state, "dir", &root.display().to_string());
     let (uid, gid) = service_ids(ctx)?;
     let vault = vault_dir();
     make_dir(ctx, &vault, 0o700, uid, gid)?;
+    record(state, "dir", &vault.display().to_string());
     step(
         ctx,
         &format!(
@@ -789,6 +933,7 @@ fn build_tree(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
     );
     let run_path = run_dir();
     make_dir(ctx, &run_path, 0o2750, uid, client_gid(ctx)?)?;
+    record(state, "dir", &run_path.display().to_string());
     if is_mac() {
         let _ = run_opts(
             ctx,
@@ -855,12 +1000,52 @@ fn checkout_from(ctx: &Ctx) -> Result<PathBuf, Die> {
     ))
 }
 
-/// True when installing `source` would overwrite the app directory itself.
-pub(crate) fn refuses_self_install(source: &Path, app: &Path) -> bool {
-    source == app
+/// Resolve every existing prefix, so `/var` and `/private/var` compare equal
+/// on macOS even when the final component does not exist yet.
+pub(crate) fn canonical_prefix(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            std::path::Component::RootDir => out.push("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(part) => {
+                out.push(part);
+                if let Ok(real) = out.canonicalize() {
+                    out = real;
+                }
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        out
+    }
 }
 
-fn install_app(ctx: &Ctx) -> Result<(), Die> {
+/// True when installing `source` would delete or overwrite the source itself.
+/// Both sides are canonicalized. Equality, source-inside-app, and
+/// app-inside-source all refuse.
+pub(crate) fn refuses_self_install(source: &Path, app: &Path) -> bool {
+    let source = canonical_prefix(source);
+    let app = canonical_prefix(app);
+    source == app || source.starts_with(&app) || app.starts_with(&source)
+}
+
+/// True when this process's executable resolves inside `app`. Deleting `app`
+/// would delete the binary that is doing the delete.
+fn binary_inside(app: &Path) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    canonical_prefix(&exe).starts_with(canonical_prefix(app))
+}
+
+fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     let source = checkout_from(ctx)?;
     for required in ["src", "bin", "package.json"] {
         if !source.join(required).exists() {
@@ -871,7 +1056,7 @@ fn install_app(ctx: &Ctx) -> Result<(), Die> {
         }
     }
     let app = app_dir();
-    if refuses_self_install(&source, &app) {
+    if refuses_self_install(&source, &app) || binary_inside(&app) {
         return Err(Die::new(
             "refusing to install the app directory over itself.",
             "Pass --from <path to your checkout> so there is something new to install.",
@@ -879,6 +1064,14 @@ fn install_app(ctx: &Ctx) -> Result<(), Die> {
     }
     assert_no_symlinks(&source, &["src", "bin", "package.json"])?;
     if !ctx.dry {
+        // Never delete a path that resolves into the source. The guard above
+        // already refused that; this is the last check before the unlink.
+        if refuses_self_install(&source, &app) {
+            return Err(Die::new(
+                "refusing to install the app directory over itself.",
+                "Pass --from <path to your checkout> so there is something new to install.",
+            ));
+        }
         if app.exists() {
             std::fs::remove_dir_all(&app)?;
         }
@@ -898,8 +1091,13 @@ fn install_app(ctx: &Ctx) -> Result<(), Die> {
         } else {
             run(ctx, "chown", &["-R", "root:root", &app.to_string_lossy()])?;
         }
-        run(ctx, "chmod", &["-R", "go-w", &app.to_string_lossy()])?;
+        run(
+            ctx,
+            "chmod",
+            &["-R", "u-s,g-s,go-w", &app.to_string_lossy()],
+        )?;
     }
+    record(state, "dir", &app.display().to_string());
     step(
         ctx,
         &format!(
@@ -912,26 +1110,62 @@ fn install_app(ctx: &Ctx) -> Result<(), Die> {
 }
 
 fn copy_rust_bins(app: &Path) -> Result<(), Die> {
-    let Some(exe) = std::env::current_exe().ok() else {
-        return Ok(());
-    };
+    let exe = std::env::current_exe().map_err(|_| {
+        Die::msg("the daemon binary is missing: this process has no executable path")
+    })?;
     let Some(dir) = exe.parent() else {
-        return Ok(());
+        return Err(Die::msg(
+            "the daemon binary is missing: this process has no directory",
+        ));
     };
     let dest = app.join("bin");
     std::fs::create_dir_all(&dest)?;
     for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
         let src = dir.join(name);
-        if src.is_file() {
-            if is_root() && !is_root_owned(&src) {
-                eprintln!(
-                    "\nwarning  the binary being copied ({}) is writable by uid {}, not root.",
-                    src.display(),
-                    std::fs::metadata(&src).map(|m| m.uid()).unwrap_or(0)
-                );
+        if name == "agent-vault-daemon" {
+            require_regular_daemon(&src)?;
+        } else if let Err(error) = require_regular_daemon(&src) {
+            if error.message.contains("missing") {
+                continue;
             }
-            copy_dereference(&src, &dest.join(name))?;
+            return Err(error);
         }
+        if is_root() && !is_root_owned(&src) {
+            eprintln!(
+                "\nwarning  the binary being copied ({}) is writable by uid {}, not root.",
+                src.display(),
+                std::fs::metadata(&src).map(|m| m.uid()).unwrap_or(0)
+            );
+        }
+        copy_dereference(&src, &dest.join(name))?;
+    }
+    Ok(())
+}
+
+/// The daemon binary must be a regular file. A symlink would leave the unit
+/// running code outside the root-owned tree; a missing file leaves the unit
+/// pointing at nothing.
+pub(crate) fn require_regular_daemon(src: &Path) -> Result<(), Die> {
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(meta) => meta,
+        Err(_) => {
+            return Err(Die::msg(format!(
+                "the daemon binary is missing at {}",
+                src.display()
+            )));
+        }
+    };
+    if meta.file_type().is_symlink() {
+        return Err(Die::new(
+            format!("refusing to install: {} is a symbolic link.", src.display()),
+            "The service must run a regular file copied into the install, not a link.",
+        ));
+    }
+    if !meta.is_file() {
+        return Err(Die::msg(format!(
+            "the daemon binary is missing at {}",
+            src.display()
+        )));
     }
     Ok(())
 }
@@ -961,6 +1195,17 @@ pub(crate) fn copy_dereference(src: &Path, dst: &Path) -> Result<(), Die> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::copy(src, dst)?;
+    strip_special_bits(dst)?;
+    Ok(())
+}
+
+/// Drop setuid, setgid and the sticky bit. `std::fs::copy` keeps them for
+/// root, and `chmod -R go-w` does not clear them.
+fn strip_special_bits(path: &Path) -> Result<(), Die> {
+    let meta = std::fs::metadata(path)?;
+    let mut perms = meta.permissions();
+    perms.set_mode(perms.mode() & !0o7000);
+    std::fs::set_permissions(path, perms)?;
     Ok(())
 }
 
@@ -1006,49 +1251,122 @@ pub(crate) fn systemd_start_args() -> &'static [&'static str] {
     &["restart", "agent-vault.service"]
 }
 
-fn install_service(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
-    let program = daemon_program();
-    let port = value(&ctx.args, "port").unwrap_or("7411");
-    let env = [
-        ("AV_VAULT_DIR", vault_dir().display().to_string()),
-        ("AV_RUN_DIR", run_dir().display().to_string()),
-        ("AV_ENROLLED_UID", enrolled.uid.to_string()),
-        ("AV_CLIENT_GROUP", CLIENT_GROUP.to_string()),
-        ("AV_PORT", port.to_string()),
-    ];
-    if is_mac() {
-        let mut body = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+/// `--port` written into a unit file. Only an integer 1–65535 is accepted,
+/// so the value cannot break out of the plist or the unit text.
+pub(crate) fn service_port(raw: Option<&str>) -> Result<String, Die> {
+    let text = raw.unwrap_or("7411");
+    match text.parse::<u16>() {
+        Ok(port) if port != 0 => Ok(port.to_string()),
+        _ => Err(Die::msg(format!(
+            "--port must be an integer from 1 to 65535, not {text}"
+        ))),
+    }
+}
+
+/// launchd plist. The program is the Rust daemon. Every other line matches
+/// `installService` in `bin/agent-vault-setup.js`, including a core soft
+/// limit of zero and ProcessType Adaptive.
+pub(crate) fn launchd_plist(
+    program: &Path,
+    vault: &Path,
+    run: &Path,
+    uid: u32,
+    port: &str,
+) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{LAUNCHD_LABEL}</string>\n  \
-<key>ProgramArguments</key>\n  <array><string>{}</string></array>\n  \
+<plist version=\"1.0\">\n\
+<dict>\n  \
+<key>Label</key><string>{LAUNCHD_LABEL}</string>\n  \
+<key>ProgramArguments</key>\n  \
+<array><string>{}</string></array>\n  \
 <key>UserName</key><string>{SERVICE_USER}</string>\n  \
 <key>GroupName</key><string>{SERVICE_USER}</string>\n  \
-<key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  \
-<key>EnvironmentVariables</key>\n  <dict>",
-            program.display()
-        );
-        for (key, val) in &env {
-            body.push_str(&format!("\n    <key>{key}</key><string>{val}</string>"));
-        }
-        body.push_str(&format!(
-            "\n  </dict>\n  <key>StandardOutPath</key><string>{}/daemon.out</string>\n  \
-<key>StandardErrorPath</key><string>{}/daemon.err</string>\n</dict>\n</plist>\n",
-            vault_dir().display(),
-            vault_dir().display()
-        ));
+<key>RunAtLoad</key><true/>\n  \
+<key>KeepAlive</key><true/>\n  \
+<key>ProcessType</key><string>Adaptive</string>\n  \
+<key>EnvironmentVariables</key>\n  \
+<dict>\n    \
+<key>AV_VAULT_DIR</key><string>{}</string>\n    \
+<key>AV_RUN_DIR</key><string>{}</string>\n    \
+<key>AV_ENROLLED_UID</key><string>{uid}</string>\n    \
+<key>AV_CLIENT_GROUP</key><string>{CLIENT_GROUP}</string>\n    \
+<key>AV_PORT</key><string>{port}</string>\n  \
+</dict>\n  \
+<key>StandardOutPath</key><string>{}/daemon.out</string>\n  \
+<key>StandardErrorPath</key><string>{}/daemon.err</string>\n  \
+<key>SoftResourceLimits</key><dict><key>Core</key><integer>0</integer></dict>\n\
+</dict>\n\
+</plist>\n",
+        program.display(),
+        vault.display(),
+        run.display(),
+        vault.display(),
+        vault.display(),
+    )
+}
+
+/// systemd unit. ExecStart is the Rust daemon with no trailing space.
+/// Hardening matches `installService` in `bin/agent-vault-setup.js`.
+pub(crate) fn systemd_unit(
+    program: &Path,
+    vault: &Path,
+    run: &Path,
+    uid: u32,
+    port: &str,
+) -> String {
+    format!(
+        "[Unit]\n\
+Description=agent-vault daemon\n\
+After=network.target\n\
+\n\
+[Service]\n\
+Type=simple\n\
+User={SERVICE_USER}\n\
+Group={SERVICE_USER}\n\
+SupplementaryGroups={CLIENT_GROUP}\n\
+ExecStart={}\n\
+Environment=AV_VAULT_DIR={}\n\
+Environment=AV_RUN_DIR={}\n\
+Environment=AV_ENROLLED_UID={uid}\n\
+Environment=AV_CLIENT_GROUP={CLIENT_GROUP}\n\
+Environment=AV_PORT={port}\n\
+RuntimeDirectory=agent-vault\n\
+RuntimeDirectoryMode=0750\n\
+RuntimeDirectoryPreserve=yes\n\
+NoNewPrivileges=yes\n\
+ProtectSystem=strict\n\
+ProtectHome=yes\n\
+PrivateTmp=yes\n\
+ReadWritePaths={} {}\n\
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n\
+CapabilityBoundingSet=\n\
+MemoryDenyWriteExecute=yes\n\
+LockPersonality=yes\n\
+LimitCORE=0\n\
+Restart=always\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        program.display(),
+        vault.display(),
+        run.display(),
+        vault.display(),
+        run.display(),
+    )
+}
+
+fn install_service(ctx: &Ctx, enrolled: &Enrolled, state: &mut InstallState) -> Result<(), Die> {
+    let program = daemon_program();
+    let port = service_port(value(&ctx.args, "port"))?;
+    let vault = vault_dir();
+    let run_path = run_dir();
+    if is_mac() {
+        let body = launchd_plist(&program, &vault, &run_path, enrolled.uid, &port);
         let plist = plist_path();
-        if ctx.dry {
-            say(&format!(
-                "       {}",
-                paint("2", &format!("write {}", plist.display()))
-            ));
-        } else {
-            if let Some(parent) = plist.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&plist, body)?;
-        }
+        write_root_file(ctx, &plist, &body)?;
+        record(state, "file", &plist.display().to_string());
         bootstrap_launchd(ctx)?;
         step(
             ctx,
@@ -1058,28 +1376,37 @@ fn install_service(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
             ),
         );
     } else {
+        let body = systemd_unit(&program, &vault, &run_path, enrolled.uid, &port);
         let unit_path = PathBuf::from(SYSTEMD_UNIT);
-        if ctx.dry {
-            say(&format!(
-                "       {}",
-                paint("2", &format!("write {}", unit_path.display()))
-            ));
-        } else {
-            let mut unit = format!(
-                "[Service]\nExecStart={} \nUser={SERVICE_USER}\nGroup={SERVICE_USER}\n",
-                program.display()
-            );
-            for (key, val) in &env {
-                unit.push_str(&format!("Environment={key}={val}\n"));
-            }
-            std::fs::write(&unit_path, unit)?;
-        }
+        write_root_file(ctx, &unit_path, &body)?;
+        record(state, "file", SYSTEMD_UNIT);
         run(ctx, "systemctl", &["daemon-reload"])?;
         let _ = run_opts(ctx, "systemctl", &["enable", "agent-vault.service"], true);
         let args = systemd_start_args();
         run(ctx, "systemctl", args)?;
         step(ctx, "installed and started the systemd service");
     }
+    Ok(())
+}
+
+/// Write a root-owned mode-0644 file. A dry run prints the path and writes
+/// nothing. `chown 0:0` matches `chownSync(path, 0, 0)` in the JS installer.
+fn write_root_file(ctx: &Ctx, path: &Path, body: &str) -> Result<(), Die> {
+    if ctx.dry {
+        say(&format!(
+            "       {}",
+            paint("2", &format!("write {}", path.display()))
+        ));
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, body)?;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(path, perms)?;
+    run(ctx, "chown", &["0:0", &path.to_string_lossy()])?;
     Ok(())
 }
 
@@ -1231,15 +1558,17 @@ fn install(ctx: &Ctx) -> Result<(), Die> {
             enrolled.name, enrolled.uid
         ),
     ));
-    create_service_user(ctx)?;
-    create_client_group(ctx, &enrolled)?;
-    build_tree(ctx, &enrolled)?;
-    install_app(ctx)?;
+    let mut state = load_state();
+    create_service_user(ctx, &mut state)?;
+    create_client_group(ctx, &enrolled, &mut state)?;
+    build_tree(ctx, &enrolled, &mut state)?;
+    install_app(ctx, &mut state)?;
     step(
         ctx,
         "not installing a Node runtime; the service runs the Rust daemon",
     );
-    install_service(ctx, &enrolled)?;
+    install_service(ctx, &enrolled, &mut state)?;
+    save_state(ctx, &state)?;
     say(&format!("\n{}", paint("1", "done")));
     say(&format!(
         "  The daemon runs as {}. Your account cannot read {}.",
@@ -1277,6 +1606,7 @@ fn install(ctx: &Ctx) -> Result<(), Die> {
 fn uninstall(ctx: &Ctx) -> Result<(), Die> {
     require_root(ctx)?;
     let purge = flag(&ctx.args, "purge");
+    let mut state = load_state();
     say(&format!(
         "\n{}{}\n",
         paint("1", "agent-vault uninstall"),
@@ -1322,6 +1652,7 @@ fn uninstall(ctx: &Ctx) -> Result<(), Die> {
                 )));
             }
             std::fs::rename(&vault, &retired)?;
+            state.retired = Some(retired.display().to_string());
             step(
                 ctx,
                 &format!(
@@ -1332,11 +1663,31 @@ fn uninstall(ctx: &Ctx) -> Result<(), Die> {
             );
         }
     }
+    let recorded: Vec<(String, String)> = state
+        .created
+        .iter()
+        .map(|item| (item.kind.clone(), item.id.clone()))
+        .collect();
+    for path in delete_recorded(ctx.dry, &recorded, &vault) {
+        step(ctx, &format!("removed {}", path.display()));
+    }
     if ctx.dry || user_exists(ctx, SERVICE_USER)? {
         say(&paint(
             "2",
             &format!("       left the {SERVICE_USER} account in place; removing it would free its uid for reuse"),
         ));
+    }
+    let root = root_dir();
+    if !ctx.dry && root.exists() {
+        if let Some(retired) = &state.retired {
+            if Path::new(retired).starts_with(&root) {
+                return Err(Die::msg(format!(
+                    "refusing to remove {}: your retired vault is inside it at {retired}",
+                    root.display()
+                )));
+            }
+        }
+        std::fs::remove_dir_all(&root)?;
     }
     say(&format!(
         "\n{}  Your own ~/.agent-vault dev vault, if any, is untouched.\n",
@@ -1357,8 +1708,7 @@ pub(crate) fn retired_vault_path() -> PathBuf {
     parent.join(format!("agent-vault-retired-{millis}"))
 }
 
-fn status(ctx: &Ctx) -> Result<(), Die> {
-    let _ = ctx;
+fn status(_ctx: &Ctx) -> Result<(), Die> {
     let installed = state_path().is_file();
     say(&format!("\n{}\n", paint("1", "agent-vault system install")));
     if !installed {
@@ -1377,30 +1727,78 @@ fn status(ctx: &Ctx) -> Result<(), Die> {
         ));
         return Ok(());
     }
-    let user_ok = user_exists(
-        &Ctx {
-            args: Vec::new(),
-            dry: false,
-            verb: "status".into(),
+    let quiet = Ctx {
+        args: Vec::new(),
+        dry: false,
+        verb: "status".into(),
+    };
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let user_ok = user_exists(&quiet, SERVICE_USER).unwrap_or(false);
+    checks.push(("service user".into(), user_ok, SERVICE_USER.into()));
+    let vault = vault_dir();
+    if vault.exists() {
+        match std::fs::metadata(&vault) {
+            Ok(meta) => {
+                let mode = meta.mode() & 0o777;
+                checks.push((
+                    "vault mode 0700".into(),
+                    mode == 0o700,
+                    format!("0{mode:o}"),
+                ));
+                let uid = current_uid().unwrap_or(0);
+                checks.push((
+                    "vault owned by service user".into(),
+                    meta.uid() != 0 && meta.uid() != uid,
+                    format!("uid {}", meta.uid()),
+                ));
+            }
+            Err(error) => checks.push(("vault directory".into(), false, error.to_string())),
+        }
+    } else {
+        checks.push(("vault directory".into(), false, "missing".into()));
+    }
+    let unit = if is_mac() {
+        plist_path()
+    } else {
+        PathBuf::from(SYSTEMD_UNIT)
+    };
+    checks.push((
+        "service unit".into(),
+        unit.exists(),
+        unit.display().to_string(),
+    ));
+    let run_path = run_dir();
+    checks.push((
+        "socket directory".into(),
+        run_path.exists(),
+        run_path.display().to_string(),
+    ));
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-vault-setup"));
+    let trusted = canonical_prefix(&exe).starts_with(canonical_prefix(&app_dir()));
+    checks.push((
+        "running the root-owned installer".into(),
+        trusted,
+        if trusted {
+            app_dir().display().to_string()
+        } else {
+            exe.display().to_string()
         },
-        SERVICE_USER,
-    )
-    .unwrap_or(false);
-    say(&format!(
-        "  {} service user                     {}",
-        if user_ok {
+    ));
+    for (name, ok, note) in &checks {
+        let mark = if *ok {
             paint("32", "ok  ")
         } else {
             paint("33", "warn")
-        },
-        paint("2", SERVICE_USER)
-    ));
+        };
+        say(&format!("  {mark} {:<32} {}", name, paint("2", note)));
+    }
+    say("");
     Ok(())
 }
 
 fn help() {
     say(&format!(
-        "\n{}  the privileged installer\n\n  {} [--user <name>] [--port 7411] [--dry-run]\n  {} [--purge] [--dry-run]\n  {}\n\n  install creates the {SERVICE_USER} system user and a root-owned tree, so the\n  vault is unreadable to anything running as you. --dry-run prints every change\n  it would make and touches nothing.\n",
+        "\n{}  the privileged installer\n\n  {} [--user <name>] [--port 7411] [--dry-run]\n  {} [--purge] [--dry-run]\n  {}\n\n  install creates the {SERVICE_USER} system user and a root-owned tree, so the\n  vault is unreadable to anything running as you. --dry-run prints every change\n  it would make and touches nothing.\n  --use-node is refused: this installer ships the Rust daemon and does not copy a Node runtime.\n",
         paint("1", "agent-vault-setup"),
         paint("1", "sudo agent-vault-setup install"),
         paint("1", "sudo agent-vault-setup uninstall"),

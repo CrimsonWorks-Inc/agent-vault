@@ -20,6 +20,8 @@ test asserts the same property, or `not applicable, because ...`.
 - Upgrade probes the installed installer for `value('from')` (JS) or `--from`
   (Rust binary) via `installer_supports_from`, and says the copy is too old
   to upgrade itself when neither marker is present. It does not spawn `sudo`.
+- `--use-node` is refused. This installer ships the Rust daemon and does not
+  copy a Node runtime. `agent-vault-setup` help says so.
 - `--json` envelopes keep insertion order (`serde_json` `preserve_order`).
 
 ## Security and CLI tests
@@ -129,9 +131,9 @@ test asserts the same property, or `not applicable, because ...`.
 | `test/security/installer.test.js` the command to verify the boundary does not itself need sudo | `installer_dry_run_names_the_boundary_without_root` (`Check it` has no sudo) |
 | `test/security/installer.test.js` uninstall retires the vault outside the tree it then deletes | `retired_vault_path_is_outside_the_install_root` |
 | `test/security/installer.test.js` uninstall keeps credentials unless --purge is given | `installer_dry_run_names_the_boundary_without_root` (`To remove everything`) |
-| `test/security/installer.test.js` the service user is left in place on uninstall, so its uid is not reused | not applicable, because the dry-run text is produced without root and these tests do not delete a service user |
+| `test/security/installer.test.js` the service user is left in place on uninstall, so its uid is not reused | `probe_dry_run_uninstall_says_the_service_user_stays` (stdout contains "removing it would free its uid for reuse") |
 | `test/security/installer.test.js` the runtime version is checked before it is enshrined | not applicable, because the Rust installer does not copy a Node runtime (`MIN_NODE_MAJOR` is not part of this binary) |
-| `test/security/installer.test.js` install refuses a path chain that is writable by anyone but root | not applicable, because `assert_root_owned_chain` runs only on the root install path, and these tests do not sudo |
+| `test/security/installer.test.js` install refuses a path chain that is writable by anyone but root | `probe_dry_run_checks_the_root_chain_so_the_row_is_testable` (`AGENT_VAULT_SETUP_DRY_ROOT` under a user temp dir, install --dry-run, exit 1, "root must not execute from it") |
 | `test/security/installer.test.js` the installer refuses to install its own directory over itself | `self_install_and_systemd_restart_and_from_probe` |
 | `test/security/installer.test.js` --from selects the checkout to install | `installer_refuses_a_symlinked_checkout_and_plans_a_clean_one` |
 | `test/security/installer.test.js` an installer predating --from cannot be used to upgrade itself | `self_install_and_systemd_restart_and_from_probe` |

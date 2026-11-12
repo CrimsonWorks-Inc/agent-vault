@@ -280,26 +280,62 @@ pub(crate) fn looks_like_credential(name: &str, value: &str) -> bool {
     url_has_password(value)
 }
 
+/// `urlHasPassword` in `src/cli/index.js`: the password pattern anywhere in
+/// the value, then WHATWG `URL.password` when the value starts with a scheme.
 fn url_has_password(value: &str) -> bool {
-    if let Some(idx) = value.find("://") {
-        let after = &value[idx + 3..];
-        if let Some(at) = after.find('@') {
-            let userinfo = &after[..at];
-            if !userinfo.chars().any(|c| c == '/' || c.is_whitespace()) {
-                if let Some(colon) = userinfo.find(':') {
-                    let user = &userinfo[..colon];
-                    let pass = &userinfo[colon + 1..];
-                    let clean =
-                        |s: &str| !s.chars().any(|c| c == '/' || c.is_whitespace() || c == '@');
-                    // An empty user (`://:secret@host`) is still a password.
-                    if !user.contains(':') && clean(user) && !pass.is_empty() && clean(pass) {
-                        return true;
-                    }
-                }
-            }
-        }
+    if url_password_anywhere(value) {
+        return true;
     }
-    false
+    let Ok(scheme) = av_core::jsre::compile(r"(?i)^[a-z][a-z0-9+.-]*://") else {
+        return false;
+    };
+    if !scheme.is_match(value) {
+        return false;
+    }
+    // `new URL` percent-encodes a space in the password (`p w` -> `p%20w`).
+    // Parse the raw value, then the same value with spaces encoded, which is
+    // what that constructor does when the raw form is rejected.
+    parsed_url_has_password(value)
+        || (value.contains(' ') && parsed_url_has_password(&value.replace(' ', "%20")))
+}
+
+fn parsed_url_has_password(value: &str) -> bool {
+    url::Url::parse(value)
+        .is_ok_and(|url| url.password().is_some_and(|password| !password.is_empty()))
+}
+
+fn url_password_anywhere(value: &str) -> bool {
+    let Ok(pattern) = av_core::jsre::compile(r"://[^/\s:@]*:[^/\s@]+@") else {
+        return false;
+    };
+    pattern.is_match(value)
+}
+
+/// Parent environment entries that may reach a child. Non-UTF-8 names and
+/// values are dropped: `std::env::vars` panics on them, and the JS child
+/// never sees a byte string it cannot decode.
+pub(crate) fn kept_parent_env() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let (name, value) = utf8_pair(&name, &value)?;
+            parent_env_kept(&name, &value).then_some((name, value))
+        })
+        .collect()
+}
+
+/// UTF-8 environment entries, for writers that keep every variable. A
+/// non-UTF-8 name or value is dropped.
+pub(crate) fn utf8_env_map() -> std::collections::BTreeMap<String, String> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| utf8_pair(&name, &value))
+        .collect()
+}
+
+pub(crate) fn utf8_pair(
+    name: &std::ffi::OsStr,
+    value: &std::ffi::OsStr,
+) -> Option<(String, String)> {
+    Some((name.to_str()?.to_string(), value.to_str()?.to_string()))
 }
 
 /// Whether a parent environment variable may reach the `exec` child.
@@ -421,22 +457,16 @@ pub async fn setup(ctx: &Context, args: &SetupArgs) -> Outcome {
                 }
             }
         }
+        // This process never elevates itself. A terminal used to be asked
+        // "Run it now? [y/N]" and a yes was ignored. There is no question:
+        // the command is printed, and a non-terminal says so the way the
+        // JS client does.
         println!();
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            println!("  Run it yourself:");
+        } else {
             println!("  No terminal here, so run it yourself:");
-            println!("    {}", ctx.paint("36", &cmd));
-            return Ok(0);
         }
-        let answer = ctx.ask("  Run it now? sudo will ask for your password. [y/N] ")?;
-        if !answer.trim().eq_ignore_ascii_case("y") && !answer.trim().eq_ignore_ascii_case("yes") {
-            println!();
-            println!("  Nothing was changed. When you are ready:");
-            println!("    {}", ctx.paint("36", &cmd));
-            return Ok(0);
-        }
-        // The real install needs root. This process never elevates itself.
-        println!();
-        println!("  Run it yourself:");
         println!("    {}", ctx.paint("36", &cmd));
         return Ok(0);
     }
@@ -504,7 +534,7 @@ pub async fn setup(ctx: &Context, args: &SetupArgs) -> Outcome {
 }
 
 /// Ports `COMMANDS.daemon`. The Rust daemon owns the process; this hands off.
-pub async fn daemon(_ctx: &Context, args: &DaemonArgs) -> Outcome {
+pub async fn daemon(ctx: &Context, args: &DaemonArgs) -> Outcome {
     if using_system() {
         return Err(err_next(
             "the daemon is managed by the system service and is already running as its own user",
@@ -521,7 +551,13 @@ pub async fn daemon(_ctx: &Context, args: &DaemonArgs) -> Outcome {
             integer: true,
         },
     )?;
-    let _ = boolean_flag(args.passphrase.then_some(""), "passphrase")?;
+    let requested = boolean_flag(args.passphrase.then_some(""), "passphrase")?;
+    let secret = if requested {
+        Some(ctx.read_secret("passphrase: ")?)
+    } else {
+        None
+    };
+    let passphrase = passphrase_for_daemon(requested, secret);
     // The daemon binary reads AV_VAULT_DIR and AV_RUN_DIR. Dev mode is
     // AGENT_VAULT_DIR: the vault and the control socket live in that one
     // directory. `--port` is AV_PORT (0 is ephemeral).
@@ -538,10 +574,24 @@ pub async fn daemon(_ctx: &Context, args: &DaemonArgs) -> Outcome {
     }
     // `run_from_env` builds its own runtime. This command is already inside
     // the CLI runtime, so the daemon runs on a blocking thread.
-    let code = tokio::task::spawn_blocking(|| av_daemon::run_from_env().code())
-        .await
-        .unwrap_or(Exit::Failure.code());
+    let code =
+        tokio::task::spawn_blocking(move || av_daemon::run_from_env_unlocking(passphrase).code())
+            .await
+            .unwrap_or(Exit::Failure.code());
     Ok(code)
+}
+
+/// The passphrase `daemon --passphrase` hands to `startInRecordedState`.
+/// Without the flag the secret is dropped, even if one was read.
+pub(crate) fn passphrase_for_daemon(
+    requested: bool,
+    secret: Option<av_core::secret::SecretString>,
+) -> Option<av_core::secret::SecretString> {
+    if requested {
+        secret
+    } else {
+        None
+    }
 }
 
 /// Ports `COMMANDS.upgrade`.
@@ -2063,13 +2113,7 @@ pub async fn exec(ctx: &Context, args: &ExecArgs) -> Outcome {
     } else {
         None
     };
-    let mut env: Vec<(String, String)> = Vec::new();
-    for (k, v) in std::env::vars() {
-        if !parent_env_kept(&k, &v) {
-            continue;
-        }
-        env.push((k, v));
-    }
+    let mut env: Vec<(String, String)> = kept_parent_env();
     let same = mapped
         .as_ref()
         .is_none_or(|m| st.session_id.as_deref() == Some(m.sid.as_str()));
@@ -2812,10 +2856,7 @@ pub async fn mcp_install(ctx: &Context, args: &McpInstallArgs) -> Outcome {
         token_env: None,
         format: spec.format.to_string(),
     });
-    let mut env = std::collections::BTreeMap::new();
-    for (k, v) in std::env::vars() {
-        env.insert(k, v);
-    }
+    let env = utf8_env_map();
     let result = mcp_install::install(&InstallSpec {
         agent: agent.clone(),
         scope: scope.clone(),
@@ -3164,17 +3205,23 @@ pub(crate) fn as_rpc(text: &str, request_line: &str, http_status: u16) -> String
         } else {
             code.to_string()
         };
+        let mut data = Map::new();
+        // JSON.stringify drops a missing field (`undefined`) and keeps an
+        // explicit null. Insert only keys the daemon sent.
+        if let Some(hint) = payload.get("hint") {
+            data.insert("hint".into(), hint.clone());
+        }
+        if let Some(next) = payload.get("next") {
+            data.insert("next".into(), next.clone());
+        }
+        data.insert("http_status".into(), json!(http_status));
         return serde_json::to_string(&json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {
                 "code": -32603,
                 "message": format!("{label}: {detail}"),
-                "data": {
-                    "hint": payload.get("hint").cloned().unwrap_or(Value::Null),
-                    "next": payload.get("next").cloned().unwrap_or(Value::Null),
-                    "http_status": http_status,
-                },
+                "data": data,
             },
         }))
         .unwrap_or_default();
@@ -3772,13 +3819,52 @@ pub async fn migrate(ctx: &Context, args: &MigrateArgs) -> Outcome {
         to: to.clone(),
         dry_run: args.dry_run,
     };
+    let db = to.join("vault.db");
+    // Only a finished migration (opens, schema_version, vault.migrated in
+    // the audit chain) is "already migrated". Any other vault.db is an
+    // error that names the file. Nothing is written on this path.
+    if db.exists() && !migrate::is_completed_migration(&db) {
+        return Err(err(
+            format!(
+                "{} is not a completed migration. It must open, have schema_version, and an audit record of kind vault.migrated. Remove that file, or pass --to an empty directory. Nothing was written.",
+                db.display()
+            ),
+            Exit::Failure,
+        ));
+    }
+    if db.exists() {
+        let legacy_files = migrate::read_legacy(&from)
+            .map(|legacy| legacy.files)
+            .unwrap_or_default();
+        let report = MigrateReport {
+            already_migrated: true,
+            dry_run: args.dry_run,
+            counts: std::collections::BTreeMap::new(),
+            audit_first_seq: None,
+            audit_last_seq: None,
+            audit_head: None,
+            dropped: Vec::new(),
+            written: None,
+            legacy_files,
+        };
+        return finish_migrate(ctx, &report);
+    }
+    // The CLI's own socket (AGENT_VAULT_DIR, or the system socket when the
+    // install's state.json exists) is one of the places the JS looks, in
+    // addition to the library's candidates.
+    if std::os::unix::net::UnixStream::connect(socket_path()).is_ok() {
+        return Err(daemon_running_against(&from));
+    }
     if let Err(error) = migrate::preflight(&opts) {
         let message = error.to_string();
         return match error {
-            MigrateError::AlreadyMigrated(path) => {
-                let report = empty_report(true, args.dry_run, path);
-                finish_migrate(ctx, &report)
-            }
+            MigrateError::AlreadyMigrated(path) => Err(err(
+                format!(
+                    "{}/vault.db is not a completed migration. Remove that file, or pass --to an empty directory. Nothing was written.",
+                    path.display()
+                ),
+                Exit::Failure,
+            )),
             MigrateError::DaemonRunning { next, .. } => Err(err_next(message, Exit::Failure, next)),
             other => Err(err(other.to_string(), Exit::Failure)),
         };
@@ -3799,18 +3885,12 @@ pub async fn migrate(ctx: &Context, args: &MigrateArgs) -> Outcome {
     finish_migrate(ctx, &report)
 }
 
-fn empty_report(already: bool, dry_run: bool, path: PathBuf) -> MigrateReport {
-    MigrateReport {
-        already_migrated: already,
-        dry_run,
-        counts: std::collections::BTreeMap::new(),
-        audit_first_seq: None,
-        audit_last_seq: None,
-        audit_head: None,
-        dropped: Vec::new(),
-        written: Some(path.join("vault.db")),
-        legacy_files: Vec::new(),
-    }
+fn daemon_running_against(dir: &Path) -> CliError {
+    err_next(
+        format!("the agent-vault daemon is running against {}", dir.display()),
+        Exit::Failure,
+        "stop the daemon first (installed: sudo launchctl bootout system/com.agentvault.daemon; dev: stop the `agent-vault daemon` process), then run agent-vault migrate again",
+    )
 }
 
 fn finish_migrate(ctx: &Context, report: &MigrateReport) -> Outcome {

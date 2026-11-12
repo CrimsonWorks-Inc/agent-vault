@@ -35,6 +35,13 @@ impl HttpResponse {
     }
 }
 
+/// Read deadline for a control or MCP response. JS `http.request` on the
+/// socket sets none, and undici's fetch waits 300s; a 120s cap turned a slow
+/// `vault_http` into "daemon unreachable".
+pub(crate) fn socket_read_timeout() -> Option<Duration> {
+    None
+}
+
 /// `GET`/`POST` on a Unix socket. `Connection: close`; the body is read to
 /// EOF, honoring `Content-Length` and chunked transfer.
 pub fn request_unix(
@@ -45,7 +52,7 @@ pub fn request_unix(
     extra: &[(&str, &str)],
 ) -> std::io::Result<HttpResponse> {
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_read_timeout(socket_read_timeout())?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     exchange(&mut stream, method, path, "localhost", body, extra)
 }
@@ -59,7 +66,7 @@ pub fn request_tcp(
     extra: &[(&str, &str)],
 ) -> std::io::Result<HttpResponse> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    stream.set_read_timeout(socket_read_timeout())?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     exchange(&mut stream, method, path, "127.0.0.1", body, extra)
 }

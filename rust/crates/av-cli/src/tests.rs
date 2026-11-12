@@ -401,11 +401,21 @@ fn append_refuses_a_fifo_without_hanging() {
         .status()
         .unwrap();
     assert!(status.success());
-    let started = std::time::Instant::now();
-    let err = crate::files::append_line_exclusive(&fifo, "line").unwrap_err();
-    assert!(started.elapsed().as_secs() < 2, "fifo open hung");
-    let text = err.to_string();
-    assert!(text.contains("is not a regular file"), "{text}");
+    // A missing O_NONBLOCK blocks in open until a reader appears. The check
+    // runs on another thread so this test fails in 2s instead of holding the
+    // process until the mutation runner's timeout. Process exit ends the
+    // blocked open.
+    let path = fifo.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = crate::files::append_line_exclusive(&path, "line");
+        let _ = tx.send(result.map_err(|err| err.to_string()));
+    });
+    let err = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(result) => result.expect_err("a fifo was appended"),
+        Err(_) => panic!("fifo open hung"),
+    };
+    assert!(err.contains("is not a regular file"), "{err}");
 }
 
 #[test]
@@ -455,6 +465,13 @@ fn exec_drops_credentials_and_generated_vars() {
     assert!(crate::commands::looks_like_credential(
         "PLAIN_URL",
         "http://:s3cret@example.test"
+    ));
+    // The empty user is not the whole value, so only the anywhere-scan
+    // matches it. The URL-parser fallback never sees a string that does not
+    // start with a scheme.
+    assert!(crate::commands::looks_like_credential(
+        "NOTE",
+        "see http://:s3cret@example.test later"
     ));
     assert!(crate::commands::parent_env_kept("PATH", "/usr/bin"));
     assert!(!crate::commands::looks_like_credential(
@@ -1558,4 +1575,188 @@ fn unknown_command_names_itself() {
         "{}",
         err.message
     );
+}
+
+#[test]
+fn root_is_allowed_treats_an_empty_value_and_an_unknown_uid_as_refused() {
+    assert!(!crate::root_is_allowed(None, Some(0)));
+    assert!(!crate::root_is_allowed(Some(""), Some(0)));
+    assert!(!crate::root_is_allowed(None, None));
+    assert!(crate::root_is_allowed(Some("1"), Some(0)));
+    assert!(crate::root_is_allowed(None, Some(1)));
+}
+
+#[test]
+fn socket_read_timeout_matches_the_js_client() {
+    assert!(crate::http_client::socket_read_timeout().is_none());
+}
+
+#[test]
+fn utf8_pair_drops_a_non_utf8_value() {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = std::ffi::OsStr::from_bytes(b"va\xfflue");
+    assert!(crate::commands::utf8_pair(std::ffi::OsStr::new("OK"), bad).is_none());
+    assert_eq!(
+        crate::commands::utf8_pair(std::ffi::OsStr::new("HOME"), std::ffi::OsStr::new("/tmp")),
+        Some(("HOME".into(), "/tmp".into()))
+    );
+}
+
+#[test]
+fn daemon_passphrase_is_not_discarded() {
+    let secret = av_core::secret::SecretString::from("test-secret-not-real".to_string());
+    assert!(crate::commands::passphrase_for_daemon(true, Some(secret)).is_some());
+    let ignored = av_core::secret::SecretString::from("test-secret-not-real".to_string());
+    assert!(crate::commands::passphrase_for_daemon(false, Some(ignored)).is_none());
+}
+
+#[test]
+fn service_port_rejects_anything_but_an_integer_port() {
+    assert_eq!(crate::setup::service_port(None).unwrap(), "7411");
+    assert_eq!(crate::setup::service_port(Some("1")).unwrap(), "1");
+    assert_eq!(crate::setup::service_port(Some("65535")).unwrap(), "65535");
+    assert!(crate::setup::service_port(Some("0")).is_err());
+    assert!(crate::setup::service_port(Some("65536")).is_err());
+    assert!(crate::setup::service_port(Some("74 11")).is_err());
+    assert!(crate::setup::service_port(Some("80\nInjected=yes")).is_err());
+}
+
+#[test]
+fn launchd_plist_matches_the_js_template() {
+    let program = std::path::Path::new("/opt/bin/agent-vault-daemon");
+    let vault = std::path::Path::new("/var/db/agent-vault/vault");
+    let run = std::path::Path::new("/var/db/agent-vault/run");
+    let got = crate::setup::launchd_plist(program, vault, run, 501, "7411");
+    let expected = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key><string>com.agentvault.daemon</string>
+  <key>ProgramArguments</key>
+  <array><string>/opt/bin/agent-vault-daemon</string></array>
+  <key>UserName</key><string>_agentvault</string>
+  <key>GroupName</key><string>_agentvault</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Adaptive</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AV_VAULT_DIR</key><string>/var/db/agent-vault/vault</string>
+    <key>AV_RUN_DIR</key><string>/var/db/agent-vault/run</string>
+    <key>AV_ENROLLED_UID</key><string>501</string>
+    <key>AV_CLIENT_GROUP</key><string>_agentvault_users</string>
+    <key>AV_PORT</key><string>7411</string>
+  </dict>
+  <key>StandardOutPath</key><string>/var/db/agent-vault/vault/daemon.out</string>
+  <key>StandardErrorPath</key><string>/var/db/agent-vault/vault/daemon.err</string>
+  <key>SoftResourceLimits</key><dict><key>Core</key><integer>0</integer></dict>
+</dict>
+</plist>
+";
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn systemd_unit_matches_the_js_template() {
+    let program = std::path::Path::new("/opt/bin/agent-vault-daemon");
+    let vault = std::path::Path::new("/var/lib/agent-vault");
+    let run = std::path::Path::new("/run/agent-vault");
+    let got = crate::setup::systemd_unit(program, vault, run, 501, "7411");
+    let expected = "\
+[Unit]
+Description=agent-vault daemon
+After=network.target
+
+[Service]
+Type=simple
+User=_agentvault
+Group=_agentvault
+SupplementaryGroups=_agentvault_users
+ExecStart=/opt/bin/agent-vault-daemon
+Environment=AV_VAULT_DIR=/var/lib/agent-vault
+Environment=AV_RUN_DIR=/run/agent-vault
+Environment=AV_ENROLLED_UID=501
+Environment=AV_CLIENT_GROUP=_agentvault_users
+Environment=AV_PORT=7411
+RuntimeDirectory=agent-vault
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/agent-vault /run/agent-vault
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+LimitCORE=0
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+";
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn state_document_keeps_the_js_key_order() {
+    let doc = crate::setup::state_document(&[("dir".into(), "/tmp/app".into())], 1, None);
+    let kind = doc.find("\"kind\"").unwrap();
+    let id = doc.find("\"id\"").unwrap();
+    let created = doc.find("\"created\"").unwrap();
+    let version = doc.find("\"version\"").unwrap();
+    assert!(created < kind && kind < id && id < version, "{doc}");
+    assert!(!doc.contains("retired"), "{doc}");
+    assert!(!doc.ends_with('\n'), "{doc}");
+    let retired = crate::setup::state_document(&[], 1, Some("/tmp/retired"));
+    assert!(
+        retired.find("\"version\"").unwrap() < retired.find("\"retired\"").unwrap(),
+        "{retired}"
+    );
+}
+
+#[test]
+fn delete_recorded_removes_files_and_leaves_the_vault() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("app");
+    let file = tmp.path().join("unit");
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    let items = vec![
+        ("dir".into(), dir.display().to_string()),
+        ("dir".into(), vault.display().to_string()),
+        ("file".into(), file.display().to_string()),
+    ];
+    let removed = crate::setup::delete_recorded(false, &items, &vault);
+    assert!(!dir.exists());
+    assert!(vault.exists(), "uninstall removed the vault");
+    assert!(!file.exists());
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    let planned = crate::setup::delete_recorded(true, &items, &vault);
+    assert_eq!(planned.len(), 2);
+}
+
+#[test]
+fn require_regular_daemon_rejects_a_missing_file_and_a_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("agent-vault-daemon");
+    let err = crate::setup::require_regular_daemon(&missing).unwrap_err();
+    assert!(err.message.contains("missing"), "{}", err.message);
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&missing, &link).unwrap();
+    let err = crate::setup::require_regular_daemon(&link).unwrap_err();
+    assert!(err.message.contains("symbolic link"), "{}", err.message);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn refuses_self_install_treats_var_and_private_var_as_the_same_directory() {
+    let spelled = std::path::Path::new("/var/db/agent-vault/app");
+    let private = std::path::Path::new("/private/var/db/agent-vault/app");
+    assert!(crate::setup::refuses_self_install(spelled, private));
+    assert!(crate::setup::refuses_self_install(private, spelled));
 }

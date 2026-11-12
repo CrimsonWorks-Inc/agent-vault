@@ -236,6 +236,8 @@ fn setup_plan_names_one_program_and_does_not_sudo() {
         "{combined}"
     );
     assert!(combined.contains("No terminal here"), "{combined}");
+    assert!(!combined.contains("[y/N]"), "{combined}");
+    assert!(!combined.contains("sudo will ask"), "{combined}");
     assert!(combined.contains("agent-vault-setup"), "{combined}");
     assert!(!combined.contains("agent-vault-setup.js"), "{combined}");
     let only = av(tmp.path(), &["setup", "--print-only"]);

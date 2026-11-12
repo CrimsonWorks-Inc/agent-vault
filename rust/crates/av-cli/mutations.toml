@@ -37,7 +37,7 @@ test = "resolve_bin_is_absolute"
 [[mutation]]
 name = "the installer will install the app directory over itself"
 file = "src/setup.rs"
-from = "    source == app"
+from = "    source == app || source.starts_with(&app) || app.starts_with(&source)"
 to = "    false"
 test = "self_install_and_systemd"
 
@@ -150,8 +150,8 @@ test = "exec_drops_credentials_and_generated_vars"
 [[mutation]]
 name = "a URL password with an empty user part is not a password"
 file = "src/commands.rs"
-from = "                    if !user.contains(':') && clean(user) && !pass.is_empty() && clean(pass) {"
-to = "                    if !user.is_empty() && !user.contains(':') && clean(user) && !pass.is_empty() && clean(pass) {"
+from = '"://[^/\s:@]*:[^/\s@]+@"'
+to = '"://[^/\s:@]+:[^/\s@]+@"'
 test = "exec_drops_credentials_and_generated_vars"
 
 [[mutation]]
@@ -195,11 +195,13 @@ to = '''        let mut file = OpenOptions::new()
             .open(path)'''
 test = "env_file_refuses_an_existing_path"
 
-# JS `the env file mode is left to the umask` (src/cli/files.js): proving the
-# mode against a hostile umask needs umask(2). This crate is
-# forbid(unsafe_code), and OpenOptions::mode(0o600) under a normal umask is
-# already 0600, so a test cannot tell a missing fchmod from the open mode.
-# The append path, which tightens an existing mode, is the next entry.
+[[mutation]]
+name = "the env file mode is left to the umask"
+file = "src/files.rs"
+from = '''    perms.set_mode(mode);
+    file.set_permissions(perms)?;'''
+to = "    let _ = perms;"
+test = "write_all_mode_restores_0600_under_umask_0377"
 
 [[mutation]]
 name = "force replaces a symlink or someone else's file"
@@ -446,11 +448,26 @@ to = '''    if false {
     }'''
 test = "session_narrow_refuses_uses_before_the_daemon"
 
-# JS `CLI appendLineExclusive opens a planted fifo without O_NONBLOCK and hangs`
-# (src/cli/files.js): the flag is `libc::O_NONBLOCK` on the append open.
-# Removing it makes `open` of a fifo with no reader block, and the mutation
-# runner would sit until its 600s timeout. `append_refuses_a_fifo_without_hanging`
-# covers the refusal while the flag stays.
+[[mutation]]
+name = "CLI appendLineExclusive opens a planted fifo without O_NONBLOCK and hangs"
+file = "src/files.rs"
+from = '''    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if os_eq(&e, libc::ELOOP) || os_eq(&e, libc::ENXIO) {'''
+to = '''    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            if os_eq(&e, libc::ELOOP) || os_eq(&e, libc::ENXIO) {'''
+test = "append_refuses_a_fifo_without_hanging"
 
 [[mutation]]
 name = "CLI appendLineExclusive lets a fifo's ENXIO through as an unclassified error"
@@ -574,3 +591,33 @@ file = "src/watch.rs"
 from = "                || (0x202a..=0x202e).contains(&u)"
 to = "                || false"
 test = "watch_strips_controls_and_bidi"
+
+[[mutation]]
+name = "migrate reports a foreign vault.db as already migrated"
+file = "src/commands.rs"
+from = "    if db.exists() && !migrate::is_completed_migration(&db) {"
+to = "    if false && !migrate::is_completed_migration(&db) {"
+test = "probe_migrate_refuses_a_foreign_vault_db"
+
+[[mutation]]
+name = "exec keeps a password that is not in the first URL"
+file = "src/commands.rs"
+from = "    if url_password_anywhere(value) {"
+to = "    if false && url_password_anywhere(value) {"
+test = "probe_exec_scrub_drops_a_second_url_with_a_password"
+
+[[mutation]]
+name = "the self-install guard compares the spelled path, so a symlinked prefix deletes the app"
+file = "src/setup.rs"
+from = '''    let source = canonical_prefix(source);
+    let app = canonical_prefix(app);'''
+to = '''    let source = source.to_path_buf();
+    let app = app.to_path_buf();'''
+test = "probe_self_install_guard_survives_a_symlinked_prefix"
+
+[[mutation]]
+name = "the systemd unit drops the core dump limit"
+file = "src/setup.rs"
+from = "LimitCORE=0\\n\\"
+to = "LimitCORE=1\\n\\"
+test = "probe_service_units_keep_the_js_hardening"
