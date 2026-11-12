@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 131 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **850 not yet ported**.
+Totals: 1090 JS tests: 148 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **833 not yet ported**.
 
 ## Mutation check
 
@@ -531,27 +531,27 @@ the vault on every call instead of caching an audit handle.
 | gateway-response.test.js | a secret split across the text of two Anthropic-shaped events is cut | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
 | gateway-response.test.js | an ordinary Anthropic-shaped stream passes through untouched | `sse::tests::hardening_a_secret_split_across_events_cuts_the_stream_and_ordinary_events_survive` |
 | gateway-response.test.js | a CRLF-framed stream is released event by event | `sse::tests::crlf_framing_is_split_too` |
-| gateway-response.test.js | a bare-CR stream is released, and a CRLF split across chunks is one line end | not yet ported |
-| gateway-response.test.js | an event that never ends is cut instead of held without bound | not yet ported |
+| gateway-response.test.js | a bare-CR stream is released, and a CRLF split across chunks is one line end | tests/ported_gateway_core.rs::bare_cr_and_split_crlf_are_one_stream_line_ending |
+| gateway-response.test.js | an event that never ends is cut instead of held without bound | tests/ported_gateway_core.rs::unfinished_event_is_cut_before_unbounded_agent_output |
 | gateway-response.test.js | a compressed stream is bounded by what it decodes to, not per chunk | `decode::tests::hardening_streamed_bomb_is_cut_over_the_whole_stream` |
 | gateway-response.test.js | an ordinary compressed stream still streams in full | `tests::gateway::hardening_a_gzip_response_and_a_gzip_event_stream_are_decoded_and_scrubbed` |
-| gateway-response.test.js | a compressed stream whose source errors neither crashes the daemon nor throws at the writer | not yet ported |
-| gateway-response.test.js | an uncompressed stream that errors before anyone reads it does not crash the daemon | not yet ported |
-| gateway-response.test.js | a compressed stream from a real upstream that resets mid-body ends instead of hanging | not yet ported |
-| gateway-response.test.js | a split secret is caught when the event that finishes it is long | not yet ported |
-| gateway-response.test.js | a split secret is caught in plain-text events when the event that finishes it is long | not yet ported |
-| gateway-response.test.js | an ordinary stream of long events passes through untouched, compressed or not | not yet ported |
-| gateway-response.test.js | a stream with more key paths than are tracked is cut, not forgotten | not yet ported |
-| gateway-response.test.js | an ordinary stream over many key paths, below the limit, passes through | not yet ported |
-| gateway-response.test.js | a secret split across events is caught however the keys are spelled, compressed or not | not yet ported |
-| gateway-response.test.js | an ordinary stream with dotted, empty and numeric keys passes through untouched, compressed or not | not yet ported |
-| gateway-response.test.js | a secret split across events is caught however the client regroups them, compressed or not | not yet ported |
-| gateway-response.test.js | a stream with more index fields over one value than can be combined is cut | not yet ported |
-| gateway-response.test.js | ordinary multi-block, multi-choice and NaN-bearing streams pass through untouched, compressed or not | not yet ported |
+| gateway-response.test.js | a compressed stream whose source errors neither crashes the daemon nor throws at the writer | tests/ported_gateway_core.rs::errored_identity_and_truncated_gzip_sources_cut_without_crashing_or_hanging |
+| gateway-response.test.js | an uncompressed stream that errors before anyone reads it does not crash the daemon | tests/ported_gateway_core.rs::errored_identity_and_truncated_gzip_sources_cut_without_crashing_or_hanging |
+| gateway-response.test.js | a compressed stream from a real upstream that resets mid-body ends instead of hanging | tests/ported_gateway_core.rs::real_gzip_upstream_reset_mid_stream_ends_with_cut_instead_of_hanging |
+| gateway-response.test.js | a split secret is caught when the event that finishes it is long | tests/ported_gateway_core.rs::long_finishing_events_do_not_hide_split_secrets_and_ordinary_long_events_survive |
+| gateway-response.test.js | a split secret is caught in plain-text events when the event that finishes it is long | tests/ported_gateway_core.rs::long_finishing_events_do_not_hide_split_secrets_and_ordinary_long_events_survive |
+| gateway-response.test.js | an ordinary stream of long events passes through untouched, compressed or not | tests/ported_gateway_core.rs::long_finishing_events_do_not_hide_split_secrets_and_ordinary_long_events_survive |
+| gateway-response.test.js | a stream with more key paths than are tracked is cut, not forgotten | tests/ported_gateway_core.rs::excess_paths_and_index_fields_cut_stream_and_ordinary_path_counts_survive |
+| gateway-response.test.js | an ordinary stream over many key paths, below the limit, passes through | tests/ported_gateway_core.rs::excess_paths_and_index_fields_cut_stream_and_ordinary_path_counts_survive |
+| gateway-response.test.js | a secret split across events is caught however the keys are spelled, compressed or not | tests/ported_gateway_core.rs::dotted_empty_and_array_key_collisions_cannot_hide_reassembled_secret |
+| gateway-response.test.js | an ordinary stream with dotted, empty and numeric keys passes through untouched, compressed or not | tests/ported_gateway_core.rs::ordinary_dotted_empty_numeric_keys_and_multi_provider_nan_streams_survive |
+| gateway-response.test.js | a secret split across events is caught however the client regroups them, compressed or not | tests/ported_gateway_core.rs::provider_index_regrouping_decoy_indexes_and_nan_beside_text_cannot_hide_secret |
+| gateway-response.test.js | a stream with more index fields over one value than can be combined is cut | tests/ported_gateway_core.rs::excess_paths_and_index_fields_cut_stream_and_ordinary_path_counts_survive |
+| gateway-response.test.js | ordinary multi-block, multi-choice and NaN-bearing streams pass through untouched, compressed or not | tests/ported_gateway_core.rs::ordinary_dotted_empty_numeric_keys_and_multi_provider_nan_streams_survive |
 | gateway-response.test.js | a buffered upstream that resets mid-body is an upstream failure, and the use is not refunded | `tests::mutants::a_buffered_upstream_reset_mid_body_is_an_unreachable_upstream` |
-| gateway-response.test.js | a buffered upstream that completes its body is answered as before | not yet ported |
+| gateway-response.test.js | a buffered upstream that completes its body is answered as before | tests/ported_gateway_core.rs::real_buffered_complete_response_and_delete_body_have_correct_framing |
 | gateway-response.test.js | a request body goes out with a Content-Length that matches it | `tests::gateway::hardening_a_compressed_request_body_and_a_duplicated_content_type_are_refused` |
-| gateway-response.test.js | a DELETE with a body reaches a real upstream framed | not yet ported |
+| gateway-response.test.js | a DELETE with a body reaches a real upstream framed | tests/ported_gateway_core.rs::real_buffered_complete_response_and_delete_body_have_correct_framing |
 | gateway-routing.test.js | /t/https/ to an http credential goes out over https, not in the clear | not yet ported |
 | gateway-routing.test.js | a placeholder with a forged checksum does not keep its session alive | not yet ported |
 | gateway-routing.test.js | a real placeholder as the only carrier still authenticates and keeps the session alive | not yet ported |

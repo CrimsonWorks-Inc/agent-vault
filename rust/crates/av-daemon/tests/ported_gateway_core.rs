@@ -22,6 +22,7 @@ struct RecordingUpstream {
     reply: Mutex<Option<Reply>>,
     failure: Mutex<Option<UpstreamError>>,
     gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    source: Mutex<Option<Body>>,
 }
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ impl Upstream for RecordingUpstream {
         let reply = self.reply.lock().unwrap().clone();
         let failure = self.failure.lock().unwrap().clone();
         let gate = self.gate.lock().unwrap().clone();
+        let source = self.source.lock().unwrap().take();
         Box::pin(async move {
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -49,7 +51,9 @@ impl Upstream for RecordingUpstream {
                 return Ok(UpstreamResponse {
                     status: reply.status,
                     headers: reply.headers,
-                    body: if reply.streaming {
+                    body: if let Some(source) = source {
+                        source
+                    } else if reply.streaming {
                         Body::chunks(vec![Ok(reply.body)])
                     } else {
                         Body::Full(reply.body)
@@ -1685,4 +1689,466 @@ async fn refund_depends_on_whether_upstream_could_have_received_both_placeholder
         assert_eq!(r.body, b"ordinary-traffic-control");
         f.clean(&r).await;
     }
+}
+
+// gateway-response.test.js: stream framing, failure, and reassembly bounds.
+fn anthropic_text(index: u32, text: &str) -> String {
+    format!(
+        "event: content_block_delta\n{}",
+        data(
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}})
+        )
+    )
+}
+fn payloads(out: &str) -> impl Iterator<Item = Value> + '_ {
+    out.lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|s| serde_json::from_str(s).ok())
+}
+fn anthropic_reassemble(out: &str) -> String {
+    payloads(out)
+        .filter_map(|v| v["delta"]["text"].as_str().map(str::to_owned))
+        .collect()
+}
+#[tokio::test]
+async fn bare_cr_and_split_crlf_are_one_stream_line_ending() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    stream_reply(&f, "", false);
+    *f.up.source.lock().unwrap() = Some(Body::chunks(
+        ["data: a\r\r", "data: b\r", "\n\r", "\ndata: c\n\n"]
+            .into_iter()
+            .map(|s| Ok(s.as_bytes().to_vec()))
+            .collect(),
+    ));
+    let r = drain(f.get().await).await;
+    assert_eq!(r.body, b"data: a\n\ndata: b\n\ndata: c\n\n");
+    f.clean(&r).await;
+    ordinary_stream_control(&f, false).await;
+}
+#[tokio::test]
+async fn errored_identity_and_truncated_gzip_sources_cut_without_crashing_or_hanging() {
+    use std::io::Write;
+    for compressed in [false, true] {
+        let f = Fixture::new(&["header:x-key"]).await;
+        stream_reply(&f, "", compressed);
+        let mut chunks = vec![];
+        if compressed {
+            let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            enc.write_all(b"data: one\n\n").unwrap();
+            let bytes = enc.finish().unwrap();
+            chunks.push(Ok(bytes[..15].to_vec()));
+        }
+        chunks.push(Err("test read ECONNRESET".into()));
+        *f.up.source.lock().unwrap() = Some(Body::chunks(chunks));
+        let response = f.get().await;
+        // In the identity case the error already exists before the agent reads.
+        tokio::task::yield_now().await;
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), drain(response))
+            .await
+            .expect("stream hung after source error");
+        assert!(String::from_utf8_lossy(&r.body).contains("AV_UNSCANNABLE"));
+        f.clean(&r).await;
+        ordinary_stream_control(&f, compressed).await;
+    }
+}
+#[tokio::test]
+async fn unfinished_event_is_cut_before_unbounded_agent_output() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    stream_reply(&f, "", false);
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+    let writer = tokio::spawn(async move {
+        if tx.send(Ok(b"data: ".to_vec())).await.is_err() {
+            return;
+        }
+        for _ in 0..18 {
+            if tx.send(Ok(vec![b'a'; 1024 * 1024])).await.is_err() {
+                break;
+            }
+        }
+    });
+    let r = drain(f.get().await).await;
+    writer.await.unwrap();
+    assert!(r.body.len() < 1024 * 1024);
+    assert!(String::from_utf8_lossy(&r.body).contains("AV_UNSCANNABLE"));
+    f.clean(&r).await;
+    ordinary_stream_control(&f, false).await;
+}
+#[tokio::test]
+async fn long_finishing_events_do_not_hide_split_secrets_and_ordinary_long_events_survive() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    for compressed in [false, true] {
+        let events = anthropic_text(0, &SECRET[..14])
+            + &anthropic_text(0, &format!("{}{}", &SECRET[14..], "x".repeat(2000)));
+        assert!(anthropic_reassemble(&events).contains(SECRET));
+        stream_reply(&f, &events, compressed);
+        let r = drain(f.get().await).await;
+        let out = String::from_utf8_lossy(&r.body);
+        assert!(!anthropic_reassemble(&out).contains(SECRET));
+        assert!(out.contains("AV_UNSCANNABLE"));
+        f.clean(&r).await;
+        let events = (0..6)
+            .map(|i| {
+                anthropic_text(
+                    0,
+                    &format!("{}{i}", "lorem ipsum dolor sit amet ".repeat(100)),
+                )
+            })
+            .collect::<String>();
+        stream_reply(&f, &events, compressed);
+        let r = drain(f.get().await).await;
+        assert_eq!(r.body, events.as_bytes());
+        f.clean(&r).await;
+    }
+    let events = format!(
+        "data: {}\n\ndata: {}{}\n\n",
+        &SECRET[..14],
+        &SECRET[14..],
+        "x".repeat(2000)
+    );
+    stream_reply(&f, &events, false);
+    let r = drain(f.get().await).await;
+    let out = String::from_utf8_lossy(&r.body);
+    assert!(!out
+        .replace("\n\ndata: ", "")
+        .replace("data: ", "")
+        .contains(SECRET));
+    assert!(out.contains("AV_UNSCANNABLE"));
+    f.clean(&r).await;
+    ordinary_stream_control(&f, false).await;
+}
+#[tokio::test]
+async fn excess_paths_and_index_fields_cut_stream_and_ordinary_path_counts_survive() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let map = (0..1025)
+        .map(|i| (format!("k{i}"), json!("metadata")))
+        .collect::<serde_json::Map<_, _>>();
+    let events = anthropic_text(0, &SECRET[..14])
+        + &data(Value::Object(map))
+        + &anthropic_text(0, &SECRET[14..]);
+    stream_reply(&f, &events, false);
+    let r = drain(f.get().await).await;
+    let out = String::from_utf8_lossy(&r.body);
+    assert!(out.contains("AV_UNSCANNABLE") && out.contains("JSON key paths"));
+    assert!(!anthropic_reassemble(&out).contains(SECRET));
+    f.clean(&r).await;
+    let events =
+        data(json!({"a_index":1,"b_index":2,"c_index":3,"d_index":4,"e_index":5,"delta":"hello"}));
+    stream_reply(&f, &events, false);
+    let r = drain(f.get().await).await;
+    let out = String::from_utf8_lossy(&r.body);
+    assert!(out.contains("AV_UNSCANNABLE") && out.contains("index fields"));
+    f.clean(&r).await;
+    let mut events = anthropic_text(0, "Hello");
+    for n in 0..5 {
+        let map = (0..10)
+            .map(|i| (format!("m{n}_{i}"), json!("value")))
+            .collect::<serde_json::Map<_, _>>();
+        events += &data(Value::Object(map));
+    }
+    events += &anthropic_text(0, " world");
+    stream_reply(&f, &events, false);
+    let r = drain(f.get().await).await;
+    assert_eq!(r.body, events.as_bytes());
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn dotted_empty_and_array_key_collisions_cannot_hide_reassembled_secret() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (a, b) = SECRET.split_at(14);
+    let cases = vec![
+        (
+            "dotted vs nested",
+            vec![json!({"a":{"b":a},"a.b":"x"}), json!({"a":{"b":b}})],
+            "/a/b",
+            false,
+        ),
+        (
+            "literal dot",
+            vec![json!({".":{".":a},"...":"x"}), json!({".":{".":b}})],
+            "/./.",
+            false,
+        ),
+        (
+            "empty parent",
+            vec![json!({"":{"x":a},"x":"y"}), json!({"":{"x":b}})],
+            "//x",
+            false,
+        ),
+        (
+            "dot suffix",
+            vec![json!({"a":{"":a},"a.":"x"}), json!({"a":{"":b}})],
+            "/a/",
+            false,
+        ),
+        (
+            "array vs object numeric key",
+            vec![json!({"c":[a]}), json!({"c":{"0":"x"}}), json!({"c":[b]})],
+            "/c/0",
+            true,
+        ),
+    ];
+    for (name, values, pointer, array_only) in cases {
+        let events = values.into_iter().map(data).collect::<String>();
+        let gather = |out: &str| {
+            payloads(out)
+                .filter(|v| !array_only || v["c"].is_array())
+                .filter_map(|v| {
+                    v.pointer(pointer)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<String>()
+        };
+        assert!(gather(&events).contains(SECRET));
+        for compressed in [false, true] {
+            stream_reply(&f, &events, compressed);
+            let r = drain(f.get().await).await;
+            let out = String::from_utf8_lossy(&r.body);
+            assert!(!gather(&out).contains(SECRET), "{name}");
+            assert!(out.contains("AV_UNSCANNABLE"), "{name}");
+            f.clean(&r).await;
+            ordinary_stream_control(&f, compressed).await;
+        }
+    }
+}
+#[tokio::test]
+async fn ordinary_dotted_empty_numeric_keys_and_multi_provider_nan_streams_survive() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let mut blocks = String::new();
+    for i in 0..60 {
+        blocks += &format!(
+            "event: content_block_start\n{}",
+            data(
+                json!({"type":"content_block_start","index":i,"content_block":if i%2==1{json!({"type":"tool_use","id":format!("toolu_{i}"),"name":"Read","input":{}})}else{json!({"type":"text","text":""})}})
+            )
+        );
+        blocks += &if i % 2 == 1 {
+            format!(
+                "event: content_block_delta\n{}",
+                data(
+                    json!({"type":"content_block_delta","index":i,"delta":{"type":"input_json_delta","partial_json":format!("{{\"path\":\"/tmp/f{i}\"}}")}})
+                )
+            )
+        } else {
+            anthropic_text(i, &format!("Paragraph {i}. "))
+        };
+        blocks += &format!(
+            "event: content_block_stop\n{}",
+            data(json!({"type":"content_block_stop","index":i}))
+        );
+    }
+    let mut choices = String::new();
+    let mut responses = String::new();
+    for i in 0..40 {
+        choices += &data(
+            json!({"id":"c1","choices":[{"index":0,"delta":{"content":format!("alpha {i} ")}}]}),
+        );
+        choices += &data(
+            json!({"id":"c1","choices":[{"index":1,"delta":{"content":format!("beta {i} ")}}]}),
+        );
+        choices += &data(
+            json!({"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":i%3,"function":{"arguments":format!("{{\"n\":{i}}}")}}]}}]}),
+        );
+        responses += &data(
+            json!({"type":"response.output_text.delta","output_index":i%4,"content_index":i%2,"delta":format!("part {i} "),"item_id":format!("msg_{}",i%4),"sequence_number":i}),
+        );
+    }
+    let nan="data: {\"index\":0,\"delta\":{\"text\":\"Hello\"},\"score\":NaN}\n\ndata: {\"index\":0,\"delta\":{\"text\":\" world\"},\"score\":Infinity}\n\n".to_string();
+    let dotted = data(
+        json!({"choices":[{"index":0,"delta":{"content":"Hello"}}],"x.request.id":"req_1",".":"dot","":"empty"}),
+    ) + &data(
+        json!({"choices":[{"index":0,"delta":{"content":" world"}}],"meta":{"0":"zero","a.b":"c"}}),
+    ) + &data(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}));
+    for (name, events) in [
+        ("blocks", blocks),
+        ("choices", choices),
+        ("responses", responses),
+        ("nan", nan),
+        ("dotted", dotted),
+    ] {
+        for compressed in [false, true] {
+            stream_reply(&f, &events, compressed);
+            let r = drain(f.get().await).await;
+            assert_eq!(r.body, events.as_bytes(), "{name} gzip={compressed}");
+            f.clean(&r).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn provider_index_regrouping_decoy_indexes_and_nan_beside_text_cannot_hide_secret() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (a, b) = SECRET.split_at(14);
+    let cases=vec![
+        ("Anthropic blocks",anthropic_text(0,a)+&anthropic_text(1,"x")+&anthropic_text(0,b),"anthropic"),
+        ("OpenAI choices",data(chat(vec![choice(Some(0),a)]))+&data(chat(vec![choice(Some(1),"x")]))+&data(chat(vec![choice(Some(0),b)])),"chat"),
+        ("OpenAI tools",data(chat(vec![tool(vec![call(Some(0),a)])]))+&data(chat(vec![tool(vec![call(Some(1),"x")])]))+&data(chat(vec![tool(vec![call(Some(0),b)])])),"chat"),
+        ("Responses parts",data(response_text(Some(0),Some(0),a))+&data(response_text(Some(0),Some(1),"x"))+&data(response_text(Some(0),Some(0),b)),"responses"),
+        ("decoy retry index",data(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":a,"retry_index":1}))+&data(json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"delta":"x","retry_index":2}))+&data(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":b,"retry_index":3})),"responses"),
+        ("NaN beside text",format!("data: {{\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{a}\"}},\"p\":NaN}}\n\ndata: {{\"index\":0,\"delta\":{{\"type\":\"x\",\"text\":\"{b}\"}},\"p\":-Infinity}}\n\n"),"nan"),
+    ];
+    for (name, events, client) in cases {
+        let gather = |out: &str| -> Vec<String> {
+            match client {
+                "chat" => reassemble(out, Client::Chat, "0"),
+                "responses" => reassemble(out, Client::Responses, "0"),
+                "nan" => vec![anthropic_reassemble(
+                    &out.replace("NaN", "null").replace("-Infinity", "null"),
+                )],
+                _ => {
+                    let mut groups = std::collections::BTreeMap::<String, String>::new();
+                    for v in payloads(out) {
+                        if let Some(s) = v["delta"]["text"].as_str() {
+                            groups
+                                .entry(v["index"].to_string())
+                                .or_default()
+                                .push_str(s);
+                        }
+                    }
+                    groups.into_values().collect()
+                }
+            }
+        };
+        assert!(
+            gather(&events).iter().any(|s| s.contains(SECRET)),
+            "fixture {name}"
+        );
+        for compressed in [false, true] {
+            stream_reply(&f, &events, compressed);
+            let r = drain(f.get().await).await;
+            let out = String::from_utf8_lossy(&r.body);
+            assert!(out.contains("AV_UNSCANNABLE"), "{name}");
+            assert!(!gather(&out).iter().any(|s| s.contains(SECRET)), "{name}");
+            f.clean(&r).await;
+            ordinary_stream_control(&f, compressed).await;
+        }
+    }
+}
+
+async fn network_pipeline(
+    f: &Fixture,
+    port: u16,
+    method: &str,
+    body: Option<Vec<u8>>,
+) -> (av_daemon::pipeline::Pipeline, GatewayRequest) {
+    let (token,ph)=f.shared.run(move |core| {
+        use av_core::secret::ExposeSecret;
+        use av_store::vault::{NewCredential,CreateSessionOptions,CreateGrantOptions,IssueOptions};
+        let credential=core.vault.add_credential(NewCredential {slug:"network".into(),kind:"http".into(),connector:serde_json::from_value(json!({"host":format!("127.0.0.1:{port}"),"scheme":"http"})).unwrap(),fields:vec![("key".into(),SECRET.to_string().into())],sites:std::collections::BTreeMap::from([("key".into(),vec!["header:x-key".into()])])}).unwrap();
+        let session=core.vault.create_session(CreateSessionOptions::default()).unwrap();
+        let grant=core.vault.create_grant(CreateGrantOptions {session_id:session.session.id,credential_id:credential.id,policy:serde_json::from_value(json!({"hosts":["127.0.0.1"],"methods":["GET","DELETE"],"paths":["/**"],"budget":{"unit":"requests","limit":100},"approval":"auto"})).unwrap(),..Default::default()}).unwrap();
+        let ph=core.vault.issue_placeholder(IssueOptions{grant_id:grant.id,..Default::default()}).unwrap();(session.token.expose_secret().to_string(),ph.placeholder)
+    }).await.unwrap();
+    let pipeline = av_daemon::pipeline::Pipeline::new(f.shared.clone(), PipelineOptions::default());
+    (
+        pipeline,
+        GatewayRequest {
+            method: method.into(),
+            path: "/p/network/x".into(),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), token),
+                ("x-key".into(), ph),
+            ],
+            body,
+            ..Default::default()
+        },
+    )
+}
+async fn read_wire_request(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    let end = loop {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.unwrap();
+        bytes.push(byte[0]);
+        if bytes.ends_with(b"\r\n\r\n") {
+            break bytes.len();
+        }
+        assert!(bytes.len() < 65536);
+    };
+    let headers = String::from_utf8(bytes).unwrap();
+    let length = headers
+        .lines()
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    assert_eq!(end, headers.len());
+    (headers, body)
+}
+#[tokio::test]
+async fn real_buffered_complete_response_and_delete_body_have_correct_framing() {
+    use tokio::io::AsyncWriteExt;
+    for method in ["GET", "DELETE"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let seen = read_wire_request(&mut socket).await;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\npartial").await.unwrap();
+            seen
+        });
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (pipeline, request) = network_pipeline(
+            &f,
+            port,
+            method,
+            if method == "DELETE" {
+                Some(b"hello".to_vec())
+            } else {
+                None
+            },
+        )
+        .await;
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), pipeline.handle(request))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, b"partial");
+        f.clean(&r).await;
+        let (headers, body) = server.await.unwrap();
+        if method == "DELETE" {
+            assert_eq!(body, b"hello");
+            assert!(headers
+                .lines()
+                .any(|l| l.eq_ignore_ascii_case("content-length: 5")));
+        } else {
+            assert!(body.is_empty());
+        }
+    }
+}
+#[tokio::test]
+async fn real_gzip_upstream_reset_mid_stream_ends_with_cut_instead_of_hanging() {
+    use std::io::Write;
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let _ = read_wire_request(&mut socket).await;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"data: one\n\n").unwrap();
+        let bytes = enc.finish().unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n").await.unwrap();
+        socket.write_all(&bytes[..15]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (pipeline, request) = network_pipeline(&f, port, "GET", None).await;
+    let r = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        drain(pipeline.handle(request).await).await
+    })
+    .await
+    .expect("real reset stream hung");
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).contains("AV_UNSCANNABLE"));
+    f.clean(&r).await;
+    server.await.unwrap();
+    ordinary_stream_control(&f, true).await;
 }
