@@ -12237,3 +12237,260 @@ async fn control_gate_grant_placeholder_ceiling_beats_agent_control_and_direct_i
     .await
     .expect("grant placeholder ceiling timed out");
 }
+
+fn control_template_read() -> Value {
+    json!({"cred":"demo","methods":["GET"],"paths":["/repos/**"],"budget":20})
+}
+async fn control_template_save(f: &Fixture, name: &str, spec: Value, gated: bool) -> Value {
+    if gated {
+        credential_gate(f, true).await;
+    }
+    let (s, v) = credential_api(f, "POST", "/v1/templates", json!({"name":name,"spec":spec})).await;
+    assert_eq!(s, 200, "{v}");
+    if gated {
+        credential_gate(f, false).await;
+    }
+    v
+}
+
+#[tokio::test]
+async fn control_templates_validate_before_presence_and_crud_metadata_stays_open() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        credential_presence_refused(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/templates",
+                json!({"name":"read","spec":control_template_read()}),
+            )
+            .await,
+        );
+        assert!(f
+            .shared
+            .run(|c| c.vault.get_template("read").unwrap().is_none())
+            .await
+            .unwrap());
+        for (spec, code, rule) in [
+            (json!({"cred":"missing"}), "AV_NOT_FOUND", None),
+            (
+                json!({"cred":"demo","budget":0}),
+                "AV_POLICY_DENIED",
+                Some("budget"),
+            ),
+            (
+                json!({"cred":"demo","rate":"1/fortnight"}),
+                "AV_POLICY_DENIED",
+                Some("policy_invalid"),
+            ),
+            (
+                json!({"cred":"demo","template":"other"}),
+                "AV_POLICY_DENIED",
+                Some("session_shape"),
+            ),
+            (json!("demo"), "AV_POLICY_DENIED", Some("session_shape")),
+        ] {
+            let (_, v) =
+                credential_api(&f, "POST", "/v1/templates", json!({"name":"x","spec":spec})).await;
+            assert_eq!(v["code"], code);
+            if let Some(rule) = rule {
+                assert_eq!(v["rule"], rule);
+            }
+        }
+        credential_gate(&f, true).await;
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/templates",
+                json!({"name":"Not A Name","spec":control_template_read()})
+            )
+            .await
+            .1["rule"],
+            "template_name"
+        );
+        let t = control_template_save(&f, "read", control_template_read(), true).await;
+        assert_eq!(t["version"], 1);
+        is_hex_digest(&t["hash"]);
+        assert_eq!(t["elevated"], json!([]));
+        assert!(t["lint"].is_array());
+        let (_, list) = credential_api(&f, "GET", "/v1/templates", json!({})).await;
+        let row = &list[0];
+        assert_eq!(row["name"], "read");
+        assert_eq!(row["hash"], t["hash"]);
+        assert_eq!(row["creds"], json!(["demo"]));
+        assert!(row["summary"]
+            .as_str()
+            .unwrap()
+            .contains("session for demo · GET"));
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/templates?name=read", json!({}))
+                .await
+                .1["spec"],
+            control_template_read()
+        );
+        assert_eq!(
+            credential_api(&f, "GET", "/v1/templates?name=nope", json!({}))
+                .await
+                .0,
+            404
+        );
+        assert_eq!(
+            credential_api(&f, "DELETE", "/v1/templates?name=read", json!({}))
+                .await
+                .1,
+            json!({"ok":true,"removed":true})
+        );
+        assert_eq!(
+            credential_api(&f, "DELETE", "/v1/templates?name=read", json!({}))
+                .await
+                .1["removed"],
+            false
+        );
+        let writer = control_template_save(
+            &f,
+            "writer",
+            json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"}),
+            true,
+        )
+        .await;
+        assert_eq!(writer["elevated"], json!(["approval_auto_writes"]));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("template CRUD timed out");
+}
+
+#[tokio::test]
+async fn control_templates_hash_binding_detects_edits_and_overrides_only_reduce_the_saved_authority(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;let t=control_template_save(&f,"read",control_template_read(),false).await;
+        assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"template":"read"})).await.1["rule"],"template_changed");let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"template":"read","template_hash":t["hash"],"label":"from template"})).await;assert_eq!(s,200,"{v}");assert_eq!(v["label"],"from template");assert_eq!(control_session_policy(&f,v["grant_id"].as_str().unwrap()).await["methods"],json!(["GET"]));let created=audit_records(&f).await.into_iter().find(|r|r["kind"]=="session.created"&&r["session_id"]==v["session_id"]).unwrap();assert_eq!(created["template"],"read");assert_eq!(created["template_version"],1);
+        let mut edited=control_template_read();edited["methods"]=json!(["GET","POST"]);let current=control_template_save(&f,"read",edited,false).await;let(s,stale)=credential_api(&f,"POST","/v1/sessions",json!({"template":"read","template_hash":t["hash"]})).await;assert_eq!(s,403,"{stale}");assert_eq!(stale["rule"],"template_changed");assert!(stale["detail"].as_str().unwrap().contains("the template changed after you looked at it; review it again"));let(s,fresh)=credential_api(&f,"POST","/v1/sessions",json!({"template":"read","template_hash":current["hash"]})).await;assert_eq!(s,200,"{fresh}");let sid=fresh["session_id"].as_str().unwrap().to_owned();f.shared.run(move|c|assert_eq!(c.vault.session(&sid).unwrap().unwrap().template_version,Some(2))).await.unwrap();
+        let mut spec=control_template_read();spec["approval"]=json!("on-write");spec["ttl_hours"]=json!(2);let t=control_template_save(&f,"read",spec,false).await;let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"template":"read","template_hash":t["hash"],"methods":["GET","DELETE"],"paths":["/repos/x/**","/admin/**"],"budget":500,"approval":"auto","ttl_hours":24})).await;assert_eq!(s,200,"{v}");let p=control_session_policy(&f,v["grant_id"].as_str().unwrap()).await;assert_eq!(p["methods"],json!(["GET"]));assert_eq!(p["paths"],json!(["/repos/x/**"]));assert_eq!(p["budget"]["limit"],20);assert_eq!(p["approval"],"on-write");assert!(av_daemon::util::parse_iso_ms(v["expires_at"].as_str().unwrap()).unwrap()<=av_daemon::util::now_ms()+7201000);assert_eq!(control_session_request(&f,&v,"demo","GET","/repos/x/ordinary").await.status,200);assert_ne!(control_session_request(&f,&v,"demo","DELETE","/repos/x/ordinary").await.status,200);
+        let(s,n)=credential_api(&f,"POST","/v1/sessions",json!({"template":"read","template_hash":t["hash"],"budget":3,"approval":"each"})).await;assert_eq!(s,200,"{n}");let p=control_session_policy(&f,n["grant_id"].as_str().unwrap()).await;assert_eq!(p["budget"]["limit"],3);assert_eq!(p["approval"],"each");
+        for extra in [json!({"hosts":["evil.example"]}),json!({"remote":true}),json!({"rate":"1/s"}),json!({"grants":[]})] {let mut b=extra;b["template"]=json!("read");b["template_hash"]=t["hash"].clone();let(s,v)=credential_api(&f,"POST","/v1/sessions",b).await;assert_eq!(s,403,"{v}");assert!([json!("template_override"),json!("session_shape")].contains(&v["rule"]));}credential_finish(&f).await;
+    }).await.expect("template hash and narrowing timed out");
+}
+
+#[test]
+fn control_templates_infinite_only_becomes_finite_and_budget_without_a_ceiling_requires_default() {
+    use av_daemon::session_requests::resolve_template;
+    let infinite = json!({"cred":"demo","infinite":true});
+    let finite = resolve_template(&infinite, &json!({"ttl_hours":1}), None).unwrap();
+    assert!(finite.get("infinite").is_none());
+    assert_eq!(finite["ttl_hours"], 1);
+    assert!(
+        resolve_template(&infinite, &json!({"infinite":false}), None)
+            .unwrap()
+            .get("infinite")
+            .is_none()
+    );
+    for (body, rule) in [
+        (json!({"infinite":true}), "template_override"),
+        (json!({"infinite":"false"}), "ttl"),
+        (json!({"budget":10}), "policy_invalid"),
+    ] {
+        assert_eq!(
+            resolve_template(&json!({"cred":"demo"}), &body, None)
+                .unwrap_err()
+                .extra
+                .rule
+                .as_deref(),
+            Some(rule)
+        );
+    }
+    let default = |_: &Value| Some(500);
+    assert_eq!(
+        resolve_template(
+            &json!({"cred":"demo"}),
+            &json!({"budget":10}),
+            Some(&default)
+        )
+        .unwrap()["budget"],
+        10
+    );
+    assert_eq!(
+        resolve_template(
+            &json!({"cred":"demo"}),
+            &json!({"budget":900}),
+            Some(&default)
+        )
+        .unwrap()["budget"],
+        500
+    );
+}
+
+#[tokio::test]
+async fn control_templates_elevated_creation_requires_fresh_proof_and_read_only_narrowing_uses_window(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let t=control_template_save(&f,"writer",json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"}),true).await;credential_gate(&f,true).await;
+        let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"template":"writer","template_hash":t["hash"]})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"fresh_presence");let(s,v)=credential_api(&f,"POST","/v1/sessions",json!({"template":"writer","template_hash":t["hash"],"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(credential_api(&f,"POST","/v1/sessions",json!({"template":"writer","template_hash":t["hash"],"methods":["GET"]})).await.0,200);assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("elevated template gate timed out");
+}
+
+#[tokio::test]
+async fn control_templates_proposal_snapshots_survive_edits_and_owner_fields_cannot_be_supplied_by_agent(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;control_template_save(&f,"read",control_template_read(),true).await;
+        let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"template":"read","reason":"reading repos","budget":5})).await;assert_eq!(s,200,"{asked}");assert!(asked["summary"].as_str().unwrap().starts_with("template read v1 · session for demo · GET"));assert_eq!(asked["proposal"]["budget"],5);assert_eq!(asked["proposal"]["template_version"],1);
+        let mut changed=control_template_read();changed["methods"]=json!(["GET","POST","DELETE"]);changed["budget"]=json!(999);control_template_save(&f,"read",changed,true).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":true})).await;assert_eq!(s,200,"{v}");let p=control_session_policy(&f,v["session"]["grant_id"].as_str().unwrap()).await;assert_eq!(p["methods"],json!(["GET"]));assert_eq!(p["budget"]["limit"],5);let sid=v["session"]["session_id"].as_str().unwrap().to_owned();f.shared.run(move|c|{let s=c.vault.session(&sid).unwrap().unwrap();assert_eq!(s.template.as_deref(),Some("read"));assert_eq!(s.template_version,Some(1));}).await.unwrap();
+        assert_eq!(credential_api(&f,"POST","/v1/credentials",json!({"slug":"other","kind":"http","host":"api.example.test","value":"OTHER-SECRET-0099887766","sites":["header:x-key"]})).await.0,200);control_template_save(&f,"both",json!({"grants":[{"cred":"demo"},{"cred":"other"}]}),true).await;
+        assert_eq!(credential_api(&f,"POST","/v1/session-requests",json!({"template":"both","reason":"x"})).await.1["rule"],"template_multi_cred");assert_eq!(credential_api(&f,"POST","/v1/session-requests",json!({"template":"nope","reason":"x"})).await.0,404);let t=control_template_save(&f,"writer",json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"}),true).await;
+        assert_eq!(credential_api(&f,"POST","/v1/session-requests",json!({"template":"writer","approval":"each","reason":"x"})).await.1["rule"],"owner_only_field");assert_eq!(credential_api(&f,"POST","/v1/session-requests",json!({"template":"writer","cred":"other","reason":"x"})).await.1["rule"],"session_shape");let(s,asked)=credential_api(&f,"POST","/v1/session-requests",json!({"template":"writer","reason":"x"})).await;assert_eq!(s,200,"{asked}");assert_eq!(asked["proposal"]["approval"],"auto");assert_eq!(asked["proposal"]["template_hash"],t["hash"]);credential_gate(&f,true).await;assert_eq!(credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":true})).await.1["rule"],"fresh_presence");let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":asked["id"],"granted":true,"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(control_session_policy(&f,v["session"]["grant_id"].as_str().unwrap()).await["approval"],"auto");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("template request snapshots timed out");
+}
+
+#[tokio::test]
+async fn control_templates_mcp_lists_only_single_credential_templates_and_can_propose_by_name() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;control_template_save(&f,"read",control_template_read(),false).await;assert_eq!(credential_api(&f,"POST","/v1/credentials",json!({"slug":"other","kind":"http","host":"api.example.test","value":"OTHER-SECRET-0099887766","sites":["header:x-key"]})).await.0,200);control_template_save(&f,"both",json!({"grants":[{"cred":"demo"},{"cred":"other"}]}),false).await;
+        let(_,v)=control_mcp_call(&f,"vault_status",json!({}),false).await;assert_eq!(v["templates"].as_array().unwrap().iter().map(|t|t["name"].as_str().unwrap()).collect::<Vec<_>>(),vec!["read"]);assert_eq!(v["templates"][0]["cred"],"demo");let(error,v)=control_mcp_call(&f,"vault_request_session",json!({"template":"read","reason":"x","grant_ttl_minutes":15}),false).await;assert!(!error,"{v}");assert_eq!(v["state"],"pending");assert!(v["asked_for"].as_str().unwrap().starts_with("template read v1"));let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;assert_eq!(pending.as_array().unwrap().iter().find(|r|r["id"]==v["request_id"]).unwrap()["proposal"]["grant_ttl_minutes"],15);assert_eq!(control_mcp_call(&f,"vault_request_session",json!({"template":"nope","reason":"x"}),false).await.1["code"],"AV_NOT_FOUND");assert_eq!(control_mcp_call(&f,"vault_request_session",json!({"template":"both","reason":"x"}),false).await.1["rule"],"template_multi_cred");assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("MCP template proposal timed out");
+}
+
+#[tokio::test]
+async fn control_templates_signed_consent_binds_exact_template_hash_and_fresh_matching_signature_works(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let w = WidenFixture::new().await;
+        let t =
+            w.f.shared
+                .run(|c| {
+                    c.vault
+                        .save_template("read", &control_template_read())
+                        .unwrap()
+                })
+                .await
+                .unwrap();
+        let body = json!({"template":"read","template_hash":t.hash});
+        let signature = w.proof("session.create", &body).await;
+        let edited =
+            w.f.shared
+                .run(|c| {
+                    let mut spec = control_template_read();
+                    spec["methods"] = json!(["GET", "DELETE"]);
+                    c.vault.save_template("read", &spec).unwrap()
+                })
+                .await
+                .unwrap();
+        let mut swapped =
+            json!({"template":"read","template_hash":edited.hash,"presence":signature});
+        let (s, v) = w.ctl("POST", "/v1/sessions", swapped.clone()).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["code"], "AV_PRESENCE_REQUIRED");
+        swapped.as_object_mut().unwrap().remove("presence");
+        let proof = w.proof("session.create", &swapped).await;
+        swapped["presence"] = proof;
+        let (s, v) = w.ctl("POST", "/v1/sessions", swapped).await;
+        assert_eq!(s, 200, "{v}");
+        w.stop().await;
+    })
+    .await
+    .expect("signed template hash timed out");
+}

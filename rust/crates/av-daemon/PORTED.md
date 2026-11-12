@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 530 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **566 not yet ported**.
+Totals: 1207 JS tests: 540 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **556 not yet ported**.
 
 ## Mutation check
 
@@ -185,16 +185,16 @@ the vault on every call instead of caching an audit handle.
 | control-api-sessions.test.js | the detail says when history is incomplete, and is refused while locked (F19) | `ported_gateway_core::control_sessions_detail_reports_missing_creation_history_and_both_reads_refuse_locked_vault` |
 | control-api-sessions.test.js | the access report covers every session and credential, and refuses a since it cannot read (F19) | `ported_gateway_core::control_sessions_detail_and_access_reports_expose_metadata_without_queries_secrets_or_capabilities` |
 | control-api-sessions.test.js | a typo in a narrowing is refused, by the parser and by the daemon, never dropped as null | `ported_gateway_core::control_sessions_override_typos_never_settle_pending_requests_and_parsed_budget_is_applied` |
-| control-api-templates.test.js | saving a template needs a human, and is checked like a create first | not yet ported |
-| control-api-templates.test.js | templates are listed with summaries, read in full by name, and deleted without presence | not yet ported |
-| control-api-templates.test.js | creating from a template binds its hash: an edit after looking is refused, the current hash works | not yet ported |
-| control-api-templates.test.js | a signature over one template hash cannot be spent on another | not yet ported |
-| control-api-templates.test.js | overrides only narrow: DELETE on a GET template still makes a GET-only session | not yet ported |
-| control-api-templates.test.js | an infinite template can only be made finite, never the other way round | not yet ported |
-| control-api-templates.test.js | an elevated template needs a fresh proof to create, and the window is not one | not yet ported |
-| control-api-templates.test.js | a session request from a template is a snapshot: an edit afterwards does not reach the session | not yet ported |
-| control-api-templates.test.js | a template request names one credential, and a template's owner fields come only from the template | not yet ported |
-| control-api-templates.test.js | MCP asks by template name, with no credential named, and lists single-credential templates | not yet ported |
+| control-api-templates.test.js | saving a template needs a human, and is checked like a create first | `ported_gateway_core::control_templates_validate_before_presence_and_crud_metadata_stays_open` |
+| control-api-templates.test.js | templates are listed with summaries, read in full by name, and deleted without presence | `ported_gateway_core::control_templates_validate_before_presence_and_crud_metadata_stays_open` |
+| control-api-templates.test.js | creating from a template binds its hash: an edit after looking is refused, the current hash works | `ported_gateway_core::control_templates_hash_binding_detects_edits_and_overrides_only_reduce_the_saved_authority` |
+| control-api-templates.test.js | a signature over one template hash cannot be spent on another | `ported_gateway_core::control_templates_signed_consent_binds_exact_template_hash_and_fresh_matching_signature_works` |
+| control-api-templates.test.js | overrides only narrow: DELETE on a GET template still makes a GET-only session | `ported_gateway_core::control_templates_hash_binding_detects_edits_and_overrides_only_reduce_the_saved_authority` |
+| control-api-templates.test.js | an infinite template can only be made finite, never the other way round | `ported_gateway_core::control_templates_infinite_only_becomes_finite_and_budget_without_a_ceiling_requires_default` |
+| control-api-templates.test.js | an elevated template needs a fresh proof to create, and the window is not one | `ported_gateway_core::control_templates_elevated_creation_requires_fresh_proof_and_read_only_narrowing_uses_window` |
+| control-api-templates.test.js | a session request from a template is a snapshot: an edit afterwards does not reach the session | `ported_gateway_core::control_templates_proposal_snapshots_survive_edits_and_owner_fields_cannot_be_supplied_by_agent` |
+| control-api-templates.test.js | a template request names one credential, and a template's owner fields come only from the template | `ported_gateway_core::control_templates_proposal_snapshots_survive_edits_and_owner_fields_cannot_be_supplied_by_agent` |
+| control-api-templates.test.js | MCP asks by template name, with no credential named, and lists single-credential templates | `ported_gateway_core::control_templates_mcp_lists_only_single_credential_templates_and_can_propose_by_name` |
 | control-cli-fifo.test.js | appendLineExclusive refuses a fifo with no reader at once and writes nothing | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | control-cli-fifo.test.js | appendLineExclusive refuses a fifo with a reader and the reader gets no bytes | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | control-cli-fifo.test.js | writeFileExclusive refuses a fifo at once, with and without force | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
