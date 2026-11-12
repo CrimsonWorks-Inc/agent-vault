@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 471 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **626 not yet ported**.
+Totals: 1207 JS tests: 485 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **612 not yet ported**.
 
 ## Mutation check
 
@@ -133,20 +133,20 @@ the vault on every call instead of caching an audit handle.
 | control-api-containment.test.js | tripwires: on is open, everything else needs a human (C20) | not yet ported |
 | control-api-containment.test.js | a tripwire turned on through the route revokes a replaying session before its answer returns | not yet ported |
 | control-api-containment.test.js | with tripwires off, the same replay revokes nothing | not yet ported |
-| control-api-credentials.test.js | rotating needs a human; once rotated, the next request carries the new value | not yet ported |
-| control-api-credentials.test.js | rotating denies the held requests a human approved against the old key | not yet ported |
-| control-api-credentials.test.js | a rotation it cannot read is refused, and changes nothing | not yet ported |
-| control-api-credentials.test.js | adding and removing a scrub pattern need a human; the sample is the human's own text | not yet ported |
-| control-api-credentials.test.js | a pattern that could backtrack, match everything, or carry a secret is refused, before the gate | not yet ported |
-| control-api-credentials.test.js | setting an expiry needs a human, and is metadata the gateway does not enforce | not yet ported |
-| control-api-credentials.test.js | a credential can be added with its expiry; a bad one leaves nothing stored | not yet ported |
-| control-api-credentials.test.js | setting and removing pins need a human, and only for a host the credential reaches | not yet ported |
-| control-api-credentials.test.js | cred test is open, hits only the profile's probe, and never returns the body | not yet ported |
-| control-api-credentials.test.js | a second test within a minute is throttled through the route; another credential is not (C20) | not yet ported |
-| control-api-credentials.test.js | quarantine is open, stops every use at once, and denies held requests | not yet ported |
-| control-api-credentials.test.js | an agent cannot ask for a session on a quarantined credential, over either door (C12 note) | not yet ported |
-| control-api-credentials.test.js | releasing a quarantine needs a human, and a still-live session works again | not yet ported |
-| control-api-credentials.test.js | a secret across the 200-character cut of a quarantine reason leaves none of itself behind | not yet ported |
+| control-api-credentials.test.js | rotating needs a human; once rotated, the next request carries the new value | `ported_gateway_core::control_credentials_rotation_requires_presence_and_new_value_reaches_only_declared_site` |
+| control-api-credentials.test.js | rotating denies the held requests a human approved against the old key | `ported_gateway_core::control_credentials_rotation_denies_held_approvals_and_invalid_shapes_change_nothing` |
+| control-api-credentials.test.js | a rotation it cannot read is refused, and changes nothing | `ported_gateway_core::control_credentials_rotation_denies_held_approvals_and_invalid_shapes_change_nothing` |
+| control-api-credentials.test.js | adding and removing a scrub pattern need a human; the sample is the human's own text | `ported_gateway_core::control_credentials_scrub_presence_sample_and_pre_gate_refusals_preserve_ordinary_traffic` |
+| control-api-credentials.test.js | a pattern that could backtrack, match everything, or carry a secret is refused, before the gate | `ported_gateway_core::control_credentials_scrub_presence_sample_and_pre_gate_refusals_preserve_ordinary_traffic` |
+| control-api-credentials.test.js | setting an expiry needs a human, and is metadata the gateway does not enforce | `ported_gateway_core::control_credentials_expiry_is_gated_metadata_and_bad_addition_stores_nothing` |
+| control-api-credentials.test.js | a credential can be added with its expiry; a bad one leaves nothing stored | `ported_gateway_core::control_credentials_expiry_is_gated_metadata_and_bad_addition_stores_nothing` |
+| control-api-credentials.test.js | setting and removing pins need a human, and only for a host the credential reaches | `ported_gateway_core::control_credentials_pin_writes_require_presence_and_match_the_credentials_host` |
+| control-api-credentials.test.js | cred test is open, hits only the profile's probe, and never returns the body | `ported_gateway_core::control_credentials_probe_is_open_fixed_read_only_bodyless_and_honors_pins` |
+| control-api-credentials.test.js | a second test within a minute is throttled through the route; another credential is not (C20) | `ported_gateway_core::control_credentials_probe_throttle_is_per_credential_and_all_reports_each_failure` |
+| control-api-credentials.test.js | quarantine is open, stops every use at once, and denies held requests | `ported_gateway_core::control_credentials_quarantine_is_open_denies_holds_and_every_session_use` |
+| control-api-credentials.test.js | an agent cannot ask for a session on a quarantined credential, over either door (C12 note) | `ported_gateway_core::control_credentials_quarantine_refuses_session_requests_on_both_doors_until_release` |
+| control-api-credentials.test.js | releasing a quarantine needs a human, and a still-live session works again | `ported_gateway_core::control_credentials_release_requires_presence_and_reason_scrubbing_precedes_200_character_cut` |
+| control-api-credentials.test.js | a secret across the 200-character cut of a quarantine reason leaves none of itself behind | `ported_gateway_core::control_credentials_release_requires_presence_and_reason_scrubbing_precedes_200_character_cut` |
 | control-api-mcp.test.js | vault_describe_access says what the session may do, with no token, placeholder, fingerprint or size, and records nothing | not yet ported |
 | control-api-mcp.test.js | vault_preflight changes nothing: no approval, no use, no budget, no touch, and no upstream connection | not yet ported |
 | control-api-mcp.test.js | vault_preflight refuses what it cannot read, an unknown credential, and an eleventh call in a second | not yet ported |

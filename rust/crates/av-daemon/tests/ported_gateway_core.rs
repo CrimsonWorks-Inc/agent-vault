@@ -9896,3 +9896,663 @@ fn invariants_generated_real_daemon_sequences_preserve_all_five_claims_for_2400_
             .unwrap_or_else(|e| panic!("invariants seed {seed}: {e}"));
     }
 }
+
+// control-api-credentials.test.js: all routes use a disposable vault and the
+// public control socket. The real presence window is opened/closed via API.
+const CONTROL_ROTATED: &str = "ghp_PORTEDROTATEDVALUE99887766554433221100aa";
+async fn credential_api(f: &Fixture, method: &str, path: &str, body: Value) -> (u16, Value) {
+    let r = control_method(&f._dir.path().join("control.sock"), method, path, body).await;
+    let text = serde_json::to_string(&r.1).unwrap();
+    for secret in [&f.secret, CONTROL_ROTATED] {
+        assert!(
+            !text.contains(secret),
+            "control response revealed credential"
+        );
+    }
+    r
+}
+async fn credential_gate(f: &Fixture, open: bool) {
+    if open {
+        let (s, v) = credential_api(
+            f,
+            "POST",
+            "/v1/presence/window",
+            json!({"passphrase":WIDEN_PASS}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["granted"], true);
+    } else {
+        assert_eq!(
+            credential_api(f, "POST", "/v1/lock", json!({})).await.0,
+            200
+        );
+        assert_eq!(
+            credential_api(f, "POST", "/v1/unlock", json!({"passphrase":WIDEN_PASS}))
+                .await
+                .0,
+            200
+        );
+    }
+}
+async fn credential_factor(f: &Fixture) {
+    assert_eq!(
+        credential_api(
+            f,
+            "POST",
+            "/v1/passphrase",
+            json!({"passphrase":WIDEN_PASS})
+        )
+        .await
+        .0,
+        200
+    );
+    credential_gate(f, false).await;
+}
+fn credential_presence_refused(r: (u16, Value)) {
+    assert_eq!(r.0, 401, "{}", r.1);
+    assert_eq!(r.1["code"], "AV_PRESENCE_REQUIRED");
+}
+async fn credential_tool(f: &Fixture, name: &str, args: Value, session: bool) -> Value {
+    let record = if session {
+        let t = f.token.clone();
+        f.shared
+            .run(move |c| c.vault.session_by_token(&t).unwrap())
+            .await
+            .unwrap()
+    } else {
+        None
+    };
+    let result=f.daemon.mcp().handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}}),record,session.then(||f.token.clone()),None).await.unwrap();
+    let text = result["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains(&f.secret));
+    serde_json::from_str(text).unwrap()
+}
+async fn credential_finish(f: &Fixture) {
+    let text = serde_json::to_string(&audit_records(f).await).unwrap();
+    for secret in [&f.secret, CONTROL_ROTATED] {
+        assert!(!text.contains(secret), "credential leaked to audit");
+    }
+    f.daemon.stop().await;
+}
+
+#[tokio::test]
+async fn control_credentials_rotation_requires_presence_and_new_value_reaches_only_declared_site() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:authorization:Bearer"]).await;
+        credential_factor(&f).await;
+        let rotate = json!({"slug":"demo","value":CONTROL_ROTATED,"retire_hours":2});
+        credential_presence_refused(
+            credential_api(&f, "POST", "/v1/credentials/rotate", rotate.clone()).await,
+        );
+        let ordinary = f
+            .send(
+                "GET",
+                "/x",
+                vec![("authorization".into(), format!("Bearer {}", f.ph))],
+                None,
+            )
+            .await;
+        assert_eq!(ordinary.status, 200);
+        assert_eq!(
+            f.up.hits
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .unwrap()
+                .1,
+            format!("Bearer {}", f.secret)
+        );
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/credentials/rotate", rotate).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["rotated"]["version"], 2);
+        assert_eq!(v["rotated"]["mode"], "keep");
+        assert_eq!(v["invalidated_approvals"], 0);
+        f.reply(200, "text/plain", format!("ordinary {CONTROL_ROTATED}"));
+        let response = f
+            .send(
+                "GET",
+                "/x",
+                vec![("authorization".into(), format!("Bearer {}", f.ph))],
+                None,
+            )
+            .await;
+        assert_eq!(response.status, 200);
+        assert!(!String::from_utf8_lossy(&response.body).contains(CONTROL_ROTATED));
+        assert_eq!(
+            f.up.hits
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .unwrap()
+                .1,
+            format!("Bearer {CONTROL_ROTATED}")
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("rotation timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_rotation_denies_held_approvals_and_invalid_shapes_change_nothing() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        for (body, rule) in [
+            (
+                json!({"slug":"demo","value":CONTROL_ROTATED,"retire_hours":169}),
+                "retire_window",
+            ),
+            (
+                json!({"slug":"demo","value":CONTROL_ROTATED,"retire_hours":1.5}),
+                "retire_window",
+            ),
+            (
+                json!({"slug":"demo","value":CONTROL_ROTATED,"retire_hours":"2"}),
+                "retire_window",
+            ),
+            (
+                json!({"slug":"demo","value":CONTROL_ROTATED,"mode":"later"}),
+                "rotate_mode",
+            ),
+            (json!({"slug":"demo","value":SECRET}), "rotate_same_value"),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/credentials/rotate", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["rule"], rule);
+        }
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/rotate",
+                json!({"slug":"missing","value":CONTROL_ROTATED})
+            )
+            .await
+            .0,
+            404
+        );
+        assert_eq!(f.get().await.status, 200);
+        assert_eq!(
+            f.up.hits
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("x-key"))
+                .unwrap()
+                .1,
+            SECRET
+        );
+        credential_finish(&f).await;
+        let f = approval_fixture("each", &["header:x-key"]).await;
+        assert_eq!(f.get().await.status, 202);
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/credentials/rotate",
+            json!({"slug":"demo","value":CONTROL_ROTATED}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["invalidated_approvals"], 1);
+        assert!(f.daemon.pipeline().pending_approvals().await.is_empty());
+        assert!(audit_records(&f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "approval.denied" && r["reason"] == "credential_rotated"));
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("rotation refusals timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_scrub_presence_sample_and_pre_gate_refusals_preserve_ordinary_traffic()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+        let pattern="acme_[A-Za-z0-9]{20,40}";
+        credential_presence_refused(credential_api(&f,"POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":pattern})).await);
+        let(_,list)=credential_api(&f,"GET","/v1/credentials",json!({})).await;assert_eq!(list[0]["scrub_patterns"].as_array().unwrap().len(),0);
+        for pattern in [json!("(a+)+b"),json!(".*"),json!("a"),json!("[a-z]+"),json!(42)] {let(s,v)=credential_api(&f,"POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":pattern})).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"scrub_pattern");}
+        credential_gate(&f,true).await;
+        let(_,v)=credential_api(&f,"POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":SECRET})).await;assert_eq!(v["rule"],"scrub_pattern");
+        let(_,v)=credential_api(&f,"POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":"acme_[a-z]{4}","sample":5})).await;assert_eq!(v["rule"],"policy_invalid");
+        let(s,v)=credential_api(&f,"POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":pattern,"sample":"before acme_abcdefghijklmnopqrstuvwx after, and acme_short"})).await;assert_eq!(s,200,"{v}");let id=v["id"].as_str().unwrap();assert!(id.starts_with("sp_"));assert_eq!(v["sample"]["matches"],1);assert_eq!(v["sample"]["redacted"],"before [[av:derived]] after, and acme_short");
+        let(_,list)=credential_api(&f,"GET","/v1/credentials",json!({})).await;assert_eq!(list[0]["scrub_patterns"][0]["source"],pattern);
+        let rows=audit_records(&f).await;let added=rows.iter().find(|r|r["kind"]=="cred.scrub_pattern_added").unwrap();assert_eq!(added["length"],pattern.len());assert!(!added.to_string().contains(pattern));
+        credential_gate(&f,false).await;let path=format!("/v1/credentials/scrub?slug=demo&id={id}");credential_presence_refused(credential_api(&f,"DELETE",&path,json!({})).await);credential_gate(&f,true).await;
+        assert_eq!(credential_api(&f,"DELETE",&path,json!({})).await.1,json!({"ok":true,"removed":true}));assert_eq!(credential_api(&f,"DELETE",&path,json!({})).await.1,json!({"ok":true,"removed":false}));assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("scrub routes timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_expiry_is_gated_metadata_and_bad_addition_stores_nothing() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+        credential_presence_refused(credential_api(&f,"POST","/v1/credentials/expiry",json!({"slug":"demo","expires_at":"2020-01-01"})).await);credential_gate(&f,true).await;
+        for body in [json!({"slug":"demo","expires_at":"not a date"}),json!({"slug":"demo","expires_at":20200101}),json!({"slug":"demo"})] {assert_eq!(credential_api(&f,"POST","/v1/credentials/expiry",body).await.1["rule"],"expires_at");}
+        let(s,v)=credential_api(&f,"POST","/v1/credentials/expiry",json!({"slug":"demo","expires_at":"2020-01-01T00:00:00Z"})).await;assert_eq!(s,200,"{v}");assert_eq!(v["expiry_warning"],"expired");assert_eq!(f.get().await.status,200);
+        assert_eq!(credential_tool(&f,"vault_list_creds",json!({}),true).await[0]["expiry_warning"],"expired");assert_eq!(credential_api(&f,"GET","/v1/status",json!({})).await.1["credentials_expiring"],1);
+        assert!(credential_api(&f,"POST","/v1/credentials/expiry",json!({"slug":"demo","expires_at":null})).await.1["expires_at"].is_null());
+        let mut body=json!({"slug":"later","kind":"http","host":"api.example.test","value":"LATER-SECRET-00112233","expires_at":"soonish"});assert_eq!(credential_api(&f,"POST","/v1/credentials",body.clone()).await.1["rule"],"expires_at");
+        let(_,list)=credential_api(&f,"GET","/v1/credentials",json!({})).await;assert!(!list.as_array().unwrap().iter().any(|c|c["slug"]=="later"));body["expires_at"]=json!("2099-01-01");let(s,v)=credential_api(&f,"POST","/v1/credentials",body).await;assert_eq!(s,200,"{v}");assert_eq!(v["expires_at"],"2099-01-01T00:00:00.000Z");assert!(!v.to_string().contains("LATER-SECRET-00112233"));credential_finish(&f).await;
+    }).await.expect("expiry routes timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_pin_writes_require_presence_and_match_the_credentials_host() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let pin = format!("sha256/{}=", "A".repeat(43));
+        let request = json!({"slug":"demo","host":"api.example.test","pins":[pin]});
+        credential_presence_refused(
+            credential_api(&f, "POST", "/v1/credentials/pins", request.clone()).await,
+        );
+        credential_gate(&f, true).await;
+        let mut elsewhere = request.clone();
+        elsewhere["host"] = json!("evil.example");
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/credentials/pins", elsewhere)
+                .await
+                .1["rule"],
+            "pin_host"
+        );
+        for pins in [json!(["sha256/short"]), json!("sha256/x"), Value::Null] {
+            let mut bad = request.clone();
+            bad["pins"] = pins;
+            assert_eq!(
+                credential_api(&f, "POST", "/v1/credentials/pins", bad)
+                    .await
+                    .1["rule"],
+                "pin_format"
+            );
+        }
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/credentials/pins", request)
+                .await
+                .1,
+            json!({"slug":"demo","host":"api.example.test","pins":1})
+        );
+        credential_gate(&f, false).await;
+        let path = "/v1/credentials/pins?slug=demo&host=api.example.test";
+        credential_presence_refused(credential_api(&f, "DELETE", path, json!({})).await);
+        credential_gate(&f, true).await;
+        assert_eq!(
+            credential_api(&f, "DELETE", path, json!({})).await.1,
+            json!({"ok":true,"remaining":0})
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("pins routes timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_quarantine_is_open_denies_holds_and_every_session_use() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = approval_fixture("each", &["header:x-key"]).await;
+        credential_factor(&f).await;
+        assert_eq!(f.get().await.status, 202);
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/credentials/quarantine",
+            json!({"slug":"demo","reason":format!("because {} and {}",f.ph,SECRET)}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["denied_approvals"], 1);
+        assert_eq!(v["quarantine"]["by"], "control");
+        assert!(!v.to_string().contains(&f.ph));
+        let rows = audit_records(&f).await;
+        let record = rows
+            .iter()
+            .find(|r| r["kind"] == "cred.quarantined")
+            .unwrap();
+        assert!(!record.to_string().contains(&f.ph));
+        assert!(record["reason_untrusted"]
+            .as_str()
+            .unwrap()
+            .contains("«placeholder»"));
+        let r = f.get().await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&r.body).unwrap()["code"],
+            "AV_QUARANTINED"
+        );
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        for (name, args) in [
+            (
+                "vault_http",
+                json!({"cred":"demo","method":"GET","path":"/x","reason":"x"}),
+            ),
+            ("vault_get_placeholder", json!({"cred":"demo","reason":"x"})),
+        ] {
+            assert_eq!(
+                credential_tool(&f, name, args, true).await["code"],
+                "AV_QUARANTINED"
+            );
+        }
+        credential_gate(&f, true).await;
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"}))
+                .await
+                .1["code"],
+            "AV_QUARANTINED"
+        );
+        assert_eq!(
+            credential_tool(&f, "vault_list_creds", json!({}), true).await[0]["quarantined"],
+            true
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"demo"})
+            )
+            .await
+            .0,
+            200
+        );
+        let ordinary = || {
+            f.send(
+                "GET",
+                "/after-release",
+                vec![("x-key".into(), f.ph.clone())],
+                None,
+            )
+        };
+        let held = ordinary().await;
+        let id = held_id(&held);
+        f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+        assert_eq!(ordinary().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("quarantine routes timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_quarantine_refuses_session_requests_on_both_doors_until_release() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo"})
+            )
+            .await
+            .0,
+            200
+        );
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/session-requests",
+            json!({"cred":"demo","reason":"please"}),
+        )
+        .await;
+        assert_eq!(s, 403, "{v}");
+        assert_eq!(v["code"], "AV_QUARANTINED");
+        assert_eq!(v["rule"], "quarantine");
+        assert_eq!(
+            credential_tool(
+                &f,
+                "vault_request_session",
+                json!({"cred":"demo","reason":"please"}),
+                false
+            )
+            .await["code"],
+            "AV_QUARANTINED"
+        );
+        let (s, v) = credential_api(&f, "GET", "/v1/session-requests", json!({})).await;
+        assert_eq!(s, 200, "{v}");
+        assert!(v.as_array().unwrap().is_empty());
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"demo"})
+            )
+            .await
+            .0,
+            200
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/session-requests",
+                json!({"cred":"demo","reason":"please"})
+            )
+            .await
+            .0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("quarantined requests timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_release_requires_presence_and_reason_scrubbing_precedes_200_character_cut(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        assert_eq!(f.get().await.status, 200);
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo","reason":format!("{}{}","x".repeat(190),SECRET)})
+            )
+            .await
+            .0,
+            200
+        );
+        let rows = audit_records(&f).await;
+        let reason = rows
+            .iter()
+            .find(|r| r["kind"] == "cred.quarantined")
+            .unwrap()["reason_untrusted"]
+            .as_str()
+            .unwrap();
+        assert!(reason.chars().count() <= 200);
+        assert!(!reason.contains(&SECRET[..10]));
+        credential_presence_refused(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"demo"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&f.get().await.body).unwrap()["code"],
+            "AV_QUARANTINED"
+        );
+        credential_gate(&f, true).await;
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"demo"})
+            )
+            .await
+            .1,
+            json!({"slug":"demo","released":true})
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/release",
+                json!({"slug":"missing"})
+            )
+            .await
+            .0,
+            404
+        );
+        assert_eq!(f.get().await.status, 200);
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo","reason":7})
+            )
+            .await
+            .1["rule"],
+            "policy_invalid"
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo","reason":"rotating after a leak"})
+            )
+            .await
+            .0,
+            200
+        );
+        let rows = audit_records(&f).await;
+        assert_eq!(
+            rows.iter()
+                .rev()
+                .find(|r| r["kind"] == "cred.quarantined")
+                .unwrap()["reason_untrusted"],
+            "rotating after a leak"
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("release and bounded reason timed out");
+}
+
+struct CredentialProbeFixture {
+    f: Fixture,
+    hits: Arc<Mutex<Vec<String>>>,
+    peer: tokio::task::JoinHandle<()>,
+}
+impl CredentialProbeFixture {
+    async fn new() -> Self {
+        use tokio::io::AsyncWriteExt;
+        let mut f = Fixture::new(&["header:x-key"]).await;
+        f.daemon.stop().await;
+        // Replace the injected recording transport with the production HTTP
+        // transport, so the pin-over-plaintext refusal is tested on real wire.
+        f.daemon = Daemon::new(
+            f.shared.clone(),
+            DaemonOptions {
+                port: 0,
+                socket_path: Some(f._dir.path().join("control.sock")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        f.daemon.start().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let recorded = hits.clone();
+        let peer = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (h, body) = read_wire_request(&mut socket).await;
+                assert!(body.is_empty());
+                recorded.lock().unwrap().push(h.clone());
+                let reply = json!({"login":"octo","echoed":h}).to_string();
+                let head=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-oauth-scopes: repo, read:org\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",reply.len());
+                socket.write_all(head.as_bytes()).await.unwrap();
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        for slug in ["gh", "gh2"] {
+            let(s,v)=credential_api(&f,"POST","/v1/credentials",json!({"slug":slug,"kind":"github","host":format!("127.0.0.1:{port}"),"scheme":"http","value":format!("ghp_PROBE{}SECRET0011223344556677",slug.to_uppercase()),"sites":["header:authorization:Bearer"]})).await;
+            assert_eq!(s, 200, "{v}");
+            assert!(!v.to_string().contains("PROBEGH"));
+        }
+        Self { f, hits, peer }
+    }
+    async fn request(&self, body: Value) -> (u16, Value) {
+        let r = credential_api(&self.f, "POST", "/v1/credentials/test", body).await;
+        assert!(!r.1.to_string().contains("PROBEGH"));
+        r
+    }
+    async fn finish(self) {
+        assert!(!serde_json::to_string(&audit_records(&self.f).await)
+            .unwrap()
+            .contains("PROBEGH"));
+        credential_finish(&self.f).await;
+        self.peer.abort();
+        let _ = self.peer.await;
+    }
+}
+
+#[tokio::test]
+async fn control_credentials_probe_is_open_fixed_read_only_bodyless_and_honors_pins() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let p=CredentialProbeFixture::new().await;credential_factor(&p.f).await;
+        let(s,v)=p.request(json!({"slug":"gh","path":"/repos/x/y/keys","method":"DELETE","body":"x"})).await;assert_eq!(s,200,"{v}");assert_eq!(v["ok"],true);assert_eq!(v["status"],"ok");assert_eq!(v["http_status"],200);
+        let hits=p.hits.lock().unwrap().clone();assert_eq!(hits.len(),1);assert_eq!(hits[0].lines().next().unwrap(),"GET /user HTTP/1.1");assert!(hits[0].to_ascii_lowercase().contains("authorization: bearer ghp_probeghsecret0011223344556677"));
+        let rows=audit_records(&p.f).await;let record=rows.iter().find(|r|r["kind"]=="cred.tested").unwrap();assert_eq!(record["credential_slug"],"gh");assert_eq!(record["http_status"],200);
+        credential_gate(&p.f,true).await;assert_eq!(credential_api(&p.f,"POST","/v1/credentials/pins",json!({"slug":"gh2","host":"127.0.0.1","pins":[format!("sha256/{}=","B".repeat(43))]})).await.0,200);
+        let(s,v)=p.request(json!({"slug":"gh2"})).await;assert_eq!(s,502,"{v}");assert_eq!(v["code"],"AV_PIN_MISMATCH");assert_eq!(v["rule"],"pin_plaintext");assert_eq!(p.hits.lock().unwrap().len(),1);
+        assert_eq!(p.request(json!({"slug":"demo"})).await.1["rule"],"no_probe");assert_eq!(p.request(json!({"slug":"missing"})).await.0,404);assert_eq!(p.request(json!({"all":"yes"})).await.1["rule"],"policy_invalid");p.finish().await;
+    }).await.expect("real probe routes timed out");
+}
+
+#[tokio::test]
+async fn control_credentials_probe_throttle_is_per_credential_and_all_reports_each_failure() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let p = CredentialProbeFixture::new().await;
+        assert_eq!(p.request(json!({"slug":"gh"})).await.0, 200);
+        let (s, v) = p.request(json!({"slug":"gh"})).await;
+        assert_eq!(s, 429, "{v}");
+        assert_eq!(v["code"], "AV_QUOTA_EXCEEDED");
+        assert_eq!(v["rule"], "probe_throttle");
+        assert!(v["retry_after"].as_u64().unwrap() > 0);
+        assert_eq!(p.hits.lock().unwrap().len(), 1);
+        assert_eq!(p.request(json!({"slug":"gh2"})).await.0, 200);
+        assert_eq!(p.hits.lock().unwrap().len(), 2);
+        let (s, v) = p.request(json!({"all":true})).await;
+        assert_eq!(s, 200, "{v}");
+        let results = v["results"].as_array().unwrap();
+        let gh = results.iter().find(|r| r["slug"] == "gh").unwrap();
+        assert_eq!(gh["error"], "AV_QUOTA_EXCEEDED");
+        assert!(gh["retry_after"].as_u64().unwrap() > 0);
+        assert_eq!(
+            results.iter().find(|r| r["slug"] == "demo").unwrap()["error"],
+            "AV_NOT_FOUND"
+        );
+        assert_eq!(p.hits.lock().unwrap().len(), 2);
+        p.finish().await;
+    })
+    .await
+    .expect("probe throttling timed out");
+}
