@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 577 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **519 not yet ported**.
+Totals: 1207 JS tests: 583 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **513 not yet ported**.
 
 ## Mutation check
 
@@ -41,8 +41,8 @@ the vault on every call instead of caching an audit handle.
 
 | JS file | JS test | Rust |
 |---|---|---|
-| approval-verdict.test.js | only true or false decides on the approvals route, and anything else decides nothing | not yet ported |
-| approval-verdict.test.js | a signature cannot carry a verdict that is not a boolean either | not yet ported |
+| approval-verdict.test.js | only true or false decides on the approvals route, and anything else decides nothing | `ported_gateway_core::approval_verdict_nonbooleans_never_settle_even_with_window_or_matching_signature` |
+| approval-verdict.test.js | a signature cannot carry a verdict that is not a boolean either | `ported_gateway_core::approval_verdict_nonbooleans_never_settle_even_with_window_or_matching_signature` |
 | approval-verdict.test.js | the web UI refuses a verdict that is not a boolean, before it spends a signature | not yet ported |
 | approval-verdict.test.js | the web UI no longer turns a string "false" into an approved session | not yet ported |
 | approval-verdict.test.js | the shared decision builder will not coerce a verdict | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -1131,11 +1131,11 @@ the vault on every call instead of caching an audit handle.
 | session-requests.test.js | an agent cannot answer its own request | `tests::mutants::hardening_every_answer_a_human_gives_needs_the_human` |
 | session-requests.test.js | a human approving gets a working session, collected exactly once | `tests::control::session_requests_create_nothing_until_a_human_answers_and_only_the_asker_collects` |
 | session-requests.test.js | what the human edits is what gets created | `tests::mutants::an_approved_session_request_is_made_from_what_was_approved` |
-| session-requests.test.js | approval supplies a human, never permission | not yet ported |
-| session-requests.test.js | a denial creates nothing and cannot be reversed by asking again | not yet ported |
-| session-requests.test.js | an agent cannot flood out a request a human is reading | not yet ported |
+| session-requests.test.js | approval supplies a human, never permission | `ported_gateway_core::session_requests_presence_never_authorizes_new_hosts_denial_cannot_flip_and_flood_cannot_evict` |
+| session-requests.test.js | a denial creates nothing and cannot be reversed by asking again | `ported_gateway_core::session_requests_presence_never_authorizes_new_hosts_denial_cannot_flip_and_flood_cannot_evict` |
+| session-requests.test.js | an agent cannot flood out a request a human is reading | `ported_gateway_core::session_requests_presence_never_authorizes_new_hosts_denial_cannot_flip_and_flood_cannot_evict` |
 | session-requests.test.js | every request and answer is in the audit log | `tests::control::session_requests_create_nothing_until_a_human_answers_and_only_the_asker_collects` |
-| session-requests.test.js | a request is audited on a vault that started locked, which is every real one | not yet ported |
+| session-requests.test.js | a request is audited on a vault that started locked, which is every real one | `ported_gateway_core::session_requests_started_locked_reacquires_audit_on_every_unlock` |
 | session-requests.test.js | approving records the session where a running agent will find it | not yet ported |
 | session-requests.test.js | a denial records nothing | not yet ported |
 | session-requests.test.js | a pending request survives a daemon restart | `tests::guards::pending_session_requests_survive_a_restart_and_approved_tokens_never_touch_disk` |
