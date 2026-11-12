@@ -1528,6 +1528,14 @@ impl Core {
         ));
     }
 
+    /// Make every remembered denial `ms` older (tests).
+    #[cfg(test)]
+    pub(crate) fn pl_age_denials(&mut self, ms: i64) {
+        for (_, d) in self.pl.denials.iter_mut() {
+            d.at -= ms;
+        }
+    }
+
     /// `Pipeline.explainDenial(requestId, sessionId)`.
     pub fn pl_explain_denial(&self, request_id: &str, session_id: Option<&str>) -> Option<Value> {
         let (_, d) = self.pl.denials.iter().find(|(id, _)| id == request_id)?;
