@@ -117,13 +117,13 @@ pub struct RequestHashInput<'a> {
 /// headers}` object. Ports `requestHash` in `src/core/canon.js`.
 pub fn request_hash(input: &RequestHashInput<'_>) -> String {
     let mut credentials = input.credentials.to_vec();
-    credentials.sort();
+    credentials.sort_by_key(|s| s.encode_utf16().collect::<Vec<_>>());
     let mut headers: Vec<_> = input
         .headers
         .iter()
         .map(|(n, v)| (n.to_lowercase(), v.clone()))
         .collect();
-    headers.sort_by(|a, b| a.0.cmp(&b.0));
+    headers.sort_by_key(|(name, _)| name.encode_utf16().collect::<Vec<_>>());
     hash(&serde_json::json!({"method":input.method.unwrap_or("").to_uppercase(),"host":input.host.unwrap_or("").to_lowercase(),"path":input.path.filter(|s| !s.is_empty()).unwrap_or("/"),"query":input.query.unwrap_or(""),"body":input.body_sha256.unwrap_or(""),"credentials":credentials,"headers":headers})).expect("request has canonical values")
 }
 
