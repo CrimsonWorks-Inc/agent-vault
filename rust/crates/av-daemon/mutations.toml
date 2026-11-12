@@ -411,7 +411,8 @@ to = '''if session.is_none() { return send(401, Some(json!({"code": "AV_SESSION_
 
 # ---------------------------------------------------- src/daemon/session-requests.js
 
-# NOT APPLICABLE: 'the session-request store caches a null audit handle'.
+# NOT APPLICABLE:
+#   'the session-request store caches a null audit handle'
 # The Rust store holds no audit handle: every record goes through
 # Core::audit_opt, which asks the vault for its audit log at the time of the
 # write, so there is nothing to cache.
@@ -660,8 +661,9 @@ file = "src/connectors/pinning.rs"
 from = 'Some((not_before, _)) if now < not_before => Some(pin_error('
 to = 'Some((not_before, _)) if false && now < not_before => Some(pin_error('
 
-# NOT APPLICABLE: 'an issuer satisfies a pin without having signed the
-# certificate below it'. The JS links issuers itself (checkIssued, a name
+# NOT APPLICABLE:
+#   'an issuer satisfies a pin without having signed the certificate below it'
+# The JS links issuers itself (checkIssued, a name
 # match, then verify, the signature). Here the verified path comes from
 # webpki's path builder, which accepts an issuer only by verifying its
 # signature over the child; there is no name-only link to fall back to.
@@ -679,8 +681,9 @@ to = '''    if true || pins
         .iter()
         .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))'''
 
-# NOT APPLICABLE: "pinnedRequest gives Node the caller's headers, not the
-# copy it checked". The JS guards against a caller's header object whose
+# NOT APPLICABLE:
+#   "pinnedRequest gives Node the caller's headers, not the copy it checked"
+# The JS guards against a caller's header object whose
 # getters answer differently on a second read. Here the headers are a
 # Vec<(String, String)>: read once into `sent`, checked, and sent from that
 # same Vec; a second read of plain data cannot differ.
@@ -711,10 +714,12 @@ file = "src/connectors/probe.rs"
 from = '&av_core::pins::url_identity(&u),'
 to = '&{ let _ = &u; declared.clone() },'
 
-# NOT APPLICABLE: 'the probe takes its path from the request input', 'the
-# probe takes its method from the request input', 'the probe sends a body
-# supplied by the caller', 'the probe throttle reads a time supplied on the
-# call'. run_probe(shared, slug, upstream) takes no path, method, body or
+# NOT APPLICABLE:
+#   'the probe takes its path from the request input'
+#   'the probe takes its method from the request input'
+#   'the probe sends a body supplied by the caller'
+#   'the probe throttle reads a time supplied on the call'
+# run_probe(shared, slug, upstream) takes no path, method, body or
 # clock from its caller: the request is built from the profile alone and the
 # throttle reads the process clock. The type has no field a caller could set
 # (the route test asserts a supplied path and method are ignored).
@@ -825,7 +830,8 @@ to = '''        let plain = l.trim().parse::<f64>().is_ok_and(|n| n >= 1.0);'''
 
 # ---------------------------------------------------- src/daemon/mcp.js
 
-# NOT APPLICABLE: 'a tool that spends capability runs without a session'.
+# NOT APPLICABLE:
+#   'a tool that spends capability runs without a session'
 # The JS mutant deletes the `if (!session)` line and lets vault_http run
 # with `session` undefined. Here vault_http(args, s: SessionRecord, ...)
 # takes the session by value: the handler unwraps Option<SessionRecord> or
@@ -976,8 +982,9 @@ to = '''        let Ok(parsed) = serde_json::from_str::<Value>(s) else {
             return Ok(Value::Null);
         };'''
 
-# NOT APPLICABLE: "parseOverrides reaches outside its own body, so the
-# page's injected copy throws (C21, C23)". The JS protection is that the
+# NOT APPLICABLE:
+#   "parseOverrides reaches outside its own body, so the page's injected copy throws (C21, C23)"
+# The JS protection is that the
 # parser's source is self-contained, because the approvals page carries a
 # copy of it (web/src). The page stays JavaScript and keeps its own copy;
 # the Rust parse_overrides is never serialised into a page.
@@ -1442,13 +1449,16 @@ to = '''                    if false && core.vault.presence_key().v()?.is_some()
                         return Ok(Some(json!({
                             "granted": false, "ungated": false,'''
 
-# NOT APPLICABLE: 'an uncaught error ends the daemon'. The JS installs
-# guardProcess, a process-wide uncaughtException/unhandledRejection handler.
-# Here every connection and request runs in its own tokio task; a panic ends
-# that task only, and there is no process-wide handler to remove. The same
-# holds for 'daemon.uncaught keeps the fault message' (no such record exists)
-# and 'a fault is recorded by its message (C28)' (error_class has no caller
-# that records a fault).
+# NOT APPLICABLE:
+#   'an uncaught error ends the daemon'
+#   'daemon.uncaught keeps the fault message (C28)'
+#   'a fault is recorded by its message (C28)'
+# The JS installs guardProcess, a process-wide uncaughtException and
+# unhandledRejection handler that records daemon.uncaught with the fault's
+# class. Here every connection and request runs in its own tokio task; a
+# panic ends that task only, so there is no process-wide handler to remove,
+# no daemon.uncaught record, and error_class has no caller that files a
+# fault.
 
 [[mutation]]
 name = 'the shared window can change presence factors'
