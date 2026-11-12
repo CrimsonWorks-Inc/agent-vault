@@ -122,3 +122,46 @@ fn r1_owner_options_share_parser_and_direct_request_store_never_accepts_them() {
     assert_eq!(record.state, "pending");
     assert!(!secret.is_empty());
 }
+
+#[test]
+fn c25_shape_and_narrowing_names_are_allowlisted_field_names_and_small_list_counts() {
+    use av_daemon::session_requests::{narrowed_of, shape_of};
+    let p = json!({"cred":"demo","methods":["GET"],"paths":["/a","/b","/c"],"routes":[{},{}],"budget":12345678,"payload":{"json":{}},"reason":"x","template_hash":"h"});
+    assert_eq!(
+        shape_of(&p),
+        json!({"fields":["cred","methods","paths","budget","routes","payload"],"counts":{"methods":1,"paths":3,"routes":2}})
+    );
+    assert_eq!(
+        shape_of(&json!({"ghp/PLUS+slash/001122334455667788":1,"cred":"demo"})),
+        json!({"fields":["cred"],"counts":{}})
+    );
+    assert_eq!(shape_of(&Value::Null), json!({"fields":[],"counts":{}}));
+    let mut edited = p.clone();
+    edited["paths"] = json!(["/a"]);
+    edited["approval"] = json!("each");
+    assert_eq!(narrowed_of(&p, &edited), vec!["paths", "approval"]);
+    assert!(narrowed_of(&p, &p).is_empty());
+}
+#[test]
+fn c26_first_use_write_elevation_has_read_only_controls() {
+    for shape in [
+        json!({"cred":"demo","methods":["POST"],"approval":"first-use"}),
+        json!({"cred":"demo","methods":["get","patch"],"approval":"first-use"}),
+        json!({"cred":"demo","routes":[{"methods":["DELETE"],"paths":["/x"]}],"approval":"first-use"}),
+        json!({"grants":[{"cred":"a"},{"cred":"b","methods":["POST"],"approval":"first-use"}]}),
+    ] {
+        assert_eq!(
+            elevation_of(&shape),
+            vec!["approval_auto_writes"],
+            "{shape}"
+        );
+    }
+    for shape in [
+        json!({"cred":"demo","approval":"first-use"}),
+        json!({"cred":"demo","methods":["POST"],"approval":"on-write"}),
+        json!({"cred":"demo","methods":["GET","HEAD","OPTIONS"],"approval":"first-use"}),
+        json!({"cred":"demo","approval":"first-use","routes":[{"methods":["GET"],"paths":["/x"]}]}),
+    ] {
+        assert!(elevation_of(&shape).is_empty(), "{shape}");
+    }
+}

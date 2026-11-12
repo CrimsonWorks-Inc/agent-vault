@@ -6204,57 +6204,106 @@ async fn stored_decimal_budget_counts_twice_and_noncanonical_values_are_refused(
 
 #[tokio::test]
 async fn stored_session_and_grant_expiry_predicates_agree_in_preflight_and_execution() {
-    let iso = |offset| {
-        (time::OffsetDateTime::now_utc() + time::Duration::seconds(offset))
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap()
-    };
-    let future = iso(3600);
-    let past = iso(-60);
-    for approval in ["auto", "each"] {
-        for (name, expiry, infinite, expected) in [
-            ("finite", json!(future), false, "allow"),
-            ("expired", json!(past), false, "AV_SESSION_EXPIRED"),
-            ("infinite", Value::Null, true, "allow"),
-            (
-                "legacy absent expiry and false infinite",
-                Value::Null,
-                false,
-                "AV_SESSION_EXPIRED",
-            ),
-            ("invalid", json!("not a date"), false, "AV_SESSION_EXPIRED"),
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        let iso = |offset| {
+            (time::OffsetDateTime::now_utc() + time::Duration::seconds(offset))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let future = iso(3600);
+        let past = iso(-60);
+        for approval in ["auto", "each"] {
+            for (name, expiry, infinite, expected) in [
+                ("finite", json!(future), false, "allow"),
+                ("expired", json!(past), false, "AV_SESSION_EXPIRED"),
+                ("infinite", Value::Null, true, "allow"),
+                (
+                    "legacy absent expiry and false infinite",
+                    Value::Null,
+                    false,
+                    "AV_SESSION_EXPIRED",
+                ),
+                ("invalid", json!("not a date"), false, "AV_SESSION_EXPIRED"),
+            ] {
+                let mut policy = seeded_policy();
+                policy["approval"] = json!(approval);
+                let f = SeededGateway::new(
+                    json!({"expires_at":expiry,"infinite":infinite}),
+                    json!({"policy":policy}),
+                );
+                let before = f.snapshot().await;
+                let pre = f.pipeline.preflight(f.request.clone(), false).await;
+                if expected == "allow" {
+                    assert_eq!(
+                        pre.unwrap()["would"],
+                        if approval == "each" { "hold" } else { "allow" },
+                        "{name}"
+                    );
+                } else {
+                    assert_eq!(pre.unwrap_err().code.as_str(), expected, "{name}");
+                }
+                assert_eq!(
+                    before,
+                    f.snapshot().await,
+                    "{name}: preflight mutated persistent state"
+                );
+                assert!(f.pipeline.pending_approvals().await.is_empty());
+                let real = f.pipeline.handle(f.request.clone()).await;
+                if expected == "allow" {
+                    assert_eq!(
+                        real.status,
+                        if approval == "each" { 202 } else { 200 },
+                        "{name}: {:?}",
+                        real.error
+                    );
+                } else {
+                    assert_eq!(
+                        real.error.as_ref().unwrap().code.as_str(),
+                        expected,
+                        "{name}"
+                    );
+                }
+                assert_eq!(
+                    f.upstream.hits.lock().unwrap().len(),
+                    usize::from(expected == "allow" && approval == "auto")
+                );
+                f.clean(&real).await;
+            }
+        }
+        for (name, expiry, expected) in [
+            ("no ttl", Value::Null, "allow"),
+            ("future", json!(future), "allow"),
+            ("past", json!(past), "AV_GRANT_EXPIRED"),
+            ("garbage", json!("nope"), "AV_GRANT_EXPIRED"),
         ] {
-            let mut policy = seeded_policy();
-            policy["approval"] = json!(approval);
             let f = SeededGateway::new(
-                json!({"expires_at":expiry,"infinite":infinite}),
-                json!({"policy":policy}),
+                json!({"infinite":true,"expires_at":null}),
+                json!({"expires_at":expiry}),
             );
             let before = f.snapshot().await;
-            let pre = f.pipeline.preflight(f.request.clone(), false).await;
+            let pre = f
+                .pipeline
+                .preflight(f.request.clone(), false)
+                .await
+                .unwrap();
             if expected == "allow" {
+                assert_eq!(pre["would"], "allow", "{name}");
+            } else {
+                assert_eq!(pre["would"], "deny", "{name}");
                 assert_eq!(
-                    pre.unwrap()["would"],
-                    if approval == "each" { "hold" } else { "allow" },
+                    pre["checks"].as_array().unwrap().last().unwrap()["code"],
+                    expected,
                     "{name}"
                 );
-            } else {
-                assert_eq!(pre.unwrap_err().code.as_str(), expected, "{name}");
             }
             assert_eq!(
                 before,
                 f.snapshot().await,
-                "{name}: preflight mutated persistent state"
+                "{name}: preflight changed state"
             );
-            assert!(f.pipeline.pending_approvals().await.is_empty());
             let real = f.pipeline.handle(f.request.clone()).await;
             if expected == "allow" {
-                assert_eq!(
-                    real.status,
-                    if approval == "each" { 202 } else { 200 },
-                    "{name}: {:?}",
-                    real.error
-                );
+                assert_eq!(real.status, 200, "{name}");
             } else {
                 assert_eq!(
                     real.error.as_ref().unwrap().code.as_str(),
@@ -6262,56 +6311,11 @@ async fn stored_session_and_grant_expiry_predicates_agree_in_preflight_and_execu
                     "{name}"
                 );
             }
-            assert_eq!(
-                f.upstream.hits.lock().unwrap().len(),
-                usize::from(expected == "allow" && approval == "auto")
-            );
             f.clean(&real).await;
         }
-    }
-    for (name, expiry, expected) in [
-        ("no ttl", Value::Null, "allow"),
-        ("future", json!(future), "allow"),
-        ("past", json!(past), "AV_GRANT_EXPIRED"),
-        ("garbage", json!("nope"), "AV_GRANT_EXPIRED"),
-    ] {
-        let f = SeededGateway::new(
-            json!({"infinite":true,"expires_at":null}),
-            json!({"expires_at":expiry}),
-        );
-        let before = f.snapshot().await;
-        let pre = f
-            .pipeline
-            .preflight(f.request.clone(), false)
-            .await
-            .unwrap();
-        if expected == "allow" {
-            assert_eq!(pre["would"], "allow", "{name}");
-        } else {
-            assert_eq!(pre["would"], "deny", "{name}");
-            assert_eq!(
-                pre["checks"].as_array().unwrap().last().unwrap()["code"],
-                expected,
-                "{name}"
-            );
-        }
-        assert_eq!(
-            before,
-            f.snapshot().await,
-            "{name}: preflight changed state"
-        );
-        let real = f.pipeline.handle(f.request.clone()).await;
-        if expected == "allow" {
-            assert_eq!(real.status, 200, "{name}");
-        } else {
-            assert_eq!(
-                real.error.as_ref().unwrap().code.as_str(),
-                expected,
-                "{name}"
-            );
-        }
-        f.clean(&real).await;
-    }
+    })
+    .await
+    .expect("integration seam timed out");
 }
 
 #[tokio::test]
@@ -6415,65 +6419,73 @@ async fn redirect_guards_include_malformed_stored_maximum_and_per_request_approv
 
 #[tokio::test]
 async fn pin_problem_is_safe_and_refunded_and_real_profile_health_receives_metadata() {
-    let f = Fixture::configured_kind(
-        &["header:x-key"],
-        SECRET,
-        None,
-        json!({}),
-        "github",
-        "api.github.com",
-    )
-    .await;
-    *f.up.failure.lock().unwrap() = Some(UpstreamError {
-        code: "AV_PIN_MISMATCH".into(),
-        message: SECRET.into(),
-        presented: vec!["sha256/presented".into()],
-        ..Default::default()
-    });
-    let response = f.get().await;
-    assert_eq!(
-        response.error.as_ref().unwrap().code.as_str(),
-        "AV_PIN_MISMATCH"
-    );
-    assert_eq!(response.error.as_ref().unwrap().extra.refunded, Some(true));
-    assert_eq!(grant_counters(&f).await, (0, vec![0]));
-    f.clean(&response).await;
-    *f.up.failure.lock().unwrap() = None;
-    *f.up.reply.lock().unwrap() = Some(Reply {
-        streaming: false,
-        status: 401,
-        headers: vec![
-            ("content-type".into(), "application/json".into()),
-            (
-                "github-authentication-token-expiration".into(),
-                "2027-01-01T00:00:00.000Z".into(),
-            ),
-        ],
-        body: b"{}".to_vec(),
-    });
-    let executed = f.get().await;
-    assert_eq!(executed.status, 401);
-    f.shared
-        .run(|core| {
-            let health = serde_json::to_value(
-                core.vault
-                    .find_credential("demo")
-                    .unwrap()
-                    .unwrap()
-                    .health
-                    .unwrap(),
-            )
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        let f = Fixture::configured_kind(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({}),
+            "github",
+            "api.github.com",
+        )
+        .await;
+        *f.up.failure.lock().unwrap() = Some(UpstreamError {
+            code: "AV_PIN_MISMATCH".into(),
+            message: SECRET.into(),
+            presented: vec!["sha256/presented".into()],
+            ..Default::default()
+        });
+        let response = f.get().await;
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_PIN_MISMATCH"
+        );
+        assert_eq!(response.error.as_ref().unwrap().extra.refunded, Some(true));
+        assert_eq!(grant_counters(&f).await, (0, vec![0]));
+        f.clean(&response).await;
+        *f.up.failure.lock().unwrap() = None;
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: false,
+            status: 401,
+            headers: vec![
+                ("content-type".into(), "application/json".into()),
+                (
+                    "github-authentication-token-expiration".into(),
+                    "2027-01-31T00:00:00.000Z".into(),
+                ),
+            ],
+            body: b"{}".to_vec(),
+        });
+        let executed = f.get().await;
+        assert_eq!(executed.status, 401);
+        f.shared
+            .run(|core| {
+                let health = serde_json::to_value(
+                    core.vault
+                        .find_credential("demo")
+                        .unwrap()
+                        .unwrap()
+                        .health
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(health["status"], "unauthorized");
+                assert_eq!(health["http_status"], 401);
+                assert_eq!(health["source"], "response");
+                let public = serde_json::to_value(core.vault.list_credentials().unwrap()).unwrap();
+                assert_eq!(public[0]["health"]["status"], "unauthorized");
+                assert_eq!(health["observed_expires_at"], "2027-01-31T00:00:00.000Z");
+            })
+            .await
             .unwrap();
-            assert_eq!(health["status"], "unauthorized");
-            assert_eq!(health["observed_expires_at"], "2027-01-01T00:00:00.000Z");
-        })
-        .await
-        .unwrap();
-    f.clean(&executed).await;
-    f.reply(200, "application/json", "{}".into());
-    let ordinary = f.get().await;
-    assert_eq!(ordinary.status, 200);
-    f.clean(&ordinary).await;
+        f.clean(&executed).await;
+        f.reply(200, "application/json", "{}".into());
+        let ordinary = f.get().await;
+        assert_eq!(ordinary.status, 200);
+        f.clean(&ordinary).await;
+    })
+    .await
+    .expect("integration seam timed out");
 }
 
 #[tokio::test]
@@ -6863,6 +6875,7 @@ async fn custom_pattern_redacts_error_and_single_event_and_cuts_split_stream_wit
 
 #[tokio::test]
 async fn panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before_record_and_lock() {
+    tokio::time::timeout(std::time::Duration::from_secs(40),async {
     use av_store::model::SessionState;
     let f = approval_fixture("each", &["header:x-key"]).await;
     let held = f.get().await;
@@ -6939,6 +6952,7 @@ async fn panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before
     assert_eq!(revoked.len(), 2);
     assert_eq!(requests.len(), 2);
     assert_eq!(panic.len(), 1);
+        assert_eq!(rows[panic[0]]["denied_session_requests"],2);
     assert!(denied[0] < *revoked.iter().min().unwrap());
     assert!(*revoked.iter().max().unwrap() < *requests.iter().min().unwrap());
     assert!(*requests.iter().max().unwrap() < panic[0]);
@@ -6948,64 +6962,75 @@ async fn panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before
     let response = ordinary.get().await;
     assert_eq!(response.status, 200);
     ordinary.clean(&response).await;
+
+    }).await.expect("integration seam timed out");
 }
 
 #[tokio::test]
 async fn real_session_request_metadata_failure_does_not_prevent_panic_revocation_and_partial_record(
 ) {
-    use av_store::model::SessionState;
-    let (_dir, shared, pipeline, sid) = panic_failure_fixture();
-    shared
-        .run(|core| {
-            assert_eq!(core.sr_pending().len(), 1);
-            assert!(
-                core.dm_deny_pending_session_requests("fixture probe")
-                    .is_err(),
-                "the side-system fixture must actually fail"
-            );
-        })
-        .await
-        .unwrap();
-    let out = pipeline.panic(None, false).await.unwrap();
-    assert_eq!(out["revoked_sessions"], 1);
-    assert!(out["denied_session_requests"].is_null());
-    shared
-        .run(move |core| {
-            assert_eq!(
-                core.vault.session(&sid).unwrap().unwrap().state,
-                SessionState::Revoked
-            );
-            let audit = core
-                .vault
-                .audit()
-                .unwrap()
-                .read(&av_store::audit::ReadFilter {
-                    limit: 1000,
-                    ..Default::default()
-                })
-                .unwrap();
-            let audit = serde_json::to_value(audit).unwrap();
-            let rows = audit.as_array().unwrap();
-            assert_eq!(
-                rows.iter()
-                    .filter(|r| r["kind"] == "tripwire.panic_partial")
-                    .count(),
-                1
-            );
-            assert_eq!(
-                rows.iter()
-                    .filter(|r| r["kind"] == "panic.triggered")
-                    .count(),
-                1
-            );
-            assert!(!serde_json::to_string(&audit).unwrap().contains(SECRET));
-        })
-        .await
-        .unwrap();
-    let ordinary = SeededGateway::new(json!({}), json!({}));
-    let clean = ordinary.pipeline.panic(None, false).await.unwrap();
-    assert_eq!(clean["revoked_sessions"], 1);
-    assert_eq!(clean["denied_session_requests"], 0);
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        use av_store::model::SessionState;
+        let (_dir, shared, pipeline, sid) = panic_failure_fixture();
+        shared
+            .run(|core| {
+                assert_eq!(core.sr_pending().len(), 1);
+                assert!(
+                    core.dm_deny_pending_session_requests("fixture probe")
+                        .is_err(),
+                    "the side-system fixture must actually fail"
+                );
+            })
+            .await
+            .unwrap();
+        let out = pipeline.panic(None, false).await.unwrap();
+        assert_eq!(out["revoked_sessions"], 1);
+        assert!(out["denied_session_requests"].is_null());
+        shared
+            .run(move |core| {
+                assert_eq!(
+                    core.vault.session(&sid).unwrap().unwrap().state,
+                    SessionState::Revoked
+                );
+                let audit = core
+                    .vault
+                    .audit()
+                    .unwrap()
+                    .read(&av_store::audit::ReadFilter {
+                        limit: 1000,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let audit = serde_json::to_value(audit).unwrap();
+                let rows = audit.as_array().unwrap();
+                assert_eq!(
+                    rows.iter()
+                        .filter(|r| r["kind"] == "tripwire.panic_partial")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    rows.iter()
+                        .filter(|r| r["kind"] == "panic.triggered")
+                        .count(),
+                    1
+                );
+                assert!(rows
+                    .iter()
+                    .find(|r| r["kind"] == "panic.triggered")
+                    .unwrap()["denied_session_requests"]
+                    .is_null());
+                assert!(!serde_json::to_string(&audit).unwrap().contains(SECRET));
+            })
+            .await
+            .unwrap();
+        let ordinary = SeededGateway::new(json!({}), json!({}));
+        let clean = ordinary.pipeline.panic(None, false).await.unwrap();
+        assert_eq!(clean["revoked_sessions"], 1);
+        assert_eq!(clean["denied_session_requests"], 0);
+    })
+    .await
+    .expect("integration seam timed out");
 }
 
 fn panic_failure_fixture() -> (
@@ -16139,9 +16164,9 @@ fn c12_auth(token: &str) -> Vec<(String, String)> {
 #[tokio::test]
 async fn integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls(
 ) {
-    tokio::time::timeout(std::time::Duration::from_secs(90),async{let w=C12World::new().await;
+    tokio::time::timeout(std::time::Duration::from_secs(90),async{let w=C12World::new().await;let token=w.token.clone();let untouched=w.f.shared.run(move|c|c.vault.session_by_token(&token).unwrap().unwrap().last_seen_at).await.unwrap();
  for d in w.doors.iter().filter(|d|d.remote){
-  for headers in [vec![("av-session".into(),w.token.clone()),("authorization".into(),format!("Bearer {}",w.ph))],vec![("authorization".into(),format!("Bearer {}",w.token))]]{let before=w.cost().await;let(s,_,b)=w.wire(d,"GET","/p/demo/safe/x",headers,vec![]).await;let v:Value=serde_json::from_slice(&b).unwrap();assert_eq!(s,403,"{} {v}",d.id);assert_eq!(v["rule"],"infinite_remote");assert_eq!(w.cost().await.0,before.0);}
+  for headers in [vec![("av-session".into(),w.token.clone()),("authorization".into(),format!("Bearer {}",w.ph))],vec![("authorization".into(),format!("Bearer {}",w.token))]]{let before=w.cost().await;let(s,_,b)=w.wire(d,"GET","/p/demo/safe/x",headers,vec![]).await;let v:Value=serde_json::from_slice(&b).unwrap();assert_eq!(s,403,"{} {v}",d.id);assert_eq!(v["rule"],"infinite_remote");assert_eq!(w.cost().await,(before.0,before.1,before.2+1));}
   for (path,headers,rule) in [("/p/demo/safe/x".to_owned(),vec![("authorization".into(),format!("Bearer {}",w.ph))],Some("remote_carrier")),("/p/demo/safe/x".into(),vec![("cookie".into(),format!("av-session={}",w.token))],None),(format!("/p/demo/safe/x?access_token={}",w.token),vec![],None),("/p/demo/safe/x".into(),vec![("x-api-key".into(),w.token.clone())],None),("/p/demo/safe/x".into(),vec![("mcp-session-id".into(),w.token.clone())],None)]{let before=w.cost().await;let(s,_,b)=w.wire(d,"GET",&path,headers,vec![]).await;assert_eq!(s,401,"{} {}",d.id,String::from_utf8_lossy(&b));if let Some(rule)=rule{assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["rule"],rule);}assert_eq!(w.cost().await.0,before.0);}
   let before=w.cost().await;let(s,_,b)=w.wire(d,"GET","/p/demo/safe/x",vec![("av-session".into(),w.f.token.clone()),("authorization".into(),format!("Bearer {}",w.f.ph))],vec![]).await;assert_eq!(s,200,"{} {}",d.id,String::from_utf8_lossy(&b));assert_eq!(b,b"C12_UPSTREAM_MARKER");assert_eq!(w.cost().await.0,before.0+1);
   for carrier in ["av-session","bearer","both"]{for(name,args)in [("vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x"})),("vault_get_placeholder",json!({"cred":"demo","reason":"c12"})),("vault_list_creds",json!({})),("vault_approval_status",json!({"approval_id":"apr_none"}))]{let mut headers=c12_auth(&w.token);if carrier=="av-session"{headers.retain(|(n,_)|n!="authorization");}if carrier!="bearer"{headers.push(("av-session".into(),w.token.clone()));}let before=w.cost().await;let(s,_,b)=w.wire(d,"POST","/mcp",headers,c12_rpc(name,args)).await;assert_eq!(s,200);let(error,v)=c12_tool(&b);assert!(error,"{v}");assert_eq!(v["code"],"AV_REMOTE_FORBIDDEN");assert_eq!(v["rule"],"infinite_remote");assert!(!String::from_utf8_lossy(&b).contains("av1."));assert_eq!(w.cost().await,(before.0,before.1,before.2+1),"{} {carrier} {name}",d.id);}}
@@ -16152,7 +16177,11 @@ async fn integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_a
   let init=serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}})).unwrap();let before=w.cost().await;let(s,h,b)=w.wire(d,"POST","/mcp",c12_auth(&w.token),init.clone()).await;assert_eq!(s,200);assert!(h.iter().any(|(n,v)|n.eq_ignore_ascii_case("av-session-invalid")&&v=="1"));assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["result"]["serverInfo"]["name"],"agent-vault");assert_eq!(w.cost().await.2,before.2);let(_,_,b)=w.wire(d,"POST","/mcp",c12_auth(&w.token),c12_rpc("vault_status",json!({}))).await;let(_,v)=c12_tool(&b);assert!(v["session"].is_null());assert!(v["session_problem"].as_str().unwrap().contains("network listener"));assert_eq!(v["credentials_available"],0);assert_eq!(w.cost().await.2,before.2);let(_,_,b)=w.wire(d,"POST","/mcp",c12_auth(&w.token),c12_rpc("vault_explain_denial",json!({"request_id":"req_none"}))).await;assert!(!String::from_utf8_lossy(&b).contains(&w.sid));
   let(_,h,_)=w.wire(d,"POST","/mcp",c12_auth(&w.f.token),init).await;assert!(!h.iter().any(|(n,_)|n.eq_ignore_ascii_case("av-session-invalid")));let before=w.cost().await;let(_,_,b)=w.wire(d,"POST","/mcp",c12_auth(&w.f.token),c12_rpc("vault_http",json!({"cred":"demo","method":"GET","path":"/safe/x"}))).await;let(error,v)=c12_tool(&b);assert!(!error,"{v}");assert_eq!(v["status"],200);assert_eq!(v["body"],"C12_UPSTREAM_MARKER");assert_eq!(w.cost().await.0,before.0+1);assert!(audit_records(&w.f).await.iter().any(|r|r["request_id"]==v["request_id"]&&r["peer"]["listener_id"]==d.id));let before=w.cost().await;let(_,_,b)=w.wire(d,"POST","/mcp",c12_auth(&w.f.token),c12_rpc("vault_get_placeholder",json!({"cred":"demo","reason":"c12"}))).await;assert!(c12_tool(&b).1["placeholder"].as_str().unwrap().starts_with("av1."));assert_eq!(w.cost().await.1,before.1+1);
  }
- w.finish().await;}).await.unwrap();
+ let token=w.token.clone();let sid=w.sid.clone();w.f.shared.run(move|c|{assert_eq!(c.vault.session_by_token(&token).unwrap().unwrap().last_seen_at,untouched);assert!(c.vault.list_placeholders(Some(&sid)).unwrap().iter().all(|p|p.uses==0));}).await.unwrap();
+        let mut req=GatewayRequest{method:"GET".into(),path:"/p/demo/safe/x".into(),headers:vec![("host".into(),"localhost".into()),("av-session".into(),w.token.clone()),("authorization".into(),format!("Bearer {}",w.ph))],listener:Some(av_daemon::pipeline::ListenerInfo{id:"lan".into(),kind:"tls".into(),remote:true,advertise:vec![]}),..Default::default()};assert_eq!(w.f.daemon.pipeline().preflight(req.clone(),false).await.unwrap_err().extra.rule.as_deref(),Some("infinite_remote"));
+        for listener in [Some(av_daemon::pipeline::ListenerInfo{id:"local".into(),kind:"tcp".into(),remote:false,advertise:vec![]}),None]{req.listener=listener;assert_eq!(w.f.daemon.pipeline().handle(req.clone()).await.status,200);}
+        for raw in w.seen.lock().unwrap().iter(){assert!(raw.contains(&format!("Bearer {SECRET}")));}
+        w.finish().await;}).await.unwrap();
 }
 
 #[tokio::test]
@@ -16392,4 +16421,1050 @@ async fn integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_
     })
     .await
     .unwrap();
+}
+
+struct SeamWorld {
+    f: Fixture,
+    seen: Arc<Mutex<Vec<String>>>,
+    peer: tokio::task::JoinHandle<()>,
+}
+impl SeamWorld {
+    async fn new(reply: Reply, policy: Value, session_policy: Value) -> Self {
+        use tokio::io::AsyncWriteExt;
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+        let got = seen.clone();
+        let peer = tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = l.accept().await {
+                let (head, _) = read_wire_request(&mut tcp).await;
+                got.lock().unwrap().push(head);
+                let mut wire = format!(
+                    "HTTP/1.1 {} Fake\r\ncontent-length: {}\r\nconnection: close\r\n",
+                    reply.status,
+                    reply.body.len()
+                );
+                for (n, v) in &reply.headers {
+                    wire.push_str(&format!("{n}: {v}\r\n"));
+                }
+                wire.push_str("\r\n");
+                tcp.write_all(wire.as_bytes()).await.unwrap();
+                tcp.write_all(&reply.body).await.unwrap();
+            }
+        });
+        let mut f = mcp_real_http_fixture(port).await;
+        let(token,ph,gid)=f.shared.run(move|c|{use av_core::secret::ExposeSecret;let cred=c.vault.find_credential("demo").unwrap().unwrap();let s=c.vault.create_session(av_store::vault::CreateSessionOptions{policy:serde_json::from_value(session_policy).unwrap(),..Default::default()}).unwrap();let mut base=json!({"hosts":["127.0.0.1"],"methods":["GET","POST"],"paths":["/**"],"approval":"auto","budget":{"unit":"requests","limit":100}});for(k,v)in policy.as_object().unwrap(){base[k]=v.clone();}let g=c.vault.create_grant(av_store::vault::CreateGrantOptions{session_id:s.session.id,credential_id:cred.id,policy:serde_json::from_value(base).unwrap(),..Default::default()}).unwrap();let p=c.vault.issue_placeholder(av_store::vault::IssueOptions{grant_id:g.id.clone(),..Default::default()}).unwrap();(s.token.expose_secret().to_string(),p.placeholder,g.id)}).await.unwrap();
+        f.token = token;
+        f.ph = ph;
+        f.grant_id = gid;
+        Self { f, seen, peer }
+    }
+    async fn get(&self) -> GatewayResponse {
+        self.f
+            .send(
+                "GET",
+                "/x",
+                vec![("authorization".into(), format!("Bearer {}", self.f.ph))],
+                None,
+            )
+            .await
+    }
+    async fn finish(self) {
+        credential_finish(&self.f).await;
+        self.peer.abort();
+        let _ = self.peer.await;
+    }
+}
+#[tokio::test]
+async fn integrate2_real_redirect_hops_charge_bounded_grant_and_unit_only_session_budgets() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for (limit, grant, session) in [
+            (
+                2,
+                json!({"budget":{"unit":"requests","limit":2},"redirects":{"max":5}}),
+                json!({}),
+            ),
+            (
+                3,
+                json!({"budget":{"unit":"requests"},"redirects":{"max":5}}),
+                json!({"budget":{"unit":"requests","limit":3}}),
+            ),
+        ] {
+            let w = SeamWorld::new(redirect_reply(302, "/next"), grant, session).await;
+            let r = w.get().await;
+            assert_eq!(r.status, 302);
+            assert_eq!(r.header("av-redirect-stopped"), Some("budget"));
+            assert_eq!(w.seen.lock().unwrap().len(), limit);
+            let gid = w.f.grant_id.clone();
+            w.f.shared
+                .run(move |c| {
+                    assert_eq!(
+                        c.vault.grant(&gid).unwrap().unwrap().budget_used,
+                        limit as u64
+                    )
+                })
+                .await
+                .unwrap();
+            w.f.clean(&r).await;
+            w.finish().await;
+        }
+        let w = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        assert_eq!(w.get().await.status, 200);
+        assert_eq!(w.seen.lock().unwrap().len(), 1);
+        w.finish().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integrate2_expired_grant_is_unsent_and_stays_expired_across_repeated_attempts() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let w = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        let gid = w.f.grant_id.clone();
+        let sid = control_session_sid(&w.f).await;
+        let seedgid = gid.clone();
+        let f = control_session_restart_after_seed(w.f, move |dir| {
+            ported_common::seed_gateway_rows(
+                dir,
+                &sid,
+                &seedgid,
+                &json!({}),
+                &json!({"expires_at":"2000-01-01T00:00:00.000Z"}),
+            )
+        })
+        .await;
+        for _ in 0..2 {
+            let r = f
+                .send(
+                    "GET",
+                    "/x",
+                    vec![("authorization".into(), format!("Bearer {}", f.ph))],
+                    None,
+                )
+                .await;
+            assert_eq!(
+                serde_json::from_slice::<Value>(&r.body).unwrap()["code"],
+                "AV_GRANT_EXPIRED"
+            );
+        }
+        assert!(w.seen.lock().unwrap().is_empty());
+        f.shared
+            .run(move |c| {
+                assert_eq!(
+                    c.vault.grant(&gid).unwrap().unwrap().state,
+                    av_store::model::GrantState::Expired
+                )
+            })
+            .await
+            .unwrap();
+        credential_finish(&f).await;
+        w.peer.abort();
+        let _ = w.peer.await;
+        let control = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        assert_eq!(control.get().await.status, 200);
+        control.finish().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integrate2_store_quarantine_and_tripwire_both_stop_real_network_traffic() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let w=SeamWorld::new(done_reply(),json!({}),json!({})).await;w.f.shared.run(|c|c.vault.set_quarantine("demo",Default::default()).unwrap()).await.unwrap();let r=w.get().await;assert_eq!(r.error.unwrap().code.as_str(),"AV_QUARANTINED");assert!(w.seen.lock().unwrap().is_empty());assert_eq!(grant_counters(&w.f).await.1,vec![0]);w.f.shared.run(|c|c.vault.clear_quarantine("demo").unwrap()).await.unwrap();assert_eq!(w.get().await.status,200);w.f.shared.run(|c|c.vault.update_settings(&json!({"tripwires":{"enabled":true,"rules":[{"id":"methods","codes":["AV_POLICY_DENIED"],"threshold":2,"window_s":60,"action":"quarantine_credential"}]}})).unwrap()).await.unwrap();for _ in 0..2{let r=w.f.send("DELETE","/x",vec![("authorization".into(),format!("Bearer {}",w.f.ph))],None).await;assert_eq!(r.error.unwrap().code.as_str(),"AV_POLICY_DENIED");}w.f.shared.run(|c|{let q=c.vault.find_credential("demo").unwrap().unwrap().quarantine.unwrap();assert_eq!(q.by,av_store::model::QuarantineBy::Tripwire);assert_eq!(q.rule_id.as_deref(),Some("methods"));}).await.unwrap();assert_eq!(w.get().await.error.unwrap().code.as_str(),"AV_QUARANTINED");assert_eq!(w.seen.lock().unwrap().len(),1);w.finish().await;}).await.unwrap();
+}
+#[tokio::test]
+async fn integrate2_store_saved_scrub_pattern_is_used_and_rejected_patterns_are_never_persisted() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let w = SeamWorld::new(
+            Reply {
+                status: 200,
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: b"before acme_QWERTYUI after".to_vec(),
+                streaming: false,
+            },
+            json!({}),
+            json!({}),
+        )
+        .await;
+        for source in [
+            "acme_[A-Z]+",
+            "acme_.*",
+            "acme_[A-Z]{1,}",
+            "abc[^Q]{0,250}[^Q]{250}Q",
+        ] {
+            w.f.shared
+                .run(move |c| {
+                    let e = c.vault.add_scrub_pattern("demo", source).unwrap_err();
+                    let av_store::error::Error::Vault(e) = e else {
+                        panic!("vault refusal")
+                    };
+                    assert_eq!(e.extra.rule.as_deref(), Some("scrub_pattern"));
+                    assert!(c
+                        .vault
+                        .find_credential("demo")
+                        .unwrap()
+                        .unwrap()
+                        .scrub_patterns
+                        .is_empty());
+                })
+                .await
+                .unwrap();
+        }
+        let ordinary = w.get().await;
+        assert!(String::from_utf8_lossy(&ordinary.body).contains("acme_QWERTYUI"));
+        w.f.shared
+            .run(|c| c.vault.add_scrub_pattern("demo", "acme_[A-Z]{8}").unwrap())
+            .await
+            .unwrap();
+        let r = w.get().await;
+        assert_eq!(r.status, 200);
+        let text = String::from_utf8(r.body).unwrap();
+        assert!(!text.contains("acme_QWERTYUI"));
+        assert!(text.starts_with("before ") && text.ends_with(" after"));
+        w.finish().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integrate2_held_request_is_unsent_and_store_activity_counts_it_as_held_not_allowed() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let w = SeamWorld::new(done_reply(), json!({"approval":"each"}), json!({})).await;
+        let r = w.get().await;
+        assert_eq!(r.status, 202);
+        assert!(w.seen.lock().unwrap().is_empty());
+        let rows = audit_records(&w.f).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["kind"] == "request.allowed")
+                .map(|r| r["decision"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!("held")]
+        );
+        let sid = control_session_sid(&w.f).await;
+        let (s, v) = credential_api(
+            &w.f,
+            "GET",
+            &format!("/v1/sessions/detail?sid={sid}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["activity"]["requests"]["held"], 1);
+        assert_eq!(v["activity"]["requests"]["allowed"], 0);
+        w.f.daemon
+            .pipeline()
+            .decide_approval(held_id(&r), true)
+            .await
+            .unwrap();
+        assert_eq!(w.get().await.status, 200);
+        assert_eq!(w.seen.lock().unwrap().len(), 1);
+        w.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+struct ForeignHostTransport;
+impl Upstream for ForeignHostTransport {
+    fn send(
+        &self,
+        mut req: UpstreamRequest,
+    ) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
+        Box::pin(async move {
+            req.headers.push(("Host".into(), "evil.example".into()));
+            av_daemon::connectors::pinning::pinned_request(req).await
+        })
+    }
+}
+#[tokio::test]
+async fn integrate2_pipeline_rebuilds_host_and_real_connector_refuses_foreign_host_with_refund() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let w = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        let r =
+            w.f.send(
+                "GET",
+                "/x",
+                vec![
+                    ("authorization".into(), format!("Bearer {}", w.f.ph)),
+                    ("HOST".into(), "127.0.0.1".into()),
+                    ("Host".into(), "localhost".into()),
+                ],
+                None,
+            )
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        let raw = w.seen.lock().unwrap()[0].clone();
+        let values = raw
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+            .map(|(_, v)| v.trim())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        let connector =
+            w.f.shared
+                .run(|c| {
+                    c.vault.find_credential("demo").unwrap().unwrap().connector["host"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .await
+                .unwrap();
+        assert_eq!(values[0], connector);
+        let before = grant_counters(&w.f).await;
+        let pipeline = av_daemon::pipeline::Pipeline::new(
+            w.f.shared.clone(),
+            PipelineOptions {
+                upstream: Some(Arc::new(ForeignHostTransport)),
+                ..Default::default()
+            },
+        );
+        let r = pipeline
+            .handle(GatewayRequest {
+                method: "GET".into(),
+                path: "/p/demo/x".into(),
+                headers: vec![
+                    ("host".into(), "localhost".into()),
+                    ("av-session".into(), w.f.token.clone()),
+                    ("authorization".into(), format!("Bearer {}", w.f.ph)),
+                ],
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(r.status, 403);
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(v["code"], "AV_POLICY_DENIED");
+        assert_eq!(v["rule"], "host_mismatch");
+        assert_eq!(v["refunded"], true);
+        assert_eq!(w.seen.lock().unwrap().len(), 1);
+        assert_eq!(grant_counters(&w.f).await, before);
+        w.f.clean(&r).await;
+        w.finish().await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integrate2_malformed_stored_pin_entries_never_mean_unpinned_or_reach_upstream() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let w = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        let f = control_session_restart_after_seed(w.f, |dir| {
+            ported_common::seed_credential_pins(dir, "demo", &json!({"127.0.0.1":["nope"]}))
+        })
+        .await;
+        let pipeline = av_daemon::pipeline::Pipeline::new(f.shared.clone(), Default::default());
+        let r = pipeline.handle(hop_request(&f, "GET", "/x")).await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&r.body).unwrap()["code"],
+            "AV_PIN_MISMATCH"
+        );
+        assert!(w.seen.lock().unwrap().is_empty());
+        assert!(f.up.hits.lock().unwrap().is_empty());
+        f.clean(&r).await;
+        credential_finish(&f).await;
+        w.peer.abort();
+        let _ = w.peer.await;
+        let normal = SeamWorld::new(done_reply(), json!({}), json!({})).await;
+        assert_eq!(normal.get().await.status, 200);
+        normal.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+const C25_VALUE: &str = "ghp/PLUS+slash/001122334455667788";
+const C25_AMP: &str = "abcd&efgh-ijkl-0099887766";
+const C25_PIN: &str = "12345678";
+fn c25_variants() -> Vec<(String, String, bool)> {
+    use base64::Engine;
+    let mut v = vec![("raw".into(), C25_VALUE.into(), true)];
+    let mut pct = C25_VALUE.to_owned();
+    for n in 1..=5 {
+        pct = av_daemon::util::encode_uri_component(&pct);
+        v.push((format!("percent x{n}"), pct.clone(), true));
+    }
+    for upper in [false, true] {
+        let u = C25_VALUE
+            .chars()
+            .map(|c| {
+                if upper {
+                    format!("\\u{:04X}", c as u32)
+                } else {
+                    format!("\\u{:04x}", c as u32)
+                }
+            })
+            .collect::<String>();
+        v.push((format!("unicode {upper}"), u, true));
+    }
+    v.push((
+        "partial slash".into(),
+        C25_VALUE.replacen('/', "\\/", 1),
+        true,
+    ));
+    v.push(("full slash".into(), C25_VALUE.replace('/', "\\/"), true));
+    let b64 = base64::engine::general_purpose::STANDARD.encode(C25_VALUE);
+    let cut = b64.len() / 2;
+    v.push(("base64".into(), b64.clone(), true));
+    v.push((
+        "wrapped base64".into(),
+        format!("{}\n{}", &b64[..cut], &b64[cut..]),
+        false,
+    ));
+    v.push((
+        "base64 of percent".into(),
+        base64::engine::general_purpose::STANDARD
+            .encode(av_daemon::util::encode_uri_component(C25_VALUE)),
+        true,
+    ));
+    v.push((
+        "html decimal".into(),
+        C25_VALUE
+            .chars()
+            .map(|c| format!("&#{};", c as u32))
+            .collect(),
+        true,
+    ));
+    v.push((
+        "html hex".into(),
+        C25_VALUE
+            .chars()
+            .map(|c| format!("&#x{:x};", c as u32))
+            .collect(),
+        true,
+    ));
+    let hex = C25_VALUE
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    v.push(("hex lower".into(), hex.clone(), true));
+    v.push(("hex upper".into(), hex.to_ascii_uppercase(), true));
+    let mut flip = false;
+    v.push((
+        "hex mixed".into(),
+        hex.chars()
+            .map(|c| {
+                if ('a'..='f').contains(&c) {
+                    flip = !flip;
+                    if flip {
+                        c.to_ascii_uppercase()
+                    } else {
+                        c
+                    }
+                } else {
+                    c
+                }
+            })
+            .collect(),
+        true,
+    ));
+    v.push(("html named".into(), C25_AMP.replace('&', "&amp;"), true));
+    v
+}
+fn c25_greedy(numbers: bool) -> Value {
+    let forms = c25_variants();
+    let paths = forms
+        .iter()
+        .filter(|(_, _, p)| *p)
+        .map(|(_, s, _)| format!("/{s}"))
+        .collect::<Vec<_>>();
+    let mut values = forms.iter().map(|(_, v, _)| json!(v)).collect::<Vec<_>>();
+    if numbers {
+        values.push(json!(12345678));
+    }
+    let mut p = json!({"cred":"demo","methods":["GET","POST"],"paths":paths,"routes":[{"methods":["GET","POST"],"paths":&paths[..3]}],"payload":{"json":{"/q":{"one_of":values}}},"reason":format!("forms: {} | {C25_PIN}",forms.iter().map(|(_,s,_)|s.as_str()).collect::<Vec<_>>().join(" | "))});
+    if numbers {
+        for(k,v)in json!({"budget":12345678,"uses":12345678,"quota":{"count":12345678,"window":"day"},"ttl_minutes":12345678,"grant_ttl_minutes":12345678}).as_object().unwrap(){p[k]=v.clone();}
+    }
+    p
+}
+async fn c25_fixture() -> Fixture {
+    let f = Fixture::new(&["header:x-key"]).await;
+    f.shared
+        .run(|c| {
+            c.vault
+                .rotate_credential(
+                    "demo",
+                    av_store::vault::RotateOptions {
+                        field: None,
+                        value: C25_VALUE.to_owned().into(),
+                        mode: av_store::vault::RotateMode::Keep,
+                        retire_ms: 0,
+                        expires_at: None,
+                    },
+                )
+                .unwrap();
+            for (slug, value) in [("amp", C25_AMP), ("pin", C25_PIN)] {
+                c.vault
+                    .add_credential(av_store::vault::NewCredential {
+                        slug: slug.into(),
+                        kind: "http".into(),
+                        connector: serde_json::from_value(
+                            json!({"host":"api.example.test","scheme":"https"}),
+                        )
+                        .unwrap(),
+                        fields: vec![("token".into(), value.to_owned().into())],
+                        sites: std::collections::BTreeMap::from([(
+                            "token".into(),
+                            vec!["header:x-key".into()],
+                        )]),
+                    })
+                    .unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    credential_factor(&f).await;
+    f
+}
+async fn c25_ask(f: &Fixture, p: Value) -> Value {
+    let (s, v) = credential_api(f, "POST", "/v1/session-requests", p).await;
+    assert_eq!(s, 200, "{v}");
+    v["id"].clone()
+}
+async fn c25_decide(f: &Fixture, id: &Value, extra: Value) -> Value {
+    credential_gate(f, true).await;
+    let mut b = json!({"id":id,"granted":true});
+    for (k, v) in extra.as_object().unwrap() {
+        b[k] = v.clone();
+    }
+    let (s, v) = credential_api(f, "POST", "/v1/session-requests/decide", b).await;
+    assert_eq!(s, 200, "{v}");
+    v
+}
+async fn c25_assert_structure_only(f: &Fixture, ids: &[Value], kinds: &[&str]) {
+    let direct = json!(audit_records(f).await);
+    let (s, read) = credential_api(f, "GET", "/v1/audit?limit=500", json!({})).await;
+    assert_eq!(s, 200);
+    let read = if read.is_array() {
+        read
+    } else {
+        read["records"].clone()
+    };
+    let (s, export) = credential_api(
+        f,
+        "GET",
+        "/v1/audit/export?since_seq=0&limit=500",
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, 200, "{export}");
+    let fields = av_daemon::session_requests::FIELDS
+        .iter()
+        .chain(av_daemon::session_requests::OWNER_FIELDS.iter())
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let variants = c25_variants();
+    let b64 = variants
+        .iter()
+        .find(|(n, _, _)| n == "base64")
+        .unwrap()
+        .1
+        .clone();
+    let cut = b64.len() / 2;
+    let mut needles = variants
+        .iter()
+        .map(|(_, v, _)| v.as_str())
+        .collect::<Vec<_>>();
+    needles.extend([
+        C25_VALUE,
+        C25_AMP,
+        C25_PIN,
+        &C25_VALUE[..12],
+        "PLUS+slash",
+        "001122334455667788",
+        &b64[..cut],
+        &b64[cut..],
+    ]);
+    for (where_, rows) in [
+        ("store", direct),
+        ("read", read),
+        ("export", export["rows"].clone()),
+    ] {
+        let rows = rows
+            .as_array()
+            .unwrap_or_else(|| panic!("{where_} is not rows"));
+        for kind in kinds {
+            assert!(
+                rows.iter().any(|r| r["kind"] == *kind),
+                "{where_} lacks {kind}"
+            );
+        }
+        for r in rows.iter().filter(|r| {
+            matches!(
+                r["kind"].as_str(),
+                Some(
+                    "session_request.opened"
+                        | "session_request.approved"
+                        | "session_request.denied"
+                )
+            )
+        }) {
+            let kind = r["kind"].as_str().unwrap();
+            let mut allowed = vec!["seq", "ts", "kind", "prev_hash", "hash"];
+            allowed.extend(match kind {
+                "session_request.opened" => vec![
+                    "request_id",
+                    "actor",
+                    "cred",
+                    "template",
+                    "proposed",
+                    "counts",
+                ],
+                "session_request.approved" => vec![
+                    "request_id",
+                    "decision",
+                    "cred",
+                    "proposed",
+                    "actor",
+                    "session_id",
+                    "granted",
+                    "counts",
+                    "narrowed",
+                    "edited",
+                ],
+                _ => vec!["request_id", "decision", "cred", "proposed", "actor"],
+            });
+            if r["actor"] == "panic" {
+                allowed.push("reason");
+                assert_eq!(r["reason"], "panic");
+            }
+            assert_eq!(
+                r.as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                allowed.into_iter().collect(),
+                "{where_}: {r}"
+            );
+            assert!(ids.contains(&r["request_id"]));
+            assert!(r["cred"].is_null() || r["cred"] == "demo");
+            assert!(["agent", "human", "panic"].contains(&r["actor"].as_str().unwrap()));
+            for key in ["proposed", "granted", "narrowed"] {
+                if let Some(v) = r.get(key) {
+                    assert!(v
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|v| fields.contains(v.as_str().unwrap())));
+                }
+            }
+            if let Some(counts) = r.get("counts") {
+                for (k, n) in counts.as_object().unwrap() {
+                    assert!(fields.contains(k.as_str()));
+                    assert!(n.as_u64().is_some_and(|n| n < 1000));
+                }
+            }
+            if kind == "session_request.approved" {
+                assert!(r["edited"].is_boolean());
+                let sid = r["session_id"].as_str().unwrap().to_owned();
+                assert!(f
+                    .shared
+                    .run(move |c| c.vault.session(&sid).unwrap().is_some())
+                    .await
+                    .unwrap());
+            }
+            if kind != "session_request.opened" {
+                assert_eq!(r["decision"], kind.split('.').nth(1).unwrap());
+            }
+        }
+        let text = serde_json::to_string(rows).unwrap();
+        for needle in &needles {
+            assert!(
+                !text.contains(needle),
+                "{where_} audit contains input shape {needle:?}"
+            );
+        }
+    }
+}
+async fn c25_assert_grant(f: &Fixture, made: &Value, numbers: bool) {
+    let p = control_session_policy(f, made["grant_id"].as_str().unwrap()).await;
+    for (name, v, path) in c25_variants() {
+        if path {
+            assert!(
+                p["paths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(format!("/{v}"))),
+                "lost {name}"
+            );
+        }
+    }
+    assert!(p["payload"].to_string().contains(C25_VALUE));
+    if numbers {
+        assert_eq!(p["budget"]["limit"], 12345678);
+        assert_eq!(p["quota"]["count"], 12345678);
+    }
+}
+#[tokio::test]
+async fn c25_all_encoded_proposal_forms_are_absent_from_all_audit_surfaces_but_limits_remain_live()
+{
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = c25_fixture().await;
+        let id = c25_ask(&f, c25_greedy(true)).await;
+        let made = c25_decide(&f, &id, json!({})).await;
+        let rows = audit_records(&f).await;
+        let opened = rows
+            .iter()
+            .find(|r| r["kind"] == "session_request.opened")
+            .unwrap();
+        assert_eq!(
+            opened["proposed"],
+            json!([
+                "cred",
+                "methods",
+                "paths",
+                "budget",
+                "uses",
+                "ttl_minutes",
+                "quota",
+                "routes",
+                "payload",
+                "grant_ttl_minutes"
+            ])
+        );
+        assert_eq!(
+            opened["counts"],
+            json!({"methods":2,"paths":c25_variants().len()-1,"routes":1})
+        );
+        assert_eq!(opened["actor"], "agent");
+        assert_eq!(opened["cred"], "demo");
+        let approved = rows
+            .iter()
+            .find(|r| r["kind"] == "session_request.approved")
+            .unwrap();
+        assert_eq!(approved["granted"], opened["proposed"]);
+        assert_eq!(approved["narrowed"], json!([]));
+        assert_eq!(approved["edited"], false);
+        c25_assert_grant(&f, &made["session"], true).await;
+        c25_assert_structure_only(
+            &f,
+            &[id],
+            &["session_request.opened", "session_request.approved"],
+        )
+        .await;
+        let sid = made["session"]["session_id"].as_str().unwrap();
+        for kind in ["session.created", "grant.created"] {
+            let row = rows
+                .iter()
+                .find(|r| r["kind"] == kind && r["session_id"] == sid)
+                .unwrap();
+            assert!(row["expires_at"].is_null());
+            assert_eq!(row["has_expiry"], true);
+        }
+        let issued = rows
+            .iter()
+            .find(|r| r["kind"] == "placeholder.issued" && r["session_id"] == sid)
+            .unwrap();
+        assert!(issued.get("max_uses").is_none());
+        let gid = made["session"]["grant_id"].as_str().unwrap().to_owned();
+        let sid = sid.to_owned();
+        f.shared
+            .run(move |c| {
+                assert!(c.vault.session(&sid).unwrap().unwrap().expires_at.is_some());
+                assert!(c.vault.grant(&gid).unwrap().unwrap().expires_at.is_some());
+                assert!(c
+                    .vault
+                    .list_placeholders(None)
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.grant_id == gid && p.max_uses > 0));
+            })
+            .await
+            .unwrap();
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn c25_bulk_human_denial_and_panic_denial_keep_only_structure_and_minted_ids() {
+    tokio::time::timeout(std::time::Duration::from_secs(35),async{let f=c25_fixture().await;let one=c25_ask(&f,c25_greedy(true)).await;let two=c25_ask(&f,c25_greedy(false)).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":one,"kind":"session","granted":true},{"id":two,"kind":"session","granted":false}]})).await;assert_eq!(s,200,"{v}");assert!(v["decided"].as_array().unwrap().iter().all(|r|r["outcome"]=="decided"));let rows=audit_records(&f).await;let many=rows.iter().find(|r|r["kind"]=="pending.decided_many").unwrap();assert_eq!(many["granted"],json!([one]));assert_eq!(many["denied"],json!([two]));assert_eq!(many["skipped"],json!([]));let denied=rows.iter().find(|r|r["kind"]=="session_request.denied").unwrap();assert_eq!(denied["actor"],"human");assert_eq!(denied["proposed"],json!(["cred","methods","paths","routes","payload"]));let approved=rows.iter().find(|r|r["kind"]=="session_request.approved").unwrap();let sid=approved["session_id"].as_str().unwrap().to_owned();let gid=f.shared.run(move|c|c.vault.grants_for_session(&sid).unwrap()[0].id.clone()).await.unwrap();c25_assert_grant(&f,&json!({"grant_id":gid}),true).await;c25_assert_structure_only(&f,&[one,two],&["session_request.opened","session_request.approved","session_request.denied","pending.decided_many"]).await;credential_finish(&f).await;
+ let f=c25_fixture().await;let one=c25_ask(&f,c25_greedy(true)).await;credential_gate(&f,true).await;assert_eq!(credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":one,"granted":false})).await.0,200);let two=c25_ask(&f,c25_greedy(false)).await;let(s,v)=credential_api(&f,"POST","/v1/panic",json!({})).await;assert_eq!(s,200,"{v}");assert_eq!(v["denied_session_requests"],1);let rows=audit_records(&f).await;let denied=rows.iter().filter(|r|r["kind"]=="session_request.denied").collect::<Vec<_>>();assert_eq!(denied.len(),2);for(id,actor)in [(&one,"human"),(&two,"panic")]{assert!(denied.iter().any(|r|r["request_id"]==*id&&r["actor"]==actor&&r["decision"]=="denied"));}c25_assert_structure_only(&f,&[one,two],&["session_request.opened","session_request.denied"]).await;credential_finish(&f).await;
+ }).await.unwrap();
+}
+
+async fn c25_rotate(f: &Fixture, value: &'static str) {
+    use av_core::secret::ExposeSecret;
+    f.shared
+        .run(move |c| {
+            c.vault
+                .rotate_credential(
+                    "demo",
+                    av_store::vault::RotateOptions {
+                        field: None,
+                        value: value.to_owned().into(),
+                        mode: av_store::vault::RotateMode::Keep,
+                        retire_ms: 0,
+                        expires_at: None,
+                    },
+                )
+                .unwrap();
+            assert!(!c
+                .vault
+                .all_secrets()
+                .unwrap()
+                .iter()
+                .any(|s| s.secret.expose_secret() == C25_VALUE));
+        })
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn c25_rotated_proposal_and_human_override_keep_values_in_grants_and_out_of_audits() {
+    tokio::time::timeout(std::time::Duration::from_secs(40), async {
+        let f = c25_fixture().await;
+        let id = c25_ask(&f, c25_greedy(true)).await;
+        c25_rotate(&f, "ghp_NEWVALUE99887766554433221100ff").await;
+        let made = c25_decide(&f, &id, json!({})).await;
+        c25_assert_grant(&f, &made["session"], true).await;
+        c25_assert_structure_only(
+            &f,
+            &[id],
+            &["session_request.opened", "session_request.approved"],
+        )
+        .await;
+        let cap = &made["session"];
+        let req = |path: String| GatewayRequest {
+            method: "GET".into(),
+            path: format!("/p/demo{path}"),
+            headers: vec![
+                ("host".into(), "127.0.0.1".into()),
+                ("av-session".into(), cap["token"].as_str().unwrap().into()),
+                ("x-key".into(), cap["placeholder"].as_str().unwrap().into()),
+            ],
+            ..Default::default()
+        };
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(req(format!("/{C25_VALUE}")))
+            .await;
+        assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+        assert!(f
+            .up
+            .hits
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .url
+            .ends_with(&format!("/{C25_VALUE}")));
+        assert_eq!(
+            f.daemon
+                .pipeline()
+                .handle(req("/not-the-path".into()))
+                .await
+                .status,
+            403
+        );
+        credential_finish(&f).await;
+        let f = c25_fixture().await;
+        let id = c25_ask(
+            &f,
+            json!({"cred":"demo","methods":["GET"],"paths":["/ok"],"reason":"ordinary"}),
+        )
+        .await;
+        c25_rotate(&f, "ghp_NEWVALUE99887766554433221100ee").await;
+        let pct = c25_variants()
+            .into_iter()
+            .find(|(n, _, _)| n == "percent x5")
+            .unwrap()
+            .1;
+        let paths = json!([format!("/{C25_VALUE}"), format!("/{pct}")]);
+        let made = c25_decide(
+            &f,
+            &id,
+            json!({"overrides":{"paths":paths,"budget":12345678}}),
+        )
+        .await;
+        let rows = audit_records(&f).await;
+        let r = rows
+            .iter()
+            .find(|r| r["kind"] == "session_request.approved")
+            .unwrap();
+        assert_eq!(r["narrowed"], json!(["paths", "budget"]));
+        assert_eq!(r["granted"], json!(["cred", "methods", "paths", "budget"]));
+        assert_eq!(r["counts"], json!({"methods":1,"paths":2}));
+        assert_eq!(r["edited"], true);
+        let p = control_session_policy(&f, made["session"]["grant_id"].as_str().unwrap()).await;
+        assert_eq!(p["paths"], paths);
+        assert_eq!(p["budget"]["limit"], 12345678);
+        c25_assert_structure_only(
+            &f,
+            &[id],
+            &["session_request.opened", "session_request.approved"],
+        )
+        .await;
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn c25_human_expiry_stays_public_but_placeholder_use_ceiling_and_agent_expiry_do_not() {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = c25_fixture().await;
+        credential_gate(&f, true).await;
+        let (s, made) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"cred":"demo","budget":12345678,"uses":12345678}),
+        )
+        .await;
+        assert_eq!(s, 200, "{made}");
+        let sid = made["session_id"].as_str().unwrap().to_owned();
+        let gid = made["grant_id"].as_str().unwrap().to_owned();
+        let rows = audit_records(&f).await;
+        let r = rows
+            .iter()
+            .find(|r| r["kind"] == "session.created" && r["session_id"] == sid)
+            .unwrap();
+        assert_eq!(r["expires_at"], made["expires_at"]);
+        assert!(r.get("has_expiry").is_none());
+        assert!(rows
+            .iter()
+            .find(|r| r["kind"] == "grant.created" && r["session_id"] == sid)
+            .unwrap()
+            .get("has_expiry")
+            .is_none());
+        f.shared
+            .run(move |c| {
+                let row = c
+                    .vault
+                    .list_placeholders(None)
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.grant_id == gid)
+                    .unwrap();
+                assert_eq!(row.max_uses, 12345678);
+                c.vault.consume_placeholder(&row.id).unwrap();
+                c.vault.refund_placeholder(&row.id).unwrap();
+            })
+            .await
+            .unwrap();
+        let rows = audit_records(&f).await;
+        assert!(rows.iter().any(|r| r["kind"] == "placeholder.refunded"));
+        for r in rows
+            .iter()
+            .filter(|r| r["kind"] == "placeholder.issued" || r["kind"] == "placeholder.refunded")
+        {
+            assert!(r.get("max_uses").is_none());
+            assert!(!r.to_string().contains(C25_PIN));
+        }
+        let id = c25_ask(
+            &f,
+            json!({"cred":"demo","methods":["GET"],"paths":["/inf"]}),
+        )
+        .await;
+        let made = c25_decide(
+            &f,
+            &id,
+            json!({"overrides":{"infinite":true},"presence":{"passphrase":WIDEN_PASS}}),
+        )
+        .await;
+        let rows = audit_records(&f).await;
+        let r = rows
+            .iter()
+            .find(|r| {
+                r["kind"] == "session.created" && r["session_id"] == made["session"]["session_id"]
+            })
+            .unwrap();
+        assert_eq!(
+            json!([r["expires_at"], r["has_expiry"], r["infinite"]]),
+            json!([null, false, true])
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+async fn c25_unreadable_fixture() -> Fixture {
+    let f = c25_fixture().await;
+    f.shared
+        .run(|c| {
+            c.vault
+                .add_credential(av_store::vault::NewCredential {
+                    slug: "broken-health".into(),
+                    kind: "http".into(),
+                    connector: serde_json::from_value(json!({"host":"api.example.test"})).unwrap(),
+                    fields: vec![("token".into(), "FAKE-BYSTANDER-123456789".to_owned().into())],
+                    sites: std::collections::BTreeMap::from([(
+                        "token".into(),
+                        vec!["header:x-key".into()],
+                    )]),
+                })
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    let f = control_session_restart_with_pass(
+        f,
+        ported_common::seed_panic_side_system_failure,
+        Some(WIDEN_PASS),
+    )
+    .await;
+    assert!(f
+        .shared
+        .run(|c| c.vault.all_secrets().is_err())
+        .await
+        .unwrap());
+    f
+}
+#[tokio::test]
+async fn c25_real_secret_reader_failure_cannot_turn_shape_only_auditing_into_value_logging() {
+    tokio::time::timeout(std::time::Duration::from_secs(35), async {
+        let f = c25_unreadable_fixture().await;
+        let id = c25_ask(&f, c25_greedy(false)).await;
+        c25_decide(&f, &id, json!({})).await;
+        c25_assert_structure_only(
+            &f,
+            &[id],
+            &["session_request.opened", "session_request.approved"],
+        )
+        .await;
+        credential_finish(&f).await;
+        let f = c25_fixture().await;
+        let id = c25_ask(
+            &f,
+            json!({"cred":"demo","methods":["GET"],"paths":["/ordinary"]}),
+        )
+        .await;
+        let made = c25_decide(&f, &id, json!({})).await;
+        assert!(made["session"]["session_id"].is_string());
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(35),async {
+  for broken in [false,true]{let f=if broken{c25_unreadable_fixture().await}else{c25_fixture().await};let id=c25_ask(&f,json!({"cred":"demo","paths":[format!("/{C25_VALUE}"),"/plain/path"],"reason":format!("please, my token is {C25_VALUE}")})).await;let rows=audit_records(&f).await;let row=rows.iter().find(|r|r["kind"]=="session_request.opened").unwrap();assert_eq!(row["proposed"],json!(["cred","paths"]));assert_eq!(row["counts"],json!({"paths":2}));c25_assert_structure_only(&f,&[id.clone()],&["session_request.opened"]).await;let(s,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;assert_eq!(s,200);assert!(pending.is_array());assert!(f.shared.run(move|c|c.sr_get(id.as_str().unwrap()).unwrap().summary.contains(C25_VALUE)).await.unwrap());credential_finish(&f).await;}
+  let f=c25_fixture().await;let id=c25_ask(&f,json!({"cred":"demo","methods":["GET"],"paths":["/repos/**"],"reason":"read the repo list"})).await;let rows=audit_records(&f).await;let r=rows.iter().find(|r|r["kind"]=="session_request.opened").unwrap();assert_eq!(r["request_id"],id);assert_eq!(json!([r["actor"],r["cred"],r["template"]]),json!(["agent","demo",null]));assert_eq!(r["proposed"],json!(["cred","methods","paths"]));assert_eq!(r["counts"],json!({"methods":1,"paths":1}));assert!(!json!(rows).to_string().contains("/repos/**"));assert!(!json!(rows).to_string().contains("read the repo list"));let(s,p)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;assert_eq!(s,200);assert!(p[0]["summary"].as_str().unwrap().contains("/repos/**"));credential_finish(&f).await;
+ }).await.unwrap();
+}
+
+#[tokio::test]
+async fn integrate3_c18_real_ipv4_ipv6_tls_preflight_and_description_refuse_infinite_and_keep_finite_peeks_unsent(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(40),async {
+  let w=C12World::new().await;
+  for door in w.doors.iter().filter(|d|d.remote) {
+   let before=w.seen.lock().unwrap().len();
+   for (token,ph,infinite) in [(&w.token,&w.ph,true),(&w.f.token,&w.f.ph,false)] {
+    let body=serde_json::to_vec(&json!({"method":"GET","path":"/p/demo/safe/x","headers":[["authorization",format!("Bearer {ph}")]]})).unwrap();
+    let(status,_,body)=w.wire(door,"POST","/v1/preflight",c12_auth(token),body).await;
+    let value:Value=serde_json::from_slice(&body).unwrap();assert_eq!(status,if infinite{403}else{200},"{}: {value}",door.id);if infinite{assert_eq!(value["rule"],"infinite_remote");}
+    for(name,args)in [("vault_describe_access",json!({})),("vault_preflight",json!({"cred":"demo","method":"GET","path":"/safe/x"}))] {
+     let(status,_,body)=w.wire(door,"POST","/mcp",c12_auth(token),c12_rpc(name,args)).await;assert_eq!(status,200);let(error,value)=c12_tool(&body);if infinite{assert!(error);assert_eq!(value["rule"],"infinite_remote");}else{assert!(!error,"{} {name}: {value}",door.id);assert!(value.get("code").is_none());}assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+    }
+   }
+   assert_eq!(w.seen.lock().unwrap().len(),before,"peek reached real upstream");
+  }
+  w.finish().await;
+ }).await.unwrap();
 }

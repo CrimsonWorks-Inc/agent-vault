@@ -351,6 +351,7 @@ async fn pinning_child_client() {
     tokio::time::timeout(Duration::from_secs(20),async {
  let mut out=Vec::new();
  for call in serde_json::from_str::<Vec<Value>>(&input).unwrap(){
+ if call["gateway"]==true {out.push(child_gateway(&call).await);continue;}
  if call["probe"]==true {out.push(child_probe(&call).await);continue;}
  let r=UpstreamRequest{url:call["url"].as_str().unwrap().into(),method:"POST".into(),headers:call.get("headers").map(|v|serde_json::from_value(v.clone()).unwrap()).unwrap_or_else(||vec![("authorization".into(),format!("Bearer {SECRET}"))]),body:Some(b"SENTINEL".to_vec()),pins:match &call["pins"]{Value::Array(v)=>Pins::List(v.clone()),_=>Pins::None}};
  out.push(match pinned_request(r).await{Ok(r)=>{let mut b=Vec::new();match r.body{Body::Full(v)=>b=v,Body::Stream(mut rx)=>while let Some(v)=rx.recv().await{b.extend(v.unwrap());}}json!({"ok":true,"status":r.status,"headers":r.headers,"body":String::from_utf8(b).unwrap()})},Err(e)=>json!({"ok":false,"code":e.code,"reason":e.reason,"presented":e.presented,"rule":e.vault.map(|v|v.extra.rule)})});
@@ -1179,6 +1180,146 @@ async fn real_probe_root_pin_needs_ca_trust_refuses_mismatch_and_persists_scrubb
         assert!(text.starts_with("GET /user HTTP/1.1\r\n"));
         assert!(text.contains(&format!("Bearer {SECRET}")));
         assert!(!text.contains("pwned"));
+    })
+    .await
+    .unwrap();
+}
+
+async fn child_gateway(call: &Value) -> Value {
+    use av_core::secret::ExposeSecret;
+    use av_daemon::pipeline::{GatewayRequest, Pipeline, PipelineOptions};
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    let url = url::Url::parse(call["url"].as_str().unwrap()).unwrap();
+    let host = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    let cred = vault
+        .add_credential(av_store::vault::NewCredential {
+            slug: "up".into(),
+            kind: "http".into(),
+            connector: serde_json::from_value(json!({"host":host,"scheme":"https"})).unwrap(),
+            fields: vec![("token".into(), SECRET.to_owned().into())],
+            sites: std::collections::BTreeMap::from([(
+                "token".into(),
+                vec!["header:authorization:Bearer".into()],
+            )]),
+        })
+        .unwrap();
+    let s = vault.create_session(Default::default()).unwrap();
+    let g=vault.create_grant(av_store::vault::CreateGrantOptions{session_id:s.session.id,credential_id:cred.id,policy:serde_json::from_value(json!({"hosts":["127.0.0.1"],"methods":["GET"],"paths":["/**"],"approval":"auto","budget":{"unit":"requests","limit":10}})).unwrap(),..Default::default()}).unwrap();
+    let p = vault
+        .issue_placeholder(av_store::vault::IssueOptions {
+            grant_id: g.id,
+            ..Default::default()
+        })
+        .unwrap();
+    let token = s.token.expose_secret().to_owned();
+    let shared = av_daemon::state::Shared::new(vault);
+    let pipeline = Pipeline::new(
+        shared.clone(),
+        PipelineOptions {
+            allowed_hosts: Some(vec!["localhost".into()]),
+            ..Default::default()
+        },
+    );
+    let req = GatewayRequest {
+        method: "GET".into(),
+        path: "/p/up/user".into(),
+        headers: vec![
+            ("host".into(), "localhost".into()),
+            ("av-session".into(), token),
+            ("authorization".into(), format!("Bearer {}", p.placeholder)),
+        ],
+        ..Default::default()
+    };
+    let sequence = if let Some(next) = call.get("next_pins") {
+        vec![call["pins"].clone(), next.clone()]
+    } else {
+        vec![call["pins"].clone()]
+    };
+    let mut out = Vec::new();
+    for pins in sequence {
+        let list = pins.as_array().map(|p| {
+            p.iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        });
+        shared
+            .run(move |c| {
+                if let Some(list) = list {
+                    c.vault.set_pins("up", "127.0.0.1", &list).unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        let response = pipeline.handle(req.clone()).await;
+        let result=shared.run(|c|{let rows=c.vault.list_placeholders(None).unwrap();let audit=c.vault.audit().unwrap().read(&av_store::audit::ReadFilter{limit:1000,..Default::default()}).unwrap();let audit=serde_json::to_value(audit).unwrap();assert!(!audit.to_string().contains(SECRET));json!({"uses":rows[0].uses,"presented":audit.as_array().unwrap().iter().rev().find(|r|r["kind"]=="request.pin_mismatch").map(|r|r["presented_spki"].clone())})}).await.unwrap();
+        let body = String::from_utf8(response.body).unwrap();
+        assert!(!body.contains(SECRET));
+        out.push(json!({"status":response.status,"body":body,"uses":result["uses"],"presented":result["presented"]}));
+    }
+    json!(out)
+}
+#[tokio::test]
+async fn integrate2_gateway_real_pins_verify_before_send_and_refund_the_original_capability() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (d, k) = cert("127.0.0.1", (-1, 2));
+        let own = spki_of(&d).unwrap();
+        let p = peer(vec![d], k).await;
+        let mut r = call(p.port, json!([format!("sha256/{}=", "A".repeat(43))]));
+        r["gateway"] = json!(true);
+        r["next_pins"] = json!([own]);
+        let out = trusted("", vec![r]).await;
+        let bad = &out[0][0];
+        let problem: Value = serde_json::from_str(bad["body"].as_str().unwrap()).unwrap();
+        assert_eq!(problem["code"], "AV_UPSTREAM_UNREACHABLE");
+        assert_eq!(problem["refunded"], true);
+        assert_eq!(bad["uses"], 0);
+        assert_eq!(out[0][1]["status"], 200);
+        assert_eq!(out[0][1]["uses"], 1);
+        assert_eq!(p.seen.lock().unwrap().len(), 1);
+        let raw = p.seen.lock().unwrap()[0].clone();
+        let text = String::from_utf8(raw).unwrap();
+        assert!(text.contains(&format!("Bearer {SECRET}")));
+        assert!(text.contains(&format!("127.0.0.1:{}", p.port)));
+        let c = chain();
+        let p = peer(
+            vec![c.leaf.der().to_vec(), c.inter.der().to_vec()],
+            c.key.clone(),
+        )
+        .await;
+        let mut calls = Vec::new();
+        for pinset in [
+            json!([pin(&c.inter)]),
+            json!([format!("sha256/{}=", "A".repeat(43))]),
+            json!([pin(&c.leaf)]),
+            Value::Null,
+        ] {
+            let mut r = call(p.port, pinset);
+            r["gateway"] = json!(true);
+            calls.push(r);
+        }
+        let out = trusted(&c.root.pem(), calls).await;
+        for i in [0, 2, 3] {
+            assert_eq!(out[i][0]["status"], 200, "{}", out[i]);
+            assert_eq!(out[i][0]["uses"], 1);
+        }
+        let bad = &out[1][0];
+        let problem: Value = serde_json::from_str(bad["body"].as_str().unwrap()).unwrap();
+        assert_eq!(problem["code"], "AV_PIN_MISMATCH");
+        assert_eq!(problem["rule"], "spki_pin");
+        assert_eq!(problem["refunded"], true);
+        assert_eq!(bad["uses"], 0);
+        assert_eq!(
+            &bad["presented"].as_array().unwrap()[..2],
+            &[json!(pin(&c.leaf)), json!(pin(&c.inter))]
+        );
+        assert!(out[0][0]["presented"].is_null());
+        assert_eq!(p.seen.lock().unwrap().len(), 3);
+        let mut r = call(p.port, json!([pin(&c.inter)]));
+        r["gateway"] = json!(true);
+        let out = trusted("", vec![r]).await;
+        assert_ne!(out[0][0]["status"], 200);
+        assert_eq!(p.seen.lock().unwrap().len(), 3);
     })
     .await
     .unwrap();

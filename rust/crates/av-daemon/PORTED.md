@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 720 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **346 not yet ported**.
+Totals: 1207 JS tests: 750 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **316 not yet ported**.
 
 ## Mutation check
 
@@ -793,32 +793,32 @@ the vault on every call instead of caching an audit handle.
 | integrate2-c12-surfaces.test.js | stdio MCP has no network listener and stays loopback for an infinite session | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
 | integrate2-c12-surfaces.test.js | vault_http hands its listener to the pipeline, which refuses an infinite session there by itself | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
 | integrate2-c12-surfaces.test.js | the vault answers C12 for a peek and for a use alike, and records only the use | `ported_gateway_core::integrate2_c12_loopback_surfaces_stdio_pipeline_defense_and_store_peek_use_contract` |
-| integrate2-seams.test.js | a correct leaf pin goes out through the real pinnedRequest, with the secret and the URL host | not yet ported |
-| integrate2-seams.test.js | a wrong pin on an untrusted self-signed upstream sends nothing and is refunded; its own leaf pin is reached | not yet ported |
-| integrate2-seams.test.js | on a chain the daemon trusts, an intermediate or leaf pin is honoured, and a pin that matches nothing is AV_PIN_MISMATCH, refunded and unsent | not yet ported |
-| integrate2-seams.test.js | the same chain with an intermediate pin is refused, unsent, when the daemon does not trust its root | not yet ported |
-| integrate2-seams.test.js | the agent's Host header never reaches the connector; a Host that did would be refused unsent (C9) | not yet ported |
+| integrate2-seams.test.js | a correct leaf pin goes out through the real pinnedRequest, with the secret and the URL host | `ported_connectors_pinning::integrate2_gateway_real_pins_verify_before_send_and_refund_the_original_capability` |
+| integrate2-seams.test.js | a wrong pin on an untrusted self-signed upstream sends nothing and is refunded; its own leaf pin is reached | `ported_connectors_pinning::integrate2_gateway_real_pins_verify_before_send_and_refund_the_original_capability` |
+| integrate2-seams.test.js | on a chain the daemon trusts, an intermediate or leaf pin is honoured, and a pin that matches nothing is AV_PIN_MISMATCH, refunded and unsent | `ported_connectors_pinning::integrate2_gateway_real_pins_verify_before_send_and_refund_the_original_capability` |
+| integrate2-seams.test.js | the same chain with an intermediate pin is refused, unsent, when the daemon does not trust its root | `ported_connectors_pinning::integrate2_gateway_real_pins_verify_before_send_and_refund_the_original_capability` |
+| integrate2-seams.test.js | the agent's Host header never reaches the connector; a Host that did would be refused unsent (C9) | `ported_gateway_core::integrate2_pipeline_rebuilds_host_and_real_connector_refuses_foreign_host_with_refund` |
 | integrate2-seams.test.js | a repeated list header goes out folded into one line, not refused as header_format | `ported_gateway_core::integrate2_real_upstream_combines_repeated_list_headers_as_one_upstream_value` |
-| integrate2-seams.test.js | a malformed pin table on a credential is pinned, not unpinned: refused before a connection | not yet ported |
-| integrate2-seams.test.js | the connectors health reader and the store record what a response says (F10) | not yet ported |
-| integrate2-seams.test.js | an expired grant is refused before anything is sent, and stays expired, not missing (F18) | not yet ported |
-| integrate2-seams.test.js | each redirect hop is charged to the grant by the store, and the hop past the budget is not followed (F6) | not yet ported |
-| integrate2-seams.test.js | a grant layer with no limit is bounded by the session layer, and its hops are charged (C4, one reader) | not yet ported |
-| integrate2-seams.test.js | a credential the store quarantined is refused before any send, and a tripwire quarantines through the store (F16) | not yet ported |
-| integrate2-seams.test.js | preflight and the real route agree, read with the store itself, on finite, expired, infinite and legacy sessions | not yet ported |
-| integrate2-seams.test.js | a scrub pattern the store saves is applied by the gateway, and one the grammar refuses is never saved | not yet ported |
-| integrate2-seams.test.js | a held request is recorded as held, and the store report counts it as held, not as a use (C11) | not yet ported |
-| integrate2-seams.test.js | panic: the wired hook denies pending session requests, and a throwing hook still completes the panic (C1) | not yet ported |
-| integrate2-seams.test.js | an infinite session is refused on a network listener, with nothing sent and the refusal recorded (C12) | not yet ported |
-| integrate2-seams.test.js | a finite session on a network listener is unchanged by C12 | not yet ported |
-| integrate3-c25.test.js | C25: shapeOf names the fields a proposal sets and counts its lists; narrowedOf names what a human changed | not yet ported |
-| integrate3-c25.test.js | C25: every r2 and r3 form, in paths, routes, payload, reason and every number, reaches no record; decide keeps the grant whole | not yet ported |
-| integrate3-c25.test.js | C25: decide-many records the same structure, and pending.decided_many holds only ids | not yet ported |
-| integrate3-c25.test.js | C25: a denial, and a panic denial, record structure only | not yet ported |
-| integrate3-c25.test.js | C25: a value rotated out (retireMs 0) between the ask and decide is in no record, and the gateway enforces the grant | not yet ported |
-| integrate3-c25.test.js | C25: a human override holding a former secret and a PIN is recorded as the names it narrowed, nothing more | not yet ported |
-| integrate3-c25.test.js | F6: placeholder.issued and placeholder.refunded carry no use ceiling; a human-made session keeps its expiry in the log | not yet ported |
-| integrate3-c25.test.js | C25: no request record is written with a value even when the secrets cannot be read | not yet ported |
+| integrate2-seams.test.js | a malformed pin table on a credential is pinned, not unpinned: refused before a connection | `ported_gateway_core::integrate2_malformed_stored_pin_entries_never_mean_unpinned_or_reach_upstream` |
+| integrate2-seams.test.js | the connectors health reader and the store record what a response says (F10) | `ported_gateway_core::pin_problem_is_safe_and_refunded_and_real_profile_health_receives_metadata` |
+| integrate2-seams.test.js | an expired grant is refused before anything is sent, and stays expired, not missing (F18) | `ported_gateway_core::integrate2_expired_grant_is_unsent_and_stays_expired_across_repeated_attempts` |
+| integrate2-seams.test.js | each redirect hop is charged to the grant by the store, and the hop past the budget is not followed (F6) | `ported_gateway_core::integrate2_real_redirect_hops_charge_bounded_grant_and_unit_only_session_budgets` |
+| integrate2-seams.test.js | a grant layer with no limit is bounded by the session layer, and its hops are charged (C4, one reader) | `ported_gateway_core::integrate2_real_redirect_hops_charge_bounded_grant_and_unit_only_session_budgets` |
+| integrate2-seams.test.js | a credential the store quarantined is refused before any send, and a tripwire quarantines through the store (F16) | `ported_gateway_core::integrate2_store_quarantine_and_tripwire_both_stop_real_network_traffic` |
+| integrate2-seams.test.js | preflight and the real route agree, read with the store itself, on finite, expired, infinite and legacy sessions | `ported_gateway_core::stored_session_and_grant_expiry_predicates_agree_in_preflight_and_execution` |
+| integrate2-seams.test.js | a scrub pattern the store saves is applied by the gateway, and one the grammar refuses is never saved | `ported_gateway_core::integrate2_store_saved_scrub_pattern_is_used_and_rejected_patterns_are_never_persisted` |
+| integrate2-seams.test.js | a held request is recorded as held, and the store report counts it as held, not as a use (C11) | `ported_gateway_core::integrate2_held_request_is_unsent_and_store_activity_counts_it_as_held_not_allowed` |
+| integrate2-seams.test.js | panic: the wired hook denies pending session requests, and a throwing hook still completes the panic (C1) | `ported_gateway_core::panic_denies_held_work_then_revokes_finite_and_infinite_sessions_before_record_and_lock`; `ported_gateway_core::real_session_request_metadata_failure_does_not_prevent_panic_revocation_and_partial_record` |
+| integrate2-seams.test.js | an infinite session is refused on a network listener, with nothing sent and the refusal recorded (C12) | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate2-seams.test.js | a finite session on a network listener is unchanged by C12 | `ported_gateway_core::integrate2_c12_real_remote_listeners_refuse_infinite_on_every_surface_and_keep_finite_controls` |
+| integrate3-c25.test.js | C25: shapeOf names the fields a proposal sets and counts its lists; narrowedOf names what a human changed | `ported_requested::c25_shape_and_narrowing_names_are_allowlisted_field_names_and_small_list_counts` |
+| integrate3-c25.test.js | C25: every r2 and r3 form, in paths, routes, payload, reason and every number, reaches no record; decide keeps the grant whole | `ported_gateway_core::c25_all_encoded_proposal_forms_are_absent_from_all_audit_surfaces_but_limits_remain_live` |
+| integrate3-c25.test.js | C25: decide-many records the same structure, and pending.decided_many holds only ids | `ported_gateway_core::c25_bulk_human_denial_and_panic_denial_keep_only_structure_and_minted_ids` |
+| integrate3-c25.test.js | C25: a denial, and a panic denial, record structure only | `ported_gateway_core::c25_bulk_human_denial_and_panic_denial_keep_only_structure_and_minted_ids` |
+| integrate3-c25.test.js | C25: a value rotated out (retireMs 0) between the ask and decide is in no record, and the gateway enforces the grant | `ported_gateway_core::c25_rotated_proposal_and_human_override_keep_values_in_grants_and_out_of_audits` |
+| integrate3-c25.test.js | C25: a human override holding a former secret and a PIN is recorded as the names it narrowed, nothing more | `ported_gateway_core::c25_rotated_proposal_and_human_override_keep_values_in_grants_and_out_of_audits` |
+| integrate3-c25.test.js | F6: placeholder.issued and placeholder.refunded carry no use ceiling; a human-made session keeps its expiry in the log | `ported_gateway_core::c25_human_expiry_stays_public_but_placeholder_use_ceiling_and_agent_expiry_do_not` |
+| integrate3-c25.test.js | C25: no request record is written with a value even when the secrets cannot be read | `ported_gateway_core::c25_real_secret_reader_failure_cannot_turn_shape_only_auditing_into_value_logging` |
 | integrate3-e2e-approvals.test.js | A.7 6 (F13, F14): watch prints a held POST, the preview hides the placeholder, and the approved resend runs once | not yet ported |
 | integrate3-e2e-approvals.test.js | A.7 7 (F15): session narrow --methods GET mid-run refuses the next POST and keeps GET working | not yet ported |
 | integrate3-e2e-approvals.test.js | A.7 7 (F16): with the tripwire on, a replayed placeholder revokes its session before the answer returns | not yet ported |
@@ -857,7 +857,7 @@ the vault on every call instead of caching an audit handle.
 | integrate3-r4.test.js | C27: a path-only grant records path_rule and a null route_rule, never the glob | not yet ported |
 | integrate3-r4.test.js | C27: a deny pattern added by an open narrowing is named by index in the denial, never by its text | not yet ported |
 | integrate3-r4.test.js | F2: decide-many writes only ids the daemon minted, and counts the rest | not yet ported |
-| integrate3-r4.test.js | C26: elevationOf names first-use with a write method, and not read-only first-use | not yet ported |
+| integrate3-r4.test.js | C26: elevationOf names first-use with a write method, and not read-only first-use | `ported_requested::c26_first_use_write_elevation_has_read_only_controls` |
 | integrate3-r4.test.js | C26: creating first-use with writes needs a fresh proof; read-only first-use rides the window | not yet ported |
 | integrate3-r4.test.js | C26: approving a request into first-use with writes needs a fresh proof, not the window | not yet ported |
 | integrate3-r4.test.js | C26: narrowing a request into first-use with a write left needs a fresh proof; narrowing it to read-only does not | not yet ported |
@@ -887,10 +887,10 @@ the vault on every call instead of caching an audit handle.
 | integrate3-r6.test.js | r6 F2: a caller with no session gets the code and rule of a no-session denial, never its sentence | not yet ported |
 | integrate3-seams.test.js | the README and the docs page say how many MCP tools there are, and it is how many mcp.js has | not yet ported |
 | integrate3-seams.test.js | F13: a held request carries its preview from the gateway through pending.js and the UI server, and the page escapes it | not yet ported |
-| integrate3-seams.test.js | C18: an infinite token is refused on a 0.0.0.0 and a [::] TLS listener by every wave-3 surface, and a finite one works | not yet ported |
-| integrate3-seams.test.js | a stored secret an agent puts in a session request path or reason does not reach the audit log | not yet ported |
-| integrate3-seams.test.js | an ordinary session request is recorded in the audit log by its shape | not yet ported |
-| integrate3-seams.test.js | with the secrets unreadable, the opened record is the same shape and holds nothing the agent wrote | not yet ported |
+| integrate3-seams.test.js | C18: an infinite token is refused on a 0.0.0.0 and a [::] TLS listener by every wave-3 surface, and a finite one works | `ported_gateway_core::integrate3_c18_real_ipv4_ipv6_tls_preflight_and_description_refuse_infinite_and_keep_finite_peeks_unsent` |
+| integrate3-seams.test.js | a stored secret an agent puts in a session request path or reason does not reach the audit log | `ported_gateway_core::integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text` |
+| integrate3-seams.test.js | an ordinary session request is recorded in the audit log by its shape | `ported_gateway_core::integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text` |
+| integrate3-seams.test.js | with the secrets unreadable, the opened record is the same shape and holds nothing the agent wrote | `ported_gateway_core::integrate3_session_request_audit_records_shapes_while_human_pending_retains_secret_and_ordinary_text` |
 | invariants.test.js | across thousands of random requests, no credential ever reaches the agent | `ported_gateway_core::invariants_generated_real_daemon_sequences_preserve_all_five_claims_for_2400_random_requests` |
 | invariants.test.js | the granted credential reached only the host its grant allows, and nothing else did | `ported_gateway_core::invariants_generated_real_daemon_sequences_preserve_all_five_claims_for_2400_random_requests` |
 | invariants.test.js | no placeholder and no session token was ever forwarded upstream | `ported_gateway_core::invariants_generated_real_daemon_sequences_preserve_all_five_claims_for_2400_random_requests` |
