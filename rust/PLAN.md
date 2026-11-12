@@ -159,7 +159,7 @@ Approved crates (ask the coordinator before adding others): `tokio`, `hyper`
 CBOR), `libc` (`mlock`, peer credentials, uid/gid), `clap`, `rpassword`,
 `regex` (only with linear-time guarantees; no backtracking), `url`, `time`,
 `thiserror`, `tracing`; and, for av-daemon only, `flate2` (rust_backend),
-`brotli-decompressor` (decode only), `webpki-roots`, and `x509-parser` or the
+`brotli-decompressor` (decode only), `webpki-roots`, `rustls-webpki` (the same version rustls uses, for the verified chain path pinning needs), and `x509-parser` or the
 RustCrypto `x509-cert`/`spki` crates for certificate parsing (never a
 hand-rolled DER parser). Response decompression keeps the JS cap of 64 MiB
 (`MAX_DECOMPRESSED`), zstd stays refused, and upstream TLS trusts the Mozilla
