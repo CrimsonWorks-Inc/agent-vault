@@ -730,3 +730,30 @@ file = "src/setup.rs"
 from = "    save_state(ctx, &mut state)?;"
 to = "    let _ = (&ctx, &state);"
 test = "install_dry_run_records_and_saves_state"
+
+# Release-directory installs (a download or a Homebrew keg).
+
+[[mutation]]
+name = "a release install takes Homebrew's directory of links instead of the keg"
+file = "src/setup.rs"
+from = "    let real = exe.canonicalize().ok()?;"
+to = "    let real = exe.to_path_buf();"
+test = "a_release_directory_is_an_install_source"
+
+[[mutation]]
+name = "any directory counts as a release directory"
+file = "src/setup.rs"
+from = '''    dir.join("agent-vault-daemon").exists() && dir.join("agent-vault-setup").exists()'''
+to = "    true"
+test = "a_release_directory_is_an_install_source"
+
+[[mutation]]
+name = "a release directory beside the CLI wins over the checkout it runs in"
+file = "src/commands.rs"
+from = '''        if crate::setup::is_checkout(dir) {
+            return checkout;
+        }'''
+to = '''        if false && crate::setup::is_checkout(dir) {
+            return checkout;
+        }'''
+test = "a_release_directory_is_an_install_source"

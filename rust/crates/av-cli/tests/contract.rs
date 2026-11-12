@@ -560,3 +560,39 @@ fn listing(dir: &Path) -> Vec<(String, Vec<u8>)> {
     out.sort();
     out
 }
+
+#[test]
+fn installer_plans_an_install_from_a_release_directory_and_refuses_a_linked_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let release = tmp.path().join("agent-vault-0.3.0/bin");
+    fs::create_dir_all(&release).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        fs::write(release.join(name), b"binary").unwrap();
+    }
+    let planned = Command::new(bin("agent-vault-setup"))
+        .args(["install", "--dry-run", "--from"])
+        .arg(&release)
+        .env_remove("AGENT_VAULT_SETUP_DRY_ROOT")
+        .output()
+        .unwrap();
+    let out = format!("{}{}", text(&planned.stdout), text(&planned.stderr));
+    assert_eq!(planned.status.code(), Some(0), "{out}");
+    assert!(out.contains("would copied the daemon"), "{out}");
+
+    // Homebrew's bin directory is links: pointing --from at it is refused,
+    // because the service must run a regular file in the root-owned tree.
+    let links = tmp.path().join("homebrew/bin");
+    fs::create_dir_all(&links).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        std::os::unix::fs::symlink(release.join(name), links.join(name)).unwrap();
+    }
+    let refused = Command::new(bin("agent-vault-setup"))
+        .args(["install", "--dry-run", "--from"])
+        .arg(&links)
+        .env_remove("AGENT_VAULT_SETUP_DRY_ROOT")
+        .output()
+        .unwrap();
+    let out = format!("{}{}", text(&refused.stdout), text(&refused.stderr));
+    assert_ne!(refused.status.code(), Some(0), "{out}");
+    assert!(out.to_lowercase().contains("symbolic link"), "{out}");
+}

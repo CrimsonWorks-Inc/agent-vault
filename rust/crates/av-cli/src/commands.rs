@@ -102,6 +102,31 @@ fn checkout_root() -> Result<PathBuf, CliError> {
     resolve_checkout_root(&starts)
 }
 
+/// What `setup` and `upgrade` install from: the checkout this runs in, or,
+/// outside any checkout, the release directory this CLI came from (a
+/// release download or a Homebrew keg).
+fn install_source() -> Result<PathBuf, CliError> {
+    let exe = std::env::current_exe().ok();
+    install_source_from(checkout_root(), exe.as_deref())
+}
+
+pub(crate) fn install_source_from(
+    checkout: Result<PathBuf, CliError>,
+    exe: Option<&Path>,
+) -> Result<PathBuf, CliError> {
+    if let Ok(dir) = &checkout {
+        if crate::setup::is_checkout(dir) {
+            return checkout;
+        }
+    }
+    if let Some(dir) = exe.and_then(crate::setup::release_dir_beside) {
+        if !is_installed_app(dir.parent().unwrap_or(&dir)) {
+            return Ok(dir);
+        }
+    }
+    checkout
+}
+
 /// Walk `starts` upward for a source checkout ([`crate::setup::is_checkout`]:
 /// the Rust workspace at `rust/`). A start inside the installed app,
 /// `<SYSTEM_ROOT>/app` (canonicalized, so `/var` and `/private/var` are the
@@ -129,9 +154,9 @@ pub(crate) fn resolve_checkout_root(starts: &[PathBuf]) -> Result<PathBuf, CliEr
     }
     if saw_installed {
         return Err(err_next(
-            "run agent-vault upgrade from your checkout.",
+            "run agent-vault upgrade from your checkout, or from the new release.",
             Exit::Usage,
-            "This directory is the installed app, not a checkout.",
+            "This is the installed app. Use the CLI from your checkout or from the release you downloaded (Homebrew: $(brew --prefix)/bin/agent-vault upgrade).",
         ));
     }
     Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -433,7 +458,7 @@ pub async fn setup(ctx: &Context, args: &SetupArgs) -> Outcome {
                 ctx.paint("33", "The installed daemon is not this code.")
             );
             println!(
-                "  Updating reinstalls the daemon from this checkout and restarts the service."
+                "  Updating reinstalls the daemon from this checkout or release and restarts the service."
             );
             println!("  {}", ctx.paint("36", "agent-vault upgrade"));
         }
@@ -441,7 +466,7 @@ pub async fn setup(ctx: &Context, args: &SetupArgs) -> Outcome {
     }
     if !dev {
         let installer = setup_bin();
-        let checkout = checkout_root()?;
+        let checkout = install_source()?;
         let mut cmd = format!(
             "sudo {} install --from {}",
             installer.display(),
@@ -631,7 +656,7 @@ pub async fn upgrade(ctx: &Context, args: &UpgradeArgs) -> Outcome {
         ));
     }
     let checkout_installer = setup_bin();
-    let checkout = checkout_root()?;
+    let checkout = install_source()?;
     let root_owned = PathBuf::from(SYSTEM_ROOT).join("app/bin/agent-vault-setup");
     let (cmd, installer, using_root) =
         format_upgrade_command(&root_owned, &checkout_installer, &checkout)?;
@@ -720,7 +745,7 @@ pub(crate) fn choose_upgrade_installer(
             return Ok((root_owned.to_path_buf(), true));
         }
     }
-    let release = checkout_root.join("rust/target/release/agent-vault-setup");
+    let release = crate::setup::release_dir_of(checkout_root).join("agent-vault-setup");
     if release.is_file() && !installer_runs_inside_app(&release) {
         return Ok((release, false));
     }

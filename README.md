@@ -32,9 +32,32 @@ agent-vault is written in Rust and keeps its vault in SQLite. The mechanism work
 
 It was first written in JavaScript; that implementation is frozen in [`legacy/js`](legacy/js) as the reference the Rust tests compare against, and nothing installs or runs it. Coming from the JavaScript version? [`agent-vault migrate`](rust/README.md#moving-an-existing-vault) moves your vault across with every credential, session and placeholder intact.
 
-## Try it
+## Install
 
-Build from source with the toolchain pinned in `rust/rust-toolchain.toml` (rustup installs it on first use):
+On macOS or Linux:
+
+```bash
+curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/download/install.sh | sh
+```
+
+or with Homebrew:
+
+```bash
+brew install crimsonworks/tap/agent-vault
+agent-vault setup
+```
+
+The script checks the archive against the release's `SHA256SUMS` and, when the GitHub CLI is installed, against the build provenance GitHub recorded for it, then runs `agent-vault setup`. Setup shows exactly what its one privileged step will do and asks before it runs `sudo`. To verify by hand first:
+
+```bash
+gh attestation verify agent-vault-<version>-<target>.tar.gz --repo CrimsonWorks-Inc/agent-vault
+```
+
+Upgrading: run the install command again (or `brew upgrade agent-vault`), then the `sudo` command `agent-vault upgrade` prints. It runs the root-owned installer from your existing install, which an agent cannot edit.
+
+## Build from source
+
+With the toolchain pinned in `rust/rust-toolchain.toml` (rustup installs it on first use):
 
 ```bash
 cd rust
@@ -598,8 +621,9 @@ has read every line of this repository. Against that attacker:
 - **A vault with no human factor.** Set neither a passphrase nor an
   authenticator and the control socket is open by design, and audited as
   `control.widening_ungated`. Set a passphrase.
-- **The first `sudo`.** The first install runs the `agent-vault-setup` you built
-  in a checkout you own, which an agent could have replaced beforehand. After
+- **The first `sudo`.** The first install runs an `agent-vault-setup` from a
+  directory you own (a release you unpacked, or a checkout you built), which an
+  agent could have replaced beforehand; verify a release archive first. After
   that the root-owned copy is used, and it installs only the release binaries,
   refusing any that is a symbolic link.
 - **Phishing your touch.** The platform dialog says who is asking, not what
@@ -645,7 +669,7 @@ This build is the mechanism, not the hardened deployment. Each gap below is real
 
 **The privileged install has only ever run on macOS.** `sudo agent-vault-setup install` creates the `_agentvault` system user, a root-owned tree, a 0700 vault owned by that user, and a launchd or systemd unit that runs the Rust daemon. After it runs, your own account cannot read the vault — the boundary the whole design rests on. `agent-vault doctor` checks it by trying. It has never been run as root on Linux. Run it with `--dry-run` first; it prints every change it would make.
 
-**The installer itself is trust-on-first-use.** The first `sudo` runs the `agent-vault-setup` you built in your own checkout, which an agent running as you could have replaced beforehand. Signed release binaries are the answer, and they are not built yet.
+**The installer itself is trust-on-first-use.** The first `sudo` runs an `agent-vault-setup` that sits in a directory you own, which an agent running as you could replace before you run it. Release archives narrow this: each has a checksum and build provenance (`gh attestation verify`), so you can confirm what you are about to run as root was built by this repository's release workflow. The install script checks both. Releases are not yet signed with an Apple Developer ID, so a downloaded macOS binary is not notarized; the workflow does that once the signing secrets are configured.
 
 `agent-vault setup` runs unprivileged, prints the dry-run plan and the absolute path of the one program root will execute, then asks before spawning sudo. After a successful install, `agent-vault upgrade` uses the root-owned copy of the installer instead, which an agent cannot edit, and it copies only the release binaries from your checkout into the root-owned tree — so only the very first install carries this risk. Running the whole CLI under sudo is a different and worse thing, and is refused.
 

@@ -1,0 +1,206 @@
+# Release: push a tag like v0.3.0 and this builds agent-vault for macOS and
+# Linux, attaches the archives and SHA256SUMS to a GitHub release, and records
+# build provenance for each archive.
+#
+# Users verify an archive before they ever run it as root:
+#   shasum -a 256 -c SHA256SUMS --ignore-missing
+#   gh attestation verify agent-vault-<version>-<target>.tar.gz --repo CrimsonWorks-Inc/agent-vault
+#
+# Optional, switched on by repository secrets (skipped when they are absent):
+#   macOS signing and notarization: APPLE_CERTIFICATE_P12 (base64),
+#     APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID
+#     Application: ..."), APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD.
+#   Homebrew tap update: HOMEBREW_TAP_TOKEN (a token that can push to
+#     CrimsonWorks-Inc/homebrew-tap).
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (for a re-run)'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      # Read by the signing step's condition; empty when the secret is unset.
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          crate_version="$(grep -m1 '^version' rust/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$version" != "$crate_version" ]; then
+            echo "tag $tag does not match rust/Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=agent-vault-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Toolchain
+        working-directory: rust
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Build
+        working-directory: rust
+        run: cargo build --release --locked --target ${{ matrix.target }} -p av-cli -p av-daemon
+
+      - name: Stage
+        shell: bash
+        run: |
+          stage="dist/${{ steps.version.outputs.name }}"
+          mkdir -p "$stage/bin"
+          for b in agent-vault agent-vault-daemon agent-vault-setup; do
+            install -m 0755 "rust/target/${{ matrix.target }}/release/$b" "$stage/bin/$b"
+          done
+          cp LICENSE "$stage/"
+          cp packaging/INSTALL.txt "$stage/"
+
+      - name: Sign and notarize (macOS, when configured)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_pass="$(openssl rand -hex 16)"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_pass" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          stage="dist/${{ steps.version.outputs.name }}"
+          for b in "$stage"/bin/*; do
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$b"
+          done
+          ditto -c -k "$stage/bin" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+
+      - name: Archive
+        id: archive
+        shell: bash
+        run: |
+          cd dist
+          tar -czf "${{ steps.version.outputs.name }}.tar.gz" "${{ steps.version.outputs.name }}"
+          echo "path=dist/${{ steps.version.outputs.name }}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.name }}
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.publish.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/*.tar.gz dist/SHA256SUMS packaging/install.sh --clobber
+          else
+            gh release create "$tag" dist/*.tar.gz dist/SHA256SUMS packaging/install.sh \
+              --title "agent-vault $tag" --notes-file packaging/RELEASE_NOTES.md --verify-tag
+          fi
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ !contains(inputs.tag || github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Update the tap (when configured)
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping the tap update."
+            exit 0
+          fi
+          gh release download "v$VERSION" --pattern SHA256SUMS --dir sums
+          python3 packaging/homebrew/render.py "$VERSION" sums/SHA256SUMS > agent-vault.rb
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/CrimsonWorks-Inc/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp agent-vault.rb tap/Formula/agent-vault.rb
+          cd tap
+          git config user.name "agent-vault release"
+          git config user.email "noreply@github.com"
+          git add Formula/agent-vault.rb
+          git commit -m "agent-vault $VERSION"
+          git push

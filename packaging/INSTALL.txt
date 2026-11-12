@@ -1,0 +1,22 @@
+agent-vault
+
+  bin/agent-vault         the command line (also usable as `av`)
+  bin/agent-vault-daemon  the daemon the system service runs
+  bin/agent-vault-setup   the privileged installer
+
+Install:
+
+  bin/agent-vault setup
+
+It shows exactly what the one privileged step does (a system user that alone
+can read the vault, a root-owned copy of these binaries, a launchd or systemd
+service) and asks before it runs sudo.
+
+Coming from the JavaScript version: stop the old service, then run
+`agent-vault migrate` as described in the README
+(https://github.com/CrimsonWorks-Inc/agent-vault/blob/main/rust/README.md#moving-an-existing-vault).
+
+Verify this archive before running anything as root:
+
+  shasum -a 256 -c SHA256SUMS --ignore-missing
+  gh attestation verify agent-vault-<version>-<target>.tar.gz --repo CrimsonWorks-Inc/agent-vault

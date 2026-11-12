@@ -397,7 +397,7 @@ impl Context {
                 exit: Exit::VersionSkew,
                 skew: true,
                 next: Some(if using_system() {
-                    "agent-vault setup   (reinstalls from this checkout and restarts the service)"
+                    "agent-vault setup   (reinstalls from this checkout or release and restarts the service)"
                         .into()
                 } else {
                     "restart the daemon you started with: agent-vault daemon".into()
