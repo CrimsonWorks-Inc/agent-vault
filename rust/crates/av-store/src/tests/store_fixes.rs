@@ -356,3 +356,37 @@ fn booting_an_unlocked_vault_still_unlocks_it() {
     assert!(!booted.locked());
     assert!(records_all(&booted).iter().any(|k| k == "vault.unlock"));
 }
+
+/// A legacy health value of the wrong shape (migrate can carry one from an
+/// old vault.json) reads as no health, and the credential still lists; JS
+/// passes the odd value through. Other columns stay strict.
+#[test]
+fn a_wrong_shape_health_value_reads_as_none_and_the_credential_still_lists() {
+    let fx = fresh();
+    let slug = fx.cred.slug.clone();
+    fx.vault
+        .conn()
+        .execute(
+            "UPDATE credentials SET health = '\"unreadable legacy health\"' WHERE slug = ?1",
+            [&slug],
+        )
+        .unwrap();
+    let c = fx.vault.find_credential(&slug).unwrap().expect("listed");
+    assert!(c.health.is_none());
+    assert!(fx
+        .vault
+        .credential_records()
+        .unwrap()
+        .iter()
+        .any(|c| c.slug == slug));
+    // Control: a well-formed record is still read.
+    fx.vault
+        .conn()
+        .execute(
+            "UPDATE credentials SET health = '{\"status\":\"ok\",\"http_status\":200,\"checked_at\":\"2026-01-01T00:00:00.000Z\",\"source\":\"probe\",\"observed_expires_at\":null,\"scopes\":null}' WHERE slug = ?1",
+            [&slug],
+        )
+        .unwrap();
+    let c = fx.vault.find_credential(&slug).unwrap().expect("listed");
+    assert!(c.health.is_some(), "a well-formed health record is read");
+}

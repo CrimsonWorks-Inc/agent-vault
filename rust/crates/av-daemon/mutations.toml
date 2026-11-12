@@ -1,0 +1,3029 @@
+# Protections in av-daemon that the tests must catch. `cargo xtask mutation`
+# applies each swap to a temporary copy of rust/ and requires `cargo test` to
+# fail. Fields: name, file (relative to this crate), from (must appear exactly
+# once), to.
+#
+# Every entry of test/mutation-check.js (read as text, never imported) whose
+# file is src/daemon/*, src/ui/*, src/pending.js or src/connectors/* is here,
+# under its `what` as the name, or is in another crate's mutations.toml (named
+# where it applies), or is a NOT APPLICABLE comment block giving the reason the
+# protection cannot be removed in the Rust code. A few entries break a
+# protection that lives in av-core or av-store (`file = "../av-core/..."`):
+# the daemon calls it, and the daemon's own tests catch the mutant.
+
+
+[[mutation]]
+name = 'a batch of decisions is settled with no human present'
+file = "src/server/routes.rs"
+from = 'self.gate_session("bulk decision", operation, &elevated, presence).await?;'
+to = 'let _ = (operation, elevated, presence);'
+
+[[mutation]]
+name = 'the human-presence gate never refuses'
+file = "src/server.rs"
+from = '''let factors = self.dm_factors()?;
+        if factors.is_empty() {
+            self.audit_opt("control.widening_ungated"'''
+to = '''let factors = self.dm_factors()?;
+        if true || factors.is_empty() {
+            self.audit_opt("control.widening_ungated"'''
+
+[[mutation]]
+name = 'the session token is forwarded upstream'
+file = "src/pipeline.rs"
+from = 'if token_re.is_match(v) {'
+to = 'if false && token_re.is_match(v) {'
+
+[[mutation]]
+name = 'the placeholder checksum is never checked'
+file = "src/pipeline.rs"
+from = 'if !av_core::placeholder::verify(&k_ph, &occ.parsed) {'
+to = 'if false && !av_core::placeholder::verify(&k_ph, &occ.parsed) {'
+
+[[mutation]]
+name = 'a compressed event stream bypasses the scrubber'
+file = "src/pipeline.rs"
+from = 'let compressed = !encoding.is_empty()'
+to = 'let compressed = false && !encoding.is_empty()'
+
+[[mutation]]
+name = 'error details reach the agent unscrubbed'
+file = "src/pipeline.rs"
+from = 'err.detail = detail;'
+to = 'let _ = detail;'
+
+[[mutation]]
+name = 'a resend may change the bytes the human approved'
+file = "src/pipeline.rs"
+from = 'let body_sha = view'
+to = 'let body_sha = String::new(); let _unused = view'
+
+[[mutation]]
+name = 'a policy denial is filed without the session that was refused'
+file = "src/pipeline.rs"
+from = '''"session_id".into(),
+                ctx.session
+                    .as_ref()
+                    .map_or(Value::Null, |s| s.id.clone().into()),'''
+to = '''"session_id".into(),
+                Value::Null,'''
+
+[[mutation]]
+name = 'denying a held request needs no human'
+file = "src/server/routes.rs"
+from = 'self.require_human(if granted { "approval grant" } else { "approval deny" }, op?, presence).await?;'
+to = 'if granted { self.require_human("approval grant", op?, presence).await?; }'
+
+[[mutation]]
+name = 'an agent can enrol a presence key on a fresh vault'
+file = "src/server/routes.rs"
+from = 'if !existed_pass.0 && !existed_pass.1 {'
+to = 'if false {'
+
+[[mutation]]
+name = 'a session request is created from what was asked, not what was approved'
+file = "src/server.rs"
+from = 'let mut spec = request_spec(&final_);'
+to = 'let mut spec = request_spec(&record.proposal);'
+
+[[mutation]]
+name = 'anyone with a request id collects its session'
+file = "src/server/routes.rs"
+from = '''if !record.may_collect(secret.as_deref()) {
+                            return Err(dr(C::PolicyDenied, "that is not the secret'''
+to = '''if false && !record.may_collect(secret.as_deref()) {
+                            return Err(dr(C::PolicyDenied, "that is not the secret'''
+
+[[mutation]]
+name = 'locking leaves the presence window open'
+file = "src/server/routes.rs"
+from = '''core.vault.lock().v()?;
+                        core.dm.presence_grace_until = 0;'''
+to = 'core.vault.lock().v()?;'
+
+[[mutation]]
+name = 'an assertion from an untrusted origin is accepted'
+file = "src/ui/webauthn.rs"
+from = 'expected_origins.iter().any'
+to = 'true || expected_origins.iter().any'
+
+[[mutation]]
+name = 'a method-override header escapes the methods allowlist'
+file = "src/pipeline.rs"
+from = 'if !methods.contains(m) {'
+to = 'if false && !methods.contains(m) {'
+
+[[mutation]]
+name = 'a secret in a response header name reaches the agent'
+file = "src/pipeline.rs"
+from = 'if kit.check.scrub(&lower).redactions > 0 || kit.check.contains_ignoring_case(&lower) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'an event stream is framed on LF only'
+file = "src/sse.rs"
+from = '''t.replace("\r\n", "\n").replace('\r', "\n")'''
+to = 't'
+
+[[mutation]]
+name = 'a request body goes upstream without a Content-Length'
+file = "src/pipeline.rs"
+from = 'put_header(&mut headers, "content-length", b.len().to_string());'
+to = 'let _ = b;'
+
+[[mutation]]
+name = 'the approvals route takes any verdict that is not literally false'
+file = "src/server/routes.rs"
+from = 'let Some(granted) = field(&input, "granted")?.and_then(Value::as_bool) else {'
+to = 'let Some(granted) = field(&input, "granted")?.map(|v| v != &Value::Bool(false)) else {'
+
+[[mutation]]
+name = 'elevationOf calls every session ordinary, so auto with writes rides the window'
+file = "src/session_requests.rs"
+from = 'unasked(g) && permits_write(g)'
+to = 'false && unasked(g) && permits_write(g)'
+
+[[mutation]]
+name = 'POST /v1/sessions gates an elevated body as ordinary widening'
+file = "src/server.rs"
+from = 'if !elevated.is_empty() {'
+to = 'if false && !elevated.is_empty() {'
+
+[[mutation]]
+name = 'the daemon lets an infinite session be remote'
+file = "src/server.rs"
+from = 'if infinite && remote {'
+to = 'if false && infinite && remote {'
+
+[[mutation]]
+name = 'a pin on a non-leaf certificate stands in for CA trust'
+file = "src/connectors/pinning.rs"
+from = 'let leaf_pinned'
+to = 'let leaf_pinned = chain_pins(chain, &[]).iter().any(|p| pins.contains(p)); let _leaf'
+
+[[mutation]]
+name = 'a pin on any presented certificate stands in for CA trust'
+file = "src/connectors/pinning.rs"
+from = 'if check.verified.iter().any'
+to = 'if chain_pins(chain, &check.verified).iter().any'
+
+[[mutation]]
+name = 'a pinned leaf skips the host name check'
+file = "src/connectors/pinning.rs"
+from = 'if let Err(code) = named {'
+to = 'if let Some(code) = named.err().filter(|_| false) {'
+
+[[mutation]]
+name = 'an expired pinned leaf is accepted'
+file = "src/connectors/pinning.rs"
+from = 'if now > not_after'
+to = 'if now > not_after + 100_000_000'
+
+[[mutation]]
+name = 'a pins value that is not an array is read as no pins'
+file = "src/connectors/pinning.rs"
+from = 'if state == PinListState::Invalid {'
+to = 'if false && state == PinListState::Invalid {'
+
+[[mutation]]
+name = 'a second probe inside a minute is sent anyway'
+file = "src/connectors/probe.rs"
+from = 'if now.saturating_sub(*prev) < PROBE_WINDOW_MS {'
+to = 'if false && now.saturating_sub(*prev) < PROBE_WINDOW_MS {'
+
+[[mutation]]
+name = 'probe scopes are returned without scrubbing the credential'
+file = "src/connectors/probe.rs"
+from = 'scrub_text(&crate::util::js_string(x), &mut scrubber)'
+to = 'crate::util::js_string(x)'
+
+[[mutation]]
+name = 'the rolling quota admits a request that would take it past the limit'
+file = "src/pipeline.rs"
+from = 'if enforce && estimate + 1.0 > q.count as f64 {'
+to = 'if false && enforce && estimate + 1.0 > q.count as f64 {'
+
+[[mutation]]
+name = 'a redirect hop is followed without checking the grant'
+file = "src/pipeline.rs"
+from = '''Ok(h) => hop = Some(h),
+                Err(e) => {'''
+to = '''Ok(h) => hop = Some(h),
+                Err(_) if true => hop = Some(policy::HttpDecision { host: url_hostname(n), path: n.path().to_string(), method: hv.method.clone(), path_rule: None, route_rule: None }),
+                Err(e) => {'''
+
+[[mutation]]
+name = 'preflight creates the approval it predicts'
+file = "src/pipeline.rs"
+from = '''        if preflight {
+            let held = self'''
+to = '''        if false && preflight {
+            let held = self'''
+
+[[mutation]]
+name = 'preflight extends the session it is asked about'
+file = "src/pipeline.rs"
+from = 'let session = self.pl_authenticate(&req, false)?;'
+to = 'let session = self.pl_authenticate(&req, true)?;'
+
+[[mutation]]
+name = 'a single-valued header sent twice with different values is let through'
+file = "src/pipeline.rs"
+from = 'if differs {'
+to = 'if false && differs {'
+
+[[mutation]]
+name = 'a method-override field naming another method is let through'
+file = "src/pipeline.rs"
+from = 'if value.to_uppercase() != view.method'
+to = 'if false && value.to_uppercase() != view.method'
+
+[[mutation]]
+name = 'a direct request with a stray name is sent'
+file = "src/pipeline.rs"
+from = 'if view.stray_name {'
+to = 'if false && view.stray_name {'
+
+[[mutation]]
+name = 'a daemon answer reaches the page without the token and placeholder guard'
+file = "src/ui/server.rs"
+from = 'WITHHELD_KEYS.contains'
+to = 'false && WITHHELD_KEYS.contains'
+
+[[mutation]]
+name = 'a withheld key in another case reaches the page'
+file = "src/ui/server.rs"
+from = 'for c in k.to_lowercase().chars()'
+to = 'for c in k.chars()'
+
+[[mutation]]
+name = 'U2: an asset path is matched after normalising instead of as it arrived'
+file = "src/ui/server.rs"
+from = 'lower.contains("%2e")'
+to = 'false && lower.contains("%2e")'
+
+[[mutation]]
+name = 'U2: a file of a type the build never makes (a source map, a text file) is served'
+file = "src/ui/server.rs"
+from = '''"ico" => "image/x-icon",
+        _ => return None,'''
+to = '''"ico" => "image/x-icon",
+        _ => "text/plain",'''
+
+[[mutation]]
+name = 'U2: assets are served without the session cookie'
+file = "src/ui/server.rs"
+from = 'if !self.authed(&parts.headers) {'
+to = 'if false && !self.authed(&parts.headers) {'
+
+[[mutation]]
+name = 'U3: a cursor is opened without checking its seal'
+file = "src/ui/list_paging.rs"
+from = 'if !ct_eq(mac, &self.mac(body))'
+to = 'if false && !ct_eq(mac, &self.mac(body))'
+
+[[mutation]]
+name = 'U3: a cursor made under one search or filter is accepted under another'
+file = "src/ui/list_paging.rs"
+from = 'if c["f"].as_str() != Some(digest_of(filters).as_str()) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'U3: a cursor made for one list is accepted by another'
+file = "src/ui/list_paging.rs"
+from = 'if c["l"].as_str() != Some(list) {'
+to = 'if false {'
+
+[[mutation]]
+name = 'U3: a limit above 200 is accepted'
+file = "src/ui/list_paging.rs"
+from = 'if limit > LIMIT_MAX {'
+to = 'if false && limit > LIMIT_MAX {'
+
+[[mutation]]
+name = 'U3: a cursor without paged=1 is ignored instead of refused'
+file = "src/ui/list_paging.rs"
+from = 'n == "cursor"'
+to = 'false && n == "cursor"'
+
+[[mutation]]
+name = 'panic reads a string as a lock decision'
+file = "src/ui/server.rs"
+from = 'body.get("lock").is_some_and'
+to = 'false && body.get("lock").is_some_and'
+
+[[mutation]]
+name = '''the session_request.opened record quotes the agent's reason (C25)'''
+file = "src/session_requests.rs"
+from = '"actor": "agent",'
+to = '"actor": "agent", "reason": record.reason_untrusted,'
+
+[[mutation]]
+name = 'pending.decided_many writes every id the client sent, known or not (r4 F2)'
+file = "src/server/routes.rs"
+from = 'let logged = |dd: &Value| known.contains(&js_string(&dd["id"]));'
+to = 'let logged = |_dd: &Value| !known.is_empty() || true;'
+
+[[mutation]]
+name = 'presence.denied records the assertion error message, which quotes the client data type and origin (r5 F1)'
+file = "src/server.rs"
+from = '"reason": webauthn::failure_of(&err)'
+to = '"reason": err.message.clone()'
+
+[[mutation]]
+name = 'a gateway denial row keeps the free-text detail (C28)'
+file = "src/pipeline.rs"
+from = 'f.insert("decision".into(), "deny".into());'
+to = 'f.insert("decision".into(), "deny".into()); f.insert("detail".into(), err.detail.clone().into());'
+
+[[mutation]]
+name = '''explain-denial answers about another session's request'''
+file = "src/mcp.rs"
+from = 'x.get("session_id").and_then'
+to = 'true || x.get("session_id").and_then'
+
+[[mutation]]
+name = 'r6 N4: a headline leaves the daemon with its bidi controls'
+file = "src/notify.rs"
+from = '0x202a..=0x202e | 0x2066..=0x2069 => None,'
+to = '0x202a..=0x202e | 0x2066..=0x2069 => Some(c),'
+
+[[mutation]]
+name = 'a request held for approval is recorded as allowed'
+file = "src/pipeline.rs"
+from = '"decision": if held'
+to = '"decision": if held && false'
+
+[[mutation]]
+name = 'the placeholder text is hashed raw, so a resend never matches'
+file = "src/pipeline.rs"
+from = '.map(|(n, v)| (n.clone(), stable_header(n, v)))'
+to = '.map(|(n, v)| (n.clone(), { let _ = &stable_header; v.clone() }))'
+
+[[mutation]]
+name = 'listen rm leaves the bound server serving'
+file = "src/server/routes.rs"
+from = 'let unbound = self.unbind_listener(&lid).await;'
+to = 'let unbound = false;'
+
+[[mutation]]
+name = 'pending session requests are lost on a restart'
+file = "src/session_requests.rs"
+from = 'let rows = vault.session_requests()'
+to = 'let rows = Vec::<SessionRequestRecord>::new(); let _r = vault.session_requests()'
+
+[[mutation]]
+name = '--allow-cidr is stored and not enforced'
+file = "src/listen.rs"
+from = 'if !allow.allows(&addr) {'
+to = 'if false && !allow.allows(&addr) {'
+
+[[mutation]]
+name = 'an agent can enroll its own unlock factor'
+file = "src/server/routes.rs"
+from = 'self.require_fresh(if remove { "touch id removal" } else { "touch id enrollment" }, op?.unwrap_or(Value::Null), presence).await?;'
+to = 'let _ = (op, presence);'
+
+[[mutation]]
+name = 'overridesProblem lets through a key no decision reads'
+file = "src/session_requests.rs"
+from = 'filter(|k| !FIELDS.contains'
+to = 'filter(|k| false && !FIELDS.contains'
+
+[[mutation]]
+name = 'a multi-grant session may name one credential twice'
+file = "src/server.rs"
+from = 'if seen.contains(&c) {'
+to = 'if false && seen.contains(&c) {'
+
+[[mutation]]
+name = 'the agent-facing approval status carries the preview'
+file = "src/pipeline.rs"
+from = '"approval_id": a.id, "state": a.state,'
+to = '"approval_id": a.id, "state": a.state, "preview": a.preview,'
+
+[[mutation]]
+name = 'the MCP endpoint refuses the handshake without a live session'
+file = "src/server.rs"
+from = 'if !token.is_empty() && session.is_none() {'
+to = '''if session.is_none() { return send(401, Some(json!({"code": "AV_SESSION_REQUIRED"})), &[], &[]); }
+        if !token.is_empty() && session.is_none() {'''
+
+# ---------------------------------------------------- src/daemon/session-requests.js
+
+# NOT APPLICABLE:
+#   'the session-request store caches a null audit handle'
+# The Rust store holds no audit handle: every record goes through
+# Core::audit_opt, which asks the vault for its audit log at the time of the
+# write, so there is nothing to cache.
+
+[[mutation]]
+name = 'an approved token is persisted to disk'
+file = "src/session_requests.rs"
+from = '''            "pending" => SessionRequestState::Pending,
+            "denied" => SessionRequestState::Denied,
+            _ => return None,'''
+to = '''            "pending" => SessionRequestState::Pending,
+            "denied" => SessionRequestState::Denied,
+            _ => SessionRequestState::Approved,'''
+
+[[mutation]]
+name = 'settled session requests count against the waiting-room cap'
+file = "src/session_requests.rs"
+from = '''            .filter(|r| r.state == "pending")
+            .count();
+        if waiting >= MAX_PENDING {'''
+to = '''            .count();
+        if waiting >= MAX_PENDING {'''
+
+[[mutation]]
+name = 'elevationOf reads an unreadable methods or routes list as ordinary unless it says auto'
+file = "src/session_requests.rs"
+from = '.any(|g| !readable(g) || (unasked(g) && permits_write(g)))'
+to = '.any(|g| (unasked(g) && permits_write(g)))'
+
+[[mutation]]
+name = 'a session request never tells the notifier it is waiting (F14)'
+file = "src/session_requests.rs"
+from = '''self.notify_pending(json!({"kind": "session", "id": record.id,'''
+to = '''let _ = (json!({"kind": "session", "id": record.id,'''
+
+[[mutation]]
+name = "a template override's methods replace the template's instead of intersecting (F17)"
+file = "src/session_requests.rs"
+from = '.map(|a| a.iter().filter(|m| base.contains(m)).cloned().collect())'
+to = '.map(|a| a.iter().filter(|m| !base.is_empty() || base.contains(m)).cloned().collect())'
+
+[[mutation]]
+name = 'a template override that is not one is ignored instead of refused (F17)'
+file = "src/session_requests.rs"
+from = '        if !TEMPLATE_OVERRIDES.contains(&k.as_str()) {'
+to = '        if false && !TEMPLATE_OVERRIDES.contains(&k.as_str()) {'
+
+[[mutation]]
+name = "a template override's budget replaces the template's instead of taking the minimum (F17)"
+file = "src/session_requests.rs"
+from = 'g["budget"] = Value::from(base_int.min(budget.expect("budget")));'
+to = 'g["budget"] = Value::from({ let _ = base_int; budget.expect("budget") });'
+
+[[mutation]]
+name = "a template override's approval mode replaces a stricter one (F17)"
+file = "src/session_requests.rs"
+from = '''                if oi > bi {
+                    ov.to_string()'''
+to = '''                if oi > bi || true {
+                    ov.to_string()'''
+
+[[mutation]]
+name = "a template override's lifetime replaces a shorter one (F17)"
+file = "src/session_requests.rs"
+from = 'spec["ttl_hours"] = num(base.min(ov));'
+to = 'spec["ttl_hours"] = num({ let _ = base; ov });'
+
+[[mutation]]
+name = 'a template override can make a finite template infinite (F17)'
+file = "src/session_requests.rs"
+from = '''        if inf && spec.get("infinite") != Some(&Value::Bool(true)) {
+            return Err(refuse('''
+to = '''        if false && inf && spec.get("infinite") != Some(&Value::Bool(true)) {
+            return Err(refuse('''
+
+[[mutation]]
+name = 'overridesProblem accepts a narrowing that is not an object'
+file = "src/session_requests.rs"
+from = '''        return Some("the narrowing must be an object".into());'''
+to = '''        return None;'''
+
+[[mutation]]
+name = "the session_request.opened record quotes the proposal's summary (C25)"
+file = "src/session_requests.rs"
+from = '''"proposed": shape["fields"], "counts": shape["counts"],
+            }),'''
+to = '''"proposed": shape["fields"], "counts": shape["counts"], "summary": record.summary,
+            }),'''
+
+[[mutation]]
+name = 'the session_request.opened record carries a digest of the proposal (C25)'
+file = "src/session_requests.rs"
+from = '''"template": proposal.get("template").and_then(Value::as_str),
+                "proposed": shape["fields"],'''
+to = '''"template": proposal.get("template").and_then(Value::as_str), "fingerprint": record.fingerprint,
+                "proposed": shape["fields"],'''
+
+[[mutation]]
+name = 'shapeOf counts a list by copying it (C25)'
+file = "src/session_requests.rs"
+from = 'counts.insert(f.to_string(), Value::from(a.len() as u64));'
+to = 'counts.insert(f.to_string(), Value::Array(a.clone()));'
+
+[[mutation]]
+name = "shapeOf names fields from the proposal's own keys, which the agent wrote (C25)"
+file = "src/session_requests.rs"
+from = '''    let fields: Vec<&str> = FIELDS
+        .iter()
+        .chain(OWNER_FIELDS.iter())
+        .copied()
+        .filter(|f| set(p, f))'''
+to = '''    let fields: Vec<&str> = p
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.keys())
+        .map(String::as_str)
+        .filter(|f| set(p, f))'''
+
+[[mutation]]
+name = 'first-use with a write method is not elevated, so the window creates or approves it (C26)'
+file = "src/session_requests.rs"
+from = '''            Some("auto") | Some("first-use")
+        )
+    };'''
+to = '''            Some("auto")
+        )
+    };'''
+
+# ---------------------------------------------------- src/daemon/notify.js
+
+[[mutation]]
+name = 'a ninth watcher is let in (F14)'
+file = "src/notify.rs"
+from = '        if i.subscribers.len() >= MAX_SUBSCRIBERS {'
+to = '        if false {'
+
+[[mutation]]
+name = 'the minimal webhook payload carries headlines (F14)'
+file = "src/notify.rs"
+from = 'let mut its: Option<Vec<Value>> = (detail == "headline").then(|| {'
+to = 'let mut its: Option<Vec<Value>> = (!detail.is_empty()).then(|| {'
+
+[[mutation]]
+name = 'a notification headline keeps placeholder text (F14)'
+file = "src/notify.rs"
+from = '''        s = format!("{}«placeholder»{}", &s[..hit.offset], &s[hit.end..]);'''
+to = '''        let _ = hit;'''
+
+[[mutation]]
+name = 'the webhook is POSTed for every item, not once per interval (F14)'
+file = "src/notify.rs"
+from = 'let wait = (i.last_sent + WEBHOOK_INTERVAL_MS as i64 - now_ms()).max(0);'
+to = 'let wait = 0i64;'
+
+[[mutation]]
+name = 'a test notification is not throttled (F14)'
+file = "src/notify.rs"
+from = '            if now - i.last_test < TEST_INTERVAL_MS as i64 {'
+to = '            if false {'
+
+[[mutation]]
+name = 'every webhook failure is recorded, so a dead endpoint floods the log (F14)'
+file = "src/notify.rs"
+from = '''            if now - i.last_failure_recorded < FAILURE_RECORD_MS as i64 {
+                return;
+            }'''
+to = ''
+
+[[mutation]]
+name = 'a notification headline keeps a stored secret an agent put in a path (F14)'
+file = "src/notify.rs"
+from = '''            e.get("headline").and_then(Value::as_str).unwrap_or(""),
+            s,
+        )),'''
+to = '''            e.get("headline").and_then(Value::as_str).unwrap_or(""),
+            &s[..0],
+        )),'''
+
+[[mutation]]
+name = 'notify.failed records any string an error carries as its code (C28)'
+file = "src/notify.rs"
+from = '''let ok = code.starts_with('E')'''
+to = '''let ok = true || code.starts_with('E')'''
+
+# ---------------------------------------------------- src/connectors/pinning.js, probe.js, profiles.js
+
+[[mutation]]
+name = 'the request is ended before the certificate pin is checked'
+file = "src/connectors/pinning.rs"
+from = '''        if let Some(err) = verdict(&chain, &name, pin_list.as_deref()) {
+            drop(tls);
+            return Err(err);
+        }
+        exchange(tls, &req.method, &path, &sent, req.body, &url).await'''
+to = '''        let sent_first = exchange(tls, &req.method, &path, &sent, req.body, &url).await;
+        if let Some(err) = verdict(&chain, &name, pin_list.as_deref()) {
+            return Err(err);
+        }
+        sent_first'''
+
+[[mutation]]
+name = 'the certificate identity check reads the Host header'
+file = "src/connectors/pinning.rs"
+from = '''    let identity = identity_of(&url);
+    if !sent'''
+to = '''    let identity = sent.iter().find(|(n, _)| n.eq_ignore_ascii_case("host")).map(|(_, v)| v.split(':').next().unwrap_or("").to_string()).unwrap_or_else(|| identity_of(&url));
+    if false && !sent'''
+
+[[mutation]]
+name = 'a Host header naming another host is sent instead of refused'
+file = "src/connectors/pinning.rs"
+from = '''    if !sent
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))'''
+to = '''    if false && !sent
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))'''
+
+[[mutation]]
+name = 'any Host header value passes as the URL host'
+file = "../av-core/src/pins.rs"
+from = '''    url.port().is_none()
+        && match url.scheme() {'''
+to = '''    true || url.port().is_none()
+        && match url.scheme() {'''
+
+[[mutation]]
+name = 'a Host header under another spelling of the name is not checked'
+file = "src/connectors/pinning.rs"
+from = '''        .filter(|(n, _)| n.eq_ignore_ascii_case("host"))
+        .all(|(_, v)| host_header_matches(v, &url))'''
+to = '''        .filter(|(n, _)| n == "host")
+        .all(|(_, v)| host_header_matches(v, &url))'''
+
+[[mutation]]
+name = 'a pinned request treats an unverified chain as verified'
+file = "src/connectors/pinning.rs"
+from = '''    if check.authorized.is_ok() {
+        if check.verified'''
+to = '''    if true {
+        if check.verified'''
+
+[[mutation]]
+name = 'a pinned leaf that is not yet valid is accepted'
+file = "src/connectors/pinning.rs"
+from = 'Some((not_before, _)) if now < not_before => Some(pin_error('
+to = 'Some((not_before, _)) if false && now < not_before => Some(pin_error('
+
+# NOT APPLICABLE:
+#   'an issuer satisfies a pin without having signed the certificate below it'
+# The JS links issuers itself (checkIssued, a name
+# match, then verify, the signature). Here the verified path comes from
+# webpki's path builder, which accepts an issuer only by verifying its
+# signature over the child; there is no name-only link to fall back to.
+# The neighbouring protection (a pin matches only the verified path, never a
+# merely presented certificate) is the entry 'a pin on any presented
+# certificate stands in for CA trust' above.
+
+[[mutation]]
+name = 'a pin list with a malformed entry is used anyway'
+file = "../av-core/src/pins.rs"
+from = '''    if pins
+        .iter()
+        .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))'''
+to = '''    if true || pins
+        .iter()
+        .all(|v| v.as_str().is_some_and(|s| re.is_match(s)))'''
+
+# NOT APPLICABLE:
+#   "pinnedRequest gives Node the caller's headers, not the copy it checked"
+# The JS guards against a caller's header object whose
+# getters answer differently on a second read. Here the headers are a
+# Vec<(String, String)>: read once into `sent`, checked, and sent from that
+# same Vec; a second read of plain data cannot differ.
+
+[[mutation]]
+name = 'pinnedRequest connects to the bracketed IPv6 host'
+file = "src/connectors/pinning.rs"
+from = 'tokio::net::lookup_host((identity.as_str(), port))'
+to = 'tokio::net::lookup_host((url.host_str().unwrap_or(""), port))'
+
+[[mutation]]
+name = 'probe pin keys that are a bare IPv6 address are not read as a host'
+file = "../av-core/src/pins.rs"
+from = '    let host = if bare.parse::<std::net::Ipv6Addr>().is_ok() {'
+to = '    let host = if false && bare.parse::<std::net::Ipv6Addr>().is_ok() {'
+
+[[mutation]]
+name = 'a request with no pins skips certificate verification'
+file = "src/connectors/pinning.rs"
+from = '''    let Some(pins) = pins else {
+        return check.authorized.err().map(|code| {'''
+to = '''    let Some(pins) = pins else {
+        return check.authorized.err().filter(|_| false).map(|code| {'''
+
+[[mutation]]
+name = 'probe pins are looked up by the declared host, not the URL host'
+file = "src/connectors/probe.rs"
+from = '&av_core::pins::url_identity(&u),'
+to = '&{ let _ = &u; declared.clone() },'
+
+# NOT APPLICABLE:
+#   'the probe takes its path from the request input'
+#   'the probe takes its method from the request input'
+#   'the probe sends a body supplied by the caller'
+#   'the probe throttle reads a time supplied on the call'
+# run_probe(shared, slug, upstream) takes no path, method, body or
+# clock from its caller: the request is built from the profile alone and the
+# throttle reads the process clock. The type has no field a caller could set
+# (the route test asserts a supplied path and method are ignored).
+
+[[mutation]]
+name = 'a probe body past the drain bound is left open'
+file = "src/connectors/probe.rs"
+from = '''                        if n > DRAIN_LIMIT_BYTES {
+                            break;
+                        }'''
+to = '''                        if n > DRAIN_LIMIT_BYTES {
+                            continue;
+                        }'''
+
+[[mutation]]
+name = 'a probe body that never ends holds the probe open'
+file = "src/connectors/probe.rs"
+from = '''                let _ =
+                    tokio::time::timeout(std::time::Duration::from_millis(DRAIN_TIMEOUT_MS), drain)
+                        .await;'''
+to = '''                drain.await;'''
+
+[[mutation]]
+name = 'a recordHealth failure is swallowed'
+file = "src/connectors/probe.rs"
+from = 'core.vault.record_health(&id, &patch).v()?;'
+to = 'let _ = core.vault.record_health(&id, &patch);'
+
+[[mutation]]
+name = 'a probe pin entry of the wrong shape is skipped'
+file = "../av-core/src/pins.rs"
+from = '''        let Some(pins) = value.as_array() else {
+            return PinLookup::Malformed;
+        };'''
+to = '''        let Some(pins) = value.as_array() else {
+            continue;
+        };'''
+
+[[mutation]]
+name = 'the probe result includes the credential value'
+file = "src/connectors/probe.rs"
+from = '''"observed_expires_at": observed, "checked_at": checked_at,
+    });'''
+to = '''"observed_expires_at": observed, "checked_at": checked_at, "secret": p.scrubber_secret.expose_secret(),
+    });'''
+
+[[mutation]]
+name = 'a probe host that is not a hostname is used anyway'
+file = "src/connectors/probe.rs"
+from = 'let (raw_host, port) = split_host_port(&declared).ok_or_else(credential_host)?;'
+to = 'let (raw_host, port) = split_host_port(&declared).unwrap_or_else(|| (declared.clone(), None));'
+
+[[mutation]]
+name = 'a probe accepts a scheme other than http or https'
+file = "src/connectors/probe.rs"
+from = 'if scheme != "https" && scheme != "http" {'
+to = 'if false && scheme != "https" && scheme != "http" {'
+
+[[mutation]]
+name = 'an unparseable expiry header is kept as the observed expiry'
+file = "../av-core/src/profiles.rs"
+from = 'let observed_expires_at = header(h.expiry_header).and_then(|s| parse_expiry(&s));'
+to = 'let observed_expires_at = header(h.expiry_header).map(|s| parse_expiry(&s).unwrap_or_else(|| s.trim().to_string()));'
+
+[[mutation]]
+name = 'an expiry offset outside +-14:00 is applied'
+file = "../av-core/src/profiles.rs"
+from = '        if hours > 14 || minutes > 59 || (hours == 14 && minutes > 0) {'
+to = '        if false {'
+
+# ---------------------------------------------------- src/ui/webauthn.js, list-paging.js
+
+[[mutation]]
+name = 'a request field can rewrite the signed op or a digest'
+file = "../av-core/src/operation.rs"
+from = '        if key == "op" || key.ends_with("_sha256") {'
+to = '        if false {'
+
+[[mutation]]
+name = 'a non-string secret field (a backup bundle) is digested as "[object Object]"'
+file = "../av-core/src/operation.rs"
+from = '.unwrap_or_else(|| canonical_operation(v));'
+to = '.unwrap_or_else(|| "[object Object]".to_string());'
+
+[[mutation]]
+name = 'the wave-3 secret fields are bound in clear'
+file = "../av-core/src/operation.rs"
+from = '''    "recovery_passphrase",
+    "bundle",
+    "webhook_url",
+];'''
+to = '''];'''
+
+[[mutation]]
+name = 'a clientDataJSON that is not JSON is recorded as other, not malformed (r5 F1)'
+file = "src/ui/webauthn.rs"
+from = '.map_err(|e| fail("malformed", format!("clientDataJSON is not JSON: {e}")))?;'
+to = '.map_err(|e| plain(format!("clientDataJSON is not JSON: {e}")))?;'
+
+[[mutation]]
+name = 'U3: limit is coerced instead of read as written'
+file = "src/ui/list_paging.rs"
+from = '''        let plain = !l.is_empty()
+            && l.len() <= 3
+            && !l.starts_with('0')
+            && l.bytes().all(|b| b.is_ascii_digit());'''
+to = '''        let plain = l.trim().parse::<f64>().is_ok_and(|n| n >= 1.0);'''
+
+# ---------------------------------------------------- src/daemon/mcp.js
+
+# NOT APPLICABLE:
+#   'a tool that spends capability runs without a session'
+# The JS mutant deletes the `if (!session)` line and lets vault_http run
+# with `session` undefined. Here vault_http(args, s: SessionRecord, ...)
+# takes the session by value: the handler unwraps Option<SessionRecord> or
+# answers needs_session, and there is no session-less call to compile. The
+# answer for a missing session is held by the test
+# hardening_every_tool_that_spends_capability_checks_for_a_session.
+
+[[mutation]]
+name = 'vault_http never sends the session token'
+file = "src/mcp.rs"
+from = '''            _ => {}
+        }
+        headers.push(("av-session".into(), token.to_string()));'''
+to = '''            _ => {}
+        }
+        let _ = token;'''
+
+[[mutation]]
+name = 'vault_http leaves its placeholder live after the call'
+file = "src/mcp.rs"
+from = 'let _ = core.vault.burn_placeholder(&row_id, "spent");'
+to = 'let _ = &row_id;'
+
+[[mutation]]
+name = 'anonymous MCP handshakes are unbounded'
+file = "src/mcp.rs"
+from = '            while t.sessions.len() >= MAX_MCP_SESSIONS {'
+to = '            while false {'
+
+[[mutation]]
+name = 'every MCP transport close is audited, anonymous ones included'
+file = "src/mcp.rs"
+from = '        if recorded || record {'
+to = '        if true {'
+
+[[mutation]]
+name = 'vault_http does not hand its listener to the pipeline'
+file = "src/mcp.rs"
+from = '''                body: body.map(String::into_bytes),
+                listener,
+            })'''
+to = '''                body: body.map(String::into_bytes),
+                listener: { let _ = listener; None },
+            })'''
+
+[[mutation]]
+name = 'vault_describe_access checks the session without its listener (C18)'
+file = "src/mcp.rs"
+from = '''                                Some(&s),
+                                l.as_ref(),
+                                UsableOptions {
+                                    peek: true,'''
+to = '''                                Some(&s),
+                                { let _ = &l; None },
+                                UsableOptions {
+                                    peek: true,'''
+
+[[mutation]]
+name = 'vault_preflight does not hand its listener to the pipeline (C18)'
+file = "src/mcp.rs"
+from = '''                    headers,
+                    body,
+                    listener,
+                },
+                true,'''
+to = '''                    headers,
+                    body,
+                    listener: { let _ = listener; None },
+                },
+                true,'''
+
+[[mutation]]
+name = 'vault_request_session drops an owner field instead of refusing it (R3)'
+file = "src/mcp.rs"
+from = '        if !owned.is_empty() {'
+to = '        if false {'
+
+[[mutation]]
+name = "explain-denial answers about another session's request (C28)"
+file = "src/mcp.rs"
+from = '.filter(|x| x.get("session_id").and_then(Value::as_str).map(str::to_string) == sid)'
+to = '.filter(|_| true)'
+
+[[mutation]]
+name = "vault_get_placeholder records the agent's reason as sent (C28)"
+file = "src/mcp.rs"
+from = 'let reason = core.vault.untrusted_text(&reason, 200).v()?;'
+to = 'let reason = reason.clone();'
+
+[[mutation]]
+name = 'r6 F2 (Grok): explain-denial looks only at the last 200 audit rows'
+file = "src/mcp.rs"
+from = '''log.read(&av_store::audit::ReadFilter { request_id: Some(r.clone()), limit: 100, ..Default::default() })
+                                    .v()?
+                                    .into_iter()'''
+to = '''log.read(&av_store::audit::ReadFilter { limit: 200, ..Default::default() })
+                                    .v()?
+                                    .into_iter()
+                                    .filter(|x| serde_json::to_value(x).ok().and_then(|v| v.get("request_id").cloned()) == Some(Value::from(r.as_str())))'''
+
+[[mutation]]
+name = 'r6 F2 (Grok): a caller with no session gets the sentence of any no-session denial'
+file = "src/mcp.rs"
+from = '                    Some(r) if sid.is_some() => {'
+to = '                    Some(r) => {'
+
+# ---------------------------------------------------- src/pending.js
+#
+# pending.js is ported in av-store (crates/av-store/src/pending.rs); three of
+# its entries are in crates/av-store/mutations.toml ('a batch verdict is read
+# by truthiness rather than as a boolean', 'approving a session request
+# records nothing', 'the shared narrowing parser drops a key it does not read
+# instead of refusing it'). The rest are here, and src/tests/mutants_pending.rs
+# catches them from av-daemon's own tests.
+
+[[mutation]]
+name = "a human's numeric override is coerced, so a typo becomes null and is dropped"
+file = "../av-store/src/pending.rs"
+from = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),
+            _ => None,'''
+to = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),
+            other => Some(if truthy(other) { 1.0 } else { 0.0 }),'''
+
+[[mutation]]
+name = "a held request's preview is dropped from the human's list (F13)"
+file = "../av-store/src/pending.rs"
+from = '            preview: Some(get("preview")),'
+to = '            preview: Some(Value::Null),'
+
+[[mutation]]
+name = "a JSON-string routes narrowing is dropped, so the agent's wider routes are approved (C21, C23)"
+file = "../av-store/src/pending.rs"
+from = '        out.routes = Some(json("routes", v)?);'
+to = '        if v.is_array() { out.routes = Some(v.clone()); }'
+
+[[mutation]]
+name = 'a JSON-string payload narrowing is dropped (C21, C23)'
+file = "../av-store/src/pending.rs"
+from = '        out.payload = Some(json("payload", v)?);'
+to = '        if v.is_object() { out.payload = Some(v.clone()); }'
+
+[[mutation]]
+name = 'a routes or payload narrowing that is not JSON is dropped instead of refused (C23)'
+file = "../av-store/src/pending.rs"
+from = '''        let parsed: Value =
+            serde_json::from_str(s).map_err(|_| fail(field, "not valid JSON".into()))?;'''
+to = '''        let Ok(parsed) = serde_json::from_str::<Value>(s) else {
+            return Ok(Value::Null);
+        };'''
+
+# NOT APPLICABLE:
+#   "parseOverrides reaches outside its own body, so the page's injected copy throws (C21, C23)"
+# The JS protection is that the
+# parser's source is self-contained, because the approvals page carries a
+# copy of it (web/src). The page stays JavaScript and keeps its own copy;
+# the Rust parse_overrides is never serialised into a page.
+
+[[mutation]]
+name = 'a numeric narrowing that is not finite is sent as NaN, which JSON drops (C23)'
+file = "../av-store/src/pending.rs"
+from = '            Some(n) if n.is_finite() => Ok(n),'
+to = '            Some(n) => Ok(n),'
+
+[[mutation]]
+name = 'a blank numeric narrowing becomes a limit of 0 (C23)'
+file = "../av-store/src/pending.rs"
+from = '''            Value::String(s) if !s.trim().is_empty() => js_parse_number(s.trim()),'''
+to = '''            Value::String(s) => js_parse_number(s.trim()).or(Some(0.0)).filter(|_| s.trim().is_empty()).or_else(|| js_parse_number(s.trim())),'''
+
+[[mutation]]
+name = 'a rate or quota narrowing is stringified and not trimmed (C23)'
+file = "../av-store/src/pending.rs"
+from = '''        Value::String(s) => Value::from(s.trim()),
+        other => other.clone(),'''
+to = '''        Value::String(s) => Value::from(s.as_str()),
+        other => Value::from(js_string(other)),'''
+
+# ---------------------------------------------------- src/ui/server.js
+
+[[mutation]]
+name = 'Touch ID changes from the UI drop the proof on the way to the daemon'
+file = "src/ui/server.rs"
+from = '''                        ("action", Some(json!("remove"))),
+                        ("presence", b("presence")),'''
+to = '''                        ("action", Some(json!("remove"))),'''
+
+[[mutation]]
+name = 'the UI login cookie never slides'
+file = "src/ui/server.rs"
+from = '''        let cookie = self.touch();
+        let body = match crate::http::read_body(body, 1_000_000).await {'''
+to = '''        let cookie = String::new();
+        let body = match crate::http::read_body(body, 1_000_000).await {'''
+
+[[mutation]]
+name = 'credential-record writes, tripwire rules and templates go through the UI unsigned'
+file = "src/ui/server.rs"
+from = '''pub const GATED: [&str; 21] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "DELETE sessions",
+    "POST approvals",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST lock",
+    "POST touchid/enroll",
+    "POST touchid/remove",
+    "POST sessions/narrow",
+    "POST credentials/rotate",
+    "POST credentials/scrub",
+    "DELETE credentials/scrub",
+    "POST credentials/expiry",
+    "POST credentials/release",
+    "POST tripwires",
+    "POST templates",
+    "DELETE templates",'''
+to = '''pub const GATED: [&str; 13] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "DELETE sessions",
+    "POST approvals",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST lock",
+    "POST touchid/enroll",
+    "POST touchid/remove",
+    "POST sessions/narrow",'''
+
+[[mutation]]
+name = 'removing a scrub pattern drops the proof on the way to the daemon'
+file = "src/ui/server.rs"
+from = '''                    &format!("/v1/credentials/scrub{}", qof(&["slug", "id"])),
+                    Some(presence_only()),'''
+to = '''                    &format!("/v1/credentials/scrub{}", qof(&["slug", "id"])),
+                    Some(json!({})),'''
+
+[[mutation]]
+name = 'a replacement authenticator other than the one just registered is accepted by the UI'
+file = "src/ui/server.rs"
+from = '''            if webauthn::canonical_operation(&Value::Object(record))
+                != webauthn::canonical_operation(&cred)
+            {'''
+to = '''            if false && webauthn::canonical_operation(&Value::Object(record))
+                != webauthn::canonical_operation(&cred)
+            {'''
+
+[[mutation]]
+name = 'the page can steer the credential probe'
+file = "src/ui/server.rs"
+from = '''                let b2 = if body.get("all") == Some(&Value::Bool(true)) {
+                    json!({"all": true})
+                } else {
+                    obj_of(&[("slug", b("slug"))])
+                };'''
+to = '''                let b2 = body.clone();'''
+
+[[mutation]]
+name = 'the audit kind filter takes any text into the daemon path'
+file = "src/ui/server.rs"
+from = '''                if kind.as_deref().is_some_and(|k| {
+                    !(!k.is_empty()'''
+to = '''                if false && kind.as_deref().is_some_and(|k| {
+                    !(!k.is_empty()'''
+
+[[mutation]]
+name = 'an error from POST sessions reaches the page as a hand-off, unfiltered'
+file = "src/ui/server.rs"
+from = '                Self::send(e.status, &toward_page(&Value::Object(m), 0))'
+to = '                Self::send(e.status, &if HANDOFF.contains(&key.as_str()) { Value::Object(m) } else { toward_page(&Value::Object(m), 0) })'
+
+[[mutation]]
+name = 'the session hand-off carries the whole daemon answer, not only the card fields'
+file = "src/ui/server.rs"
+from = '''                &if handoff && HANDOFF.contains(&key.as_str()) {
+                    handoff_toward_page(&v)'''
+to = '''                &if handoff && HANDOFF.contains(&key.as_str()) {
+                    v.clone()'''
+
+[[mutation]]
+name = 'a hand-off card field is copied back with whatever is nested in it'
+file = "src/ui/server.rs"
+from = '            if is_scalar(v) || v.as_array().is_some_and(|a| a.iter().all(is_scalar)) {'
+to = '            if true {'
+
+[[mutation]]
+name = 'a hyphenated withheld key reaches the page'
+file = "src/ui/server.rs"
+from = '''    let norm = norm.replace("pass_phrase", "passphrase");
+    WITHHELD_KEYS.contains(&norm.as_str())'''
+to = '''    let _ = norm;
+    WITHHELD_KEYS.contains(&k.to_lowercase().as_str())'''
+
+[[mutation]]
+name = 'U2: a server with no built bundle starts anyway'
+file = "src/ui/server.rs"
+from = '''            Some(d) => load_dist(d)?.ok_or_else(|| std::io::Error::other(format!("the built UI is missing (no index.html in {}); run npm run build:ui", d.display())))?,'''
+to = '''            Some(d) => load_dist(d)?.unwrap_or_default(),'''
+
+[[mutation]]
+name = 'a VaultError refusal from the UI is reported as a crash'
+file = "src/ui/server.rs"
+from = '''        UiErr {
+            status: e.http(),
+            message: e.to_string(),'''
+to = '''        UiErr {
+            status: 500,
+            message: e.to_string(),'''
+
+[[mutation]]
+name = 'removing a pin from the UI needs no signature (C22(4))'
+file = "src/ui/server.rs"
+from = '''pub const GATED: [&str; 21] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "DELETE sessions",
+    "POST approvals",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST lock",
+    "POST touchid/enroll",
+    "POST touchid/remove",
+    "POST sessions/narrow",
+    "POST credentials/rotate",
+    "POST credentials/scrub",
+    "DELETE credentials/scrub",
+    "POST credentials/expiry",
+    "POST credentials/release",
+    "POST tripwires",
+    "POST templates",
+    "DELETE templates",
+    "DELETE credentials/pins",
+    "POST presence/rotate",
+];
+'''
+to = '''pub const GATED: [&str; 20] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "DELETE sessions",
+    "POST approvals",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST lock",
+    "POST touchid/enroll",
+    "POST touchid/remove",
+    "POST sessions/narrow",
+    "POST credentials/rotate",
+    "POST credentials/scrub",
+    "DELETE credentials/scrub",
+    "POST credentials/expiry",
+    "POST credentials/release",
+    "POST tripwires",
+    "POST templates",
+    "DELETE templates",
+    "POST presence/rotate",
+];
+'''
+
+[[mutation]]
+name = 'the UI treats the daemon-verified pin removal as its own check only'
+file = "src/ui/server.rs"
+from = '''pub const DAEMON_VERIFIED: [&str; 14] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST credentials/rotate",
+    "POST credentials/scrub",
+    "DELETE credentials/scrub",
+    "POST credentials/expiry",
+    "POST credentials/release",
+    "POST tripwires",
+    "POST templates",
+    "DELETE credentials/pins",
+    "POST presence/rotate",
+];
+'''
+to = '''pub const DAEMON_VERIFIED: [&str; 13] = [
+    "POST credentials",
+    "DELETE credentials",
+    "POST sessions",
+    "POST session-requests/decide",
+    "POST pending/decide-many",
+    "POST credentials/rotate",
+    "POST credentials/scrub",
+    "DELETE credentials/scrub",
+    "POST credentials/expiry",
+    "POST credentials/release",
+    "POST tripwires",
+    "POST templates",
+    "POST presence/rotate",
+];
+'''
+
+[[mutation]]
+name = 'the UI binds a pin removal with spki omitted rather than null (C22(4))'
+file = "src/ui/server.rs"
+from = '''                &json!({"slug": q("slug"), "host": q("host"), "spki": q("spki")}),'''
+to = '''                &{ let mut m = json!({"slug": q("slug"), "host": q("host")}); if !q("spki").is_null() { m["spki"] = q("spki"); } m },'''
+
+[[mutation]]
+name = 'the UI forwards a single-pin removal without the pin'
+file = "src/ui/server.rs"
+from = '&format!("/v1/credentials/pins{}", qof(&["slug", "host", "spki"])),'
+to = '&format!("/v1/credentials/pins{}", qof(&["slug", "host"])),'
+
+[[mutation]]
+name = 'towardPage sends a passphrase to the page'
+file = "src/ui/server.rs"
+from = '''pub const WITHHELD_KEYS: [&str; 9] = [
+    "token",
+    "placeholder",
+    "value",
+    "secret",
+    "prf_secret",
+    "recovery_passphrase",
+    "passphrase",'''
+to = '''pub const WITHHELD_KEYS: [&str; 8] = [
+    "token",
+    "placeholder",
+    "value",
+    "secret",
+    "prf_secret",
+    "recovery_passphrase",'''
+
+[[mutation]]
+name = 'the UI server checks the narrowing of an approval only, so a denial carrying an unreadable one is not a 400'
+file = "src/ui/server.rs"
+from = '        if key == "POST session-requests/decide" && body.get("overrides").is_some() {'
+to = '        if key == "POST session-requests/decide" && body.get("granted") == Some(&Value::Bool(true)) {'
+
+[[mutation]]
+name = 'towardPage sends a pass-phrase or pass_phrase to the page'
+file = "src/ui/server.rs"
+from = '    let norm = norm.replace("pass_phrase", "passphrase");'
+to = '    let norm = norm.clone();'
+
+[[mutation]]
+name = 'towardPage keeps pass--phrase, pass__phrase and "pass phrase": separator runs are not folded'
+file = "src/ui/server.rs"
+from = '''        if c == '-' || c == '_' || c.is_whitespace() {
+            if !sep {
+                norm.push('_');
+            }
+            sep = true;'''
+to = '''        if c == '-' {
+            norm.push('_');
+            sep = true;'''
+
+[[mutation]]
+name = 'U3: a paged search matches the answer before towardPage, so q can test a withheld value'
+file = "src/ui/server.rs"
+from = '        let shown = toward_page(&load, 0);'
+to = '        let shown = load.clone();'
+
+[[mutation]]
+name = 'U3: an audit search matches rows before towardPage'
+file = "src/ui/server.rs"
+from = '            let s = toward_page(r, 0);'
+to = '            let s = r.clone();'
+
+[[mutation]]
+name = 'U3: the audit page ignores where the last page ended and rereads the newest rows'
+file = "src/ui/server.rs"
+from = '            let where_ = at.map(|a| format!("&before={a}")).unwrap_or_default();'
+to = '            let where_ = String::new();'
+
+[[mutation]]
+name = 'U2: a symlink in dist/assets is followed at startup and served'
+file = "src/ui/server.rs"
+from = '            if !ft.is_file() || !asset_name_ok(&name) {'
+to = '            if !asset_name_ok(&name) {'
+
+[[mutation]]
+name = 'U2: the built page is served under a policy that allows inline script'
+file = "src/ui/server.rs"
+from = '''            ("referrer-policy".into(), "no-referrer".into()),
+            ("content-security-policy".into(), STRICT_CSP.into()),
+        ];'''
+to = '''            ("referrer-policy".into(), "no-referrer".into()),
+            ("content-security-policy".into(), "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'".into()),
+        ];'''
+
+[[mutation]]
+name = 'U2: an asset answer carries no content security policy'
+file = "src/ui/server.rs"
+from = '''                    ("cross-origin-resource-policy".into(), "same-origin".into()),
+                    ("content-security-policy".into(), STRICT_CSP.into()),'''
+to = '''                    ("cross-origin-resource-policy".into(), "same-origin".into()),'''
+
+[[mutation]]
+name = 'U3 fix1: Prev with less than a page above it starts again from the newest row'
+file = "src/ui/server.rs"
+from = '''            let mut items: Vec<Value> = found.iter().take(paging.limit).cloned().collect();
+            items.reverse();'''
+to = '''            if found.len() < want {
+                return Box::pin(self.audit_page(kind.clone(), list_paging::Paging { cursor: None, ..paging.clone() })).await;
+            }
+            let mut items: Vec<Value> = found.iter().take(paging.limit).cloned().collect();
+            items.reverse();'''
+
+[[mutation]]
+name = 'U3 fix1: a short Prev page still offers a Prev'
+file = "src/ui/server.rs"
+from = '''                "prev_cursor": if more { items.first()'''
+to = '''                "prev_cursor": if !items.is_empty() { items.first()'''
+
+[[mutation]]
+name = 'U2 fix2: the raw path is not checked before routing'
+file = "src/ui/server.rs"
+from = '        if !literal_path(&raw_url, &pathname) {'
+to = '        if false && !literal_path(&raw_url, &pathname) {'
+
+[[mutation]]
+name = 'U2 fix2: a path the parser changed counts as literal'
+file = "src/ui/server.rs"
+from = '''    if raw != pathname || !raw.starts_with('/') {'''
+to = '''    if !raw.starts_with('/') {'''
+
+[[mutation]]
+name = 'U2 fix2: encoded separators and backslashes count as literal'
+file = "src/ui/server.rs"
+from = '''    if raw.contains('\\') || lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c")
+    {
+        return false;
+    }'''
+to = ''
+
+[[mutation]]
+name = 'U2 fix2: dot and empty segments count as literal'
+file = "src/ui/server.rs"
+from = '''        .any(|(i, p)| *p == "." || *p == ".." || (p.is_empty() && i < n - 1))'''
+to = '''        .any(|(i, p)| { let _ = (i, p, n); false })'''
+
+[[mutation]]
+name = 'U2 fix2: a request target the URL parser refuses is thrown, not answered'
+file = "src/ui/server.rs"
+from = '''        let Some((pathname, query)) = crate::http::parse_target(&raw_url, &self.inner.origin)
+        else {
+            return Self::send(404, &json!({"error": "not found"}));
+        };'''
+to = '''        let (pathname, query) = crate::http::parse_target(&raw_url, &self.inner.origin).expect("a request target the parser reads");'''
+
+[[mutation]]
+name = 'U2 fix3: a dist directory that is a symlink is followed'
+file = "src/ui/server.rs"
+from = '''    if top.file_type().is_symlink() {
+        return Err(refuse("the dist directory is a symlink".into()));
+    }'''
+to = ''
+
+[[mutation]]
+name = 'U2 fix3: an index.html that is a symlink is followed'
+file = "src/ui/server.rs"
+from = '''    if ik.file_type().is_symlink() {
+        return Err(refuse("index.html is a symlink".into()));
+    }'''
+to = ''
+
+[[mutation]]
+name = 'U2 fix3: an assets directory that is a symlink is read through'
+file = "src/ui/server.rs"
+from = '''    if ak.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+        return Err(refuse("the assets directory is a symlink".into()));
+    }'''
+to = ''
+
+[[mutation]]
+name = "U3 fix4: the page's old kind read passes its own limit to the daemon"
+file = "src/ui/server.rs"
+from = '''"/v1/audit?limit={AUDIT_BATCH}&kind={}",'''
+to = '''"/v1/audit?limit={lim_s}&kind={}",'''
+
+# ---------------------------------------------------- src/daemon/server.js
+
+[[mutation]]
+name = 'the MCP session is read from shared state again'
+file = "src/server.rs"
+from = '''.handle(m, session.clone(), Some(token.clone()), listener.clone())'''
+to = '''.handle(m, None, None, { let _ = (&session, &token); listener.clone() })'''
+
+[[mutation]]
+name = 'the listener never reaches the pipeline'
+file = "src/server.rs"
+from = '''                body: if req.body.is_empty() {
+                    None
+                } else {
+                    Some(req.body)
+                },
+                listener,'''
+to = '''                body: if req.body.is_empty() {
+                    None
+                } else {
+                    Some(req.body)
+                },
+                listener: { let _ = listener; None },'''
+
+[[mutation]]
+name = 'an agent can approve its own session request'
+file = "src/server/routes.rs"
+from = '''self.gate_session("session request approval", operation, &elevated, presence).await?;'''
+to = '''let _ = (operation, elevated, presence);'''
+
+[[mutation]]
+name = 'an authenticator-only vault reports its socket as ungated'
+file = "src/server/routes.rs"
+from = '''                    if core.vault.presence_key().v()?.is_some() {
+                        return Ok(Some(json!({
+                            "granted": false, "ungated": false,'''
+to = '''                    if false && core.vault.presence_key().v()?.is_some() {
+                        return Ok(Some(json!({
+                            "granted": false, "ungated": false,'''
+
+# NOT APPLICABLE:
+#   'an uncaught error ends the daemon'
+#   'daemon.uncaught keeps the fault message (C28)'
+# The JS installs guardProcess, a process-wide uncaughtException and
+# unhandledRejection handler that records daemon.uncaught with the fault's
+# class. Here every connection and request runs in its own tokio task; a
+# panic ends that task only, so there is no process-wide handler to remove
+# and no daemon.uncaught record. (Request handler faults are guarded and
+# recorded as daemon.handler_error; see the #guard entries below.)
+
+[[mutation]]
+name = 'the shared window can change presence factors'
+file = "src/server.rs"
+from = '''        let p = presence.cloned().unwrap_or(Value::Null);
+        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+to = '''        if now_ms() < self.dm.presence_grace_until {
+            return Ok(Fresh::Done);
+        }
+        let p = presence.cloned().unwrap_or(Value::Null);
+        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+
+[[mutation]]
+name = 'what the window admits is not recorded'
+file = "src/server.rs"
+from = '''            self.audit_opt("presence.window_used", json!({"op": op}));'''
+to = '''            let _ = op;'''
+
+[[mutation]]
+name = 'a fresh-presence change goes through on a vault with no factor'
+file = "src/server.rs"
+from = '''        if factors.is_empty() {
+            return Err(dr(C::PresenceRequired, format!("{op} needs a human factor, and none is enrolled"), "factor_required")'''
+to = '''        if factors.is_empty() {
+            return Ok(Fresh::Done);
+        }
+        if factors.is_empty() {
+            return Err(dr(C::PresenceRequired, format!("{op} needs a human factor, and none is enrolled"), "factor_required")'''
+
+[[mutation]]
+name = 'listen rm leaves pre-handshake TLS sockets connected'
+file = "src/listen.rs"
+from = '''            let mut revoked = stop_rx.clone();
+            conns.spawn(async move {'''
+to = '''            let mut revoked = stop_rx.clone();
+            let _ = &mut revoked;
+            let (tx_never, rx_never) = tokio::sync::watch::channel(false);
+            std::mem::forget(tx_never);
+            revoked = rx_never;
+            conns.spawn(async {});
+            tokio::spawn(async move {'''
+
+[[mutation]]
+name = 'the daemon asks for a tap before refusing Touch ID unlock without a passphrase'
+file = "src/server/routes.rs"
+from = '''                        if !remove {
+                            core.vault.require_recovery_factor().v()?;
+                        }'''
+to = '''                        if false && !remove {
+                            core.vault.require_recovery_factor().v()?;
+                        }'''
+
+[[mutation]]
+name = 'the single decide route takes any truthy verdict'
+file = "src/server/routes.rs"
+from = '''            "POST /v1/session-requests/decide" => {
+                if !field(&input, "granted")?.is_some_and(Value::is_boolean) {'''
+to = '''            "POST /v1/session-requests/decide" => {
+                if false && !field(&input, "granted")?.is_some_and(Value::is_boolean) {'''
+
+[[mutation]]
+name = 'the fresh presence gate accepts the shared passphrase window'
+file = "src/server.rs"
+from = '''    ) -> R<Fresh> {
+        let p = presence.cloned().unwrap_or(Value::Null);'''
+to = '''    ) -> R<Fresh> {
+        if now_ms() < self.dm.presence_grace_until {
+            return Ok(Fresh::Done);
+        }
+        let p = presence.cloned().unwrap_or(Value::Null);'''
+
+[[mutation]]
+name = 'approving a session request into auto with writes needs only the window'
+file = "src/server/routes.rs"
+from = '''let elevated = if granted { elevation_of(&final_) } else { Vec::new() };'''
+to = '''let elevated: Vec<String> = { let _ = granted; Vec::new() };'''
+
+[[mutation]]
+name = 'a bulk decision with an elevated item needs only the window'
+file = "src/server/routes.rs"
+from = '''let elevated = if elevated { vec!["approval_auto_writes".to_string()] } else { Vec::new() };'''
+to = '''let elevated: Vec<String> = { let _ = elevated; Vec::new() };'''
+
+[[mutation]]
+name = 'a session request may carry an owner-only field'
+file = "src/server.rs"
+from = '''        if !owned.is_empty() {
+            return Err(dr(C::PolicyDenied, format!("a session request cannot carry {}", owned.join(" or ")), "owner_only_field")
+                .hinted("Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason."));'''
+to = '''        if false && !owned.is_empty() {
+            return Err(dr(C::PolicyDenied, format!("a session request cannot carry {}", owned.join(" or ")), "owner_only_field")
+                .hinted("Only the owner can choose the approval mode or an unlimited lifetime. Ask without it and say why in reason."));'''
+
+[[mutation]]
+name = 'an unknown approval mode is stored instead of refused'
+file = "src/server.rs"
+from = '''            if spec.get("approval").is_some_and(|a| {
+                !a.is_null() && !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s))
+            }) {'''
+to = '''            if false && spec.get("approval").is_some_and(|a| {
+                !a.is_null() && !a.as_str().is_some_and(|s| APPROVAL_MODES.contains(&s))
+            }) {'''
+
+[[mutation]]
+name = 'the placeholder batch is issued with no human'
+file = "src/server/routes.rs"
+from = '''                batch_shape(&input)?;
+                let presence = field(&input, "presence")?.cloned();
+                self.require_human("placeholder issue", op?, presence).await?;'''
+to = '''                batch_shape(&input)?;
+                let presence = field(&input, "presence")?.cloned();
+                let _ = (op, presence);'''
+
+[[mutation]]
+name = 'ttl_hours is not required to be a positive number'
+file = "src/server.rs"
+from = '''            if !as_finite(h).is_some_and(|x| x > 0.0) {
+                return Err(ttl("ttl_hours must be a positive number of hours"));'''
+to = '''            if false && !as_finite(h).is_some_and(|x| x > 0.0) {
+                return Err(ttl("ttl_hours must be a positive number of hours"));'''
+
+[[mutation]]
+name = 'the daemon does not hand a session its elevation'
+file = "src/server.rs"
+from = '''                elevated: plan.elevated.clone(),'''
+to = '''                elevated: Vec::new(),'''
+
+[[mutation]]
+name = 'a session for a quarantined credential is planned and gated'
+file = "src/server.rs"
+from = '''            if cred.quarantine.is_some() && !saving_template {'''
+to = '''            if false && cred.quarantine.is_some() && !saving_template {'''
+
+[[mutation]]
+name = 'a session can be planned for a quarantined credential'
+file = "src/server.rs"
+from = '''            if cred.quarantine.is_some() && !saving_template {
+                return Err(quarantined(&cred.slug));
+            }'''
+to = '''            let _ = saving_template;'''
+
+[[mutation]]
+name = 'discovery checks liveness but not whether the session is usable on this listener'
+file = "src/server.rs"
+from = '''core.vault.assert_session_usable(Some(&session), l.as_ref(), Default::default()).v()?;'''
+to = '''{ let _ = &l; core.vault.assert_session_live(Some(&session)).v()?; }'''
+
+[[mutation]]
+name = 'the MCP endpoint checks liveness but not whether the session is usable on this listener'
+file = "src/server.rs"
+from = '''                core.vault
+                    .assert_session_usable(
+                        Some(&s),
+                        lc.as_ref(),
+                        av_store::vault::UsableOptions {
+                            peek: true,
+                            record: true,
+                        },
+                    )
+                    .ok()'''
+to = '''                { let _ = &lc; core.vault.assert_session_live(Some(&s)) }
+                    .ok()'''
+
+[[mutation]]
+name = 'a budget of 0 reaches the presence gate before it is refused (C17)'
+file = "src/server.rs"
+from = '''            if budget == Some(Some(0)) {'''
+to = '''            if false && budget == Some(Some(0)) {'''
+
+[[mutation]]
+name = 'a grant lifetime is accepted and never given to the store (F18)'
+file = "src/server.rs"
+from = '''                        policy: g.policy.clone(),
+                        ttl_ms: g.ttl_ms,'''
+to = '''                        policy: g.policy.clone(),
+                        ttl_ms: None,'''
+
+[[mutation]]
+name = 'a session request is opened without being built first, so one that could never be created reaches a human'
+file = "src/server.rs"
+from = '''        self.dm_plan_session(&request_spec(&proposal), false, false)?;'''
+to = '''        let _ = request_spec(&proposal);'''
+
+[[mutation]]
+name = 'a template create is not bound to the hash the human looked at (F17)'
+file = "src/server.rs"
+from = '''        if input.get("template_hash").and_then(Value::as_str) != Some(t.hash.as_str()) {'''
+to = '''        if false && input.get("template_hash").and_then(Value::as_str) != Some(t.hash.as_str()) {'''
+
+[[mutation]]
+name = "a template create's signed operation binds the name but not template_hash (F17)"
+file = "src/server.rs"
+from = '''            "POST /v1/sessions" => of("session.create", input),'''
+to = '''            "POST /v1/sessions" => of("session.create", &if input.get("template").is_some() { json!({"template": input["template"]}) } else { input.clone() }),'''
+
+[[mutation]]
+name = 'a session request from a template is resolved again at approval, not snapshotted (F17)'
+file = "src/server.rs"
+from = '''        let mut spec = request_spec(&final_);'''
+to = '''        let mut spec = match final_.get("template").and_then(Value::as_str) { Some(t) => json!({"template": t, "template_hash": self.vault.get_template(t).ok().flatten().map(|x| x.hash)}), None => request_spec(&final_) };'''
+
+[[mutation]]
+name = 'a narrowing that names nothing does nothing silently (F15)'
+file = "src/server/routes.rs"
+from = '''    if fields.is_empty() && session_ttl.is_none() && grant_ttl.is_none() {'''
+to = '''    if false && fields.is_empty() && session_ttl.is_none() && grant_ttl.is_none() {'''
+
+[[mutation]]
+name = 'a narrowing that turns redirects on is only refused after the session was shortened (F15)'
+file = "src/server/routes.rs"
+from = '''    if narrow.contains_key("redirects") && narrow["redirects"] != json!(0) {'''
+to = '''    if false && narrow.contains_key("redirects") && narrow["redirects"] != json!(0) {'''
+
+[[mutation]]
+name = 'a narrowing silently ignores a field it cannot narrow (F15)'
+file = "src/server/routes.rs"
+from = '''    if let Some(k) = narrow.keys().find(|k| !allowed.contains(&k.as_str())) {'''
+to = '''    if let Some(k) = narrow.keys().find(|k| false && !allowed.contains(&k.as_str())) {'''
+
+[[mutation]]
+name = 'rotation keeps the held approvals a human gave against the old key (F7)'
+file = "src/server/routes.rs"
+from = '''    let invalidated = core.pl_deny_approvals(
+        &ApprovalFilter {
+            credential_id: Some(cred.id),
+            ..Default::default()
+        },
+        "credential_rotated",
+    )?;'''
+to = '''    let invalidated = { let _ = cred.id; 0usize };'''
+
+[[mutation]]
+name = 'a rotation retire window is read by coercion'
+file = "src/server/routes.rs"
+from = '''        if !as_integer(h).is_some_and(|n| (0..=168).contains(&n)) {'''
+to = '''        if false && !as_integer(h).is_some_and(|n| (0..=168).contains(&n)) {'''
+
+[[mutation]]
+name = 'a scrub pattern is stored without being compiled (F4)'
+file = "src/server/routes.rs"
+from = '''                let compiled = av_core::scrub::compile_scrub_pattern(&pattern)?;'''
+to = '''                let compiled = av_core::scrub::compile_scrub_pattern("(?!)")?;'''
+
+[[mutation]]
+name = 'cred rotate runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred rotate", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred scrub add runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred scrub add", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred scrub remove runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred scrub remove", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred expiry runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred expiry", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred pins runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred pins", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred pins remove runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred pins remove", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'cred release runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("cred release", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'template save runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("template save", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'backup restore runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("backup restore", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'notify set runs with no human (A.2 widening)'
+file = "src/server/routes.rs"
+from = '''self.require_human("notify set", op?, presence).await?;'''
+to = '''let _ = (op, presence);'''
+
+[[mutation]]
+name = 'backup export accepts the window instead of a fresh proof (F8)'
+file = "src/server/routes.rs"
+from = '''self.require_fresh("backup export", op?.unwrap_or(Value::Null), presence).await?;'''
+to = '''self.require_human("backup export", op?, presence).await?;'''
+
+[[mutation]]
+name = 'a wrong recovery passphrase on inspect is not counted (F8)'
+file = "src/server/routes.rs"
+from = '''                        if rule_of(&e) == Some("backup_auth") {
+                            core.dm_record_attempt(false);'''
+to = '''                        if false && rule_of(&e) == Some("backup_auth") {
+                            core.dm_record_attempt(false);'''
+
+[[mutation]]
+name = 'a right recovery passphrase on inspect clears the vault passphrase throttle (F8)'
+file = "src/server/routes.rs"
+from = '''core.audit("backup.inspected",'''
+to = '''core.dm_record_attempt(true); core.audit("backup.inspected",'''
+
+[[mutation]]
+name = 'POST /v1/tripwires {enabled:false} is open (F16)'
+file = "src/server/routes.rs"
+from = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"] == Value::Bool(true);'''
+to = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"].is_boolean();'''
+
+[[mutation]]
+name = "POST /v1/tripwires reads enabled by truthiness, so 'true' and 1 are open (C20)"
+file = "src/server/routes.rs"
+from = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && body["enabled"] == Value::Bool(true);'''
+to = '''let enable_only = keys.len() == 1 && keys[0] == "enabled" && crate::util::truthy(&body["enabled"]);'''
+
+[[mutation]]
+name = 'tripwire changes other than enabling run with no human (F16)'
+file = "src/server/routes.rs"
+from = '''                if !enable_only {
+                    self.require_human("tripwires set", op?, presence).await?;'''
+to = '''                if false && !enable_only {
+                    self.require_human("tripwires set", op?, presence).await?;'''
+
+[[mutation]]
+name = 'panic is never told about session requests (C1)'
+file = "src/pipeline.rs"
+from = '''        let session_requests = match self.dm_deny_pending_session_requests("panic") {'''
+to = '''        let session_requests = match Ok::<usize, VaultError>(0) {'''
+
+[[mutation]]
+name = 'a panic that locks leaves the passphrase window open'
+file = "src/server/routes.rs"
+from = '''                        if r["locked"] == Value::Bool(true) {
+                            core.dm.presence_grace_until = 0;
+                        }'''
+to = ''''''
+
+[[mutation]]
+name = "panic reads lock by truthiness, so 'true' panics without locking"
+file = "src/server/routes.rs"
+from = '''                if lock.as_ref().is_some_and(|l| !l.is_boolean()) {
+                    return Err(dr(C::PolicyDenied, "lock is true or false", "policy_invalid"));'''
+to = '''                if false && lock.as_ref().is_some_and(|l| !l.is_boolean()) {
+                    return Err(dr(C::PolicyDenied, "lock is true or false", "policy_invalid"));'''
+
+[[mutation]]
+name = 'an agent-written quarantine reason is stored with its placeholder and secret in it (F16)'
+file = "src/server/routes.rs"
+from = '''                            Some(r) => Some(core.vault.untrusted_text(r, 200).v()?),'''
+to = '''                            Some(r) => Some(r.to_string()),'''
+
+[[mutation]]
+name = 'the gateway preflight route ignores the listener it arrived on (C18)'
+file = "src/server.rs"
+from = '''            let (t, l) = (token.clone(), lctx.clone());
+            let session = self
+                .shared
+                .run(move |core| -> R<Option<()>> {
+                    let Some(s) = core.vault.session_by_token(&t).v()? else {
+                        return Ok(None);
+                    };
+                    core.vault
+                        .assert_session_usable(
+                            Some(&s),
+                            l.as_ref(),
+                            av_store::vault::UsableOptions {
+                                peek: true,
+                                record: true,
+                            },
+                        )
+                        .v()?;
+                    Ok(Some(()))
+                })
+                .await;
+            match session {
+                Ok(Ok(Some(()))) => {}
+                Ok(Ok(None)) => {
+                    return json(
+                        401,
+                        json!({"code": "AV_SESSION_REQUIRED", "hint": "send Authorization: Bearer <session token>"}),
+                    )
+                }
+                Ok(Err(e)) | Err(e) => return problem(&e),
+            }
+            let described = match preflight_request(&req.body) {
+                Ok(x) => x,
+                Err(e) => return problem(&e),
+            };
+            let (asked, assume) = described;
+            let mut asked = asked;
+            asked.headers.push(("av-session".into(), token));
+            asked.listener = listener;'''
+to = '''            let (t, l) = (token.clone(), { let _ = &lctx; None::<av_store::vault::ListenerContext> });
+            let session = self
+                .shared
+                .run(move |core| -> R<Option<()>> {
+                    let Some(s) = core.vault.session_by_token(&t).v()? else {
+                        return Ok(None);
+                    };
+                    core.vault
+                        .assert_session_usable(
+                            Some(&s),
+                            l.as_ref(),
+                            av_store::vault::UsableOptions {
+                                peek: true,
+                                record: true,
+                            },
+                        )
+                        .v()?;
+                    Ok(Some(()))
+                })
+                .await;
+            match session {
+                Ok(Ok(Some(()))) => {}
+                Ok(Ok(None)) => {
+                    return json(
+                        401,
+                        json!({"code": "AV_SESSION_REQUIRED", "hint": "send Authorization: Bearer <session token>"}),
+                    )
+                }
+                Ok(Err(e)) | Err(e) => return problem(&e),
+            }
+            let described = match preflight_request(&req.body) {
+                Ok(x) => x,
+                Err(e) => return problem(&e),
+            };
+            let (asked, assume) = described;
+            let mut asked = asked;
+            asked.headers.push(("av-session".into(), token));
+            asked.listener = { let _ = listener; None };'''
+
+[[mutation]]
+name = 'a probe refusal (a pin mismatch) is answered as an internal error (F12)'
+file = "src/connectors/probe.rs"
+from = '''            return Err(dr(
+                C::PinMismatch,
+                scrub_text(&e.message, &mut scrubber),
+                rule,
+            ));'''
+to = '''            let _ = rule;
+            return Err(crate::err::internal(scrub_text(&e.message, &mut scrubber)));'''
+
+[[mutation]]
+name = 'a grant lifetime given twice in a narrowing is taken from one place silently (C22)'
+file = "src/server/routes.rs"
+from = '''    if input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
+to = '''    if false && input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
+
+# NOT APPLICABLE:
+#   "the control API hands back an approval's cached upstream response"
+# The JS approvalView strips `result` from any approval it is given, and the
+# control API listed approvals in every state. Here the stored response is a
+# StoredResult with no serialisation, Approval::view never writes it, and view
+# is only called for a pending approval (the list and decide routes), which
+# has no stored response yet: the response is kept only after the request
+# ran, when the approval is consumed and no longer listed or decidable. A
+# mutant that copies the body into view has nothing to copy on any path.
+
+[[mutation]]
+name = 'the presence route stores whatever record it is sent'
+file = "../av-store/src/vault.rs"
+from = '''    if !ok_id {
+        return Err(presence_refusal(
+            "credentialId is not a WebAuthn credential id",'''
+to = '''    if false && !ok_id {
+        return Err(presence_refusal(
+            "credentialId is not a WebAuthn credential id",'''
+
+[[mutation]]
+name = 'the daemon approves a session request whose overrides name a key it does not apply'
+file = "src/server/routes.rs"
+from = '''                if let Some(problem) = overrides_problem(input.get("overrides")) {
+                    return Err(dr(C::PolicyDenied, problem, "session_overrides"));
+                }
+                let i2 = input.clone();'''
+to = '''                let i2 = input.clone();'''
+
+[[mutation]]
+name = 'a bulk decision drops a session override key it does not apply'
+file = "src/server/routes.rs"
+from = '''                        overrides_problem(dd.get("overrides"))
+                    } else if'''
+to = '''                        None
+                    } else if'''
+
+[[mutation]]
+name = 'a bulk decision drops the narrowing sent with a held request'
+file = "src/server/routes.rs"
+from = '''                    } else if dd.get("overrides").is_some_and(|o| o.as_object().is_some_and(|m| !m.is_empty()) || (!o.is_null() && !o.is_object() && crate::util::truthy(o) && o.is_array() && !o.as_array().is_some_and(Vec::is_empty))) {'''
+to = '''                    } else if false {'''
+
+[[mutation]]
+name = 'the session_request.approved record holds the granted values, not their names (C25)'
+file = "src/server.rs"
+from = '''        rec["granted"] = shape["fields"].clone();'''
+to = '''        rec["granted"] = final_.clone();'''
+
+[[mutation]]
+name = 'the session_request.approved record holds the values a human narrowed to, not their names (C25)'
+file = "src/server.rs"
+from = '''        rec["narrowed"] = json!(narrowed);'''
+to = '''        rec["narrowed"] = json!(narrowed.iter().map(|f| final_.get(f).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>());'''
+
+[[mutation]]
+name = 'a decided session-request record holds the proposal, not its field names (C25)'
+file = "src/server.rs"
+from = '''"proposed": shape_of(&record.proposal)["fields"]}),'''
+to = '''"proposed": record.proposal}),'''
+
+[[mutation]]
+name = "a human denial quotes the proposal's summary (C25)"
+file = "src/server.rs"
+from = '''            shape["actor"] = "human".into();
+            self.audit_opt("session_request.denied", shape);'''
+to = '''            shape["actor"] = "human".into();
+            shape["summary"] = record.summary.clone().into();
+            self.audit_opt("session_request.denied", shape);'''
+
+[[mutation]]
+name = "a panic denial quotes the proposal's summary (C25)"
+file = "src/server.rs"
+from = '''            shape["reason"] = reason.into();
+            self.audit("session_request.denied", shape)?;'''
+to = '''            shape["reason"] = reason.into();
+            shape["summary"] = record.summary.clone().into();
+            self.audit("session_request.denied", shape)?;'''
+
+[[mutation]]
+name = 'the session made from a request is not marked as one, so session.created records its end (C25 addendum)'
+file = "src/server.rs"
+from = '''                template_version: from.as_ref().map(|t| t.1),
+                requested,'''
+to = '''                template_version: from.as_ref().map(|t| t.1),
+                requested: { let _ = requested; false },'''
+
+[[mutation]]
+name = 'the grant made from a request is not marked as one, so grant.created records its end (C25 addendum)'
+file = "src/server.rs"
+from = '''                        ttl_ms: g.ttl_ms,
+                        requested,'''
+to = '''                        ttl_ms: g.ttl_ms,
+                        requested: false,'''
+
+[[mutation]]
+name = 'an approval does not say its session comes from a request (C25 addendum)'
+file = "src/server.rs"
+from = '''self.dm_make_session(&plan, template_of(&record.proposal), true)?;'''
+to = '''self.dm_make_session(&plan, template_of(&record.proposal), false)?;'''
+
+[[mutation]]
+name = 'decide-many counts any session-request id as one the daemon minted (r4 F2)'
+file = "src/server.rs"
+from = '''            return self.sr_get(&id).is_some();'''
+to = '''            return { let _ = self.sr_get(&id); true };'''
+
+[[mutation]]
+name = 'decide-many counts any held-request id as one the daemon minted (r4 F2)'
+file = "src/server.rs"
+from = '''        self.pl_has_approval(&id)
+    }'''
+to = '''        { let _ = self.pl_has_approval(&id); true }
+    }'''
+
+[[mutation]]
+name = 'listen.bind_failed records the bind error message (C28)'
+file = "src/server.rs"
+from = '''                    let code = e.0.clone();'''
+to = '''                    let code = e.1.clone();'''
+
+[[mutation]]
+name = 'r6 B1: rules never saved are null, which `tripwire show` cannot list'
+file = "src/server/routes.rs"
+from = '''"rules": if saved { t["rules"].clone() } else { defaults.clone() }, "rules_saved": saved,'''
+to = '''"rules": if saved { t["rules"].clone() } else { Value::Null }, "rules_saved": saved,'''
+
+[[mutation]]
+name = 'r6 B2: the preflight route ignores assume_placeholder'
+file = "src/server.rs"
+from = '''            listener: None,
+        },
+        input.get("assume_placeholder") == Some(&Value::Bool(true)),'''
+to = '''            listener: None,
+        },
+        false,'''
+
+[[mutation]]
+name = 'r6 B2: the preflight route assumes a placeholder for a caller that did not ask'
+file = "src/server.rs"
+from = '''            listener: None,
+        },
+        input.get("assume_placeholder") == Some(&Value::Bool(true)),'''
+to = '''            listener: None,
+        },
+        input.get("assume_placeholder") != Some(&Value::Bool(false)),'''
+
+[[mutation]]
+name = 'r6 B2: assume_placeholder is not checked to be a boolean'
+file = "src/server.rs"
+from = '''    if input
+        .get("assume_placeholder")
+        .is_some_and(|q| !q.is_boolean())
+    {
+        return Err(refuse("assume_placeholder is true or false"));
+    }'''
+to = ''''''
+
+[[mutation]]
+name = 'U3 daemon: kind is filtered after the limit, not before'
+file = "src/server/routes.rs"
+from = '''        let n = limit_raw.as_deref().map_or(30, |l| l.parse().unwrap_or(30));
+        let start = all.len().saturating_sub(n);
+        return Ok(Value::Array(all[start..].to_vec()));'''
+to = '''        let n = limit_raw.as_deref().map_or(30, |l| l.parse().unwrap_or(30));
+        let _ = all;
+        return Ok(Value::Array(of_kind(read(n)?)));'''
+
+[[mutation]]
+name = 'U3 daemon: a paged read ignores kind'
+file = "src/server/routes.rs"
+from = '''    let rows: Vec<Value> = all
+        .into_iter()'''
+to = '''    let _ = all;
+    let rows: Vec<Value> = read(usize::MAX)?
+        .into_iter()'''
+
+[[mutation]]
+name = 'U3 daemon: before= is ignored, so the log cannot be walked'
+file = "src/server/routes.rs"
+from = '''            .filter(|r| r["seq"].as_u64().unwrap_or(0) < at)'''
+to = '''            .filter(|_| true)'''
+
+[[mutation]]
+name = 'U3 daemon: a paged read takes more than 500 rows'
+file = "src/server/routes.rs"
+from = '''            && l.parse::<usize>().is_ok_and(|n| n <= AUDIT_PAGE_MAX);'''
+to = '''            && l.parse::<usize>().is_ok();'''
+
+[[mutation]]
+name = 'U3 fix4: a kind-filtered tail takes any limit'
+file = "src/server/routes.rs"
+from = '''    let limit_raw = p("limit");
+    if let Some(l) = &limit_raw {'''
+to = '''    let limit_raw = p("limit");
+    if let Some(l) = limit_raw.as_ref().filter(|_| before.is_some() || after.is_some()) {'''
+
+[[mutation]]
+name = 'U3 fix4: the unfiltered tail is held to the new bound'
+file = "src/server/routes.rs"
+from = '''    if before.is_none() && after.is_none() && kind.is_none() {'''
+to = '''    if false && before.is_none() && after.is_none() && kind.is_none() {'''
+
+[[mutation]]
+name = 'a placeholder batch resolves a quarantined credential'
+file = "src/server/routes.rs"
+from = '''        if cred.quarantine.is_some() {
+            return Err(quarantined(&cred.slug));
+        }
+        let grant = grants'''
+to = '''        if false && cred.quarantine.is_some() {
+            return Err(quarantined(&cred.slug));
+        }
+        let grant = grants'''
+
+[[mutation]]
+name = 'a session body is converted inline, so its rate, quota, routes and payload rules are dropped'
+file = "src/server.rs"
+from = '''            let pol = policy::grant_policy_from_input(
+                spec,'''
+to = '''            let inline: Value = {
+                let mut s = Map::new();
+                for k in ["cred", "hosts", "methods", "paths", "budget", "approval"] {
+                    if let Some(v) = spec.get(k) {
+                        s.insert(k.into(), v.clone());
+                    }
+                }
+                Value::Object(s)
+            };
+            let pol = policy::grant_policy_from_input(
+                &inline,'''
+
+# ---------------------------------------------------- src/daemon/pipeline.js
+
+[[mutation]]
+name = 'an approval is bound to which placeholder carried the credential'
+file = "src/pipeline.rs"
+from = '''            .map(|s| format!("{}:{}", s.row.grant_id, s.row.field))
+            .collect();
+        let hash_headers'''
+to = '''            .map(|s| s.row.id.clone())
+            .collect();
+        let hash_headers'''
+
+[[mutation]]
+name = 'an approval is not bound to its request'
+file = "src/pipeline.rs"
+from = '''            .iter_mut()
+            .find(|(h, _)| h == hash)
+            .map(|(_, a)| a)'''
+to = '''            .iter_mut()
+            .find(|(h, _)| { let _ = (h, hash); true })
+            .map(|(_, a)| a)'''
+
+[[mutation]]
+name = 'an approval that already ran can be decided again'
+file = "src/pipeline.rs"
+from = '''        if a.state != "pending" {
+            return Err(dr(
+                C::PolicyDenied,
+                format!("already {}", a.state),
+                "approval",'''
+to = '''        if false && a.state != "pending" {
+            return Err(dr(
+                C::PolicyDenied,
+                format!("already {}", a.state),
+                "approval",'''
+
+[[mutation]]
+name = "a request carrying the hash marker's text literally collides with one carrying the placeholder"
+file = "src/pipeline.rs"
+from = '''            let mut out = value.replace('<', "<<");'''
+to = '''            let mut out = value.to_string();'''
+
+[[mutation]]
+name = 'a method-override header escapes the approval rule'
+file = "src/pipeline.rs"
+from = '''        let needs_human = std::iter::once(decision.method.as_str())
+            .chain(overrides.iter().map(String::as_str))'''
+to = '''        let needs_human = std::iter::once(decision.method.as_str())
+            .chain(overrides.iter().map(String::as_str).filter(|_| false))'''
+
+[[mutation]]
+name = 'a pre-connect failure refunds only the last placeholder'
+file = "src/pipeline.rs"
+from = '''            for row in std::mem::take(&mut ctx.consumed) {
+                let _ = self.vault.refund_placeholder(&row);'''
+to = '''            for row in std::mem::take(&mut ctx.consumed).into_iter().rev().take(1) {
+                let _ = self.vault.refund_placeholder(&row);'''
+
+[[mutation]]
+name = 'a spent approval with nothing to replay holds its resend forever'
+file = "src/pipeline.rs"
+from = '''                    if existing.executed_at.is_none() {
+                        return Ok(("pending".into(), existing.id.clone()));
+                    }'''
+to = '''                    if true {
+                        return Ok(("pending".into(), existing.id.clone()));
+                    }'''
+
+[[mutation]]
+name = 'a case-folded secret in a response header name reaches the agent'
+file = "src/pipeline.rs"
+from = '''if kit.check.scrub(&lower).redactions > 0 || kit.check.contains_ignoring_case(&lower) {'''
+to = '''if kit.check.scrub(&lower).redactions > 0 {'''
+
+[[mutation]]
+name = 'a secret split across one JSON field of two events is not reassembled'
+file = "src/sse.rs"
+from = '''        match parse_event_json(&data.join("\n")) {
+            Parsed::Value(v) => self.runs.add(&v, &mut self.check),'''
+to = '''        match parse_event_json(&data.join("\n")) {
+            Parsed::Value(_) => None,'''
+
+[[mutation]]
+name = 'an event that never ends is held without bound'
+file = "src/sse.rs"
+from = '''        if self.pending.len() > MAX_EVENT_BYTES {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = 'a compressed event stream is bounded per chunk only'
+file = "src/sse.rs"
+from = '''        if self.total > self.max_bytes {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = "an event stream's source is piped without its errors"
+file = "src/pipeline.rs"
+from = '''                    Some(Err(_)) => crate::sse::Input::Failed,'''
+to = '''                    Some(Err(_)) => crate::sse::Input::End,'''
+
+[[mutation]]
+name = 'a failing event stream throws at the response writer'
+file = "src/sse.rs"
+from = '''            Input::Failed => st.fail(),'''
+to = '''            Input::Failed => panic!("the upstream failed part way"),'''
+
+[[mutation]]
+name = 'a forged placeholder touches the session it names'
+file = "src/pipeline.rs"
+from = '''            if !av_core::placeholder::verify(&k_ph, &carrier.parsed) {
+                return Err(malformed(&carrier.location));
+            }'''
+to = '''            if false && !av_core::placeholder::verify(&k_ph, &carrier.parsed) {
+                return Err(malformed(&carrier.location));
+            }'''
+
+[[mutation]]
+name = '/t/https/ to an http credential goes out in the clear'
+file = "src/pipeline.rs"
+from = '''                let use_scheme = if scheme == "https" {
+                    "https".to_string()
+                } else {
+                    cred_scheme
+                };'''
+to = '''                let use_scheme = cred_scheme;'''
+
+[[mutation]]
+name = 'an event-stream path run is trimmed before the new value is searched'
+file = "src/sse.rs"
+from = '''            let r = scrubber.scrub(&run);'''
+to = '''            let r = scrubber.scrub(&tail(&run, self.keep));'''
+
+[[mutation]]
+name = 'the joined event-stream view is trimmed before the new event is searched'
+file = "src/sse.rs"
+from = '''        if let Some(r) = self.leaked(&joined) {'''
+to = '''        let trimmed = self.assembled.clone();
+        if let Some(r) = self.leaked(&trimmed) {'''
+
+[[mutation]]
+name = 'an event stream past the key-path limit forgets the oldest path and carries on'
+file = "src/sse.rs"
+from = '''        if self.runs.contains_key(key) || self.runs.len() < MAX_SSE_PATHS {
+            None
+        } else {
+            Some("too_many_paths")
+        }'''
+to = '''        let _ = key;
+        None'''
+
+[[mutation]]
+name = 'a buffered upstream reset mid-body escapes as an internal error'
+file = "src/pipeline.rs"
+from = '''                        Some(Err(m)) => {
+                            return Err(dr(
+                                C::UpstreamUnreachable,'''
+to = '''                        Some(Err(m)) => {
+                            return Err(crate::err::internal(m));
+                            #[allow(unreachable_code)]
+                            return Err(dr(
+                                C::UpstreamUnreachable,'''
+
+[[mutation]]
+name = 'the placeholder in a Basic header is not made stable for the request hash'
+file = "src/pipeline.rs"
+from = '''                    if crate::util::b64(decoded.as_bytes()) == enc {
+                        return format!('''
+to = '''                    if false && crate::util::b64(decoded.as_bytes()) == enc {
+                        return format!('''
+
+[[mutation]]
+name = 'a Basic header that does not encode back to itself shares an approval with one that does'
+file = "src/pipeline.rs"
+from = '''                    if crate::util::b64(decoded.as_bytes()) == enc {'''
+to = '''                    if true {'''
+
+[[mutation]]
+name = 'an event-stream key path is the keys joined with a dot, so a dotted key names another path'
+file = "src/sse.rs"
+from = '''    let path_json = Value::Array(path.iter().map(seg_json).collect());
+    let mut out = vec![Way {
+        gathering: js_stringify(&path_json),'''
+to = '''    let path_json = Value::Array(path.iter().map(seg_json).collect());
+    let _ = &path_json;
+    let mut out = vec![Way {
+        gathering: path.iter().map(|s| match s { Seg::I(i) => i.to_string(), Seg::K(k) => k.clone() }).collect::<Vec<_>>().join("."),'''
+
+[[mutation]]
+name = 'an event-stream array index is the same path segment as a key spelled like it'
+file = "src/sse.rs"
+from = '''                path.push(Seg::I(i));'''
+to = '''                path.push(Seg::K(i.to_string()));'''
+
+[[mutation]]
+name = 'an event-stream value is gathered by key path only, not by the indexes a client groups it by'
+file = "src/sse.rs"
+from = '''                next.push(c.clone());
+                for v in values {'''
+to = '''                next.push(c.clone());
+                for v in values.iter().filter(|_| false) {'''
+
+[[mutation]]
+name = 'an event-stream value is gathered by all of its indexes at once, so a decoy index splits the run'
+file = "src/sse.rs"
+from = '''                next.push(c.clone());
+                for v in values {'''
+to = '''                for v in values {'''
+
+[[mutation]]
+name = 'an event payload with NaN or Infinity, which Python reads, is not reassembled by path'
+file = "src/sse.rs"
+from = '''    swapped.extend(&chars[from..]);
+    match parse_js_json(&swapped) {'''
+to = '''    swapped.extend(&chars[from..]);
+    if true {
+        return Parsed::No;
+    }
+    match parse_js_json(&swapped) {'''
+
+[[mutation]]
+name = 'an event-stream value under more index fields than are combined is passed instead of cut'
+file = "src/sse.rs"
+from = '''        if slots.len() > MAX_SSE_INDEXES {'''
+to = '''        if false {'''
+
+[[mutation]]
+name = 'an event-stream array element is gathered by its position only, not wherever its index puts it'
+file = "src/sse.rs"
+from = '''    if path.iter().any(|s| matches!(s, Seg::I(_))) {'''
+to = '''    if false {'''
+
+[[mutation]]
+name = "a content block's starting text is not gathered with the deltas that continue it"
+file = "src/sse.rs"
+from = '''        out.push(Way {
+            gathering: format!("#{continued}"),'''
+to = '''        if true {
+            continue;
+        }
+        out.push(Way {
+            gathering: format!("#{continued}"),'''
+
+[[mutation]]
+name = "a Responses item's content position is not read as its content_index"
+file = "src/sse.rs"
+from = '''            indexes: own.into_iter().chain(positions).collect(),'''
+to = '''            indexes: { let _ = (own, positions); indexes.to_vec() },'''
+
+[[mutation]]
+name = 'an index field missing from one event is not read as zero or as a group of its own'
+file = "src/sse.rs"
+from = '''            if !way.indexes.iter().any(|(d, k, _)| *d == depth && *k == key) {
+                slots.push((depth, key, missing()));'''
+to = '''            if false && !way.indexes.iter().any(|(d, k, _)| *d == depth && *k == key) {
+                slots.push((depth, key, missing()));'''
+
+[[mutation]]
+name = 'a missing index that came before the field was first seen is not filed with it'
+file = "src/sse.rs"
+from = '''                        let text = self.runs.get(&from).cloned().unwrap_or_default();'''
+to = '''                        let text = { let _ = &from; String::new() };'''
+
+[[mutation]]
+name = 'a missing index field is read as zero only, never as a group of its own'
+file = "src/sse.rs"
+from = '''    vec![Value::from(0u64), Value::Null]'''
+to = '''    vec![Value::from(0u64)]'''
+
+[[mutation]]
+name = 'an index written as a string is not also read as its number'
+file = "src/sse.rs"
+from = '''        if numeric {
+            if let Ok(n) = s.parse::<u64>() {'''
+to = '''        if false && numeric {
+            if let Ok(n) = s.parse::<u64>() {'''
+
+[[mutation]]
+name = "an annotation's character offsets are counted as index fields"
+file = "src/sse.rs"
+from = '''            && !k.starts_with("start_")
+            && !k.starts_with("end_"))'''
+to = '''            )'''
+
+[[mutation]]
+name = 'a response too nested to finish scanning is forwarded instead of refused'
+file = "src/pipeline.rs"
+from = '''        if scrubbed.unscannable {
+            return Err(dr(C::Unscannable, "the response nested encodings deeper'''
+to = '''        if false && scrubbed.unscannable {
+            return Err(dr(C::Unscannable, "the response nested encodings deeper'''
+
+[[mutation]]
+name = 'a concurrency slot is released only when the upstream answered'
+file = "src/pipeline.rs"
+from = '''                            let streaming = p.stream.is_some();
+                            if !streaming {
+                                if let Some(g) = ctx.resources.release.take() {
+                                    core.pl_release(&g);
+                                }
+                            }
+                            GatewayResponse {
+                                status: p.status,
+                                headers: p.headers,
+                                body: p.body,
+                                stream: p.stream,
+                                request_id: Some(ctx.request_id.clone()),
+                                error: None,
+                            }
+                        }
+                        Err(e) => core.pl_fail(&mut ctx, e),
+                    },
+                    Err(e) => core.pl_fail(&mut ctx, e),
+                };
+                if resp.stream.is_none() {'''
+to = '''                            let streaming = p.stream.is_some();
+                            if !streaming && ctx.upstream_opened {
+                                if let Some(g) = ctx.resources.release.take() {
+                                    core.pl_release(&g);
+                                }
+                            }
+                            GatewayResponse {
+                                status: p.status,
+                                headers: p.headers,
+                                body: p.body,
+                                stream: p.stream,
+                                request_id: Some(ctx.request_id.clone()),
+                                error: None,
+                            }
+                        }
+                        Err(e) => core.pl_fail(&mut ctx, e),
+                    },
+                    Err(e) => core.pl_fail(&mut ctx, e),
+                };
+                if resp.stream.is_none() && ctx.upstream_opened {'''
+
+[[mutation]]
+name = 'a stored scrub pattern that no longer compiles is skipped instead of withholding the response'
+file = "src/pipeline.rs"
+from = '''                if av_core::scrub::compile_scrub_pattern(&p.source).is_err() {
+                    return Err(dr(
+                        C::Unscannable,
+                        "a stored scrub pattern is invalid",
+                        "scrub_pattern_invalid",
+                    ));
+                }'''
+to = '''                if av_core::scrub::compile_scrub_pattern(&p.source).is_err() {
+                    continue;
+                }'''
+
+[[mutation]]
+name = 'the spend check ignores what calls in flight have reserved'
+file = "src/pipeline.rs"
+from = '''let committed = state[format!("{key}_used")].as_i64().unwrap_or(0) + reserved(key);'''
+to = '''let committed = state[format!("{key}_used")].as_i64().unwrap_or(0) + 0 * reserved(key);'''
+
+[[mutation]]
+name = 'redirects are followed for every method'
+file = "src/pipeline.rs"
+from = '''        let mut asked = vec![plan.decision.method.clone()];
+        asked.extend(plan.overrides.iter().cloned());
+        asked.push(method.clone());'''
+to = '''        let asked = vec![method.clone()];'''
+
+[[mutation]]
+name = 'a request a method override made a DELETE has its redirect followed'
+file = "src/pipeline.rs"
+from = '''        asked.extend(plan.overrides.iter().cloned());
+        asked.push(method.clone());'''
+to = '''        asked.push(method.clone());'''
+
+[[mutation]]
+name = 'a redirect may choose another port on an allowed host'
+file = "src/pipeline.rs"
+from = '''                if next_port != cred_port {
+                    reason = Some("host");
+                }'''
+to = '''                let _ = (next_port, cred_port);'''
+
+[[mutation]]
+name = 'an approval preview is not scrubbed'
+file = "src/pipeline.rs"
+from = '''        let mut scrub = |text: &str| {
+            let r = scrubber.scrub(text);
+            if r.unscannable {
+                "[withheld: unscannable]".to_string()
+            } else {
+                r.text
+            }
+        };'''
+to = '''        let _ = &mut scrubber;
+        let mut scrub = |text: &str| text.to_string();'''
+
+[[mutation]]
+name = 'a tripwire counts a denial against the session its placeholder names, before authentication'
+file = "src/pipeline.rs"
+from = '''                .map(|s| s.id.clone())
+                .unwrap_or_default(),
+            credential_id: ctx.route.as_ref().map(|r| r.cred.id.clone()),'''
+to = '''                .map(|s| s.id.clone())
+                .unwrap_or_else(|| av_core::placeholder::find_all(&ctx.path).first().map(|p| p.sid.clone()).unwrap_or_default()),
+            credential_id: ctx.route.as_ref().map(|r| r.cred.id.clone()),'''
+
+[[mutation]]
+name = 'a quarantined credential is not refused before its use is spent'
+file = "src/pipeline.rs"
+from = '''            st.stage("quarantine");
+            Self::pl_check_quarantine(&cred)?;
+            st.stage("grant");
+            let grant = self
+                .vault
+                .grants_for_session(&session.id)'''
+to = '''            st.stage("grant");
+            let grant = self
+                .vault
+                .grants_for_session(&session.id)'''
+
+[[mutation]]
+name = 'the gateway does not ask the store whether the grant is still live'
+file = "src/pipeline.rs"
+from = '''            let grant = if peek {
+                self.pl_peek_grant(&grant)?;
+                grant
+            } else {
+                self.vault.assert_grant_live(Some(&grant)).v()?
+            };'''
+to = '''            let grant = if peek {
+                self.pl_peek_grant(&grant)?;
+                grant
+            } else {
+                grant
+            };'''
+
+[[mutation]]
+name = 'a preflight denial is fed to the tripwires'
+file = "src/pipeline.rs"
+from = '''            Err(e) => {
+                let mut scrubber = self.pl_error_scrubber().ok();
+                let detail = self.pl_safe_message(&e.detail, scrubber.as_mut());
+                let mut check = Map::new();'''
+to = '''            Err(e) => {
+                let _ = self.tw_observe(&crate::tripwire::Observation { session_id: session.id.clone(), credential_id: None, code: e.code.as_str().to_string(), rule: rule_of(&e).map(str::to_string), preflight: false });
+                let mut scrubber = self.pl_error_scrubber().ok();
+                let detail = self.pl_safe_message(&e.detail, scrubber.as_mut());
+                let mut check = Map::new();'''
+
+[[mutation]]
+name = 'a method-override header is not held to the route pairs'
+file = "src/pipeline.rs"
+from = '''        let mut p = effective.clone();
+        p.methods = None;
+        policy::evaluate_http(
+            &p,'''
+to = '''        let mut p = effective.clone();
+        p.methods = None;
+        p.routes = None;
+        p.route_sets = None;
+        p.paths = None;
+        policy::evaluate_http(
+            &p,'''
+
+[[mutation]]
+name = 'a redirect hop skips the GraphQL rules'
+file = "src/pipeline.rs"
+from = '''                let sets = policy::describe_effective(effective).payload;'''
+to = '''                let mut sets = policy::describe_effective(effective).payload;
+                if let Checked::Valid(v) = &mut sets { for s in v.iter_mut() { s.graphql = None; } }'''
+
+[[mutation]]
+name = 'a redirect hop silently drops the body rules'
+file = "src/pipeline.rs"
+from = '''                let sets = policy::describe_effective(effective).payload;'''
+to = '''                let mut sets = policy::describe_effective(effective).payload;
+                if let Checked::Valid(v) = &mut sets { for s in v.iter_mut() { s.json = None; s.form = None; } }'''
+
+[[mutation]]
+name = 'a request is checked on headers that were never folded'
+file = "src/pipeline.rs"
+from = '''        let mut req = req;
+        req.headers = fold_headers(&req.headers)?;
+        let session = self.pl_authenticate(&req, true)?;'''
+to = '''        let req = req;
+        let session = self.pl_authenticate(&req, true)?;'''
+
+[[mutation]]
+name = 'preflight reads headers that were never folded'
+file = "src/pipeline.rs"
+from = '''        let mut req = req;
+        req.headers = fold_headers(&req.headers)?;
+        let session = self.pl_authenticate(&req, false)?;'''
+to = '''        let req = req;
+        let session = self.pl_authenticate(&req, false)?;'''
+
+[[mutation]]
+name = 'two header keys differing only in case reach the client, and the last one wins'
+file = "src/util.rs"
+from = '''                let sep = if e.0 == "cookie" { "; " } else { ", " };
+                e.1.push_str(sep);
+                e.1.push_str(&v);'''
+to = '''                e.1 = v;'''
+
+[[mutation]]
+name = "a redirect hop copies the request's headers, method overrides included"
+file = "src/pipeline.rs"
+from = '''        if HOP_FORWARDED.contains(&lower.as_str()) || cred_headers.contains(&lower) {'''
+to = '''        if { let _ = cred_headers; true } {'''
+
+[[mutation]]
+name = 'a redirect hop sends a body or framing header a credential is declared at'
+file = "src/pipeline.rs"
+from = '''        if hop_never(&lower) {
+            continue;
+        }
+        if HOP_FORWARDED'''
+to = '''        if HOP_FORWARDED'''
+
+[[mutation]]
+name = 'a redirect hop follows a Location carrying a method-override field'
+file = "src/pipeline.rs"
+from = '''                if check_overrides(effective, &hv, &h.host, &h.path).is_err() {
+                    reason = Some("path");
+                }'''
+to = ''''''
+
+[[mutation]]
+name = 'a 307 or 308 hop is sent as a GET whatever the request was'
+file = "src/pipeline.rs"
+from = '''        let method = if status == 307 || status == 308 || plan.decision.method == "HEAD" {
+            plan.decision.method.clone()
+        } else {
+            "GET".into()
+        };'''
+to = '''        let method: String = { let _ = status; "GET".into() };'''
+
+[[mutation]]
+name = 'a hop drops the API-version headers a provider needs'
+file = "src/pipeline.rs"
+from = '''const HOP_FORWARDED: [&str; 14] = [
+    "accept",
+    "user-agent",
+    "accept-language",
+    "cache-control",
+    "if-none-match",
+    "if-modified-since",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-beta",
+    "openai-organization",
+    "openai-project",
+    "x-api-version",
+    "api-version",
+    "x-github-api-version",
+];'''
+to = '''const HOP_FORWARDED: [&str; 6] = [
+    "accept",
+    "user-agent",
+    "accept-language",
+    "cache-control",
+    "if-none-match",
+    "if-modified-since",
+];'''
+
+[[mutation]]
+name = "a hop forwards the agent's cookie and forwarding headers"
+file = "src/pipeline.rs"
+from = '''const HOP_FORWARDED: [&str; 14] = [
+    "accept",'''
+to = '''const HOP_FORWARDED: [&str; 17] = [
+    "cookie",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "accept",'''
+
+[[mutation]]
+name = "a hop's override check reads the raw URL instead of the view"
+file = "src/pipeline.rs"
+from = '''                if check_overrides(effective, &hv, &h.host, &h.path).is_err() {'''
+to = '''                if n.query_pairs().any(|(k, v)| k == "_method" && v.to_uppercase() != hv.method) {'''
+
+[[mutation]]
+name = 'a hop to a Location with a stray name is followed'
+file = "src/pipeline.rs"
+from = '''                if hv.stray_name {
+                    reason = Some("path");
+                }'''
+to = ''''''
+
+[[mutation]]
+name = "the gateway's upstream drops the credential's pins"
+file = "src/pipeline.rs"
+from = '''            body: plan.body.clone(),
+            pins,
+        };'''
+to = '''            body: plan.body.clone(),
+            pins: { let _ = pins; Pins::None },
+        };'''
+
+[[mutation]]
+name = 'the gateway looks pins up by exact key, so a malformed pin table means no pins'
+file = "src/pipeline.rs"
+from = '''        Pins::from_lookup(av_core::pins::pins_for(
+            table.as_ref(),
+            &av_core::pins::url_identity(&u),
+        ))'''
+to = '''        let _ = table;
+        match cred.pins.get(&av_core::pins::url_identity(&u)) {
+            Some(v) => Pins::List(v.iter().map(|s| Value::from(s.clone())).collect()),
+            None => Pins::None,
+        }'''
+
+[[mutation]]
+name = 'a refusal from pinnedRequest is reported as an unreachable upstream and not refunded'
+file = "src/pipeline.rs"
+from = '''        if let Some(v) = e.vault.as_ref().filter(|v| v.code == C::PolicyDenied) {
+            let mut out = d(C::PolicyDenied, v.detail.clone()).refunded(true);
+            out.extra.rule = v.extra.rule.clone();
+            return out;
+        }'''
+to = ''''''
+
+[[mutation]]
+name = 'a repeated header reaches pinnedRequest as a list and the request is refused'
+file = "src/connectors/pinning.rs"
+from = '''    let sent: Vec<(String, String)> = req.headers.clone();'''
+to = '''    let sent: Vec<(String, String)> = req.headers.clone();
+    if sent.iter().enumerate().any(|(i, (k, _))| sent[..i].iter().any(|(j, _)| j == k)) {
+        return Err(UpstreamError {
+            vault: Some(Box::new(dr(C::PolicyDenied, "headers must be names with string values, each read once", "header_format"))),
+            ..Default::default()
+        });
+    }'''
+
+[[mutation]]
+name = 'a denial row records the method the agent sent, whatever it is (C28)'
+file = "src/pipeline.rs"
+from = '''    if AUDIT_METHODS.contains(&up.as_str()) {
+        up
+    } else {
+        "OTHER".into()
+    }'''
+to = '''    let _ = up;
+    m.to_string()'''
+
+[[mutation]]
+name = 'the explain-denial sentences are not bounded by count (C28)'
+file = "src/pipeline.rs"
+from = '''            if self.pl.denials.len() < MAX_DENIALS && now - first.at < DENIAL_TTL_MS as i64 {'''
+to = '''            if now - first.at < DENIAL_TTL_MS as i64 {'''
+
+[[mutation]]
+name = 'an explain-denial sentence is served past its hour (C28)'
+file = "src/pipeline.rs"
+from = '''        if now_ms() - d.at >= DENIAL_TTL_MS as i64 || d.session_id.as_deref() != session_id {'''
+to = '''        if d.session_id.as_deref() != session_id {'''
+
+[[mutation]]
+name = 'a refused redirect records the host the upstream named (C28)'
+file = "src/pipeline.rs"
+from = '''"to_host": hop.as_ref().map(|h| h.host.clone()), "reason": reason}))?;'''
+to = '''"to_host": hop.as_ref().map(|h| h.host.clone()).or_else(|| next.as_ref().map(url_hostname)), "reason": reason}))?;'''
+
+[[mutation]]
+name = "a held request's reason is recorded unbounded (C28)"
+file = "src/pipeline.rs"
+from = '''                let safe = self.pl_safe_message(r, None);
+                Some(self.pl_untrusted_text(&safe, 200)?)'''
+to = '''                let safe = self.pl_safe_message(r, None);
+                Some(safe)'''
+
+[[mutation]]
+name = "r6 F1 (Grok): response.streamed records the upstream's own Content-Type"
+file = "src/pipeline.rs"
+from = '''"content_type": "text/event-stream", "content_encoding": audit_encoding(&enc_c)}))?;'''
+to = '''"content_type": up_headers.iter().find(|(n, _)| n.eq_ignore_ascii_case("content-type")).map(|(_, v)| v.clone()), "content_encoding": audit_encoding(&enc_c)}))?;'''
+
+# connectors-pinning.test.js:383 (DEPTH_ZERO_SELF_SIGNED_CERT): Node names an
+# untrusted chain by the leaf's own issuer path, not by what is appended.
+
+[[mutation]]
+name = 'a leaf with a non-CA certificate appended under its issuer name is named by the append, not as self-signed'
+file = "src/connectors/pinning.rs"
+from = '''        E::UnknownIssuer
+        | E::EndEntityUsedAsCa
+'''
+to = '''        E::UnknownIssuer
+'''
+
+[[mutation]]
+name = 'an untrusted chain is named by the order of the appended certificates, not the leaf issuer path'
+file = "src/connectors/pinning.rs"
+from = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| sub == issuer));'''
+to = '''.find(|&j| !used[j] && names[j].as_ref().is_some_and(|(sub, _)| !sub.is_empty() || sub == issuer));'''
+
+# control-api-notify.test.js:130: the interval slot is taken synchronously,
+# before the next event can look at it.
+
+[[mutation]]
+name = 'the webhook slot is reserved only once the POST task runs, so events back to back each post'
+file = "src/notify.rs"
+from = '''
+        self.inner().last_sent = now_ms();
+        Some(Pending {
+            url,
+            host,
+            body: webhook_payload(&items, &detail, "pending"),
+            count: items.len(),
+        })
+    }
+
+    async fn send_webhook(self: &Arc<Self>, p: Pending) {
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
+'''
+to = '''
+        Some(Pending {
+            url,
+            host,
+            body: webhook_payload(&items, &detail, "pending"),
+            count: items.len(),
+        })
+    }
+
+    async fn send_webhook(self: &Arc<Self>, p: Pending) {
+        let Some(shared) = self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .upgrade()
+        else {
+            return;
+        };
+        tokio::task::yield_now().await;
+        self.inner().last_sent = now_ms();
+        let _ = self.post(&shared, p.url, p.host, p.body, p.count).await;
+'''
+
+# CLI re-review m-N5 (no JS counterpart; the JS daemon set no limit): the
+# daemon turns off core files itself at startup.
+
+[[mutation]]
+name = 'a daemon started by hand may leave a core file'
+file = "src/lib.rs"
+from = '''    if let Err(e) = peercred::disable_core_dumps() {'''
+to = '''    if let Err(e) = Ok::<(), std::io::Error>(()) {'''
+
+# integrate2-seams.test.js:287: a hop is checked against the grant as it is
+# now, with the request's own use and earlier hops charged.
+
+[[mutation]]
+name = 'a redirect hop checks the budget on the copy taken before the request was charged'
+file = "src/pipeline.rs"
+from = '''            if !live.is_some_and(|g| self.pl_budget(&g, effective).is_ok()) {'''
+to = '''            if !live.is_some_and(|_| self.pl_budget(&route.grant, effective).is_ok()) {'''
+
+# src/daemon/server.js #guard (PLAN 4905f8d): a handler fault is recorded and
+# answered 500; release builds unwind so the guard can run. 'an uncaught
+# error ends the daemon' and the daemon.uncaught entries stay not applicable
+# (see above): there is no process-wide handler to port.
+
+[[mutation]]
+name = 'a control handler that throws is not guarded'
+file = "src/server.rs"
+from = '''        self.guard(async move { me.on_control_inner(req).await })
+            .await'''
+to = '''        (async move { me.on_control_inner(req).await })
+            .await'''
+
+[[mutation]]
+name = 'a handler fault is answered 500 without a daemon.handler_error record'
+file = "src/server.rs"
+from = '''                        core.audit_opt("daemon.handler_error", json!({"error": class}))'''
+to = '''                        core.audit_opt("daemon.handler_ok", json!({"error": class}))'''
+
+[[mutation]]
+name = 'release builds abort on a panic, so no handler fault is ever guarded'
+file = "../../Cargo.toml"
+from = '''codegen-units = 1
+# Panics unwind'''
+to = '''codegen-units = 1
+panic = "abort"
+# Panics unwind'''
+
+[[mutation]]
+name = 'a fault is recorded by its message (C28)'
+file = "src/server.rs"
+from = '''    let _ = fault;
+    PANIC_CLASS.to_string()'''
+to = '''    fault
+        .downcast_ref::<&str>()
+        .map(|m| m.to_string())
+        .or_else(|| fault.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| PANIC_CLASS.to_string())'''
+
+# Faults that are not refusals answer the generic sentence and are recorded
+# by class (C28, the JS #guard); their text goes to stderr only.
+
+[[mutation]]
+name = 'an internal fault hands its own text (a store error quoting stored data) to the caller'
+file = "src/err.rs"
+from = '''    d(C::Internal, FAULT_DETAIL)'''
+to = '''    d(C::Internal, text)'''
+
+[[mutation]]
+name = 'a store error that is not a refusal is answered with the store text'
+file = "src/state.rs"
+from = '''        other => crate::err::internal(other.to_string()),'''
+to = '''        other => deny(ErrorCode::Internal, other.to_string(), DenyExtra::default()),'''
+
+[[mutation]]
+name = 'a handler that answers a fault leaves no daemon.handler_error record'
+file = "src/server.rs"
+from = '''                if answers_fault(&r) {'''
+to = '''                if false && answers_fault(&r) {'''
+
+[[mutation]]
+name = 'an MCP fault leaves no daemon.handler_error record'
+file = "src/mcp.rs"
+from = '''                if crate::err::is_fault(&e) {'''
+to = '''                if false && crate::err::is_fault(&e) {'''
+
+# ui-dist-serving.test.js:157-176: the UI server routes a path only as it
+# arrived; an absolute-form target keeps its scheme and authority, as
+# Node's req.url does, and is never a literal path.
+
+[[mutation]]
+name = 'an absolute-form target is routed by the path inside it, so the page and the API answer it'
+file = "src/ui/server.rs"
+from = '''        let raw_url = if parts.uri.scheme().is_some() || parts.uri.authority().is_some() {'''
+to = '''        let raw_url = if false {'''
+
+# integrate3-narrowing.test.js:249: parseOverrides reads Object.keys, so a
+# string or list narrowing has index keys no narrowing is, and is refused.
+
+[[mutation]]
+name = 'a narrowing sent as a string is read as no narrowing'
+file = "src/ui/server.rs"
+from = '''        Some(Value::String(s)) if !s.is_empty() => index_keys(s.encode_utf16().count()),'''
+to = '''        Some(Value::String(s)) if s.is_empty() => index_keys(s.encode_utf16().count()),'''
+
+[[mutation]]
+name = 'a narrowing sent as a list is read as no narrowing'
+file = "src/ui/server.rs"
+from = '''        Some(Value::Array(a)) if !a.is_empty() => index_keys(a.len()),'''
+to = '''        Some(Value::Array(a)) if a.is_empty() => index_keys(a.len()),'''
+
+# review-daemon-1 blocking 1: a full read-ahead stash hid the client's
+# half-close (Notifier.subscribe res.on('close'); MCP GET event stream).
+
+[[mutation]]
+name = 'a full read-ahead stash stops reading, so a half-close behind it never frees the watcher'
+file = "src/listen.rs"
+from = '''            let full = c.stash.len() >= STASH_LIMIT;'''
+to = '''            if c.stash.len() >= STASH_LIMIT {
+                return std::task::Poll::Pending;
+            }
+            let full = false;'''
+
+[[mutation]]
+name = 'bytes past a full read-ahead stash are stashed and the watcher keeps its slot'
+file = "src/listen.rs"
+from = '''                std::task::Poll::Ready(Ok(())) if full => c.ended = true,'''
+to = '''                std::task::Poll::Ready(Ok(())) if full && false => c.ended = true,'''
+

@@ -512,7 +512,14 @@ impl AuditLog {
         });
         let anchor = self.read_anchor();
         let anchored = self.stamp.as_ref().is_some_and(|s| s.anchored());
+        // The chain continues from the last well-formed record, as in JS, but
+        // the next row is numbered past every stored row: a malformed record
+        // at the tail still holds its sequence number (the table's key), and
+        // writing there would fail the open and lock the owner out.
+        let stored = self.max_stored_seq()?;
         let Some(last) = last else {
+            self.seq = stored;
+            self.since_checkpoint = self.seq % CHECKPOINT_EVERY;
             if let Some(a) = anchor.as_ref().filter(|a| a.seq > 0) {
                 self.truncation = Some(Truncation {
                     expected_seq: a.seq,
@@ -527,7 +534,7 @@ impl AuditLog {
             }
             return Ok(());
         };
-        self.seq = last.seq;
+        self.seq = last.seq.max(stored);
         self.prev_hash = last.hash.clone();
         self.since_checkpoint = self.seq % CHECKPOINT_EVERY;
         match anchor {
@@ -709,6 +716,13 @@ impl AuditLog {
             rows.len().saturating_sub(filter.limit)
         };
         Ok(rows.into_iter().skip(skip).collect())
+    }
+
+    /// The highest sequence number stored, well-formed record or not.
+    fn max_stored_seq(&self) -> Result<u64> {
+        let conn = lock_conn(&self.conn);
+        let max: Option<i64> = conn.query_row("SELECT MAX(seq) FROM audit", [], |r| r.get(0))?;
+        Ok(max.map_or(0, |m| m.max(0) as u64))
     }
 
     /// Every line, as records or unreadable markers (for activity reports

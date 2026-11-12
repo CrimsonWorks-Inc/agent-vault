@@ -35,6 +35,14 @@ fn parse_opt<T: DeserializeOwned>(text: Option<String>) -> rusqlite::Result<Opti
     text.map(|t| parse(&t)).transpose()
 }
 
+/// The health column as JS reads it: loose. A legacy vault.json can carry a
+/// health value of another shape, which JS lists as it is; here it reads as
+/// no health (`null`) rather than failing every query that lists the
+/// credential. Only this column is read this way.
+fn health_opt<T: DeserializeOwned>(text: Option<String>) -> Option<T> {
+    text.and_then(|t| serde_json::from_str(&t).ok())
+}
+
 fn class_str(c: FactorClass) -> &'static str {
     match c {
         FactorClass::None => "none",
@@ -327,7 +335,7 @@ fn cred_head(r: &Row<'_>) -> rusqlite::Result<CredentialRecord> {
         fields: Vec::new(),
         created_at: r.get(4)?,
         expires_at: r.get(5)?,
-        health: parse_opt(r.get(6)?)?,
+        health: health_opt(r.get(6)?),
         quarantine: parse_opt(r.get(7)?)?,
         scrub_patterns: parse(&r.get::<_, String>(8)?)?,
         pins: BTreeMap::new(),
