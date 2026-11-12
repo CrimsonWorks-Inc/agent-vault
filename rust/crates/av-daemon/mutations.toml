@@ -820,3 +820,112 @@ from = '''        let plain = !l.is_empty()
             && !l.starts_with('0')
             && l.bytes().all(|b| b.is_ascii_digit());'''
 to = '''        let plain = l.trim().parse::<f64>().is_ok_and(|n| n >= 1.0);'''
+
+# ---------------------------------------------------- src/daemon/mcp.js
+
+# NOT APPLICABLE: 'a tool that spends capability runs without a session'.
+# The JS mutant deletes the `if (!session)` line and lets vault_http run
+# with `session` undefined. Here vault_http(args, s: SessionRecord, ...)
+# takes the session by value: the handler unwraps Option<SessionRecord> or
+# answers needs_session, and there is no session-less call to compile. The
+# answer for a missing session is held by the test
+# hardening_every_tool_that_spends_capability_checks_for_a_session.
+
+[[mutation]]
+name = 'vault_http never sends the session token'
+file = "src/mcp.rs"
+from = '''            _ => {}
+        }
+        headers.push(("av-session".into(), token.to_string()));'''
+to = '''            _ => {}
+        }
+        let _ = token;'''
+
+[[mutation]]
+name = 'vault_http leaves its placeholder live after the call'
+file = "src/mcp.rs"
+from = 'let _ = core.vault.burn_placeholder(&row_id, "spent");'
+to = 'let _ = &row_id;'
+
+[[mutation]]
+name = 'anonymous MCP handshakes are unbounded'
+file = "src/mcp.rs"
+from = '            while t.sessions.len() >= MAX_MCP_SESSIONS {'
+to = '            while false {'
+
+[[mutation]]
+name = 'every MCP transport close is audited, anonymous ones included'
+file = "src/mcp.rs"
+from = '        if recorded || record {'
+to = '        if true {'
+
+[[mutation]]
+name = 'vault_http does not hand its listener to the pipeline'
+file = "src/mcp.rs"
+from = '''                body: body.map(String::into_bytes),
+                listener,
+            })'''
+to = '''                body: body.map(String::into_bytes),
+                listener: { let _ = listener; None },
+            })'''
+
+[[mutation]]
+name = 'vault_describe_access checks the session without its listener (C18)'
+file = "src/mcp.rs"
+from = '''                                Some(&s),
+                                l.as_ref(),
+                                UsableOptions {
+                                    peek: true,'''
+to = '''                                Some(&s),
+                                { let _ = &l; None },
+                                UsableOptions {
+                                    peek: true,'''
+
+[[mutation]]
+name = 'vault_preflight does not hand its listener to the pipeline (C18)'
+file = "src/mcp.rs"
+from = '''                    headers,
+                    body,
+                    listener,
+                },
+                true,'''
+to = '''                    headers,
+                    body,
+                    listener: { let _ = listener; None },
+                },
+                true,'''
+
+[[mutation]]
+name = 'vault_request_session drops an owner field instead of refusing it (R3)'
+file = "src/mcp.rs"
+from = '        if !owned.is_empty() {'
+to = '        if false {'
+
+[[mutation]]
+name = "explain-denial answers about another session's request (C28)"
+file = "src/mcp.rs"
+from = '.filter(|x| x.get("session_id").and_then(Value::as_str).map(str::to_string) == sid)'
+to = '.filter(|_| true)'
+
+[[mutation]]
+name = "vault_get_placeholder records the agent's reason as sent (C28)"
+file = "src/mcp.rs"
+from = 'let reason = core.vault.untrusted_text(&reason, 200).v()?;'
+to = 'let reason = reason.clone();'
+
+[[mutation]]
+name = 'r6 F2 (Grok): explain-denial looks only at the last 200 audit rows'
+file = "src/mcp.rs"
+from = '''log.read(&av_store::audit::ReadFilter { request_id: Some(r.clone()), limit: 100, ..Default::default() })
+                                    .v()?
+                                    .into_iter()'''
+to = '''log.read(&av_store::audit::ReadFilter { limit: 200, ..Default::default() })
+                                    .v()?
+                                    .into_iter()
+                                    .filter(|x| x.request_id.as_deref() == Some(r.as_str()))'''
+
+[[mutation]]
+name = 'r6 F2 (Grok): a caller with no session gets the sentence of any no-session denial'
+file = "src/mcp.rs"
+from = '                    Some(r) if sid.is_some() => {'
+to = '                    Some(r) => {'

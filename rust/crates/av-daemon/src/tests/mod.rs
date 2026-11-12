@@ -19,6 +19,7 @@ mod guards;
 mod mcp;
 mod mutants;
 mod mutants_conn;
+mod mutants_mcp;
 mod mutants_notify;
 mod mutants_sr;
 mod presence;
@@ -143,7 +144,12 @@ impl World {
         let mut spec = json!({"cred": "demo", "label": "test", "methods": ["GET", "POST"], "paths": ["/**"], "budget": 40, "approval": "on-write", "ttl_hours": 1});
         if let Value::Object(m) = session {
             for (k, x) in m {
-                spec[&k] = x;
+                // `null` takes the default out of the spec.
+                if x.is_null() {
+                    spec.as_object_mut().unwrap().remove(&k);
+                } else {
+                    spec[&k] = x;
+                }
             }
         }
         let (s, v) = w.control("POST", "/v1/sessions", spec).await;
