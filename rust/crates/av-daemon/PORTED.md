@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 111 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **870 not yet ported**.
+Totals: 1090 JS tests: 115 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **866 not yet ported**.
 
 ## Mutation check
 
@@ -511,14 +511,14 @@ the vault on every call instead of caching an audit handle.
 | gateway-core.test.js | ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
 | gateway-hardening.test.js | a secret in a JSON body with `/` and `uXXXX` escapes does not reach the agent | tests/ported_gateway_core.rs::escaped_json_secrets_are_scrubbed_and_ordinary_json_survives |
 | gateway-hardening.test.js | a secret that starts in a content block and continues in its deltas is cut, identity and gzip | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
-| gateway-hardening.test.js | a secret split across events whose index disagrees with its array position is cut | not yet ported |
-| gateway-hardening.test.js | a secret split across events where the index is missing from some of them is cut | not yet ported |
+| gateway-hardening.test.js | a secret split across events whose index disagrees with its array position is cut | tests/ported_gateway_core.rs::stream_client_indexes_override_array_positions_without_leaking_split_secrets |
+| gateway-hardening.test.js | a secret split across events where the index is missing from some of them is cut | tests/ported_gateway_core.rs::missing_stream_indexes_are_safe_for_zero_default_and_distinct_missing_clients |
 | gateway-hardening.test.js | a secret base64-encoded and then percent-encoded does not reach the agent in a body, a header or a redirect | tests/ported_gateway_core.rs::url_encoded_base64_secret_is_scrubbed_from_body_header_and_redirect |
 | gateway-hardening.test.js | a secret base64-encoded and percent-encoded in a stream is cut | tests/ported_gateway_core.rs::url_encoded_base64_secret_is_removed_from_whole_and_split_stream_events |
 | gateway-hardening.test.js | ordinary JSON with `/` in URLs and `u` escapes passes through unmodified | tests/ported_gateway_core.rs::escaped_json_secrets_are_scrubbed_and_ordinary_json_survives (ordinary_json_control) |
 | gateway-hardening.test.js | ordinary percent-encoded query strings pass through unmodified in a body, a header and a redirect | tests/ported_gateway_core.rs::ordinary_percent_encoded_query_in_body_headers_and_redirect_survives |
-| gateway-hardening.test.js | ordinary Anthropic, OpenAI chat, Responses and Gemini streams pass through unmodified, identity and gzip | not yet ported |
-| gateway-hardening.test.js | the ordinary streams are left whole when the vault holds a base64-style secret | not yet ported |
+| gateway-hardening.test.js | ordinary Anthropic, OpenAI chat, Responses and Gemini streams pass through unmodified, identity and gzip | tests/ported_gateway_core.rs::ordinary_provider_streams_are_byte_exact_with_identity_and_gzip_and_both_secret_shapes |
+| gateway-hardening.test.js | the ordinary streams are left whole when the vault holds a base64-style secret | tests/ported_gateway_core.rs::ordinary_provider_streams_are_byte_exact_with_identity_and_gzip_and_both_secret_shapes |
 | gateway-hardening.test.js | Grok's two-layer case: base64 percent-encoded with every % as a uXXXX escape is redacted | tests/ported_gateway_core.rs::json_escaped_percent_encoded_base64_is_scrubbed |
 | gateway-hardening.test.js | every pair of the four encodings, nested, is redacted in a buffered body | tests/ported_gateway_core.rs::every_distinct_encoding_pair_is_scrubbed_in_buffered_responses |
 | gateway-hardening.test.js | three-layer stacks within the limit are redacted | tests/ported_gateway_core.rs::three_layer_stacks_within_decode_limit_are_scrubbed |

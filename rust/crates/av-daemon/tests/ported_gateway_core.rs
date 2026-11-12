@@ -938,3 +938,289 @@ async fn url_encoded_base64_secret_is_removed_from_whole_and_split_stream_events
         }
     }
 }
+
+// Byte-exact ordinary stream fixtures from gateway-hardening.test.js,
+// extracted from its pure constant declarations without importing the test.
+const ORDINARY_PROVIDER_STREAMS: &str = r###"{"anthropic":["event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-x\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n","event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"The user wants the file. \"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"I should read it first.\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds\"}}\n\n","event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n","event: ping\ndata: {\"type\":\"ping\"}\n\n","event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Sure\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\" — I'll read \"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"https://example.com/a/b?q=1 \"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"and the disk-usage_by_repository report.\"}}\n\n","event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n","event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"read_file\",\"input\":{}}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\": \\\"/tmp\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"/report.txt\\\",\"}}\n\n","event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"limit\\\": 200}\"}}\n\n","event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n","event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":89}}\n\n","event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"],"chat":["data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"refusal\":null},\"logprobs\":null,\"finish_reason\":null}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me\"},\"finish_reason\":null}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" check\"},\"finish_reason\":null}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" https://example.com/a/b\"},\"finish_reason\":null}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\".\"},\"finish_reason\":null}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"loc\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ation\\\":\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" \\\"Paris\\\"}\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_def\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"tz\\\":\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\" \\\"CET\\\"}\"}}]}}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n","data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":12,\"total_tokens\":21}}\n\n","data: [DONE]\n\n"],"responses":["event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"in_progress\",\"model\":\"gpt-x\",\"output\":[],\"tools\":[{\"type\":\"web_search\"}],\"text\":{\"format\":{\"type\":\"text\"}},\"usage\":null},\"sequence_number\":0}\n\n","event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]},\"sequence_number\":1}\n\n","event: response.reasoning_summary_part.added\ndata: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"},\"sequence_number\":2}\n\n","event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Looked \",\"sequence_number\":3}\n\n","event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"it up.\",\"sequence_number\":4}\n\n","event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Looked it up.\"}]},\"sequence_number\":5}\n\n","event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"in_progress\",\"role\":\"assistant\",\"content\":[]},\"sequence_number\":6}\n\n","event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\",\"annotations\":[]},\"sequence_number\":7}\n\n","event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"Paris is \",\"sequence_number\":8}\n\n","event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"the capital \",\"sequence_number\":9}\n\n","event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"of France [1].\",\"sequence_number\":10}\n\n","event: response.output_text.annotation.added\ndata: {\"type\":\"response.output_text.annotation.added\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"annotation_index\":0,\"annotation\":{\"type\":\"url_citation\",\"start_index\":31,\"end_index\":34,\"url\":\"https://en.wikipedia.org/wiki/Paris\",\"title\":\"Paris - Wikipedia\"},\"sequence_number\":11}\n\n","event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"text\":\"Paris is the capital of France [1].\",\"sequence_number\":12}\n\n","event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"Paris is the capital of France [1].\",\"annotations\":[{\"type\":\"url_citation\",\"start_index\":31,\"end_index\":34,\"url\":\"https://en.wikipedia.org/wiki/Paris\",\"title\":\"Paris - Wikipedia\"}]},\"sequence_number\":13}\n\n","event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Paris is the capital of France [1].\",\"annotations\":[{\"type\":\"url_citation\",\"start_index\":31,\"end_index\":34,\"url\":\"https://en.wikipedia.org/wiki/Paris\",\"title\":\"Paris - Wikipedia\"}]}]},\"sequence_number\":14}\n\n","event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"\",\"status\":\"in_progress\"},\"sequence_number\":15}\n\n","event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":2,\"delta\":\"{\\\"city\\\":\",\"sequence_number\":16}\n\n","event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":2,\"delta\":\"\\\"Paris\\\"}\",\"sequence_number\":17}\n\n","event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"output_index\":2,\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\",\"sequence_number\":18}\n\n","event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\",\"status\":\"completed\"},\"sequence_number\":19}\n\n","event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"completed\",\"model\":\"gpt-x\",\"output\":[{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Looked it up.\"}]},{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Paris is the capital of France [1].\",\"annotations\":[{\"type\":\"url_citation\",\"start_index\":31,\"end_index\":34,\"url\":\"https://en.wikipedia.org/wiki/Paris\",\"title\":\"Paris - Wikipedia\"}]}]},{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\",\"status\":\"completed\"}],\"tools\":[{\"type\":\"web_search\"}],\"text\":{\"format\":{\"type\":\"text\"}},\"usage\":{\"input_tokens\":30,\"output_tokens\":40,\"total_tokens\":70}},\"sequence_number\":20}\n\n"],"gemini":["data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"The capital\"}],\"role\":\"model\"},\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":8,\"totalTokenCount\":8},\"modelVersion\":\"gemini-x\",\"responseId\":\"r1\"}\n\n","data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" of France is Paris; see https://example.com/a/b.\"}],\"role\":\"model\"}}],\"modelVersion\":\"gemini-x\",\"responseId\":\"r1\"}\n\n","data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"lookup\",\"args\":{\"city\":\"Paris\",\"fields\":[\"population\",\"area\"]}}}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-x\",\"responseId\":\"r1\"}\n\n","data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":8,\"candidatesTokenCount\":20,\"totalTokenCount\":28},\"modelVersion\":\"gemini-x\",\"responseId\":\"r1\"}\n\n"]}"###;
+
+#[tokio::test]
+async fn ordinary_provider_streams_are_byte_exact_with_identity_and_gzip_and_both_secret_shapes() {
+    let fixtures: Value = serde_json::from_str(ORDINARY_PROVIDER_STREAMS).unwrap();
+    for secret in [SECRET, SLASHED] {
+        let f = Fixture::with_secret(&["header:x-key"], secret).await;
+        for (name, events) in fixtures.as_object().unwrap() {
+            let bytes = events
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e.as_str().unwrap())
+                .collect::<String>();
+            for compressed in [false, true] {
+                stream_reply(&f, &bytes, compressed);
+                let r = drain(f.get().await).await;
+                assert_eq!(r.status, 200, "{name} gzip={compressed}");
+                assert_eq!(r.body, bytes.as_bytes(), "{name} gzip={compressed}");
+                f.clean(&r).await;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Client {
+    Chat,
+    Responses,
+}
+fn client_index(v: &Value, missing: &str) -> String {
+    match v {
+        Value::Null => missing.into(),
+        Value::String(s) => s.clone(),
+        _ => v.to_string(),
+    }
+}
+fn reassemble(events: &str, client: Client, missing: &str) -> Vec<String> {
+    let mut groups = std::collections::BTreeMap::<String, String>::new();
+    let mut add = |key: String, text: &Value| {
+        if let Some(text) = text.as_str() {
+            groups.entry(key).or_default().push_str(text);
+        }
+    };
+    for v in events
+        .lines()
+        .filter_map(|s| s.strip_prefix("data: "))
+        .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+    {
+        match client {
+            Client::Chat => {
+                for choice in v["choices"].as_array().into_iter().flatten() {
+                    let i = client_index(&choice["index"], missing);
+                    add(i.clone(), &choice["delta"]["content"]);
+                    for tool in choice["delta"]["tool_calls"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        add(
+                            format!("{i}.tool.{}", client_index(&tool["index"], missing)),
+                            &tool["function"]["arguments"],
+                        );
+                    }
+                }
+            }
+            Client::Responses => {
+                let output = client_index(&v["output_index"], missing);
+                match v["type"].as_str().unwrap_or_default() {
+                    "response.output_item.added" => {
+                        for (i, part) in v["item"]["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .enumerate()
+                        {
+                            add(format!("{output}/{i}"), &part["text"]);
+                        }
+                    }
+                    "response.content_part.added" => add(
+                        format!("{output}/{}", client_index(&v["content_index"], missing)),
+                        &v["part"]["text"],
+                    ),
+                    "response.output_text.delta" => add(
+                        format!("{output}/{}", client_index(&v["content_index"], missing)),
+                        &v["delta"],
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+    groups.into_values().collect()
+}
+fn choice(index: Option<u32>, text: &str) -> Value {
+    let mut v = json!({"delta":{"content":text}});
+    if let Some(i) = index {
+        v["index"] = json!(i);
+    }
+    v
+}
+fn call(index: Option<u32>, args: &str) -> Value {
+    let mut v = json!({"function":{"arguments":args}});
+    if let Some(i) = index {
+        v["index"] = json!(i);
+    }
+    v
+}
+fn chat(choices: Vec<Value>) -> Value {
+    json!({"id":"chatcmpl-1","object":"chat.completion.chunk","choices":choices})
+}
+fn tool(tool_calls: Vec<Value>) -> Value {
+    json!({"index":0,"delta":{"tool_calls":tool_calls}})
+}
+fn response_text(output: Option<u32>, content: Option<u32>, text: &str) -> Value {
+    let mut v = json!({"type":"response.output_text.delta","item_id":"msg_1","delta":text});
+    if let Some(i) = output {
+        v["output_index"] = json!(i);
+    }
+    if let Some(i) = content {
+        v["content_index"] = json!(i);
+    }
+    v
+}
+
+async fn assert_client_cannot_reassemble(
+    name: &str,
+    events: Vec<Value>,
+    client: Client,
+    missing: &str,
+    secret: &str,
+) {
+    let events = events.into_iter().map(data).collect::<String>();
+    assert!(
+        reassemble(&events, client, missing)
+            .iter()
+            .any(|s| s.contains(secret)),
+        "invalid fixture {name}"
+    );
+    let f = Fixture::with_secret(&["header:x-key"], secret).await;
+    for compressed in [false, true] {
+        stream_reply(&f, &events, compressed);
+        let r = drain(f.get().await).await;
+        let out = String::from_utf8_lossy(&r.body);
+        assert!(
+            out.contains("AV_UNSCANNABLE"),
+            "{name} gzip={compressed}: {out}"
+        );
+        assert!(
+            !reassemble(&out, client, missing)
+                .iter()
+                .any(|s| s.contains(secret)),
+            "{name}"
+        );
+        f.clean(&r).await;
+        ordinary_stream_control(&f, compressed).await;
+    }
+}
+
+#[tokio::test]
+async fn stream_client_indexes_override_array_positions_without_leaking_split_secrets() {
+    for secret in [SECRET, SLASHED] {
+        let (a, b) = secret.split_at(11);
+        let cases = vec![
+            (
+                "choice moves array position",
+                Client::Chat,
+                vec![
+                    chat(vec![choice(Some(0), a)]),
+                    chat(vec![choice(Some(1), "x"), choice(Some(0), b)]),
+                ],
+            ),
+            (
+                "tool moves array position",
+                Client::Chat,
+                vec![
+                    chat(vec![tool(vec![call(Some(1), a)])]),
+                    chat(vec![tool(vec![call(Some(0), "x"), call(Some(1), b)])]),
+                ],
+            ),
+            (
+                "response item starts with text",
+                Client::Responses,
+                vec![
+                    json!({"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":a,"annotations":[]}]}}),
+                    response_text(Some(0), Some(0), "x"),
+                    response_text(Some(1), Some(0), b),
+                ],
+            ),
+            (
+                "response content position is index",
+                Client::Responses,
+                vec![
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"x"},{"type":"output_text","text":a}]}}),
+                    response_text(Some(0), Some(0), "y"),
+                    response_text(Some(0), Some(1), b),
+                ],
+            ),
+            (
+                "response part starts with text",
+                Client::Responses,
+                vec![
+                    json!({"type":"response.content_part.added","output_index":0,"content_index":1,"part":{"type":"output_text","text":a,"annotations":[]}}),
+                    response_text(Some(0), Some(0), "x"),
+                    response_text(Some(0), Some(1), b),
+                ],
+            ),
+        ];
+        for (name, client, events) in cases {
+            assert_client_cannot_reassemble(name, events, client, "0", secret).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_stream_indexes_are_safe_for_zero_default_and_distinct_missing_clients() {
+    for secret in [SECRET, SLASHED] {
+        let (a, b) = secret.split_at(11);
+        for missing in ["0", "none"] {
+            let first = if missing == "0" { Some(0) } else { None };
+            let other = if missing == "0" { Some(1) } else { Some(0) };
+            let cases = vec![
+                (
+                    "chat missing after",
+                    Client::Chat,
+                    vec![
+                        chat(vec![choice(first, a)]),
+                        chat(vec![choice(other, "x")]),
+                        chat(vec![choice(None, b)]),
+                    ],
+                ),
+                (
+                    "chat missing before",
+                    Client::Chat,
+                    vec![
+                        chat(vec![choice(None, a)]),
+                        chat(vec![choice(other, "x")]),
+                        chat(vec![choice(first, b)]),
+                    ],
+                ),
+                (
+                    "tool call missing index",
+                    Client::Chat,
+                    vec![
+                        chat(vec![tool(vec![call(None, a)])]),
+                        chat(vec![tool(vec![call(other, "x")])]),
+                        chat(vec![tool(vec![call(first, b)])]),
+                    ],
+                ),
+                (
+                    "response missing output after",
+                    Client::Responses,
+                    vec![
+                        response_text(first, Some(0), a),
+                        response_text(other, Some(0), "x"),
+                        response_text(None, Some(0), b),
+                    ],
+                ),
+                (
+                    "response missing output before",
+                    Client::Responses,
+                    vec![
+                        response_text(None, Some(0), a),
+                        response_text(other, Some(0), "x"),
+                        response_text(first, Some(0), b),
+                    ],
+                ),
+                (
+                    "response missing content",
+                    Client::Responses,
+                    vec![
+                        response_text(Some(0), None, a),
+                        response_text(Some(0), other, "x"),
+                        response_text(Some(0), first, b),
+                    ],
+                ),
+            ];
+            for (name, client, events) in cases {
+                assert_client_cannot_reassemble(name, events, client, missing, secret).await;
+            }
+        }
+    }
+}
