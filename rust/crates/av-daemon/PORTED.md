@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 78 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **903 not yet ported**.
+Totals: 1090 JS tests: 91 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **890 not yet ported**.
 
 ## Mutation check
 
@@ -509,24 +509,24 @@ the vault on every call instead of caching an audit handle.
 | gateway-core.test.js | locate() reports a placeholder in a shadowed duplicate by position | not yet ported |
 | gateway-core.test.js | a substituted placeholder left anywhere in the outgoing request is found | not yet ported |
 | gateway-core.test.js | ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
-| gateway-hardening.test.js | a secret in a JSON body with `/` and `uXXXX` escapes does not reach the agent | not yet ported |
+| gateway-hardening.test.js | a secret in a JSON body with `/` and `uXXXX` escapes does not reach the agent | tests/ported_gateway_core.rs::escaped_json_secrets_are_scrubbed_and_ordinary_json_survives |
 | gateway-hardening.test.js | a secret that starts in a content block and continues in its deltas is cut, identity and gzip | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
 | gateway-hardening.test.js | a secret split across events whose index disagrees with its array position is cut | not yet ported |
 | gateway-hardening.test.js | a secret split across events where the index is missing from some of them is cut | not yet ported |
-| gateway-hardening.test.js | a secret base64-encoded and then percent-encoded does not reach the agent in a body, a header or a redirect | not yet ported |
-| gateway-hardening.test.js | a secret base64-encoded and percent-encoded in a stream is cut | not yet ported |
-| gateway-hardening.test.js | ordinary JSON with `/` in URLs and `u` escapes passes through unmodified | not yet ported |
-| gateway-hardening.test.js | ordinary percent-encoded query strings pass through unmodified in a body, a header and a redirect | not yet ported |
+| gateway-hardening.test.js | a secret base64-encoded and then percent-encoded does not reach the agent in a body, a header or a redirect | tests/ported_gateway_core.rs::url_encoded_base64_secret_is_scrubbed_from_body_header_and_redirect |
+| gateway-hardening.test.js | a secret base64-encoded and percent-encoded in a stream is cut | tests/ported_gateway_core.rs::url_encoded_base64_secret_is_removed_from_whole_and_split_stream_events |
+| gateway-hardening.test.js | ordinary JSON with `/` in URLs and `u` escapes passes through unmodified | tests/ported_gateway_core.rs::escaped_json_secrets_are_scrubbed_and_ordinary_json_survives (ordinary_json_control) |
+| gateway-hardening.test.js | ordinary percent-encoded query strings pass through unmodified in a body, a header and a redirect | tests/ported_gateway_core.rs::ordinary_percent_encoded_query_in_body_headers_and_redirect_survives |
 | gateway-hardening.test.js | ordinary Anthropic, OpenAI chat, Responses and Gemini streams pass through unmodified, identity and gzip | not yet ported |
 | gateway-hardening.test.js | the ordinary streams are left whole when the vault holds a base64-style secret | not yet ported |
-| gateway-hardening.test.js | Grok's two-layer case: base64 percent-encoded with every % as a uXXXX escape is redacted | not yet ported |
-| gateway-hardening.test.js | every pair of the four encodings, nested, is redacted in a buffered body | not yet ported |
-| gateway-hardening.test.js | three-layer stacks within the limit are redacted | not yet ported |
-| gateway-hardening.test.js | a four-layer stack is beyond the limit but does not crash | not yet ported |
-| gateway-hardening.test.js | a buffered body whose nesting exceeds the decode budget fails closed, not through | not yet ported |
-| gateway-hardening.test.js | an event stream whose nesting exceeds the decode budget is cut | not yet ported |
-| gateway-hardening.test.js | an ordinary base64 image data URL passes through unmodified | not yet ported |
-| gateway-hardening.test.js | a large ordinary JSON response with mixed encodings passes through unmodified and uncut | not yet ported |
+| gateway-hardening.test.js | Grok's two-layer case: base64 percent-encoded with every % as a uXXXX escape is redacted | tests/ported_gateway_core.rs::json_escaped_percent_encoded_base64_is_scrubbed |
+| gateway-hardening.test.js | every pair of the four encodings, nested, is redacted in a buffered body | tests/ported_gateway_core.rs::every_distinct_encoding_pair_is_scrubbed_in_buffered_responses |
+| gateway-hardening.test.js | three-layer stacks within the limit are redacted | tests/ported_gateway_core.rs::three_layer_stacks_within_decode_limit_are_scrubbed |
+| gateway-hardening.test.js | a four-layer stack is beyond the limit but does not crash | tests/ported_gateway_core.rs::four_layer_stack_is_handled_without_emitting_literal_secret |
+| gateway-hardening.test.js | a buffered body whose nesting exceeds the decode budget fails closed, not through | tests/ported_gateway_core.rs::nested_decode_budget_refuses_buffered_body_and_default_budget_delivers_scrubbed_body |
+| gateway-hardening.test.js | an event stream whose nesting exceeds the decode budget is cut | tests/ported_gateway_core.rs::nested_decode_budget_cuts_event_stream |
+| gateway-hardening.test.js | an ordinary base64 image data URL passes through unmodified | tests/ported_gateway_core.rs::ordinary_base64_image_data_url_survives |
+| gateway-hardening.test.js | a large ordinary JSON response with mixed encodings passes through unmodified and uncut | tests/ported_gateway_core.rs::large_ordinary_json_with_mixed_encodings_survives |
 | gateway-response.test.js | a secret in a response header NAME does not reach the agent | `tests::gateway::hardening_a_reflected_secret_in_a_header_name_or_value_is_dropped_or_redacted` |
 | gateway-response.test.js | a secret split across the text of two Anthropic-shaped events is cut | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
 | gateway-response.test.js | an ordinary Anthropic-shaped stream passes through untouched | `sse::tests::hardening_a_secret_split_across_events_cuts_the_stream_and_ordinary_events_survive` |
