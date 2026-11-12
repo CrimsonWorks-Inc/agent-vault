@@ -606,6 +606,29 @@ fn a_backup_the_js_daemon_made_restores_into_the_rust_vault() {
     let _ = PlaceholderState::Active;
 }
 
+/// Sessions written before R3 (2026-10-25) have no `infinite` field (and no
+/// `elevated`); JS reads them as ordinary, finite sessions. A real vault with
+/// such a session must migrate.
+#[test]
+fn a_session_written_before_infinite_existed_migrates_as_finite() {
+    let js = js_vault("none");
+    let path = js.dir.join("vault.json");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for s in doc["sessions"].as_object_mut().unwrap().values_mut() {
+        let s = s.as_object_mut().unwrap();
+        s.remove("infinite");
+        s.remove("elevated");
+    }
+    std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+    let legacy = read_legacy(&js.dir).unwrap();
+    migrate(&opts(&js.dir, &js.dir, false), legacy, None).unwrap();
+    let mut v = Vault::open(&js.dir).unwrap();
+    v.unlock(None).unwrap();
+    let sid = js.out["session_id"].as_str().unwrap();
+    let s = v.session(sid).unwrap().expect("the session came across");
+    assert!(!s.infinite);
+}
+
 /// Following the report's clean-up advice must leave a vault that opens: in
 /// place, the device key is shared with vault.db and is never listed.
 #[test]
