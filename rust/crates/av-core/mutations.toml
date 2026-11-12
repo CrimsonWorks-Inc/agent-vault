@@ -207,8 +207,8 @@ test = "js_policy_reference"
 [[mutation]]
 name = "the decoded view leaves JSON's two-character escapes such as \\/ as they are"
 file = "src/scrub.rs"
-from = "r#\"\\\\u[0-9a-fA-F]{4}|\\\\[\"\\\\/bfnrt]\"#"
-to = "r#\"\\\\u[0-9a-fA-F]{4}\"#"
+from = "r#\"\\\\u[dD][89aAbB][0-9a-fA-F]{2}\\\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\\\u[0-9a-fA-F]{4}|\\\\[\"\\\\/bfnrt]\"#"
+to = "r#\"\\\\u[dD][89aAbB][0-9a-fA-F]{2}\\\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\\\u[0-9a-fA-F]{4}\"#"
 test = "js_scrub_encoding_and_nested_vectors"
 
 [[mutation]]
@@ -432,7 +432,7 @@ test = "js_request_view_vectors"
 name = "a top-level JSON key is not checked for a stray name"
 file = "src/request_view.rs"
 from = "keys.push(k.clone());"
-to = "/* JSON stray keys omitted */"
+to = "if false { keys.push(k.clone()); }"
 test = "js_request_view_vectors"
 
 [[mutation]]
@@ -546,3 +546,17 @@ file = "src/policy.rs"
 from = "    #[serde(\n        default,\n        skip_serializing_if = \"Option::is_none\",\n        deserialize_with = \"non_null\"\n    )]\n    pub limit: Option<BudgetValue>,"
 to = "    #[serde(\n        default,\n        skip_serializing_if = \"Option::is_none\"\n    )]\n    pub limit: Option<BudgetValue>,"
 test = "explicit_null_schema_members_stay_invalid"
+
+[[mutation]]
+name = "paired UTF-16 JSON escapes are decoded separately and leak astral secrets"
+file = "src/scrub.rs"
+from = "r#\"\\\\u[dD][89aAbB][0-9a-fA-F]{2}\\\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\\\u[0-9a-fA-F]{4}|\\\\[\"\\\\/bfnrt]\"#"
+to = "r#\"\\\\u[0-9a-fA-F]{4}|\\\\[\"\\\\/bfnrt]\"#"
+test = "surrogate_pair_secrets_match_javascript"
+
+[[mutation]]
+name = "base64 padding hides a placeholder from the detector"
+file = "src/detect.rs"
+from = "let mut s = s.split('=').next().unwrap_or(\"\").to_owned();"
+to = "let mut s = s.trim_end_matches('=').to_owned();"
+test = "js_detector_vectors"

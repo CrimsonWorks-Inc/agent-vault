@@ -14,4 +14,4 @@ for(const v of [undefined,{unit:'requests'},{limit:'50'},{limit:0},{limit:''},nu
 for(const x of ['0','00','50','1e3',' 5',0,1.5,-1,9007199254740992])add('budgetInteger',[x]);
 for(const policy of [{hosts:['*.s3.amazonaws.com'],budget:{limit:1}},{hosts:['*.internal.example.com'],budget:{limit:1}},{paths:['/**'],methods:['POST']},{routes:[{methods:['POST'],paths:['/**']}],budget:{limit:1}}])add('lint',[policy]);
 for(const spec of [{},{methods:['GET']},{rate:'60/min',quota:'10/day',spend_tokens:0,spend_usd:0.000001},{budget:''},{rate:'1/day'},{spend_usd:0.0000001},{approval:'bad'},{redirects:'1'}])for(const defaults of [true,false])add('grantPolicyFromInput',[spec,{ceiling:['api.example.test'],defaults}]);
-console.log(JSON.stringify(cases));
+add('intersect',[[{rate:{count:1,per:'minute'}},{rate:{count:5,per:'minute'}}]]);add('intersect',[[{rate:{count:100,per:'minute'}},{rate:{count:60,per:'second'}}]]);console.log(JSON.stringify(cases));

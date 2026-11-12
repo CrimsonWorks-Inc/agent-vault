@@ -724,12 +724,8 @@ pub fn credential_host_ceiling(
         if h.starts_with('[') {
             h = h.find(']').map_or(String::new(), |end| h[..=end].into());
         } else {
-            h = h
-                .split(':')
-                .next()
-                .unwrap_or("")
-                .trim_end_matches('.')
-                .into();
+            let name = h.split(':').next().unwrap_or("");
+            h = name.strip_suffix('.').unwrap_or(name).into();
         }
         if !h.is_empty() && !out.contains(&h) {
             out.push(h);

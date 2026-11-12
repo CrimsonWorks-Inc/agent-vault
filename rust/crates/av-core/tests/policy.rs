@@ -88,6 +88,11 @@ fn js_policy_reference_vectors() {
 #[test]
 fn host_ceiling_and_wire_path() {
     assert_eq!(
+        credential_host_ceiling(Some("API.Example.com..:443"), &[]),
+        vec!["api.example.com."]
+    );
+    assert_eq!(host_only("API.Example.com..:443"), "api.example.com.");
+    assert_eq!(
         credential_host_ceiling(Some("127.0.0.1:9931"), &[]),
         vec!["127.0.0.1"]
     );

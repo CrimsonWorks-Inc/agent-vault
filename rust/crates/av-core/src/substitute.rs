@@ -451,7 +451,7 @@ fn basic_decode(s: &str) -> String {
             c => c,
         })
         .collect();
-    let s = normalized.trim_end_matches('=');
+    let s = normalized.split('=').next().unwrap_or("");
     let s = if s.len() % 4 == 1 {
         &s[..s.len() - 1]
     } else {

@@ -252,3 +252,19 @@ fn unicode_custom_pattern_stream_window() {
     out += &stream.flush();
     assert_eq!(out, "[[av:derived]]");
 }
+#[test]
+fn surrogate_pair_secrets_match_javascript() {
+    let entries = [ScrubEntry {
+        secret: "test-🔑-fake-secret".to_owned().into(),
+        label: "unicode".into(),
+        replacement: Some("<UNICODE>".into()),
+        always: false,
+    }];
+    let mut s = Scrubber::new(&entries, &Default::default()).unwrap();
+    assert_eq!(
+        s.scrub("before test-\\ud83d\\udd11-fake-secret after").text,
+        "before <UNICODE> after"
+    );
+    let ordinary = "ordinary \\ud800 text";
+    assert_eq!(s.scrub(ordinary).text, ordinary);
+}

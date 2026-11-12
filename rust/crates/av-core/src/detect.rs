@@ -217,7 +217,7 @@ pub(crate) fn base64_decodings(run: &str) -> Vec<String> {
         let Some(s) = normalized.get(skip..) else {
             continue;
         };
-        let mut s = s.trim_end_matches('=').to_owned();
+        let mut s = s.split('=').next().unwrap_or("").to_owned();
         if s.len() < 8 {
             continue;
         }

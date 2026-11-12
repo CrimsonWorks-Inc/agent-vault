@@ -1073,7 +1073,7 @@ fn decode_b64(s: &str) -> String {
             .with_decode_padding_mode(DecodePaddingMode::Indifferent),
     );
     let s = s.replace('-', "+").replace('_', "/");
-    let s = s.trim_end_matches('=');
+    let s = s.split('=').next().unwrap_or("");
     let s = if s.len() % 4 == 1 {
         &s[..s.len() - 1]
     } else {
@@ -1087,12 +1087,21 @@ fn decode_b64(s: &str) -> String {
         .collect()
 }
 fn decode_json_escape(s: &str) -> String {
-    if let Some(s) = s.strip_prefix(r"\u") {
-        u32::from_str_radix(s, 16)
+    if let Some(hex) = s.strip_prefix(r"\u") {
+        if hex.len() == 10 && hex.get(4..6) == Some(r"\u") {
+            if let (Ok(high), Ok(low)) = (
+                u16::from_str_radix(&hex[..4], 16),
+                u16::from_str_radix(&hex[6..], 16),
+            ) {
+                if let Ok(text) = String::from_utf16(&[high, low]) {
+                    return text;
+                }
+            }
+        }
+        u32::from_str_radix(hex, 16)
             .ok()
             .and_then(char::from_u32)
-            .unwrap_or('\u{fffd}')
-            .to_string()
+            .map_or_else(|| s.to_owned(), |c| c.to_string())
     } else {
         match s.as_bytes()[1] {
             b'"' => "\"",
@@ -1123,7 +1132,7 @@ fn collect(scrubber: &Scrubber, text: &str) -> (Vec<ScrubSpan>, bool) {
         let mut nested_views = 0;
         let mut nested_bytes = 0;
         let regexes = [
-            regex::Regex::new(r#"\\u[0-9a-fA-F]{4}|\\["\\/bfnrt]"#).expect("JSON"),
+            regex::Regex::new(r#"\\u[dD][89aAbB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\["\\/bfnrt]"#).expect("JSON"),
             regex::Regex::new(r"%[0-9a-fA-F]{2}").expect("percent"),
             regex::Regex::new(&format!(
                 r"[A-Za-z0-9+/=_-]{{{},}}",
