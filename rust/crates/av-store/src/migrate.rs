@@ -621,15 +621,6 @@ pub fn migrate(
 
 use std::os::unix::fs::DirBuilderExt as _;
 
-/// Test-only: stop a migration after its transaction is written and before
-/// the rename, so a test can see what is on disk at that moment.
-#[cfg(test)]
-pub(crate) mod test_hook {
-    thread_local! {
-        pub(crate) static STOP_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-}
-
 /// Remove a temp database and its WAL and shared-memory files.
 fn remove_temp(temp_path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
@@ -797,4 +788,13 @@ fn write_entities(
     rows::session_requests_replace(c, &kv.session_requests)?;
     let _ = CryptoError::Malformed;
     Ok(())
+}
+
+/// Test-only: stop a migration after its transaction is written and before
+/// the rename, so a test can see what is on disk at that moment.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    thread_local! {
+        pub(crate) static STOP_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
 }
