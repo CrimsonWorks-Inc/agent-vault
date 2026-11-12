@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 496 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **601 not yet ported**.
+Totals: 1207 JS tests: 512 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **585 not yet ported**.
 
 ## Mutation check
 
@@ -169,22 +169,22 @@ the vault on every call instead of caching an audit handle.
 | control-api-overrides.test.js | a numeric narrowing is Number(v), and anything not finite throws, naming the field (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | rate and quota: a string is trimmed, anything else passes through for the daemon (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | an approval narrowed with --routes or --payload as JSON creates a grant with the parsed value, not the proposal | not yet ported |
-| control-api-sessions.test.js | a budget of 0 is refused before the presence gate, and nothing is made (C17) | not yet ported |
-| control-api-sessions.test.js | a create body carries every grant limit, converted by the one converter | not yet ported |
-| control-api-sessions.test.js | a grant limit that cannot be read is refused and leaves nothing behind | not yet ported |
-| control-api-sessions.test.js | a grant lifetime is set, clamped to the session, and refused when it is not a whole number (F18) | not yet ported |
-| control-api-sessions.test.js | an expired grant is refused with its own code while the session's other grant works (F18) | not yet ported |
-| control-api-sessions.test.js | narrowing intersects: auto plus DELETE on an on-write GET grant leaves on-write and no methods (F15) | not yet ported |
-| control-api-sessions.test.js | narrowing never widens, over random narrows (F15) | not yet ported |
-| control-api-sessions.test.js | a narrowing that turns redirects on is refused; turning them off is not (F15) | not yet ported |
-| control-api-sessions.test.js | an agent can narrow its own session with no presence, and only ever loses capability (F15) | not yet ported |
-| control-api-sessions.test.js | a session lifetime in a narrowing makes an infinite session finite, and a grant lifetime shortens the grant (F15) | not yet ported |
-| control-api-sessions.test.js | a narrowing that does nothing, or names what cannot be narrowed, is refused (F15) | not yet ported |
-| control-api-sessions.test.js | narrowing one credential leaves the session's other grant alone (F15) | not yet ported |
-| control-api-sessions.test.js | the session detail holds metadata only: no placeholder text, query or secret (F19) | not yet ported |
-| control-api-sessions.test.js | the detail says when history is incomplete, and is refused while locked (F19) | not yet ported |
-| control-api-sessions.test.js | the access report covers every session and credential, and refuses a since it cannot read (F19) | not yet ported |
-| control-api-sessions.test.js | a typo in a narrowing is refused, by the parser and by the daemon, never dropped as null | not yet ported |
+| control-api-sessions.test.js | a budget of 0 is refused before the presence gate, and nothing is made (C17) | `ported_gateway_core::control_sessions_create_refuses_zero_budget_before_presence_and_unreadable_limits_are_atomic` |
+| control-api-sessions.test.js | a create body carries every grant limit, converted by the one converter | `ported_gateway_core::control_sessions_create_converts_every_limit_defaults_and_grant_lifetimes` |
+| control-api-sessions.test.js | a grant limit that cannot be read is refused and leaves nothing behind | `ported_gateway_core::control_sessions_create_refuses_zero_budget_before_presence_and_unreadable_limits_are_atomic` |
+| control-api-sessions.test.js | a grant lifetime is set, clamped to the session, and refused when it is not a whole number (F18) | `ported_gateway_core::control_sessions_create_converts_every_limit_defaults_and_grant_lifetimes` |
+| control-api-sessions.test.js | an expired grant is refused with its own code while the session's other grant works (F18) | `ported_gateway_core::control_sessions_expired_grant_has_its_own_code_on_gateway_and_mcp_while_other_grant_works` |
+| control-api-sessions.test.js | narrowing intersects: auto plus DELETE on an on-write GET grant leaves on-write and no methods (F15) | `ported_gateway_core::control_sessions_narrow_intersects_approval_and_methods_and_never_requires_presence` |
+| control-api-sessions.test.js | narrowing never widens, over random narrows (F15) | `ported_gateway_core::control_sessions_generated_narrows_only_reduce_methods_approval_and_budget` |
+| control-api-sessions.test.js | a narrowing that turns redirects on is refused; turning them off is not (F15) | `ported_gateway_core::control_sessions_narrow_refuses_redirect_widening_without_shortening_and_bad_fields_are_atomic` |
+| control-api-sessions.test.js | an agent can narrow its own session with no presence, and only ever loses capability (F15) | `ported_gateway_core::control_sessions_narrow_intersects_approval_and_methods_and_never_requires_presence` |
+| control-api-sessions.test.js | a session lifetime in a narrowing makes an infinite session finite, and a grant lifetime shortens the grant (F15) | `ported_gateway_core::control_sessions_narrow_lifetimes_make_infinite_finite_and_only_touch_selected_credentials` |
+| control-api-sessions.test.js | a narrowing that does nothing, or names what cannot be narrowed, is refused (F15) | `ported_gateway_core::control_sessions_narrow_refuses_redirect_widening_without_shortening_and_bad_fields_are_atomic` |
+| control-api-sessions.test.js | narrowing one credential leaves the session's other grant alone (F15) | `ported_gateway_core::control_sessions_narrow_lifetimes_make_infinite_finite_and_only_touch_selected_credentials` |
+| control-api-sessions.test.js | the session detail holds metadata only: no placeholder text, query or secret (F19) | `ported_gateway_core::control_sessions_detail_and_access_reports_expose_metadata_without_queries_secrets_or_capabilities` |
+| control-api-sessions.test.js | the detail says when history is incomplete, and is refused while locked (F19) | `ported_gateway_core::control_sessions_detail_reports_missing_creation_history_and_both_reads_refuse_locked_vault` |
+| control-api-sessions.test.js | the access report covers every session and credential, and refuses a since it cannot read (F19) | `ported_gateway_core::control_sessions_detail_and_access_reports_expose_metadata_without_queries_secrets_or_capabilities` |
+| control-api-sessions.test.js | a typo in a narrowing is refused, by the parser and by the daemon, never dropped as null | `ported_gateway_core::control_sessions_override_typos_never_settle_pending_requests_and_parsed_budget_is_applied` |
 | control-api-templates.test.js | saving a template needs a human, and is checked like a create first | not yet ported |
 | control-api-templates.test.js | templates are listed with summaries, read in full by name, and deleted without presence | not yet ported |
 | control-api-templates.test.js | creating from a template binds its hash: an edit after looking is refused, the current hash works | not yet ported |

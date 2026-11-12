@@ -205,3 +205,44 @@ impl FakeAuthenticator {
         serde_json::json!({"credentialId":self.id(),"authenticatorData":b64.encode(data),"clientDataJSON":b64.encode(client),"signature":b64.encode(signature.to_der().as_bytes())})
     }
 }
+
+/// A session that exists on disk without a creation record, like the JS
+/// activity fixture. Copy through SQLite's typed values and preserve every
+/// constraint and trigger; only its id and (unused, fake) token hash differ.
+/// Caller must close every Vault and daemon before this function runs.
+pub fn seed_unaudited_session(dir: &std::path::Path, sid: &str, ghost: &str) {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let connection = rusqlite::Connection::open(dir.join("vault.db")).unwrap();
+    let mut query = connection
+        .prepare("SELECT * FROM sessions WHERE id = ?1")
+        .unwrap();
+    let columns = query.column_names().map(str::to_owned).collect::<Vec<_>>();
+    assert!(columns
+        .iter()
+        .all(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')));
+    let mut values = query
+        .query_row([sid], |row| {
+            (0..columns.len())
+                .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    values[columns.iter().position(|c| c == "id").unwrap()] =
+        rusqlite::types::Value::Text(ghost.into());
+    values[columns.iter().position(|c| c == "token_hash").unwrap()] =
+        rusqlite::types::Value::Text("f".repeat(64));
+    drop(query);
+    let placeholders = vec!["?"; columns.len()].join(",");
+    assert_eq!(
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO sessions ({}) VALUES ({placeholders})",
+                    columns.join(",")
+                ),
+                rusqlite::params_from_iter(values)
+            )
+            .unwrap(),
+        1
+    );
+}
