@@ -596,6 +596,10 @@ pub fn migrate(
             .and_then(|f| f.sync_all())
             .map_err(Error::from)?;
         let final_path = to.join(VAULT_DB_FILE);
+        #[cfg(test)]
+        if test_hook::STOP_BEFORE_RENAME.with(std::cell::Cell::get) {
+            return Err(Error::Invariant("stopped before the rename (test hook)".into()).into());
+        }
         std::fs::rename(&temp_path, &final_path).map_err(Error::from)?;
         if let Ok(d) = std::fs::File::open(to) {
             let _ = d.sync_all();
@@ -616,6 +620,15 @@ pub fn migrate(
 }
 
 use std::os::unix::fs::DirBuilderExt as _;
+
+/// Test-only: stop a migration after its transaction is written and before
+/// the rename, so a test can see what is on disk at that moment.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    thread_local! {
+        pub(crate) static STOP_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+}
 
 /// Remove a temp database and its WAL and shared-memory files.
 fn remove_temp(temp_path: &Path) {

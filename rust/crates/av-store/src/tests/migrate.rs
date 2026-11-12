@@ -498,3 +498,33 @@ fn a_backup_the_js_daemon_made_restores_into_the_rust_vault() {
     );
     let _ = PlaceholderState::Active;
 }
+
+#[test]
+#[ignore = "blocked on av-core todo!() on rust-port (placeholder, policy, scrub, pins, profiles, canon, errors); passes against rust-port-core in a throwaway copy"]
+fn migrate_never_writes_vault_db_in_place_the_finished_file_is_renamed() {
+    let js = js_vault("none");
+    let opts = opts(&js.dir, &js.dir, false);
+    crate::migrate::test_hook::STOP_BEFORE_RENAME.with(|c| c.set(true));
+    let stopped = migrate(&opts, read_legacy(&js.dir).unwrap(), None);
+    crate::migrate::test_hook::STOP_BEFORE_RENAME.with(|c| c.set(false));
+    assert!(stopped.is_err(), "the hook did not stop the migration");
+    // The whole database is written, under another name, and vault.db does
+    // not exist until the rename.
+    assert!(
+        !js.dir.join("vault.db").exists(),
+        "vault.db was written in place"
+    );
+    let temp = js.dir.join(".vault.db.migrating");
+    assert!(temp.exists(), "the finished temp database is missing");
+    let c = rusqlite::Connection::open(&temp).unwrap();
+    let n: i64 = c
+        .query_row("SELECT count(*) FROM credentials", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 3, "the temp database is not the finished one");
+    drop(c);
+    // Control: the same run without the hook renames it into place.
+    std::fs::remove_file(&temp).unwrap();
+    migrate(&opts, read_legacy(&js.dir).unwrap(), None).unwrap();
+    assert!(js.dir.join("vault.db").exists());
+    assert!(!temp.exists());
+}
