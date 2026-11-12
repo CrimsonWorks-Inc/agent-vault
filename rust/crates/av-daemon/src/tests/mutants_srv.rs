@@ -769,3 +769,71 @@ async fn a_session_request_that_could_never_be_made_is_refused_at_once() {
     let (_, list) = w.control("GET", "/v1/session-requests", json!({})).await;
     assert_eq!(list, json!([]));
 }
+
+/// "panic reads lock by truthiness, so 'true' panics without locking".
+#[tokio::test(flavor = "multi_thread")]
+async fn panic_refuses_a_lock_that_is_not_a_boolean_and_revokes_nothing() {
+    let w = World::seeded(json!({})).await;
+    for bad in [json!("true"), json!(1)] {
+        let (s, v) = w.control("POST", "/v1/panic", json!({"lock": bad})).await;
+        assert_eq!(
+            (s, v["rule"].as_str()),
+            (403, Some("policy_invalid")),
+            "{v}"
+        );
+    }
+    assert_eq!(w.get("/user").await.status, 200, "nothing was revoked");
+}
+
+/// 'an agent-written quarantine reason is stored with its placeholder and
+/// secret in it (F16)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quarantine_reason_is_stored_cleaned() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials/quarantine",
+            json!({"slug": "demo", "reason": format!("saw {SECRET} and {}", w.placeholder)}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let text = crate::util::js_stringify(&v);
+    assert!(!leaks(&text), "{text}");
+    assert!(!text.contains(&w.placeholder), "{text}");
+}
+
+/// 'the gateway preflight route ignores the listener it arrived on (C18)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_preflight_route_asks_about_its_own_listener() {
+    let w = World::seeded(json!({})).await;
+    let (token, _) = forever(&w).await;
+    let h = vec![
+        ("authorization".to_string(), format!("Bearer {token}")),
+        ("content-type".to_string(), "application/json".to_string()),
+    ];
+    let body = r#"{"method":"GET","path":"/p/demo/user"}"#;
+    let (s, _, out) = on_gateway(&w, "POST", "/v1/preflight", h.clone(), body, remote()).await;
+    assert!(s >= 400 && out.contains("infinite_remote"), "{s} {out}");
+    let (s, _, out) = on_gateway(&w, "POST", "/v1/preflight", h, body, None).await;
+    assert_eq!(s, 200, "{out}");
+}
+
+/// 'a grant lifetime given twice in a narrowing is taken from one place
+/// silently (C22)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_lifetime_given_twice_is_refused() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions/narrow",
+            json!({"sid": w.session_id, "grant_ttl_minutes": 5, "narrow": {"grant_ttl_minutes": 9}}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (403, Some("policy_invalid")),
+        "{v}"
+    );
+}

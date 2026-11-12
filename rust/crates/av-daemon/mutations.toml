@@ -1833,9 +1833,81 @@ to = '''                            Some(r) => Some(r.to_string()),'''
 [[mutation]]
 name = 'the gateway preflight route ignores the listener it arrived on (C18)'
 file = "src/server.rs"
-from = '''            asked.headers.push(("av-session".into(), token));
+from = '''            let (t, l) = (token.clone(), lctx.clone());
+            let session = self
+                .shared
+                .run(move |core| -> R<Option<()>> {
+                    let Some(s) = core.vault.session_by_token(&t).v()? else {
+                        return Ok(None);
+                    };
+                    core.vault
+                        .assert_session_usable(
+                            Some(&s),
+                            l.as_ref(),
+                            av_store::vault::UsableOptions {
+                                peek: true,
+                                record: true,
+                            },
+                        )
+                        .v()?;
+                    Ok(Some(()))
+                })
+                .await;
+            match session {
+                Ok(Ok(Some(()))) => {}
+                Ok(Ok(None)) => {
+                    return json(
+                        401,
+                        json!({"code": "AV_SESSION_REQUIRED", "hint": "send Authorization: Bearer <session token>"}),
+                    )
+                }
+                Ok(Err(e)) | Err(e) => return problem(&e),
+            }
+            let described = match preflight_request(&req.body) {
+                Ok(x) => x,
+                Err(e) => return problem(&e),
+            };
+            let (asked, assume) = described;
+            let mut asked = asked;
+            asked.headers.push(("av-session".into(), token));
             asked.listener = listener;'''
-to = '''            asked.headers.push(("av-session".into(), token));
+to = '''            let (t, l) = (token.clone(), { let _ = &lctx; None::<av_store::vault::ListenerContext> });
+            let session = self
+                .shared
+                .run(move |core| -> R<Option<()>> {
+                    let Some(s) = core.vault.session_by_token(&t).v()? else {
+                        return Ok(None);
+                    };
+                    core.vault
+                        .assert_session_usable(
+                            Some(&s),
+                            l.as_ref(),
+                            av_store::vault::UsableOptions {
+                                peek: true,
+                                record: true,
+                            },
+                        )
+                        .v()?;
+                    Ok(Some(()))
+                })
+                .await;
+            match session {
+                Ok(Ok(Some(()))) => {}
+                Ok(Ok(None)) => {
+                    return json(
+                        401,
+                        json!({"code": "AV_SESSION_REQUIRED", "hint": "send Authorization: Bearer <session token>"}),
+                    )
+                }
+                Ok(Err(e)) | Err(e) => return problem(&e),
+            }
+            let described = match preflight_request(&req.body) {
+                Ok(x) => x,
+                Err(e) => return problem(&e),
+            };
+            let (asked, assume) = described;
+            let mut asked = asked;
+            asked.headers.push(("av-session".into(), token));
             asked.listener = { let _ = listener; None };'''
 
 [[mutation]]
@@ -1855,12 +1927,15 @@ file = "src/server/routes.rs"
 from = '''    if input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
 to = '''    if false && input.get("grant_ttl_minutes").is_some() && narrow.contains_key("grant_ttl_minutes") {'''
 
-[[mutation]]
-name = "the control API hands back an approval's cached upstream response"
-file = "src/pipeline.rs"
-from = '''        m.insert("preview".into(), self.preview.clone());'''
-to = '''        m.insert("preview".into(), self.preview.clone());
-        if let Some(r) = &self.result { m.insert("result".into(), Value::from(String::from_utf8_lossy(&r.body).into_owned())); }'''
+# NOT APPLICABLE:
+#   "the control API hands back an approval's cached upstream response"
+# The JS approvalView strips `result` from any approval it is given, and the
+# control API listed approvals in every state. Here the stored response is a
+# StoredResult with no serialisation, Approval::view never writes it, and view
+# is only called for a pending approval (the list and decide routes), which
+# has no stored response yet: the response is kept only after the request
+# ran, when the approval is consumed and no longer listed or decidable. A
+# mutant that copies the body into view has nothing to copy on any path.
 
 [[mutation]]
 name = 'the presence route stores whatever record it is sent'
