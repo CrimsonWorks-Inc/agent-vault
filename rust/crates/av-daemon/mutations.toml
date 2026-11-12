@@ -406,3 +406,134 @@ file = "src/server.rs"
 from = 'if !token.is_empty() && session.is_none() {'
 to = '''if session.is_none() { return send(401, Some(json!({"code": "AV_SESSION_REQUIRED"})), &[], &[]); }
         if !token.is_empty() && session.is_none() {'''
+
+# ---------------------------------------------------- src/daemon/session-requests.js
+
+# NOT APPLICABLE: 'the session-request store caches a null audit handle'.
+# The Rust store holds no audit handle: every record goes through
+# Core::audit_opt, which asks the vault for its audit log at the time of the
+# write, so there is nothing to cache.
+
+[[mutation]]
+name = 'an approved token is persisted to disk'
+file = "src/session_requests.rs"
+from = '''            "pending" => SessionRequestState::Pending,
+            "denied" => SessionRequestState::Denied,
+            _ => return None,'''
+to = '''            "pending" => SessionRequestState::Pending,
+            "denied" => SessionRequestState::Denied,
+            _ => SessionRequestState::Approved,'''
+
+[[mutation]]
+name = 'settled session requests count against the waiting-room cap'
+file = "src/session_requests.rs"
+from = '''            .filter(|r| r.state == "pending")
+            .count();
+        if waiting >= MAX_PENDING {'''
+to = '''            .count();
+        if waiting >= MAX_PENDING {'''
+
+[[mutation]]
+name = 'elevationOf reads an unreadable methods or routes list as ordinary unless it says auto'
+file = "src/session_requests.rs"
+from = '.any(|g| !readable(g) || (unasked(g) && permits_write(g)))'
+to = '.any(|g| (unasked(g) && permits_write(g)))'
+
+[[mutation]]
+name = 'a session request never tells the notifier it is waiting (F14)'
+file = "src/session_requests.rs"
+from = '''self.notify_pending(json!({"kind": "session", "id": record.id,'''
+to = '''let _ = (json!({"kind": "session", "id": record.id,'''
+
+[[mutation]]
+name = "a template override's methods replace the template's instead of intersecting (F17)"
+file = "src/session_requests.rs"
+from = '.map(|a| a.iter().filter(|m| base.contains(m)).cloned().collect())'
+to = '.map(|a| a.iter().filter(|m| !base.is_empty() || base.contains(m)).cloned().collect())'
+
+[[mutation]]
+name = 'a template override that is not one is ignored instead of refused (F17)'
+file = "src/session_requests.rs"
+from = '        if !TEMPLATE_OVERRIDES.contains(&k.as_str()) {'
+to = '        if false && !TEMPLATE_OVERRIDES.contains(&k.as_str()) {'
+
+[[mutation]]
+name = "a template override's budget replaces the template's instead of taking the minimum (F17)"
+file = "src/session_requests.rs"
+from = 'g["budget"] = Value::from(base_int.min(budget.expect("budget")));'
+to = 'g["budget"] = Value::from({ let _ = base_int; budget.expect("budget") });'
+
+[[mutation]]
+name = "a template override's approval mode replaces a stricter one (F17)"
+file = "src/session_requests.rs"
+from = '''                if oi > bi {
+                    ov.to_string()'''
+to = '''                if oi > bi || true {
+                    ov.to_string()'''
+
+[[mutation]]
+name = "a template override's lifetime replaces a shorter one (F17)"
+file = "src/session_requests.rs"
+from = 'spec["ttl_hours"] = num(base.min(ov));'
+to = 'spec["ttl_hours"] = num({ let _ = base; ov });'
+
+[[mutation]]
+name = 'a template override can make a finite template infinite (F17)'
+file = "src/session_requests.rs"
+from = '''        if inf && spec.get("infinite") != Some(&Value::Bool(true)) {
+            return Err(refuse('''
+to = '''        if false && inf && spec.get("infinite") != Some(&Value::Bool(true)) {
+            return Err(refuse('''
+
+[[mutation]]
+name = 'overridesProblem accepts a narrowing that is not an object'
+file = "src/session_requests.rs"
+from = '''        return Some("the narrowing must be an object".into());'''
+to = '''        return None;'''
+
+[[mutation]]
+name = "the session_request.opened record quotes the proposal's summary (C25)"
+file = "src/session_requests.rs"
+from = '''"proposed": shape["fields"], "counts": shape["counts"],
+            }),'''
+to = '''"proposed": shape["fields"], "counts": shape["counts"], "summary": record.summary,
+            }),'''
+
+[[mutation]]
+name = 'the session_request.opened record carries a digest of the proposal (C25)'
+file = "src/session_requests.rs"
+from = '''"template": proposal.get("template").and_then(Value::as_str),
+                "proposed": shape["fields"],'''
+to = '''"template": proposal.get("template").and_then(Value::as_str), "fingerprint": record.fingerprint,
+                "proposed": shape["fields"],'''
+
+[[mutation]]
+name = 'shapeOf counts a list by copying it (C25)'
+file = "src/session_requests.rs"
+from = 'counts.insert(f.to_string(), Value::from(a.len() as u64));'
+to = 'counts.insert(f.to_string(), Value::Array(a.clone()));'
+
+[[mutation]]
+name = "shapeOf names fields from the proposal's own keys, which the agent wrote (C25)"
+file = "src/session_requests.rs"
+from = '''    let fields: Vec<&str> = FIELDS
+        .iter()
+        .chain(OWNER_FIELDS.iter())
+        .copied()
+        .filter(|f| set(p, f))'''
+to = '''    let fields: Vec<&str> = p
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.keys())
+        .map(String::as_str)
+        .filter(|f| set(p, f))'''
+
+[[mutation]]
+name = 'first-use with a write method is not elevated, so the window creates or approves it (C26)'
+file = "src/session_requests.rs"
+from = '''            Some("auto") | Some("first-use")
+        )
+    };'''
+to = '''            Some("auto")
+        )
+    };'''

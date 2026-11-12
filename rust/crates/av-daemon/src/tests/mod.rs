@@ -18,6 +18,7 @@ mod gateway;
 mod guards;
 mod mcp;
 mod mutants;
+mod mutants_sr;
 mod presence;
 mod ui;
 
