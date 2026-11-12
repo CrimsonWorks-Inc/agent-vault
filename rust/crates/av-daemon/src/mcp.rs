@@ -285,7 +285,20 @@ impl McpServer {
                 "isError": true,
                 "content": [{"type": "text", "text": js_pretty(&json!({"code": e.code.as_str(), "detail": e.detail, "hint": e.hint(), "next": e.extra.next}))}],
             })),
-            Err(e) => id.map(|id| json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": e.detail}})),
+            Err(e) => {
+                if crate::err::is_fault(&e) {
+                    let _ = self
+                        .shared
+                        .run(|core| {
+                            core.audit_opt(
+                                "daemon.handler_error",
+                                json!({"error": crate::server::PANIC_CLASS}),
+                            )
+                        })
+                        .await;
+                }
+                id.map(|id| json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": e.detail}}))
+            }
         }
     }
 

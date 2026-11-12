@@ -37,6 +37,14 @@ construction (no shared field to reintroduce), the probe takes no path,
 method or body from its caller at all, and the session-request store reads
 the vault on every call instead of caching an audit handle.
 
+## Adaptations
+
+Where the Rust behaviour deliberately differs from the JS, and why.
+
+| JS | Rust | Why |
+|---|---|---|
+| A stored credential health value of another shape (a legacy vault.json can carry one) is listed as it is (`src/store/vault.js:904`). | It reads as no health: `health` is `null` and the credential still lists (`av-store` `rows.rs` `health_opt`; tests `a_wrong_shape_health_value_does_not_fail_the_credential_list`, av-store `a_wrong_shape_health_value_reads_as_none_and_the_credential_still_lists`). | The model holds a typed `HealthRecord`; the odd value has no field to carry it. Reading it as absent keeps the list working instead of failing every query that names the credential. |
+
 ## JS tests
 
 | JS file | JS test | Rust |
