@@ -2992,3 +2992,18 @@ name = 'an absolute-form target is routed by the path inside it, so the page and
 file = "src/ui/server.rs"
 from = '''        let raw_url = if parts.uri.scheme().is_some() || parts.uri.authority().is_some() {'''
 to = '''        let raw_url = if false {'''
+
+# integrate3-narrowing.test.js:249: parseOverrides reads Object.keys, so a
+# string or list narrowing has index keys no narrowing is, and is refused.
+
+[[mutation]]
+name = 'a narrowing sent as a string is read as no narrowing'
+file = "src/ui/server.rs"
+from = '''        Some(Value::String(s)) if !s.is_empty() => index_keys(s.encode_utf16().count()),'''
+to = '''        Some(Value::String(s)) if s.is_empty() => index_keys(s.encode_utf16().count()),'''
+
+[[mutation]]
+name = 'a narrowing sent as a list is read as no narrowing'
+file = "src/ui/server.rs"
+from = '''        Some(Value::Array(a)) if !a.is_empty() => index_keys(a.len()),'''
+to = '''        Some(Value::Array(a)) if a.is_empty() => index_keys(a.len()),'''
