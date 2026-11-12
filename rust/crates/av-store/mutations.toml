@@ -1011,3 +1011,22 @@ name = 'a wrong-shape stored health value fails every query that lists the crede
 file = "src/rows.rs"
 from = '''        health: health_opt(r.get(6)?),'''
 to = '''        health: parse_opt(r.get(6)?)?,'''
+
+# fix-control-audit.test.js:176-200: a malformed last row (JSON, not a
+# record) keeps its sequence number, so recovery numbers the next record
+# past every stored row; otherwise the corruption record collides with it
+# and the right factor gets AV_LOCKED.
+
+[[mutation]]
+name = 'a malformed last audit record makes the next write reuse its sequence number, locking the owner out'
+file = "src/audit.rs"
+from = '''        self.seq = last.seq.max(stored);'''
+to = '''        self.seq = last.seq;'''
+
+[[mutation]]
+name = 'a log holding only malformed rows restarts its numbering at 1, locking the owner out'
+file = "src/audit.rs"
+from = '''            self.seq = stored;
+            self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''
+to = '''            self.seq = 0;
+            self.since_checkpoint = self.seq % CHECKPOINT_EVERY;'''

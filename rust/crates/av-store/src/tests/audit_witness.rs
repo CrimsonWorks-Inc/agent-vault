@@ -830,3 +830,99 @@ fn a_vault_upgraded_from_a_build_without_anchors_is_not_accused_of_tampering() {
         "once anchored, a later removal must be reported"
     );
 }
+
+/// fix-control-audit.test.js:176-200: a last row that is JSON but not a
+/// record (`{}`, a string seq, no hashes) must not lock the owner out. It
+/// still holds its sequence number, so recovery numbers the next record
+/// past it; verify keeps reporting it, through a later write and a restart.
+#[test]
+fn a_malformed_last_audit_row_never_locks_the_owner_out_and_stays_reported() {
+    for bad in [
+        "{}",
+        r#"{"seq":"6","ts":"x","kind":"k","hash":"00","prev_hash":"00"}"#,
+        r#"{"seq":6,"ts":"x","kind":"k"}"#,
+    ] {
+        let Fx { dir, vault, .. } = fresh();
+        drop(vault);
+        let at: u64 = {
+            let c = rusqlite::Connection::open(dir.path().join("vault.db")).unwrap();
+            let (seq, prev): (i64, String) = c
+                .query_row(
+                    "SELECT seq, hash FROM audit ORDER BY seq DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let next = seq + 1;
+            c.execute(
+                "INSERT INTO audit (seq, ts, kind, prev_hash, hash, record) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![next, "2026-11-12T00:00:00.000Z", "fixture.tail", prev, format!("{next:064x}"), bad],
+            )
+            .unwrap();
+            next as u64
+        };
+        let mut v = Vault::open(dir.path()).unwrap();
+        v.unlock(None)
+            .unwrap_or_else(|e| panic!("{bad}: the right factor must still open the vault: {e}"));
+        assert!(!v.locked(), "{bad}");
+        let r = v.audit().unwrap().verify().unwrap();
+        assert!(!r.ok, "{bad}: a malformed record verified");
+        assert_eq!(r.broken_at, Some(at), "{bad}: {r:?}");
+        let rec = v
+            .audit_mut()
+            .unwrap()
+            .write("test.after", serde_json::Map::new())
+            .unwrap();
+        assert!(rec.seq > at, "{bad}: appended at {}", rec.seq);
+        assert!(
+            !records(&v, "audit.corruption_detected").is_empty(),
+            "{bad}"
+        );
+        drop(v);
+        let mut again = Vault::open(dir.path()).unwrap();
+        again.unlock(None).unwrap();
+        let r = again.audit().unwrap().verify().unwrap();
+        assert_eq!(
+            r.broken_at,
+            Some(at),
+            "{bad}: still reported after a restart"
+        );
+        again
+            .audit_mut()
+            .unwrap()
+            .write("test.after_restart", serde_json::Map::new())
+            .unwrap();
+    }
+}
+
+/// The same when no well-formed record is left at all: the chain starts
+/// again from genesis, but the next record is still numbered past the
+/// malformed row, and the emptied log is reported.
+#[test]
+fn a_log_holding_only_a_malformed_row_still_opens() {
+    let Fx { dir, vault, .. } = fresh();
+    drop(vault);
+    {
+        let c = rusqlite::Connection::open(dir.path().join("vault.db")).unwrap();
+        // Fixture only: the delete trigger is what keeps a real log whole.
+        c.execute_batch("DROP TRIGGER audit_no_delete; DELETE FROM audit;")
+            .unwrap();
+        c.execute(
+            "INSERT INTO audit (seq, ts, kind, prev_hash, hash, record) VALUES (1, 'x', 'fixture.tail', ?1, ?2, '{}')",
+            rusqlite::params![crate::audit::GENESIS, format!("{:064x}", 1)],
+        )
+        .unwrap();
+    }
+    let mut v = Vault::open(dir.path()).unwrap();
+    v.unlock(None)
+        .expect("the right factor still opens the vault");
+    let r = v.audit().unwrap().verify().unwrap();
+    assert!(!r.ok);
+    let rec = v
+        .audit_mut()
+        .unwrap()
+        .write("test.after", serde_json::Map::new())
+        .unwrap();
+    assert!(rec.seq > 1, "appended at {}", rec.seq);
+    assert!(!records(&v, "audit.truncation_detected").is_empty());
+}
