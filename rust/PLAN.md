@@ -126,6 +126,16 @@ port, so the conformance suite stays a pure equivalence check.
   invalid-pattern refusal the JS gives. BMP-only repetitions (`\d{4}`,
   `[A-Za-z]{8}`) still work. The JS test case that accepts such patterns is
   ported with the Rust refusal as the expected result.
+- **Panics unwind, and a handler fault costs one request.** The release
+  profile uses `panic = "unwind"` (the default), not `abort`. Every request
+  and connection handler runs under a guard that mirrors the JS `#guard`: a
+  panic or an unexpected non-`VaultError` failure writes the audit record
+  `daemon.handler_error` `{error: <class>}` (never the message) and answers
+  500 `application/problem+json`
+  `{code: "AV_INTERNAL", detail: "the request could not be handled"}`, or
+  ends the response if headers were sent. Unwinding also runs the zeroizing
+  drops that `abort` would skip. `daemon.uncaught` (the JS process-wide
+  handler) has no Rust counterpart and stays not applicable.
 - README "Honest limits" is updated to match.
 
 ## Layout and ownership
