@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 305 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **675 not yet ported**.
+Totals: 1090 JS tests: 333 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **647 not yet ported**.
 
 ## Mutation check
 
@@ -54,11 +54,11 @@ the vault on every call instead of caching an audit handle.
 | bridge.test.js | a successful call is still forwarded byte for byte | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | bridge.test.js | a daemon restart does not leave the bridge permanently broken | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | bridge.test.js | a non-protocol answer from the daemon still reaches the client as JSON-RPC | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
-| carrier.test.js | the session token in Authorization never reaches the upstream | not yet ported |
-| carrier.test.js | the credential still arrives, at its own declared site | not yet ported |
-| carrier.test.js | the AV-Session carrier behaves the same way | not yet ported |
-| carrier.test.js | a session token smuggled into an unrelated header is dropped too | not yet ported |
-| carrier.test.js | headers that carry no token are forwarded untouched | not yet ported |
+| carrier.test.js | the session token in Authorization never reaches the upstream | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
+| carrier.test.js | the credential still arrives, at its own declared site | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
+| carrier.test.js | the AV-Session carrier behaves the same way | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
+| carrier.test.js | a session token smuggled into an unrelated header is dropped too | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
+| carrier.test.js | headers that carry no token are forwarded untouched | `ported_gateway_core::carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive` |
 | connectors-health.test.js | a GitHub expiry header becomes observed_expires_at | not yet ported |
 | connectors-health.test.js | ISO 8601 and RFC 1123 expiries parse, and the header name is case-insensitive | not yet ported |
 | connectors-health.test.js | an unparseable expiry is ignored, and so is a calendar date that is not a date | not yet ported |
@@ -827,14 +827,14 @@ the vault on every call instead of caching an audit handle.
 | mcp.test.js | transport parity: stdio and HTTP produce identical tool results | not yet ported |
 | mcp.test.js | batched JSON-RPC messages are answered as a batch | not yet ported |
 | mcp.test.js | a notification gets 202 with no body, per the transport spec | not yet ported |
-| path-parsing.test.js | the paths the deny list is for are denied | not yet ported |
-| path-parsing.test.js | a tab, newline or carriage return cannot smuggle a path past the deny list | not yet ported |
-| path-parsing.test.js | an encoded fragment or query cannot truncate the path after the check | not yet ported |
-| path-parsing.test.js | percent-encoding is resolved once, and a path that would decode again is refused | not yet ported |
-| path-parsing.test.js | an encoded slash is refused rather than guessed | not yet ported |
-| path-parsing.test.js | whatever the spelling, the policy reads what the wire will carry | not yet ported |
-| path-parsing.test.js | encoding for the wire keeps the characters a path is allowed to contain | not yet ported |
-| path-parsing.test.js | a path that is only control characters does not become the root | not yet ported |
+| path-parsing.test.js | the paths the deny list is for are denied | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | a tab, newline or carriage return cannot smuggle a path past the deny list | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | an encoded fragment or query cannot truncate the path after the check | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | percent-encoding is resolved once, and a path that would decode again is refused | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | an encoded slash is refused rather than guessed | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | whatever the spelling, the policy reads what the wire will carry | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
+| path-parsing.test.js | encoding for the wire keeps the characters a path is allowed to contain | `ported_gateway_core::path_wire_encoding_preserves_every_legal_segment_character_and_round_trips_required_escapes` |
+| path-parsing.test.js | a path that is only control characters does not become the root | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
 | pipeline.test.js | the placeholder is replaced with the real secret and only the upstream sees it | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
 | pipeline.test.js | the session token works as a carrier instead of a placeholder-derived session | `tests::gateway::ordinary_request_substitutes_at_the_declared_site_and_scrubs_the_answer` |
 | pipeline.test.js | S06: a valid placeholder aimed at a non-granted host never opens a connection | `ported_gateway_core::pipeline_confinement_rejects_foreign_host_path_and_profile_webhook_before_wire` |
@@ -860,11 +860,11 @@ the vault on every call instead of caching an audit handle.
 | pipeline.test.js | a bare placeholder does not authorize on a network listener | `ported_gateway_core::cross_session_placeholders_and_bare_remote_carriers_are_refused_with_legitimate_controls` |
 | pipeline.test.js | the successor to a one-time placeholder is also one-time | `ported_gateway_core::twenty_racing_one_shot_uses_send_exactly_once_and_successors_remain_one_shot` |
 | pipeline.test.js | an approval does not carry over to a request with different headers | `ported_gateway_core::approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures` |
-| pipeline.test.js | a fractional use count does not persist state the log never records | not yet ported: control normalization mismatch sent to coordinator; active regression `ported_gateway_core::fractional_control_issuance_normalizes_uses_and_records_each_ledger_row_once` |
+| pipeline.test.js | a fractional use count does not persist state the log never records | `ported_gateway_core::fractional_control_issuance_normalizes_uses_and_records_each_ledger_row_once` |
 | pipeline.test.js | an upstream cannot choose how much of the daemon it occupies | `ported_gateway_core::buffered_upstream_is_cut_at_the_size_limit_instead_of_occupying_unbounded_memory` |
 | pipeline.test.js | a use is given back when the request never reached anyone | `tests::gateway::a_denial_before_connecting_refunds_the_use` |
 | pipeline.test.js | a use is NOT given back when the request may have been delivered | `tests::gateway::a_failure_after_connecting_is_not_refunded` |
-| pipeline.test.js | a refused request does not decrypt the whole vault three times | not yet ported |
+| pipeline.test.js | a refused request does not decrypt the whole vault three times | `pipeline::decrypt_tests::a_refused_request_decrypts_the_vault_at_most_once` |
 | pipeline.test.js | an approval survives a request that never reached the upstream | `ported_gateway_core::approval_cannot_cross_header_changes_denial_resends_or_unexecuted_failures` |
 | pipeline.test.js | a refund into a revoked grant is refused, not quietly granted | `ported_gateway_core::refunds_require_a_live_grant_and_both_refund_decisions_are_audited` |
 | pipeline.test.js | a legitimate refund is recorded, so the ledger and the log agree | `ported_gateway_core::refunds_require_a_live_grant_and_both_refund_decisions_are_audited` |
@@ -980,20 +980,20 @@ the vault on every call instead of caching an audit handle.
 | requested-ui.test.js | a signature for one owner option cannot be spent on another | not yet ported |
 | requested-ui.test.js | an auto-approving multi-credential session made from the page needs only its own signature | not yet ported |
 | requested-ui.test.js | the docs say how to start an auto-approving session, and that read-only needs nothing | not yet ported |
-| response.test.js | a gzipped response is decompressed before it reaches the agent | not yet ported |
-| response.test.js | deflate and brotli are handled too | not yet ported |
-| response.test.js | a secret hidden inside a compressed body is still scrubbed | not yet ported |
-| response.test.js | an encoding we cannot decode is refused rather than passed through unread | not yet ported |
-| response.test.js | a binary body survives byte for byte | not yet ported |
-| response.test.js | a gzipped binary body round-trips through decompression unchanged | not yet ported |
-| response.test.js | a COMPRESSED event stream is decompressed before it is scrubbed | `tests::gateway::hardening_a_gzip_response_and_a_gzip_event_stream_are_decoded_and_scrubbed` |
-| response.test.js | an event stream in an encoding we cannot read is refused, not passed through | not yet ported |
-| response.test.js | a secret inside an event is scrubbed, and the rest survives | not yet ported |
-| response.test.js | the stream hold-back is bounded, not the whole response | not yet ported |
-| response.test.js | a secret split across two stream chunks is still caught | not yet ported |
-| response.test.js | end to end over real HTTP: a gzipping upstream and a streaming upstream both work | not yet ported |
-| response.test.js | a secret cannot escape through an internal error message | not yet ported |
-| response.test.js | a token stream that merely mentions a repository is not cut | not yet ported |
+| response.test.js | a gzipped response is decompressed before it reaches the agent | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
+| response.test.js | deflate and brotli are handled too | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
+| response.test.js | a secret hidden inside a compressed body is still scrubbed | `ported_gateway_core::response_gzip_echo_replaces_secret_with_the_exact_injected_placeholder` |
+| response.test.js | an encoding we cannot decode is refused rather than passed through unread | `ported_gateway_core::response_unknown_encoding_refuses_buffered_and_streamed_bytes_with_readable_control` |
+| response.test.js | a binary body survives byte for byte | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
+| response.test.js | a gzipped binary body round-trips through decompression unchanged | `ported_gateway_core::response_buffered_encodings_preserve_plaintext_and_every_binary_byte` |
+| response.test.js | a COMPRESSED event stream is decompressed before it is scrubbed | `ported_gateway_core::response_all_compressed_sse_encodings_scrub_secrets_and_keep_event_order` |
+| response.test.js | an event stream in an encoding we cannot read is refused, not passed through | `ported_gateway_core::response_unknown_encoding_refuses_buffered_and_streamed_bytes_with_readable_control` |
+| response.test.js | a secret inside an event is scrubbed, and the rest survives | `ported_gateway_core::response_sse_literal_and_transport_split_secrets_are_scrubbed_and_repository_prose_survives` |
+| response.test.js | the stream hold-back is bounded, not the whole response | `ported_gateway_core::response_stream_holdback_starts_output_before_one_quarter_and_delivers_every_event` |
+| response.test.js | a secret split across two stream chunks is still caught | `ported_gateway_core::response_transport_chunk_split_does_not_reveal_secret_and_ordinary_frames_arrive` |
+| response.test.js | end to end over real HTTP: a gzipping upstream and a streaming upstream both work | `ported_gateway_core::response_real_http_gateway_decodes_gzip_and_delivers_sse_through_default_connector` |
+| response.test.js | a secret cannot escape through an internal error message | `ported_gateway_core::response_error_detail_cannot_disclose_stored_secret_and_keeps_useful_context` |
+| response.test.js | a token stream that merely mentions a repository is not cut | `ported_gateway_core::response_repository_prose_is_byte_exact_and_never_cut_or_redacted` |
 | response.test.js | a secret split across two SSE events is caught | `tests::gateway::hardening_a_secret_split_across_sse_events_cuts_the_stream` |
 | revocation.test.js | revoking a session kills every placeholder it ever issued | not yet ported |
 | revocation.test.js | revoking one grant does not disturb another session | not yet ported |

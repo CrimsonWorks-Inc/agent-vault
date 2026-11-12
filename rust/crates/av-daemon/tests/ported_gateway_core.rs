@@ -8399,3 +8399,599 @@ async fn exfil_real_gateway_cannot_deliver_secret_to_loopback_catcher_even_with_
         assert!(f.up.hits.lock().unwrap().is_empty());
     }
 }
+
+// Fake Brotli fixtures generated once from the literal payloads below.
+const RESPONSE_BR_BODY: &str = "CxSAeyJvcmRpbmFyeSI6ImNvbXByZXNzZWQgYnkgdGhlIHVwc3RyZWFtIn0D";
+const RESPONSE_BR_SSE: &str = "G2QAMIzDdOMry7oIYb2n6ZqyS/0lA3Zu/OQAU0GnzylnGgiXJdbS0wH8DneDkzTN4jBMpimN7MfVB8I0Y6rJ1tKKOdp+UN00hVZppMedXuJCKm2s8yHQIwshv40=";
+
+fn response_compress(encoding: &str, bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    match encoding {
+        "gzip" => {
+            let mut w = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+            w.write_all(bytes).unwrap();
+            w.finish().unwrap()
+        }
+        "deflate" => {
+            let mut w = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::default());
+            w.write_all(bytes).unwrap();
+            w.finish().unwrap()
+        }
+        "identity" => bytes.to_vec(),
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn response_buffered_encodings_preserve_plaintext_and_every_binary_byte() {
+    use base64::Engine;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let ordinary = b"{\"ordinary\":\"compressed by the upstream\"}".to_vec();
+    let mut png = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    png.extend(0..=255);
+    let binary = (0..512).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+    for (name, encoding, content_type, plain, expected) in [
+        (
+            "gzip ordinary",
+            "gzip",
+            "application/json",
+            ordinary.clone(),
+            ordinary.clone(),
+        ),
+        (
+            "deflate ordinary",
+            "deflate",
+            "application/json",
+            ordinary.clone(),
+            ordinary.clone(),
+        ),
+        (
+            "brotli ordinary",
+            "br",
+            "application/json",
+            ordinary.clone(),
+            ordinary.clone(),
+        ),
+        ("PNG every byte", "identity", "image/png", png.clone(), png),
+        (
+            "gzip binary",
+            "gzip",
+            "application/octet-stream",
+            binary.clone(),
+            binary,
+        ),
+    ] {
+        let body = if encoding == "br" {
+            base64::engine::general_purpose::STANDARD
+                .decode(RESPONSE_BR_BODY)
+                .unwrap()
+        } else {
+            response_compress(encoding, &plain)
+        };
+        let mut headers = vec![("content-type".into(), content_type.into())];
+        if encoding != "identity" {
+            headers.push(("content-encoding".into(), encoding.into()));
+        }
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: false,
+            status: 200,
+            headers,
+            body,
+        });
+        let response = f.get().await;
+        assert_eq!(response.status, 200, "{name}: {:?}", response.error);
+        assert_eq!(response.body, expected, "{name}");
+        assert!(response.header("content-encoding").is_none());
+        f.clean(&response).await;
+    }
+}
+
+#[tokio::test]
+async fn response_unknown_encoding_refuses_buffered_and_streamed_bytes_with_readable_control() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    for streaming in [false, true] {
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming,
+            status: 200,
+            headers: vec![
+                (
+                    "content-type".into(),
+                    if streaming {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    }
+                    .into(),
+                ),
+                ("content-encoding".into(), "exotic-v9".into()),
+            ],
+            body: format!("data: {SECRET}\n\n").into_bytes(),
+        });
+        let response = f.get().await;
+        assert_eq!(response.status, 502);
+        assert_eq!(
+            response.error.as_ref().unwrap().code.as_str(),
+            "AV_UNSCANNABLE"
+        );
+        f.clean(&response).await;
+    }
+    f.reply(200, "application/json", "{\"ordinary\":true}".into());
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    assert_eq!(ordinary.body, b"{\"ordinary\":true}");
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn response_all_compressed_sse_encodings_scrub_secrets_and_keep_event_order() {
+    use base64::Engine;
+    let f = Fixture::new(&["header:x-key"]).await;
+    let events=format!("data: {{\"delta\":\"hi\"}}\n\ndata: {{\"leak\":\"{SECRET}\"}}\n\ndata: {{\"delta\":\"bye\"}}\n\n");
+    for encoding in ["gzip", "deflate", "br"] {
+        let compressed = if encoding == "br" {
+            base64::engine::general_purpose::STANDARD
+                .decode(RESPONSE_BR_SSE)
+                .unwrap()
+        } else {
+            response_compress(encoding, events.as_bytes())
+        };
+        *f.up.reply.lock().unwrap() = Some(Reply {
+            streaming: true,
+            status: 200,
+            headers: vec![
+                ("content-type".into(), "text/event-stream".into()),
+                ("content-encoding".into(), encoding.into()),
+            ],
+            body: compressed,
+        });
+        let response = f.get().await;
+        assert_eq!(response.status, 200, "{encoding}");
+        assert!(response.stream.is_some());
+        assert!(response.header("content-encoding").is_none());
+        let response = drain(response).await;
+        let text = String::from_utf8_lossy(&response.body);
+        assert!(!text.contains(SECRET));
+        assert!(text.contains(&f.ph));
+        assert!(text.find("hi").unwrap() < text.find("bye").unwrap());
+        for decoder in ["gzip", "deflate", "br"] {
+            if let Ok(decoded) = av_daemon::decode::decompress(&response.body, decoder) {
+                assert!(!String::from_utf8_lossy(&decoded).contains(SECRET));
+            }
+        }
+        f.clean(&response).await;
+    }
+}
+
+#[tokio::test]
+async fn response_sse_literal_and_transport_split_secrets_are_scrubbed_and_repository_prose_survives(
+) {
+    let f = Fixture::new(&["header:x-key"]).await;
+    for split in [false, true] {
+        let events=format!("data: {{\"delta\":\"hello\"}}\n\ndata: {{\"leak\":\"{SECRET}\"}}\n\ndata: {{\"delta\":\"done\"}}\n\n");
+        stream_reply(&f, &events, false);
+        if split {
+            let at = events.find(SECRET).unwrap() + SECRET.len() / 2;
+            *f.up.source.lock().unwrap() = Some(Body::chunks(vec![
+                Ok(events.as_bytes()[..at].to_vec()),
+                Ok(events.as_bytes()[at..].to_vec()),
+            ]));
+        }
+        let response = f.get().await;
+        assert!(response.stream.is_some());
+        let response = drain(response).await;
+        let text = String::from_utf8_lossy(&response.body);
+        assert!(!text.contains(SECRET));
+        assert!(text.contains(&f.ph));
+        assert!(text.find("hello").unwrap() < text.find("done").unwrap());
+        f.clean(&response).await;
+    }
+}
+
+#[tokio::test]
+async fn response_stream_holdback_starts_output_before_one_quarter_and_delivers_every_event() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let events = (0..200)
+            .map(|i| format!("data: {{\"delta\":\"tok{i}\"}}\n\n"))
+            .collect::<Vec<_>>();
+        let all = events.concat();
+        stream_reply(&f, &all, false);
+        *f.up.source.lock().unwrap() = Some(Body::chunks(
+            events.into_iter().map(|e| Ok(e.into_bytes())).collect(),
+        ));
+        let mut response = f.get().await;
+        let mut source = response.stream.take().unwrap();
+        let first = source.recv().await.unwrap();
+        assert!(
+            first.len() < all.len() / 4,
+            "{} of {} bytes held before output",
+            first.len(),
+            all.len()
+        );
+        response.body = first;
+        while let Some(chunk) = source.recv().await {
+            response.body.extend(chunk);
+        }
+        assert_eq!(response.body, all.as_bytes());
+        f.clean(&response).await;
+    })
+    .await
+    .expect("SSE output progress timed out");
+}
+
+#[tokio::test]
+async fn response_error_detail_cannot_disclose_stored_secret_and_keeps_useful_context() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    *f.up.failure.lock().unwrap() = Some(UpstreamError::new(
+        "UNEXPECTED",
+        format!("boom while sending {SECRET} upstream"),
+    ));
+    let response = f.get().await;
+    assert!(response.status >= 400);
+    let text = String::from_utf8_lossy(&response.body);
+    assert!(!text.contains(SECRET));
+    assert!(text.contains("boom") || text.contains("[[av:") || text.contains("REDACT"));
+    f.clean(&response).await;
+    *f.up.failure.lock().unwrap() = None;
+    let ordinary = f.get().await;
+    assert_eq!(ordinary.status, 200);
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn response_real_http_gateway_decodes_gzip_and_delivers_sse_through_default_connector() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let compressed = response_compress("gzip", b"{\"gzipped\":true}");
+    let peer = tokio::spawn(async move {
+        for streaming in [false, true] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (headers, body) = read_wire_request(&mut socket).await;
+            assert!(headers.contains(SECRET));
+            assert!(!headers.contains("avs1."));
+            assert!(body.is_empty());
+            let (kind, encoding, bytes) = if streaming {
+                (
+                    "text/event-stream",
+                    "",
+                    b"data: one\n\ndata: two\n\n".to_vec(),
+                )
+            } else {
+                (
+                    "application/json",
+                    "Content-Encoding: gzip\r\n",
+                    compressed.clone(),
+                )
+            };
+            let h=format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\n{encoding}Content-Length: {}\r\nConnection: close\r\n\r\n",bytes.len());
+            socket.write_all(h.as_bytes()).await.unwrap();
+            socket.write_all(&bytes).await.unwrap();
+        }
+    });
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (_pipeline, request) = network_pipeline(&f, port, "GET", None).await;
+    let real = Daemon::new(
+        f.shared.clone(),
+        DaemonOptions {
+            port: 0,
+            socket_path: Some(f._dir.path().join("response-real.sock")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    real.start().await.unwrap();
+    let gateway = real.gateway_port().unwrap();
+    for (path, expected) in [
+        ("/p/network/data", b"{\"gzipped\":true}".as_slice()),
+        ("/p/network/sse", b"data: one\n\ndata: two\n\n".as_slice()),
+    ] {
+        let headers = request
+            .headers
+            .iter()
+            .filter(|(k, _)| k != "host")
+            .cloned()
+            .collect();
+        let (status, headers, body) = loopback_http(gateway, "GET", path, headers, vec![]).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, expected);
+        assert!(!headers.iter().any(|(k, _)| k == "content-encoding"));
+        if path.ends_with("sse") {
+            assert!(headers
+                .iter()
+                .any(|(k, v)| k == "content-type" && v == "text/event-stream"));
+        }
+        assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+    }
+    peer.await.unwrap();
+    real.stop().await;
+    assert!(!serde_json::to_string(&audit_records(&f).await)
+        .unwrap()
+        .contains(SECRET));
+}
+
+#[tokio::test]
+async fn path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path()
+{
+    use av_core::policy::{encode_path_for_wire, normalize_path};
+    let f=Fixture::configured_kind(&["header:x-key"],SECRET,None,json!({"methods":["GET","POST","DELETE"],"deny_paths":["/user/keys","/user/keys/**","/user/gpg_keys","/repos/*/*/hooks","/repos/*/*/keys","/settings/**","/api/admin.*"]}),"github","api.github.com").await;
+    let mut denied = vec![
+        "/user/keys".to_string(),
+        "/user/gpg_keys".into(),
+        "/repos/o/r/hooks".into(),
+        "/repos/o/r/keys".into(),
+        "/settings/x".into(),
+        "/api/admin.users".into(),
+    ];
+    for encoding in ["%09", "%0a", "%0d"] {
+        for base in ["/user/keys", "/repos/o/r/hooks", "/settings/x"] {
+            denied.push(format!("{base}{encoding}"));
+        }
+        denied.push(format!("/api/a{encoding}dmin.users"));
+    }
+    denied.extend(
+        [
+            "/user/keys%23",
+            "/user/keys%3Fz=1",
+            "/repos/o/r/hooks%23x",
+            "/settings/x%3f",
+            "/repos/%252e%252e/admin",
+            "/repos/%25252e%25252e/admin",
+            "/user/%25256beys",
+            "/user/%6beys",
+            "/repos/o%2fr/hooks",
+            "/user%2Fkeys",
+            "/a%5Cb",
+            "/%09%09%09",
+        ]
+        .map(str::to_string),
+    );
+    denied.push(format!("/user/{}6beys", "%25".repeat(12)));
+    for path in denied {
+        let response = f
+            .send("POST", &path, vec![("x-key".into(), f.ph.clone())], None)
+            .await;
+        assert_eq!(response.status, 403, "{path}: {:?}", response.error);
+        assert!(
+            f.up.hits.lock().unwrap().is_empty(),
+            "{path} reached upstream"
+        );
+        assert_eq!(grant_counters(&f).await, (0, vec![0]));
+        f.clean(&response).await;
+    }
+    for path in [
+        "/repos/o/r/issues",
+        "/repos/o/r/issues/",
+        "/repos/./o/r/issues",
+        "/repos/o/x/../r/issues",
+        "/repos//o//r//issues",
+        "/repos/%6f/r/issues",
+    ] {
+        let decided = normalize_path(path).unwrap();
+        let expected = encode_path_for_wire(&decided);
+        let response = f
+            .send("POST", path, vec![("x-key".into(), f.ph.clone())], None)
+            .await;
+        assert_eq!(response.status, 200, "{path}");
+        let parsed = url::Url::parse(&f.last().url).unwrap();
+        assert_eq!(parsed.path(), expected, "{path}");
+        assert_eq!(wire_path_decoded(parsed.path()), decided, "{path}");
+        f.clean(&response).await;
+    }
+    assert_eq!(normalize_path("/repos/%2e%2e/admin").unwrap(), "/admin");
+    for path in ["/repos/%252e%252e/admin", "/repos/%25252e%25252e/admin"] {
+        let e = normalize_path(path).unwrap_err();
+        assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
+        assert_eq!(e.extra.rule.as_deref(), Some("path_ambiguous_encoding"));
+    }
+}
+
+fn wire_path_decoded(path: &str) -> String {
+    let mut decoded = Vec::new();
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            decoded.push(u8::from_str_radix(&path[i + 1..i + 3], 16).unwrap());
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap()
+}
+
+#[test]
+fn path_wire_encoding_preserves_every_legal_segment_character_and_round_trips_required_escapes() {
+    use av_core::policy::encode_path_for_wire;
+    for path in [
+        "/v1beta/models/gemini-pro:generateContent",
+        "/@scope/package",
+        "/Products(1)/Name",
+        "/a,b;c=d/e+f/g&h/i$j/k'l/m!n/o*p/q(r)s",
+        "/plain/path/with-dashes_and.dots~here",
+    ] {
+        assert_eq!(encode_path_for_wire(path), path);
+        assert_eq!(
+            wire_path_decoded(url::Url::parse(&format!("https://h{path}")).unwrap().path()),
+            path
+        );
+    }
+    for (raw, encoded) in [
+        ("/a b", "/a%20b"),
+        ("/a?b", "/a%3Fb"),
+        ("/a#b", "/a%23b"),
+        ("/a%b", "/a%25b"),
+        ("/a\"b", "/a%22b"),
+        ("/café", "/caf%C3%A9"),
+    ] {
+        assert_eq!(encode_path_for_wire(raw), encoded);
+        assert_eq!(
+            wire_path_decoded(
+                url::Url::parse(&format!("https://h{encoded}"))
+                    .unwrap()
+                    .path()
+            ),
+            raw
+        );
+    }
+}
+
+#[tokio::test]
+async fn carrier_tokens_are_consumed_or_dropped_on_real_wire_while_declared_secret_and_ordinary_headers_arrive(
+) {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = tokio::spawn(async move {
+        for name in [
+            "Authorization carrier",
+            "AV-Session carrier",
+            "side-header token",
+            "ordinary headers",
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let (headers, body) = read_wire_request(&mut socket).await;
+            assert!(body.is_empty());
+            assert!(
+                !headers.contains("avs1."),
+                "{name}: session capability reached upstream"
+            );
+            assert!(
+                !headers.contains("av1."),
+                "{name}: placeholder reached upstream"
+            );
+            let fields = headers
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_once(':'))
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
+                .collect::<Vec<_>>();
+            assert!(
+                fields.iter().any(|(k, v)| k == "x-key" && v == SECRET),
+                "{name}: declared credential missing"
+            );
+            for key in ["authorization", "av-session", "x-note"] {
+                assert!(
+                    !fields.iter().any(|(k, _)| k == key),
+                    "{name}: carrier header {key} survived"
+                );
+            }
+            if name == "ordinary headers" {
+                assert!(fields.iter().any(|(k, v)| k == "x-trace" && v == "abc123"));
+                assert!(fields
+                    .iter()
+                    .any(|(k, v)| k == "accept" && v == "application/json"));
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        }
+    });
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (_pipeline, request) = network_pipeline(&f, port, "GET", None).await;
+    let token = request
+        .headers
+        .iter()
+        .find(|(k, _)| k == "av-session")
+        .unwrap()
+        .1
+        .clone();
+    let real = Daemon::new(
+        f.shared.clone(),
+        DaemonOptions {
+            port: 0,
+            socket_path: Some(f._dir.path().join("carrier-real.sock")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    real.start().await.unwrap();
+    let gateway = real.gateway_port().unwrap();
+    for name in [
+        "Authorization carrier",
+        "AV-Session carrier",
+        "side-header token",
+        "ordinary headers",
+    ] {
+        let mut headers = request
+            .headers
+            .iter()
+            .filter(|(k, _)| k != "host")
+            .cloned()
+            .collect::<Vec<_>>();
+        match name {
+            "Authorization carrier" => {
+                headers.retain(|(k, _)| k != "av-session");
+                headers.push(("authorization".into(), format!("Bearer {token}")));
+            }
+            "side-header token" => headers.push(("x-note".into(), format!("fyi {token}"))),
+            "ordinary headers" => {
+                headers.push(("x-trace".into(), "abc123".into()));
+                headers.push(("accept".into(), "application/json".into()));
+            }
+            _ => {}
+        }
+        let (status, headers, body) =
+            loopback_http(gateway, "GET", "/p/network/thing", headers, vec![]).await;
+        assert_eq!(status, 200, "{name}: {}", String::from_utf8_lossy(&body));
+        assert_eq!(body, b"{}");
+        assert!(!serde_json::to_string(&headers).unwrap().contains(SECRET));
+        assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+    }
+    peer.await.unwrap();
+    real.stop().await;
+    let logs = serde_json::to_string(&audit_records(&f).await).unwrap();
+    assert!(!logs.contains(SECRET));
+    assert!(!logs.contains(&token));
+}
+
+#[tokio::test]
+async fn response_repository_prose_is_byte_exact_and_never_cut_or_redacted() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let prose="data: {\"delta\":\"here is the disk-usage_by_repository\"}\n\ndata: {\"delta\":\"_over_time report you asked for\"}\n\ndata: {\"delta\":\", plus a task-oriented_summary_of_findings\"}\n\n";
+    stream_reply(&f, prose, false);
+    let ordinary = drain(f.get().await).await;
+    assert_eq!(ordinary.body, prose.as_bytes());
+    f.clean(&ordinary).await;
+}
+
+#[tokio::test]
+async fn response_gzip_echo_replaces_secret_with_the_exact_injected_placeholder() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let plain = json!({"echo":SECRET}).to_string();
+    *f.up.reply.lock().unwrap() = Some(Reply {
+        streaming: false,
+        status: 200,
+        headers: vec![
+            ("content-type".into(), "application/json".into()),
+            ("content-encoding".into(), "gzip".into()),
+        ],
+        body: response_compress("gzip", plain.as_bytes()),
+    });
+    let response = f.get().await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, json!({"echo":f.ph}).to_string().as_bytes());
+    f.clean(&response).await;
+}
+
+#[tokio::test]
+async fn response_transport_chunk_split_does_not_reveal_secret_and_ordinary_frames_arrive() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let half = SECRET.len() / 2;
+    let events = format!("data: {{\"leak\":\"{SECRET}\"}}\n\n");
+    stream_reply(&f, &events, false);
+    *f.up.source.lock().unwrap() = Some(Body::chunks(vec![
+        Ok(format!("data: {{\"leak\":\"{}", &SECRET[..half]).into_bytes()),
+        Ok(format!("{}\"}}\n\n", &SECRET[half..]).into_bytes()),
+    ]));
+    let response = f.get().await;
+    assert!(response.stream.is_some());
+    let response = drain(response).await;
+    assert!(!String::from_utf8_lossy(&response.body).contains(SECRET));
+    f.clean(&response).await;
+    let control = "data: {\"ordinary\":true}\n\n";
+    stream_reply(&f, control, false);
+    let ordinary = drain(f.get().await).await;
+    assert_eq!(ordinary.body, control.as_bytes());
+    f.clean(&ordinary).await;
+}
