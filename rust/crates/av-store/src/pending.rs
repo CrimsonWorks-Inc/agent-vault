@@ -128,7 +128,10 @@ pub fn describe(kind: PendingKind, raw: &Value) -> PendingItem {
             created_at: get("created_at"),
             caution: Some(SESSION_CAUTION.to_string()),
             narrowable: SESSION_NARROWABLE.iter().map(|s| s.to_string()).collect(),
-            owner_settable: SESSION_OWNER_SETTABLE.iter().map(|s| s.to_string()).collect(),
+            owner_settable: SESSION_OWNER_SETTABLE
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             proposal: Some(match raw.get("proposal") {
                 Some(v) if truthy(v) => v.clone(),
                 _ => Value::Object(Map::new()),
@@ -184,10 +187,14 @@ fn js_string(v: &Value) -> String {
             _ => n.to_string(),
         },
         Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(|x| match x {
-            Value::Null => String::new(),
-            other => js_string(other),
-        }).collect::<Vec<_>>().join(","),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| match x {
+                Value::Null => String::new(),
+                other => js_string(other),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
         Value::Object(_) => "[object Object]".into(),
     }
 }
@@ -217,7 +224,7 @@ pub fn collect_pending(rows: Vec<(PendingKind, Vec<Value>)>) -> Vec<PendingItem>
         .flat_map(|(kind, raws)| raws.iter().map(|raw| describe(*kind, raw)))
         .collect();
     // Oldest first: the thing waiting longest is the one to answer.
-    out.sort_by(|a, b| sort_key(&a.created_at).cmp(&sort_key(&b.created_at)));
+    out.sort_by_key(|a| sort_key(&a.created_at));
     out
 }
 
@@ -515,7 +522,9 @@ fn js_parse_number(s: &str) -> Option<f64> {
         _ => {}
     }
     // Rust also reads "inf" and "nan", which JS does not.
-    if s.bytes().any(|c| c.is_ascii_alphabetic() && c != b'e' && c != b'E') {
+    if s.bytes()
+        .any(|c| c.is_ascii_alphabetic() && c != b'e' && c != b'E')
+    {
         return None;
     }
     s.parse::<f64>().ok()
@@ -608,16 +617,23 @@ pub fn check_decisions(raw: &Value) -> Option<String> {
         };
         for k in d.keys() {
             if !DECISION_KEYS.contains(&k.as_str()) {
-                return Some(format!("a decision cannot carry {}", Value::from(k.clone())));
+                return Some(format!(
+                    "a decision cannot carry {}",
+                    Value::from(k.clone())
+                ));
             }
         }
         let id = match d.get("id") {
             Some(Value::String(s)) if !s.is_empty() => s.clone(),
             _ => return Some("each decision needs an id".into()),
         };
-        let kind_ok = matches!(d.get("kind"), Some(Value::String(k)) if k == "request" || k == "session");
+        let kind_ok =
+            matches!(d.get("kind"), Some(Value::String(k)) if k == "request" || k == "session");
         if !kind_ok {
-            let shown = d.get("kind").map(|k| k.to_string()).unwrap_or_else(|| "undefined".into());
+            let shown = d
+                .get("kind")
+                .map(|k| k.to_string())
+                .unwrap_or_else(|| "undefined".into());
             return Some(format!("unknown kind {shown}"));
         }
         if !matches!(d.get("granted"), Some(Value::Bool(_))) {
@@ -629,7 +645,9 @@ pub fn check_decisions(raw: &Value) -> Option<String> {
             }
         }
         if !seen.insert(id.clone()) {
-            return Some(format!("{id} appears twice, with no way to say which verdict wins"));
+            return Some(format!(
+                "{id} appears twice, with no way to say which verdict wins"
+            ));
         }
     }
     None

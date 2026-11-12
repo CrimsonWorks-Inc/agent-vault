@@ -131,7 +131,10 @@ pub fn summarize_session(
         .collect();
     let approval_ids: HashSet<String> = rows
         .iter()
-        .filter(|r| r.kind == "approval.requested" && str_of(r, "grant_id").is_some_and(|g| grant_ids.contains(g)))
+        .filter(|r| {
+            r.kind == "approval.requested"
+                && str_of(r, "grant_id").is_some_and(|g| grant_ids.contains(g))
+        })
         .filter_map(|r| r.fields.get("approval_id").map(js_key))
         .collect();
     let own: Vec<&AuditRecord> = rows
@@ -146,9 +149,9 @@ pub fn summarize_session(
         })
         .collect();
     let anomaly = anomaly_note(rows);
-    let created = rows
-        .iter()
-        .any(|r| r.kind == "session.created" && str_of(r, "session_id") == Some(session.id.as_str()));
+    let created = rows.iter().any(|r| {
+        r.kind == "session.created" && str_of(r, "session_id") == Some(session.id.as_str())
+    });
     let note = anomaly.or_else(|| {
         (!created).then(|| {
             "the audit log starts after this session was created, so its early activity is not in it"
@@ -181,9 +184,16 @@ pub fn summarize_session(
             requests.denied += 1;
             let code = str_of(r, "reason_code").map(str::to_string);
             let rule = str_of(r, "rule").map(str::to_string);
-            match denials.iter_mut().find(|d| d.code == code && d.rule == rule) {
+            match denials
+                .iter_mut()
+                .find(|d| d.code == code && d.rule == rule)
+            {
                 Some(d) => d.count += 1,
-                None => denials.push(DenialCount { code, rule, count: 1 }),
+                None => denials.push(DenialCount {
+                    code,
+                    rule,
+                    count: 1,
+                }),
             }
         } else if r.kind == "approval.requested" {
             requests.held += 1;
@@ -203,7 +213,10 @@ pub fn summarize_session(
         if request {
             let method = method_of(r);
             let path = path_of(r);
-            match paths.iter_mut().find(|p| p.method == method && p.path == path) {
+            match paths
+                .iter_mut()
+                .find(|p| p.method == method && p.path == path)
+            {
                 Some(p) => {
                     p.count += 1;
                     if p.last_at.as_deref().is_none_or(|l| r.ts.as_str() > l) {
@@ -220,9 +233,13 @@ pub fn summarize_session(
         }
     }
     // Stable sorts, as Array.prototype.sort is.
-    paths.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| b.last_at.cmp(&a.last_at)));
+    paths.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| b.last_at.cmp(&a.last_at))
+    });
     paths.truncate(MAX_PATHS);
-    denials.sort_by(|a, b| b.count.cmp(&a.count));
+    denials.sort_by_key(|d| std::cmp::Reverse(d.count));
     SessionActivity {
         complete: note.is_none(),
         note,
@@ -261,18 +278,27 @@ fn holds_of(rows: &[AuditRecord]) -> impl Fn(&AuditRecord) -> bool {
     let ids: HashSet<String> = rows
         .iter()
         .filter(|r| r.kind == "approval.requested")
-        .filter_map(|r| r.fields.get("request_id").filter(|v| !v.is_null()).map(js_key))
+        .filter_map(|r| {
+            r.fields
+                .get("request_id")
+                .filter(|v| !v.is_null())
+                .map(js_key)
+        })
         .collect();
     move |r: &AuditRecord| {
         str_of(r, "decision") == Some("held")
-            || r.fields.get("request_id").is_some_and(|v| ids.contains(&js_key(v)))
+            || r.fields
+                .get("request_id")
+                .is_some_and(|v| ids.contains(&js_key(v)))
             || (req_of(r, "status").and_then(Value::as_u64) == Some(202)
                 && req_of(r, "path").is_none_or(Value::is_null))
     }
 }
 
 fn method_of(r: &AuditRecord) -> Option<String> {
-    req_of(r, "method").and_then(Value::as_str).map(str::to_uppercase)
+    req_of(r, "method")
+        .and_then(Value::as_str)
+        .map(str::to_uppercase)
 }
 
 /// The path a record names, as it may be shown: no query, placeholders
@@ -282,7 +308,11 @@ fn path_of(r: &AuditRecord) -> Option<String> {
     let mut out = p.split('?').next().unwrap_or("").to_string();
     let hits = av_core::placeholder::find_all(&out);
     for hit in hits.iter().rev() {
-        out = format!("{}[[av:placeholder]]{}", &out[..hit.offset], &out[hit.end..]);
+        out = format!(
+            "{}[[av:placeholder]]{}",
+            &out[..hit.offset],
+            &out[hit.end..]
+        );
     }
     Some(out)
 }
@@ -409,7 +439,10 @@ pub fn access_report(rows: &[AuditRecord], input: AccessReportInput<'_>) -> Resu
     let now = crate::util::now_ms();
     let is_hold = holds_of(rows);
     let used = |r: &AuditRecord| r.kind == "request.allowed" && !is_hold(r);
-    let in_window: Vec<&AuditRecord> = rows.iter().filter(|r| parse_or_nan(&r.ts) >= since_f).collect();
+    let in_window: Vec<&AuditRecord> = rows
+        .iter()
+        .filter(|r| parse_or_nan(&r.ts) >= since_f)
+        .collect();
     let slug_by_id: HashMap<&str, &str> = input
         .credentials
         .iter()
@@ -432,10 +465,13 @@ pub fn access_report(rows: &[AuditRecord], input: AccessReportInput<'_>) -> Resu
         .collect();
     let missing = reported
         .iter()
-        .filter(|s| parse_or_nan(&s.created_at) >= since_f && !created_row.contains_key(&session_key(s)))
+        .filter(|s| {
+            parse_or_nan(&s.created_at) >= since_f && !created_row.contains_key(&session_key(s))
+        })
         .count();
     let anomaly = anomaly_note(rows);
-    let count = |pred: &dyn Fn(&AuditRecord) -> bool| in_window.iter().filter(|r| pred(r)).count() as u64;
+    let count =
+        |pred: &dyn Fn(&AuditRecord) -> bool| in_window.iter().filter(|r| pred(r)).count() as u64;
 
     let credentials = input
         .credentials
@@ -461,7 +497,10 @@ pub fn access_report(rows: &[AuditRecord], input: AccessReportInput<'_>) -> Resu
             used_at.sort_unstable();
             CredentialReport {
                 slug: c.slug.clone(),
-                sessions_active: theirs.iter().filter(|s| state_now(s, now) == "active").count() as u64,
+                sessions_active: theirs
+                    .iter()
+                    .filter(|s| state_now(s, now) == "active")
+                    .count() as u64,
                 sessions_total: theirs.len() as u64,
                 requests: count(&|r| used(r) && str_of(r, "credential_slug") == Some(slug)),
                 denials: count(&|r| is_denial(r) && str_of(r, "credential_slug") == Some(slug)),
@@ -477,8 +516,11 @@ pub fn access_report(rows: &[AuditRecord], input: AccessReportInput<'_>) -> Resu
     let sessions = reported
         .iter()
         .map(|s| {
-            let their_grants: Vec<&GrantRecord> =
-                input.grants.iter().filter(|g| g.session_id == s.id).collect();
+            let their_grants: Vec<&GrantRecord> = input
+                .grants
+                .iter()
+                .filter(|g| g.session_id == s.id)
+                .collect();
             let used_methods: HashSet<Option<String>> = rows
                 .iter()
                 .filter(|r| used(r) && str_of(r, "session_id") == Some(s.id.as_str()))
@@ -508,7 +550,7 @@ pub fn access_report(rows: &[AuditRecord], input: AccessReportInput<'_>) -> Resu
                 .filter(|m| !used_methods.contains(&Some(m.clone())))
                 .collect();
             unused.sort();
-            let elevated = if !s.elevated.is_empty() || created_row.get(&session_key(s)).is_none() {
+            let elevated = if !s.elevated.is_empty() || !created_row.contains_key(&session_key(s)) {
                 Some(s.elevated.clone())
             } else {
                 created_row

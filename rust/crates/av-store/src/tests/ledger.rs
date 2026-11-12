@@ -78,7 +78,10 @@ fn a_rotated_placeholder_says_to_ask_again_and_the_newest_still_works() {
         newest = issue(&mut fx.vault, &gid);
         fx.vault.consume_placeholder(&newest.id).unwrap();
     }
-    assert_eq!(code_of(fx.vault.consume_placeholder(&first.id)), "AV_PH_STALE");
+    assert_eq!(
+        code_of(fx.vault.consume_placeholder(&first.id)),
+        "AV_PH_STALE"
+    );
     fx.vault.consume_placeholder(&newest.id).unwrap();
 }
 
@@ -89,7 +92,11 @@ fn an_explicit_placeholder_ttl_cannot_outlast_the_grants() {
     let before = now();
     let row = fx
         .vault
-        .issue_placeholder(IssueOptions { grant_id: gid.clone(), ttl_ms: Some(3_600_000), ..Default::default() })
+        .issue_placeholder(IssueOptions {
+            grant_id: gid.clone(),
+            ttl_ms: Some(3_600_000),
+            ..Default::default()
+        })
         .unwrap()
         .row;
     let lasts = parse(row.expires_at.as_deref().unwrap()) - before;
@@ -103,7 +110,11 @@ fn an_explicit_placeholder_ttl_shorter_than_the_grants_is_kept() {
     let before = now();
     let row = fx
         .vault
-        .issue_placeholder(IssueOptions { grant_id: gid.clone(), ttl_ms: Some(5000), ..Default::default() })
+        .issue_placeholder(IssueOptions {
+            grant_id: gid.clone(),
+            ttl_ms: Some(5000),
+            ..Default::default()
+        })
         .unwrap()
         .row;
     let lasts = parse(row.expires_at.as_deref().unwrap()) - before;

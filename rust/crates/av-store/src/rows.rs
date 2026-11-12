@@ -182,8 +182,9 @@ pub(crate) fn wraps_replace(c: &Connection, wraps: &[VmkWrap], now: &str) -> Res
 }
 
 pub(crate) fn factors_get(c: &Connection) -> Result<Vec<PresenceFactor>> {
-    let mut stmt =
-        c.prepare_cached("SELECT class, enrolled_at FROM presence_factors ORDER BY enrolled_at, class")?;
+    let mut stmt = c.prepare_cached(
+        "SELECT class, enrolled_at FROM presence_factors ORDER BY enrolled_at, class",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok(PresenceFactor {
@@ -196,7 +197,8 @@ pub(crate) fn factors_get(c: &Connection) -> Result<Vec<PresenceFactor>> {
 }
 
 pub(crate) fn factors_replace(c: &Connection, factors: &[PresenceFactor]) -> Result<()> {
-    c.prepare_cached("DELETE FROM presence_factors")?.execute([])?;
+    c.prepare_cached("DELETE FROM presence_factors")?
+        .execute([])?;
     for f in factors {
         c.prepare_cached("INSERT INTO presence_factors (class, enrolled_at) VALUES (?1, ?2)")?
             .execute(params![class_str(f.class), f.enrolled_at])?;
@@ -232,23 +234,30 @@ pub(crate) fn webauthn_put(c: &Connection, k: Option<&PresenceKey>) -> Result<()
                      public_key_spki = excluded.public_key_spki, sign_count = excluded.sign_count,
                      enrolled_at = excluded.enrolled_at",
             )?
-            .execute(params![k.credential_id, k.public_key_spki, k.sign_count, k.enrolled_at])?;
+            .execute(params![
+                k.credential_id,
+                k.public_key_spki,
+                k.sign_count,
+                k.enrolled_at
+            ])?;
         }
     }
     Ok(())
 }
 
 pub(crate) fn notify_get(c: &Connection) -> Result<Option<NotifyRecord>> {
-    Ok(c.prepare_cached("SELECT sealed, host, detail, configured_at FROM notify WHERE id = 1")?
-        .query_row([], |r| {
-            Ok(NotifyRecord {
-                sealed: parse(&r.get::<_, String>(0)?)?,
-                host: r.get(1)?,
-                detail: enum_of(&r.get::<_, String>(2)?)?,
-                configured_at: r.get(3)?,
+    Ok(
+        c.prepare_cached("SELECT sealed, host, detail, configured_at FROM notify WHERE id = 1")?
+            .query_row([], |r| {
+                Ok(NotifyRecord {
+                    sealed: parse(&r.get::<_, String>(0)?)?,
+                    host: r.get(1)?,
+                    detail: enum_of(&r.get::<_, String>(2)?)?,
+                    configured_at: r.get(3)?,
+                })
             })
-        })
-        .optional()?)
+            .optional()?,
+    )
 }
 
 pub(crate) fn notify_put(c: &Connection, n: Option<&NotifyRecord>) -> Result<()> {
@@ -286,7 +295,14 @@ pub(crate) fn workspace_insert(c: &Connection, w: &WorkspaceRecord) -> Result<()
         "INSERT INTO workspaces (id, name, default_policy, policy_sha256, state, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?
-    .execute(params![w.id, w.name, json(&w.default_policy)?, w.policy_sha256, w.state, w.created_at])?;
+    .execute(params![
+        w.id,
+        w.name,
+        json(&w.default_policy)?,
+        w.policy_sha256,
+        w.state,
+        w.created_at
+    ])?;
     Ok(())
 }
 
@@ -294,7 +310,9 @@ pub(crate) fn workspaces_all(c: &Connection) -> Result<Vec<WorkspaceRecord>> {
     let mut stmt = c.prepare_cached(
         "SELECT id, name, default_policy, policy_sha256, state, created_at FROM workspaces ORDER BY id",
     )?;
-    let rows = stmt.query_map([], workspace_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], workspace_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -361,7 +379,9 @@ fn cred_fill(c: &Connection, cred: &mut CredentialRecord) -> Result<()> {
         "SELECT host, spki FROM pins WHERE credential_id = ?1 ORDER BY host, position",
     )?;
     let pins = stmt
-        .query_map([&cred.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .query_map([&cred.id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (host, spki) in pins {
         cred.pins.entry(host).or_default().push(spki);
@@ -402,22 +422,13 @@ pub(crate) fn credentials_all(c: &Connection) -> Result<Vec<CredentialRecord>> {
         "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns
          FROM credentials ORDER BY id",
     )?;
-    let mut all = stmt.query_map([], cred_head)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut all = stmt
+        .query_map([], cred_head)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for cred in all.iter_mut() {
         cred_fill(c, cred)?;
     }
     Ok(all)
-}
-
-pub(crate) fn credential_slugs(c: &Connection) -> Result<Vec<String>> {
-    let mut stmt = c.prepare_cached("SELECT slug FROM credentials ORDER BY id")?;
-    let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-    Ok(rows)
-}
-
-pub(crate) fn credential_count(c: &Connection) -> Result<u64> {
-    Ok(c.prepare_cached("SELECT count(*) FROM credentials")?
-        .query_row([], |r| r.get::<_, i64>(0))? as u64)
 }
 
 /// Insert a whole credential (fields, retired values, pins).
@@ -508,7 +519,8 @@ pub(crate) fn pins_write(c: &Connection, cred: &CredentialRecord) -> Result<()> 
 }
 
 pub(crate) fn credential_delete(c: &Connection, id: &str) -> Result<()> {
-    c.prepare_cached("DELETE FROM credentials WHERE id = ?1")?.execute([id])?;
+    c.prepare_cached("DELETE FROM credentials WHERE id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 
@@ -544,18 +556,24 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<SessionRecord> {
 
 pub(crate) fn session_get(c: &Connection, sid: &str) -> Result<Option<SessionRecord>> {
     let sql = [SESSION_SELECT, " WHERE id = ?1"].concat();
-    Ok(c.prepare_cached(&sql)?.query_row([sid], session_row).optional()?)
+    Ok(c.prepare_cached(&sql)?
+        .query_row([sid], session_row)
+        .optional()?)
 }
 
 pub(crate) fn session_by_token_hash(c: &Connection, hash: &str) -> Result<Option<SessionRecord>> {
     let sql = [SESSION_SELECT, " WHERE token_hash = ?1"].concat();
-    Ok(c.prepare_cached(&sql)?.query_row([hash], session_row).optional()?)
+    Ok(c.prepare_cached(&sql)?
+        .query_row([hash], session_row)
+        .optional()?)
 }
 
 pub(crate) fn sessions_all(c: &Connection) -> Result<Vec<SessionRecord>> {
     let sql = [SESSION_SELECT, " ORDER BY created_at, id"].concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([], session_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], session_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -604,7 +622,8 @@ pub(crate) fn session_put(c: &Connection, s: &SessionRecord, now: &str) -> Resul
 
 // ----------------------------------------------------------------- grants
 
-const GRANT_SELECT: &str = "SELECT id, session_id, credential_id, fields, policy, budget_used, counters, state,
+const GRANT_SELECT: &str =
+    "SELECT id, session_id, credential_id, fields, policy, budget_used, counters, state,
         created_at, expires_at FROM grants";
 
 fn grant_row(r: &Row<'_>) -> rusqlite::Result<GrantRecord> {
@@ -624,27 +643,43 @@ fn grant_row(r: &Row<'_>) -> rusqlite::Result<GrantRecord> {
 
 pub(crate) fn grant_get(c: &Connection, id: &str) -> Result<Option<GrantRecord>> {
     let sql = [GRANT_SELECT, " WHERE id = ?1"].concat();
-    Ok(c.prepare_cached(&sql)?.query_row([id], grant_row).optional()?)
+    Ok(c.prepare_cached(&sql)?
+        .query_row([id], grant_row)
+        .optional()?)
 }
 
 pub(crate) fn grants_all(c: &Connection) -> Result<Vec<GrantRecord>> {
     let sql = [GRANT_SELECT, " ORDER BY created_at, id"].concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([], grant_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], grant_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 pub(crate) fn grants_of_session(c: &Connection, sid: &str) -> Result<Vec<GrantRecord>> {
-    let sql = [GRANT_SELECT, " WHERE session_id = ?1 ORDER BY created_at, id"].concat();
+    let sql = [
+        GRANT_SELECT,
+        " WHERE session_id = ?1 ORDER BY created_at, id",
+    ]
+    .concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([sid], grant_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([sid], grant_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 pub(crate) fn grants_of_credential(c: &Connection, cred_id: &str) -> Result<Vec<GrantRecord>> {
-    let sql = [GRANT_SELECT, " WHERE credential_id = ?1 ORDER BY created_at, id"].concat();
+    let sql = [
+        GRANT_SELECT,
+        " WHERE credential_id = ?1 ORDER BY created_at, id",
+    ]
+    .concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([cred_id], grant_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([cred_id], grant_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -674,7 +709,8 @@ pub(crate) fn grant_put(c: &Connection, g: &GrantRecord) -> Result<()> {
 
 // ----------------------------------------------------------- placeholders
 
-const PH_SELECT: &str = "SELECT id, grant_id, credential_id, field, sid, nonce_hash, uses, max_uses, state,
+const PH_SELECT: &str =
+    "SELECT id, grant_id, credential_id, field, sid, nonce_hash, uses, max_uses, state,
         dead_reason, replaces_id, created_at, expires_at, last_used_at FROM placeholders";
 
 fn ph_row(r: &Row<'_>) -> rusqlite::Result<PlaceholderRow> {
@@ -703,27 +739,35 @@ pub(crate) fn ph_get(c: &Connection, id: &str) -> Result<Option<PlaceholderRow>>
 
 pub(crate) fn ph_by_nonce_hash(c: &Connection, hash: &str) -> Result<Option<PlaceholderRow>> {
     let sql = [PH_SELECT, " WHERE nonce_hash = ?1"].concat();
-    Ok(c.prepare_cached(&sql)?.query_row([hash], ph_row).optional()?)
+    Ok(c.prepare_cached(&sql)?
+        .query_row([hash], ph_row)
+        .optional()?)
 }
 
 pub(crate) fn ph_all(c: &Connection) -> Result<Vec<PlaceholderRow>> {
     let sql = [PH_SELECT, " ORDER BY created_at, id"].concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([], ph_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], ph_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 pub(crate) fn ph_of_session(c: &Connection, sid: &str) -> Result<Vec<PlaceholderRow>> {
     let sql = [PH_SELECT, " WHERE sid = ?1 ORDER BY created_at, id"].concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([sid], ph_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([sid], ph_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
 pub(crate) fn ph_of_grant(c: &Connection, grant_id: &str) -> Result<Vec<PlaceholderRow>> {
     let sql = [PH_SELECT, " WHERE grant_id = ?1 ORDER BY created_at, id"].concat();
     let mut stmt = c.prepare_cached(&sql)?;
-    let rows = stmt.query_map([grant_id], ph_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([grant_id], ph_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -778,7 +822,12 @@ pub(crate) fn ph_update(c: &Connection, p: &PlaceholderRow) -> Result<()> {
 }
 
 /// Kill every active row matching `sid` or `grant_id` with `reason`.
-pub(crate) fn ph_kill_where(c: &Connection, sid: Option<&str>, grant_id: Option<&str>, reason: &str) -> Result<()> {
+pub(crate) fn ph_kill_where(
+    c: &Connection,
+    sid: Option<&str>,
+    grant_id: Option<&str>,
+    reason: &str,
+) -> Result<()> {
     c.prepare_cached(
         "UPDATE placeholders SET state = 'dead', dead_reason = ?3
          WHERE state = 'active' AND (?1 IS NULL OR sid = ?1) AND (?2 IS NULL OR grant_id = ?2)",
@@ -788,7 +837,8 @@ pub(crate) fn ph_kill_where(c: &Connection, sid: Option<&str>, grant_id: Option<
 }
 
 pub(crate) fn ph_delete(c: &Connection, id: &str) -> Result<()> {
-    c.prepare_cached("DELETE FROM placeholders WHERE id = ?1")?.execute([id])?;
+    c.prepare_cached("DELETE FROM placeholders WHERE id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 
@@ -822,7 +872,11 @@ pub(crate) fn listeners_all(c: &Connection) -> Result<Vec<ListenerRecord>> {
             entry.insert("state".into(), Value::from(r.get::<_, String>(3)?));
             entry.insert("created_at".into(), Value::from(r.get::<_, String>(4)?));
             serde_json::from_value(Value::Object(entry)).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -830,12 +884,15 @@ pub(crate) fn listeners_all(c: &Connection) -> Result<Vec<ListenerRecord>> {
 }
 
 pub(crate) fn listener_exists(c: &Connection, id: &str) -> Result<bool> {
-    Ok(c.prepare_cached("SELECT EXISTS (SELECT 1 FROM listeners WHERE id = ?1)")?
-        .query_row([id], |r| r.get(0))?)
+    Ok(
+        c.prepare_cached("SELECT EXISTS (SELECT 1 FROM listeners WHERE id = ?1)")?
+            .query_row([id], |r| r.get(0))?,
+    )
 }
 
 pub(crate) fn listener_delete(c: &Connection, id: &str) -> Result<()> {
-    c.prepare_cached("DELETE FROM listeners WHERE id = ?1")?.execute([id])?;
+    c.prepare_cached("DELETE FROM listeners WHERE id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 
@@ -864,7 +921,9 @@ pub(crate) fn templates_all(c: &Connection) -> Result<Vec<TemplateRecord>> {
     let mut stmt = c.prepare_cached(
         "SELECT name, version, spec, hash, created_at, updated_at FROM templates ORDER BY name",
     )?;
-    let rows = stmt.query_map([], template_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], template_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -879,7 +938,8 @@ pub(crate) fn template_put(c: &Connection, t: &TemplateRecord) -> Result<()> {
 }
 
 pub(crate) fn template_delete(c: &Connection, name: &str) -> Result<()> {
-    c.prepare_cached("DELETE FROM templates WHERE name = ?1")?.execute([name])?;
+    c.prepare_cached("DELETE FROM templates WHERE name = ?1")?
+        .execute([name])?;
     Ok(())
 }
 
@@ -908,8 +968,12 @@ pub(crate) fn session_requests_all(c: &Connection) -> Result<Vec<SessionRequestR
     Ok(rows)
 }
 
-pub(crate) fn session_requests_replace(c: &Connection, rows: &[SessionRequestRecord]) -> Result<()> {
-    c.prepare_cached("DELETE FROM session_requests")?.execute([])?;
+pub(crate) fn session_requests_replace(
+    c: &Connection,
+    rows: &[SessionRequestRecord],
+) -> Result<()> {
+    c.prepare_cached("DELETE FROM session_requests")?
+        .execute([])?;
     for r in rows {
         c.prepare_cached(
             "INSERT INTO session_requests (id, collect_hash, proposal, fingerprint, summary, reason_untrusted,
@@ -959,7 +1023,9 @@ pub(crate) fn client_put(c: &Connection, cl: &ClientRecord) -> Result<()> {
 /// Rows in a table, for counts. `table` must be one of [`crate::schema::TABLES`].
 pub(crate) fn count(c: &Connection, table: &str) -> Result<u64> {
     if !crate::schema::TABLES.contains(&table) {
-        return Err(crate::error::Error::Invariant(format!("unknown table {table}")));
+        return Err(crate::error::Error::Invariant(format!(
+            "unknown table {table}"
+        )));
     }
     // A table name cannot be a bound parameter; it comes from the fixed list
     // above, never from a caller.

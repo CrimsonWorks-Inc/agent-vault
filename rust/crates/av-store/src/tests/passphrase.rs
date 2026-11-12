@@ -30,7 +30,13 @@ fn a_none_vault_unlocks_with_no_secret_and_a_passphrase_vault_does_not() {
 #[test]
 fn locking_a_passphrase_vault_zeroizes_a_key_that_disk_alone_cannot_recover() {
     let (dir, mut v) = none_vault();
-    v.add_credential(new_cred("x", "http", "h", &[("token", "super-secret-value")])).unwrap();
+    v.add_credential(new_cred(
+        "x",
+        "http",
+        "h",
+        &[("token", "super-secret-value")],
+    ))
+    .unwrap();
     v.set_passphrase(&s("correct horse battery"), None).unwrap();
     v.lock().unwrap();
     let r = Vault::open(dir.path()).unwrap();
@@ -44,9 +50,13 @@ fn changing_a_passphrase_requires_the_current_one() {
     v.set_passphrase(&s("first-passphrase"), None).unwrap();
     let e = v.set_passphrase(&s("second-passphrase"), Some(&s("wrong")));
     assert!(err_msg(e).contains("current passphrase is required"));
-    v.set_passphrase(&s("second-passphrase"), Some(&s("first-passphrase"))).unwrap();
+    v.set_passphrase(&s("second-passphrase"), Some(&s("first-passphrase")))
+        .unwrap();
     v.lock().unwrap();
-    assert!(Vault::open(dir.path()).unwrap().unlock(Some(&s("second-passphrase"))).unwrap());
+    assert!(Vault::open(dir.path())
+        .unwrap()
+        .unlock(Some(&s("second-passphrase")))
+        .unwrap());
 }
 
 #[test]
@@ -75,7 +85,10 @@ fn the_passphrase_cannot_be_removed_while_it_is_the_last_human_factor() {
     assert!(v.has_passphrase().unwrap());
     assert_eq!(snapshot(&v), before, "a refusal must not write anything");
     v.lock().unwrap();
-    assert_eq!(code_of(Vault::open(dir.path()).unwrap().unlock(None)), "AV_LOCKED");
+    assert_eq!(
+        code_of(Vault::open(dir.path()).unwrap().unlock(None)),
+        "AV_LOCKED"
+    );
 }
 
 #[test]
@@ -93,16 +106,28 @@ fn touch_id_a_prf_secret_unlocks_the_vault_alongside_the_passphrase() {
     let secret = [9u8; 32];
     v.add_webauthn_unlock("cred-1", &prf(&secret)).unwrap();
     assert!(v.has_webauthn_unlock().unwrap());
-    assert_eq!(v.webauthn_unlock_credential_id().unwrap().as_deref(), Some("cred-1"));
+    assert_eq!(
+        v.webauthn_unlock_credential_id().unwrap().as_deref(),
+        Some("cred-1")
+    );
     v.lock().unwrap();
     let mut r = Vault::open(dir.path()).unwrap();
-    let wrong = UnlockMaterial { prf_secret: Some(prf(&[1u8; 32])), passphrase: None };
+    let wrong = UnlockMaterial {
+        prf_secret: Some(prf(&[1u8; 32])),
+        passphrase: None,
+    };
     assert_eq!(code_of(r.unlock_with(&wrong)), "AV_LOCKED");
-    let right = UnlockMaterial { prf_secret: Some(prf(&secret)), passphrase: None };
+    let right = UnlockMaterial {
+        prf_secret: Some(prf(&secret)),
+        passphrase: None,
+    };
     assert_eq!(r.unlock_with(&right).unwrap(), FactorClass::WebauthnPrf);
     r.lock().unwrap();
     let mut r2 = Vault::open(dir.path()).unwrap();
-    let pass = UnlockMaterial { passphrase: Some(s("recovery-passphrase")), prf_secret: None };
+    let pass = UnlockMaterial {
+        passphrase: Some(s("recovery-passphrase")),
+        prf_secret: None,
+    };
     assert_eq!(r2.unlock_with(&pass).unwrap(), FactorClass::Passphrase);
 }
 
@@ -112,11 +137,17 @@ fn the_passphrase_cannot_be_removed_while_touch_id_is_the_other_factor() {
     v.set_passphrase(&s("recovery-passphrase"), None).unwrap();
     v.add_webauthn_unlock("cred-1", &prf(&[3u8; 32])).unwrap();
     let e = v.remove_passphrase(&s("recovery-passphrase")).unwrap_err();
-    assert_eq!(e.as_vault().unwrap().extra.rule.as_deref(), Some("last_factor"));
+    assert_eq!(
+        e.as_vault().unwrap().extra.rule.as_deref(),
+        Some("last_factor")
+    );
     assert!(e.to_string().contains("remove Touch ID unlock first"));
     v.remove_webauthn_unlock().unwrap();
     let e = v.remove_passphrase(&s("recovery-passphrase")).unwrap_err();
-    assert_eq!(e.as_vault().unwrap().extra.rule.as_deref(), Some("last_factor"));
+    assert_eq!(
+        e.as_vault().unwrap().extra.rule.as_deref(),
+        Some("last_factor")
+    );
     v.set_presence_key(&authenticator(P256_A)).unwrap();
     assert!(v.remove_passphrase(&s("recovery-passphrase")).unwrap());
 }
@@ -127,13 +158,23 @@ fn removing_the_last_unlock_factor_leaves_the_vault_openable_not_destroyed() {
     v.set_passphrase(&s("recovery-passphrase"), None).unwrap();
     v.add_webauthn_unlock("cred-1", &prf(&[5u8; 32])).unwrap();
     // Corrupt it the way the JS test does: only the PRF wrap left.
-    exec(&v, "DELETE FROM vmk_wraps WHERE class != 'webauthn-prf'", &[]);
+    exec(
+        &v,
+        "DELETE FROM vmk_wraps WHERE class != 'webauthn-prf'",
+        &[],
+    );
     v.remove_webauthn_unlock().unwrap();
-    let n: i64 = v.conn().query_row("SELECT count(*) FROM vmk_wraps", [], |r| r.get(0)).unwrap();
+    let n: i64 = v
+        .conn()
+        .query_row("SELECT count(*) FROM vmk_wraps", [], |r| r.get(0))
+        .unwrap();
     assert!(n > 0, "the vault was left with no way to open it");
     v.lock().unwrap();
     let mut r = Vault::open(dir.path()).unwrap();
-    assert_eq!(r.unlock_with(&UnlockMaterial::default()).unwrap(), FactorClass::None);
+    assert_eq!(
+        r.unlock_with(&UnlockMaterial::default()).unwrap(),
+        FactorClass::None
+    );
 }
 
 #[test]
@@ -142,11 +183,15 @@ fn setting_a_passphrase_keeps_an_existing_touch_id_factor() {
     v.set_passphrase(&s("first-passphrase"), None).unwrap();
     let secret = [6u8; 32];
     v.add_webauthn_unlock("cred-1", &prf(&secret)).unwrap();
-    v.set_passphrase(&s("second-passphrase"), Some(&s("first-passphrase"))).unwrap();
+    v.set_passphrase(&s("second-passphrase"), Some(&s("first-passphrase")))
+        .unwrap();
     assert!(v.has_webauthn_unlock().unwrap());
     v.lock().unwrap();
     let mut r = Vault::open(dir.path()).unwrap();
-    let m = UnlockMaterial { prf_secret: Some(prf(&secret)), passphrase: None };
+    let m = UnlockMaterial {
+        prf_secret: Some(prf(&secret)),
+        passphrase: None,
+    };
     assert_eq!(r.unlock_with(&m).unwrap(), FactorClass::WebauthnPrf);
 }
 
@@ -164,7 +209,13 @@ fn a_failed_unlock_leaves_nothing_half_open() {
     // The JS made audit.jsonl a directory. Here the anchor beside vault.db
     // is made one, so the log cannot be opened and anchored.
     let (dir, mut v) = none_vault();
-    v.add_credential(new_cred("x", "http", "h", &[("token", "a-secret-value-here")])).unwrap();
+    v.add_credential(new_cred(
+        "x",
+        "http",
+        "h",
+        &[("token", "a-secret-value-here")],
+    ))
+    .unwrap();
     v.set_passphrase(&s("the-owners-passphrase"), None).unwrap();
     v.lock().unwrap();
     let anchor = dir.path().join("vault.db.head");
@@ -172,8 +223,15 @@ fn a_failed_unlock_leaves_nothing_half_open() {
     std::fs::create_dir(&anchor).unwrap();
     std::fs::write(anchor.join("keep"), "x").unwrap();
     let mut r = Vault::open(dir.path()).unwrap();
-    let m = UnlockMaterial { passphrase: Some(s("the-owners-passphrase")), prf_secret: None };
-    assert_eq!(code_of(r.unlock_with(&m)), "AV_LOCKED", "a vault whose log cannot be opened must not report success");
+    let m = UnlockMaterial {
+        passphrase: Some(s("the-owners-passphrase")),
+        prf_secret: None,
+    };
+    assert_eq!(
+        code_of(r.unlock_with(&m)),
+        "AV_LOCKED",
+        "a vault whose log cannot be opened must not report success"
+    );
     assert!(r.locked());
     assert!(r.audit().is_none());
     let id = r.find_credential("x").unwrap().unwrap().id;
@@ -191,7 +249,13 @@ fn a_permissive_vault_file_is_reset_to_0600_on_open() {
     std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o666)).unwrap();
     let mut v = Vault::open(dir.path()).unwrap();
     v.unlock(None).unwrap();
-    v.add_credential(new_cred("x", "http", "example.com", &[("token", "value-long-enough")])).unwrap();
+    v.add_credential(new_cred(
+        "x",
+        "http",
+        "example.com",
+        &[("token", "value-long-enough")],
+    ))
+    .unwrap();
     let mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the vault ended up mode {mode:o}");
 }
@@ -199,7 +263,14 @@ fn a_permissive_vault_file_is_reset_to_0600_on_open() {
 #[test]
 fn the_placeholder_ledger_does_not_grow_without_bound() {
     let (_dir, mut v) = none_vault();
-    let cred = v.add_credential(new_cred("x", "http", "h", &[("token", "a-secret-value-here")])).unwrap();
+    let cred = v
+        .add_credential(new_cred(
+            "x",
+            "http",
+            "h",
+            &[("token", "a-secret-value-here")],
+        ))
+        .unwrap();
     let sess = session(&mut v);
     let g = v
         .create_grant(CreateGrantOptions {
@@ -212,7 +283,9 @@ fn the_placeholder_ledger_does_not_grow_without_bound() {
     }
     let rows = v.list_placeholders(None).unwrap();
     assert!(rows.len() <= 600, "900 mints left {} rows", rows.len());
-    assert!(rows.iter().any(|p| p.state == crate::model::PlaceholderState::Active));
+    assert!(rows
+        .iter()
+        .any(|p| p.state == crate::model::PlaceholderState::Active));
 }
 
 #[test]
@@ -229,11 +302,20 @@ fn a_wrap_made_with_the_production_argon2id_parameters_opens() {
     let params = crate::crypto::PASSPHRASE_ARGON2;
     let fk = crate::crypto::passphrase_factor(&s("production-params"), &salt, &params).unwrap();
     let kek = crate::crypto::derive_kek(&device, fk.expose());
-    let sealed = crate::crypto::seal(&kek, crate::crypto::b64(real_vmk.expose()).as_bytes(), "av/vmk/passphrase").unwrap();
+    let sealed = crate::crypto::seal(
+        &kek,
+        crate::crypto::b64(real_vmk.expose()).as_bytes(),
+        "av/vmk/passphrase",
+    )
+    .unwrap();
     exec(
         &v,
         "UPDATE vmk_wraps SET salt = ?1, kdf = ?2, sealed = ?3 WHERE class = 'passphrase'",
-        &[&crate::crypto::b64(&salt), &serde_json::to_string(&params).unwrap(), &serde_json::to_string(&sealed).unwrap()],
+        &[
+            &crate::crypto::b64(&salt),
+            &serde_json::to_string(&params).unwrap(),
+            &serde_json::to_string(&sealed).unwrap(),
+        ],
     );
     v.lock().unwrap();
     let mut r = Vault::open(dir.path()).unwrap();

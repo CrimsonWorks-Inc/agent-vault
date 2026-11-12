@@ -23,7 +23,11 @@ fn a_placeholder_was_never_spent_more_times_than_it_had_uses() {
     let s = session(v);
     let g = grant_for(v, &s.id, &fx.cred.id);
     let one = v
-        .issue_placeholder(IssueOptions { grant_id: g.id.clone(), uses: Some(3), ..Default::default() })
+        .issue_placeholder(IssueOptions {
+            grant_id: g.id.clone(),
+            uses: Some(3),
+            ..Default::default()
+        })
         .unwrap()
         .row;
     let mut rnd = rng(20_260_921);
@@ -34,10 +38,19 @@ fn a_placeholder_was_never_spent_more_times_than_it_had_uses() {
             let _ = v.consume_placeholder(&one.id);
         }
         let row = ph_row(v, &one.id);
-        assert!(row.uses <= row.max_uses, "spent {} of {}", row.uses, row.max_uses);
+        assert!(
+            row.uses <= row.max_uses,
+            "spent {} of {}",
+            row.uses,
+            row.max_uses
+        );
         assert_eq!(row.max_uses, 3);
         if row.uses >= row.max_uses {
-            assert_eq!(row.state, PlaceholderState::Dead, "an exhausted placeholder must not stay active");
+            assert_eq!(
+                row.state,
+                PlaceholderState::Dead,
+                "an exhausted placeholder must not stay active"
+            );
         }
     }
 }
@@ -52,7 +65,10 @@ fn nothing_sensitive_reached_the_audit_log_and_its_chain_still_verifies() {
     let mut placeholders = Vec::new();
     for _ in 0..520 {
         let p = v
-            .issue_placeholder(IssueOptions { grant_id: g.id.clone(), ..Default::default() })
+            .issue_placeholder(IssueOptions {
+                grant_id: g.id.clone(),
+                ..Default::default()
+            })
             .unwrap();
         let _ = v.consume_placeholder(&p.row.id);
         placeholders.push(p.placeholder);
@@ -60,17 +76,35 @@ fn nothing_sensitive_reached_the_audit_log_and_its_chain_still_verifies() {
     let raw: String = {
         let c = v.conn();
         let mut stmt = c.prepare("SELECT record FROM audit ORDER BY seq").unwrap();
-        let lines: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        let lines: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
         lines.join("\n")
     };
     for secret in [SECRET, OTHER_SECRET] {
-        assert!(!raw.contains(secret), "a credential value is in the audit log");
+        assert!(
+            !raw.contains(secret),
+            "a credential value is in the audit log"
+        );
     }
     for p in &placeholders {
-        assert!(!raw.contains(p.as_str()), "a full placeholder is in the audit log");
+        assert!(
+            !raw.contains(p.as_str()),
+            "a full placeholder is in the audit log"
+        );
     }
     assert!(!raw.contains(&token), "a session token is in the audit log");
     let report = v.audit().unwrap().verify().unwrap();
-    assert!(report.ok, "the chain did not verify after {} records: {:?}", report.count, report.reason);
-    assert!(report.count > 500, "expected a busy log, got {}", report.count);
+    assert!(
+        report.ok,
+        "the chain did not verify after {} records: {:?}",
+        report.count, report.reason
+    );
+    assert!(
+        report.count > 500,
+        "expected a busy log, got {}",
+        report.count
+    );
 }

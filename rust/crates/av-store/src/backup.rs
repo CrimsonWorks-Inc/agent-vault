@@ -17,10 +17,10 @@ use serde_json::{Map, Value};
 
 use crate::crypto::{self, Argon2Params, ArgonAlg};
 use crate::error::{Error, Result};
+use crate::vault::{TemplateRestore, Vault};
 use av_core::secret::ExposeSecret;
 use av_core::{deny, DenyExtra, ErrorCode};
 use zeroize::Zeroizing;
-use crate::vault::{TemplateRestore, Vault};
 
 /// The bundle's `format`. Ports `BACKUP_FORMAT` in `src/store/backup.js`.
 pub const BACKUP_FORMAT: &str = "agent-vault-backup";
@@ -408,7 +408,12 @@ fn auth_error() -> Error {
 }
 
 fn locked() -> Error {
-    deny(ErrorCode::Locked, "the vault is locked", DenyExtra::default()).into()
+    deny(
+        ErrorCode::Locked,
+        "the vault is locked",
+        DenyExtra::default(),
+    )
+    .into()
 }
 
 /// The Argon2id a v2 bundle is sealed under. Tests in this crate use cheap
@@ -487,7 +492,8 @@ pub fn check_envelope(bundle: &Value) -> Result<Bundle> {
     let created_ok = b.get("created_at").is_some_and(Value::is_string);
     let ct_ok = b64_of_len(b.get("ct"), None);
     if version == Some(1) {
-        let kdf_ok = kdf.and_then(|o| o.get("name")).and_then(Value::as_str) == Some(BACKUP_KDF.name)
+        let kdf_ok = kdf.and_then(|o| o.get("name")).and_then(Value::as_str)
+            == Some(BACKUP_KDF.name)
             && num("N") == Some(u64::from(BACKUP_KDF.n))
             && num("r") == Some(u64::from(BACKUP_KDF.r))
             && num("p") == Some(u64::from(BACKUP_KDF.p))
@@ -535,15 +541,21 @@ fn only_keys(o: &Map<String, Value>, allowed: &[&str]) -> bool {
 /// Ports `checkPlaintext` in `src/store/backup.js`.
 pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
     let Value::Object(p) = plain else {
-        return Err(format_error("it carries something other than credentials and templates"));
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
     };
     let (Some(Value::Array(creds)), Some(Value::Array(templates))) =
         (p.get("credentials"), p.get("templates"))
     else {
-        return Err(format_error("it carries something other than credentials and templates"));
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
     };
     if !only_keys(p, &["credentials", "templates"]) {
-        return Err(format_error("it carries something other than credentials and templates"));
+        return Err(format_error(
+            "it carries something other than credentials and templates",
+        ));
     }
     for c in creds {
         let Value::Object(c) = c else {
@@ -554,7 +566,8 @@ pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
         let ok = only_keys(c, &CRED_KEYS)
             && av_core::placeholder::is_valid_slug(slug)
             && c.get("kind").is_some_and(Value::is_string)
-            && c.get("connector").is_none_or(|v| v.is_null() || v.is_object())
+            && c.get("connector")
+                .is_none_or(|v| v.is_null() || v.is_object())
             && fields.is_some_and(|f| !f.is_empty());
         if !ok {
             return Err(format_error("a credential entry is malformed"));
@@ -570,8 +583,7 @@ pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
                         .and_then(Value::as_str)
                         .is_some_and(|v| !v.is_empty())
                     && f.get("sites").is_none_or(|s| {
-                        s.is_null()
-                            || s.as_array().is_some_and(|a| a.iter().all(Value::is_string))
+                        s.is_null() || s.as_array().is_some_and(|a| a.iter().all(Value::is_string))
                     })
             });
             if !ok {
@@ -596,28 +608,33 @@ pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
                 })
             });
             if !ok {
-                return Err(format_error(&format!("the scrub patterns of {slug} are malformed")));
+                return Err(format_error(&format!(
+                    "the scrub patterns of {slug} are malformed"
+                )));
             }
         }
         if let Some(pins) = c.get("pins").filter(|v| !v.is_null()) {
             let ok = pins.as_object().is_some_and(|o| {
-                o.values().all(|l| {
-                    l.as_array()
-                        .is_some_and(|a| a.iter().all(Value::is_string))
-                })
+                o.values()
+                    .all(|l| l.as_array().is_some_and(|a| a.iter().all(Value::is_string)))
             });
             if !ok {
                 return Err(format_error(&format!("the pins of {slug} are malformed")));
             }
         }
         if let Some(e) = c.get("expires_at").filter(|v| !v.is_null()) {
-            if !e.as_str().is_some_and(|s| crate::util::parse_ms(s).is_some()) {
+            if !e
+                .as_str()
+                .is_some_and(|s| crate::util::parse_ms(s).is_some())
+            {
                 return Err(format_error(&format!("the expiry of {slug} is malformed")));
             }
         }
         if let Some(q) = c.get("quarantine").filter(|v| !v.is_null()) {
             if !q.is_object() {
-                return Err(format_error(&format!("the quarantine of {slug} is malformed")));
+                return Err(format_error(&format!(
+                    "the quarantine of {slug} is malformed"
+                )));
             }
         }
     }
@@ -636,7 +653,7 @@ pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
                     !["template", "template_hash", "presence"]
                         .iter()
                         .any(|k| s.contains_key(*k))
-                        && serde_json::to_string(s).map_or(false, |j| j.len() <= 16 * 1024)
+                        && serde_json::to_string(s).is_ok_and(|j| j.len() <= 16 * 1024)
                 })
         });
         if !ok {
@@ -645,7 +662,8 @@ pub fn check_plaintext(plain: &Value) -> Result<BackupPlaintext> {
     }
     // The shape is the closed list above; anything serde still refuses (an
     // id that is not text) is malformed too.
-    serde_json::from_value(plain.clone()).map_err(|_| format_error("a credential entry is malformed"))
+    serde_json::from_value(plain.clone())
+        .map_err(|_| format_error("a credential entry is malformed"))
 }
 
 /// Decrypt and check a bundle; a wrong passphrase and tampering are one
@@ -845,7 +863,11 @@ pub fn restore_backup(
     fn refused(vault: &mut Vault, e: Error) -> Error {
         if let Some(v) = e.as_vault() {
             if v.code != ErrorCode::Locked && !vault.locked() {
-                let reason = v.extra.rule.clone().unwrap_or_else(|| v.code.as_str().to_string());
+                let reason = v
+                    .extra
+                    .rule
+                    .clone()
+                    .unwrap_or_else(|| v.code.as_str().to_string());
                 if let Some(a) = vault.audit_mut() {
                     let mut f = Map::new();
                     f.insert("reason".into(), reason.into());

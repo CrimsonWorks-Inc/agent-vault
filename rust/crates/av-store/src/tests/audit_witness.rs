@@ -13,9 +13,20 @@ use crate::vault::*;
 
 fn busy(fx: &mut Fx) -> String {
     let v = &mut fx.vault;
-    let s = session_with(v, CreateSessionOptions { label: Some("busy".into()), ..Default::default() });
+    let s = session_with(
+        v,
+        CreateSessionOptions {
+            label: Some("busy".into()),
+            ..Default::default()
+        },
+    );
     let g = grant_for(v, &s.id, &fx.cred.id);
-    let issued = v.issue_placeholder(IssueOptions { grant_id: g.id, ..Default::default() }).unwrap();
+    let issued = v
+        .issue_placeholder(IssueOptions {
+            grant_id: g.id,
+            ..Default::default()
+        })
+        .unwrap();
     v.consume_placeholder(&issued.row.id).unwrap();
     issued.placeholder
 }
@@ -52,10 +63,23 @@ fn export_returns_the_records_after_since_seq_exactly_as_stored_and_is_recorded_
     let mut fx = fresh();
     let placeholder = busy(&mut fx);
     let v = &mut fx.vault;
-    let (seq, head) = (v.audit().unwrap().seq(), v.audit().unwrap().head().to_string());
-    let out = v.audit_mut().unwrap().export(ExportOptions { since_seq: 2, ..Default::default() }).unwrap();
+    let (seq, head) = (
+        v.audit().unwrap().seq(),
+        v.audit().unwrap().head().to_string(),
+    );
+    let out = v
+        .audit_mut()
+        .unwrap()
+        .export(ExportOptions {
+            since_seq: 2,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!((out.head.seq, out.head.hash.clone()), (seq, head));
-    let want: Vec<AuditRecord> = log_rows(v).into_iter().filter(|r| r.seq > 2 && r.seq <= seq).collect();
+    let want: Vec<AuditRecord> = log_rows(v)
+        .into_iter()
+        .filter(|r| r.seq > 2 && r.seq <= seq)
+        .collect();
     assert_eq!(out.rows, want);
     assert_eq!(out.next_seq, seq);
     for w in out.rows.windows(2) {
@@ -65,16 +89,30 @@ fn export_returns_the_records_after_since_seq_exactly_as_stored_and_is_recorded_
     assert!(!text.contains(SECRET) && !text.contains(&placeholder));
     let rec = &records(v, "audit.exported")[0];
     assert_eq!(
-        (field(rec, "from_seq"), field(rec, "to_seq"), field(rec, "rows")),
+        (
+            field(rec, "from_seq"),
+            field(rec, "to_seq"),
+            field(rec, "rows")
+        ),
         (&json!(3), &json!(seq), &json!(seq - 2))
     );
     assert_eq!(rec.seq, seq + 1);
     assert!(v.audit().unwrap().verify().unwrap().ok);
     let now_seq = v.audit().unwrap().seq();
-    let tail = v.audit_mut().unwrap().export(ExportOptions { since_seq: now_seq, ..Default::default() }).unwrap();
+    let tail = v
+        .audit_mut()
+        .unwrap()
+        .export(ExportOptions {
+            since_seq: now_seq,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!((tail.rows.len(), tail.next_seq), (0, now_seq));
     let second = &records(v, "audit.exported")[1];
-    assert_eq!((field(second, "from_seq"), field(second, "to_seq")), (&Value::Null, &Value::Null));
+    assert_eq!(
+        (field(second, "from_seq"), field(second, "to_seq")),
+        (&Value::Null, &Value::Null)
+    );
 }
 
 #[test]
@@ -82,11 +120,46 @@ fn the_export_limit_is_clamped_to_1_to_5000() {
     let mut fx = fresh();
     busy(&mut fx);
     let a = fx.vault.audit_mut().unwrap();
-    assert_eq!(a.export(ExportOptions { since_seq: 0, limit: 0 }).unwrap().rows.len(), 1);
-    assert_eq!(a.export(ExportOptions { since_seq: 0, limit: 2 }).unwrap().rows.len(), 2);
+    assert_eq!(
+        a.export(ExportOptions {
+            since_seq: 0,
+            limit: 0
+        })
+        .unwrap()
+        .rows
+        .len(),
+        1
+    );
+    assert_eq!(
+        a.export(ExportOptions {
+            since_seq: 0,
+            limit: 2
+        })
+        .unwrap()
+        .rows
+        .len(),
+        2
+    );
     let all = a.seq() as usize;
-    assert_eq!(a.export(ExportOptions { since_seq: 0, limit: 1_000_000_000 }).unwrap().rows.len(), all);
-    assert_eq!(a.export(ExportOptions { since_seq: 0, limit: 3 }).unwrap().next_seq, 3);
+    assert_eq!(
+        a.export(ExportOptions {
+            since_seq: 0,
+            limit: 1_000_000_000
+        })
+        .unwrap()
+        .rows
+        .len(),
+        all
+    );
+    assert_eq!(
+        a.export(ExportOptions {
+            since_seq: 0,
+            limit: 3
+        })
+        .unwrap()
+        .next_seq,
+        3
+    );
 }
 
 #[test]
@@ -96,7 +169,12 @@ fn an_export_range_that_is_not_a_whole_number_is_refused_and_nothing_is_recorded
     let mut fx = fresh();
     refused_cleanly(
         &mut fx.vault,
-        |v| v.audit_mut().unwrap().export(ExportOptions { since_seq: u64::MAX, limit: 10 }),
+        |v| {
+            v.audit_mut().unwrap().export(ExportOptions {
+                since_seq: u64::MAX,
+                limit: 10,
+            })
+        },
         ("AV_POLICY_DENIED", Some("audit_range")),
     );
 }
@@ -106,25 +184,42 @@ fn a_checkpoint_names_a_stable_vault_id_the_head_and_a_mac_and_keeps_the_chain_i
     let mut fx = fresh();
     busy(&mut fx);
     let v = &mut fx.vault;
-    let (seq, head) = (v.audit().unwrap().seq(), v.audit().unwrap().head().to_string());
+    let (seq, head) = (
+        v.audit().unwrap().seq(),
+        v.audit().unwrap().head().to_string(),
+    );
     let c = v.audit_mut().unwrap().checkpoint().unwrap();
     assert_eq!((c.seq, c.head.clone()), (seq, head));
     assert!(c.vault_id.starts_with("vlt_") && c.vault_id.len() == 30);
-    assert_eq!(c.mac, mac(v, &format!("witness|{}|{}|{}|{}", c.vault_id, c.seq, c.head, c.ts)));
+    assert_eq!(
+        c.mac,
+        mac(
+            v,
+            &format!("witness|{}|{}|{}|{}", c.vault_id, c.seq, c.head, c.ts)
+        )
+    );
     let rec = &records(v, "audit.checkpoint_issued")[0];
     assert_eq!(field(rec, "checkpoint_seq"), &json!(seq));
     assert_eq!(rec.seq, seq + 1);
     assert!(v.audit().unwrap().verify().unwrap().ok);
-    assert_eq!(v.audit_mut().unwrap().checkpoint().unwrap().vault_id, c.vault_id);
+    assert_eq!(
+        v.audit_mut().unwrap().checkpoint().unwrap().vault_id,
+        c.vault_id
+    );
     let mut again = Vault::open(fx.dir.path()).unwrap();
     again.unlock(None).unwrap();
-    assert_eq!(again.audit_mut().unwrap().checkpoint().unwrap().vault_id, c.vault_id, "the vault id survives a restart");
+    assert_eq!(
+        again.audit_mut().unwrap().checkpoint().unwrap().vault_id,
+        c.vault_id,
+        "the vault id survives a restart"
+    );
 }
 
 #[test]
 fn an_untouched_log_reports_its_witnesses_ok_the_genesis_one_included() {
     let mut fx = fresh();
-    let mut w = vec![serde_json::to_value(fx.vault.audit_mut().unwrap().checkpoint().unwrap()).unwrap()];
+    let mut w =
+        vec![serde_json::to_value(fx.vault.audit_mut().unwrap().checkpoint().unwrap()).unwrap()];
     busy(&mut fx);
     w.push(serde_json::to_value(fx.vault.audit_mut().unwrap().checkpoint().unwrap()).unwrap());
     busy(&mut fx);
@@ -140,7 +235,13 @@ fn an_untouched_log_reports_its_witnesses_ok_the_genesis_one_included() {
     );
     let rec = &records(&fx.vault, "audit.witness_verified")[0];
     assert_eq!(
-        [field(rec, "ok"), field(rec, "checked"), field(rec, "ahead"), field(rec, "mismatched"), field(rec, "forged")],
+        [
+            field(rec, "ok"),
+            field(rec, "checked"),
+            field(rec, "ahead"),
+            field(rec, "mismatched"),
+            field(rec, "forged")
+        ],
         [&json!(true), &json!(4), &json!(0), &json!(0), &json!(0)]
     );
 }
@@ -153,7 +254,11 @@ fn a_log_cut_back_after_a_witness_reports_it_ahead() {
     busy(&mut fx);
     let late = fx.vault.audit_mut().unwrap().checkpoint().unwrap();
     unprotect(&fx.vault);
-    exec(&fx.vault, "DELETE FROM audit WHERE seq > ?1", &[&((late.seq - 3) as i64)]);
+    exec(
+        &fx.vault,
+        "DELETE FROM audit WHERE seq > ?1",
+        &[&((late.seq - 3) as i64)],
+    );
     let late_seq = late.seq;
     let out = fx
         .vault
@@ -172,7 +277,10 @@ fn a_record_whose_hash_was_changed_reports_mismatched_and_a_changed_witness_repo
     busy(&mut fx);
     let c = fx.vault.audit_mut().unwrap().checkpoint().unwrap();
     unprotect(&fx.vault);
-    let row = log_rows(&fx.vault).into_iter().find(|r| r.seq == c.seq).unwrap();
+    let row = log_rows(&fx.vault)
+        .into_iter()
+        .find(|r| r.seq == c.seq)
+        .unwrap();
     let mut changed = serde_json::to_value(&row).unwrap();
     changed["hash"] = json!("f".repeat(64));
     exec(
@@ -181,7 +289,15 @@ fn a_record_whose_hash_was_changed_reports_mismatched_and_a_changed_witness_repo
         &[&"f".repeat(64), &changed.to_string(), &(c.seq as i64)],
     );
     let cv = serde_json::to_value(&c).unwrap();
-    assert_eq!(fx.vault.audit_mut().unwrap().verify_witness(&[cv.clone()]).unwrap().mismatched, vec![c.seq]);
+    assert_eq!(
+        fx.vault
+            .audit_mut()
+            .unwrap()
+            .verify_witness(std::slice::from_ref(&cv))
+            .unwrap()
+            .mismatched,
+        vec![c.seq]
+    );
     let with = |k: &str, val: Value| {
         let mut x = cv.clone();
         if val.is_null() {
@@ -202,7 +318,12 @@ fn a_record_whose_hash_was_changed_reports_mismatched_and_a_changed_witness_repo
         json!([]),
         with("seq", json!("3")),
     ];
-    let out = fx.vault.audit_mut().unwrap().verify_witness(&forged).unwrap();
+    let out = fx
+        .vault
+        .audit_mut()
+        .unwrap()
+        .verify_witness(&forged)
+        .unwrap();
     assert_eq!(out.forged, (0..forged.len()).collect::<Vec<_>>());
     assert!(!out.ok);
 }
@@ -215,10 +336,21 @@ fn a_witness_for_another_vault_is_reported_and_does_not_by_itself_fail_the_check
     other["vault_id"] = json!("vlt_SOMEWHEREELSE0000000000000");
     let m = mac(
         &fx.vault,
-        &format!("witness|{}|{}|{}|{}", other["vault_id"].as_str().unwrap(), other["seq"], other["head"].as_str().unwrap(), other["ts"].as_str().unwrap()),
+        &format!(
+            "witness|{}|{}|{}|{}",
+            other["vault_id"].as_str().unwrap(),
+            other["seq"],
+            other["head"].as_str().unwrap(),
+            other["ts"].as_str().unwrap()
+        ),
     );
     other["mac"] = json!(m);
-    let out = fx.vault.audit_mut().unwrap().verify_witness(&[c, other]).unwrap();
+    let out = fx
+        .vault
+        .audit_mut()
+        .unwrap()
+        .verify_witness(&[c, other])
+        .unwrap();
     assert!(out.ok);
     assert_eq!(out.other_vault, vec![1]);
     assert!(out.forged.is_empty());
@@ -244,7 +376,12 @@ fn a_caller_cannot_set_a_chain_field_write_refuses_it_naming_the_field_and_appen
         let mut f = serde_json::Map::new();
         f.insert(k.into(), json!(7));
         f.insert("other".into(), json!(1));
-        let e = fx.vault.audit_mut().unwrap().write("test.reserved", f).unwrap_err();
+        let e = fx
+            .vault
+            .audit_mut()
+            .unwrap()
+            .write("test.reserved", f)
+            .unwrap_err();
         let ve = e.as_vault().expect("a refusal");
         assert_eq!(ve.code.as_str(), "AV_INTERNAL", "{k}");
         assert!(ve.detail.contains(k), "{}", ve.detail);
@@ -255,7 +392,11 @@ fn a_caller_cannot_set_a_chain_field_write_refuses_it_naming_the_field_and_appen
     sorted.sort_unstable();
     assert_eq!(sorted, vec!["hash", "kind", "prev_hash", "seq", "ts"]);
     let f = json!({ "checkpoint_seq": 3, "template_hash": "ab", "kinds": 1, "from_seq": 2 });
-    fx.vault.audit_mut().unwrap().write("test.ordinary", f.as_object().unwrap().clone()).unwrap();
+    fx.vault
+        .audit_mut()
+        .unwrap()
+        .write("test.ordinary", f.as_object().unwrap().clone())
+        .unwrap();
     assert!(fx.vault.audit().unwrap().verify().unwrap().ok);
 }
 
@@ -269,7 +410,9 @@ fn audit_literal_keys(src: &str) -> Vec<Vec<String>> {
             let start = from + i;
             from = start + marker.len();
             let rest = &src[from..];
-            let Some(j) = rest.find("json!({") else { continue };
+            let Some(j) = rest.find("json!({") else {
+                continue;
+            };
             // Only a literal inside this call's own argument list.
             if rest[..j].contains(';') {
                 continue;
@@ -295,7 +438,9 @@ fn audit_literal_keys(src: &str) -> Vec<Vec<String>> {
                 .split(',')
                 .filter_map(|part| {
                     let p = part.trim().trim_start_matches('{').trim();
-                    p.strip_prefix('"').and_then(|q| q.split('"').next()).map(str::to_string)
+                    p.strip_prefix('"')
+                        .and_then(|q| q.split('"').next())
+                        .map(str::to_string)
                 })
                 .collect();
             out.push(keys);
@@ -323,7 +468,10 @@ fn no_audit_write_in_the_store_passes_a_chain_field() {
             }
         }
     }
-    assert!(calls > 40, "found only {calls} audit writes; the scan has stopped reading the source");
+    assert!(
+        calls > 40,
+        "found only {calls} audit writes; the scan has stopped reading the source"
+    );
     assert!(bad.is_empty(), "{bad:?}");
     let probe = audit_literal_keys("t.audit(\"x\", json!({ \"a\": 1, \"seq\": n }))");
     assert_eq!(probe, vec![vec!["a".to_string(), "seq".to_string()]]);
@@ -338,7 +486,11 @@ fn a_log_cut_back_while_stopped_is_reported_and_the_report_survives_new_writes()
     let n = fx.vault.audit().unwrap().seq();
     fx.vault.lock().unwrap();
     unprotect(&fx.vault);
-    exec(&fx.vault, "DELETE FROM audit WHERE seq > ?1", &[&((n - 3) as i64)]);
+    exec(
+        &fx.vault,
+        "DELETE FROM audit WHERE seq > ?1",
+        &[&((n - 3) as i64)],
+    );
     let mut again = Vault::open(fx.dir.path()).unwrap();
     again.unlock(None).unwrap();
     let a = again.audit().unwrap();
@@ -347,11 +499,17 @@ fn a_log_cut_back_while_stopped_is_reported_and_the_report_survives_new_writes()
     assert!(!r.ok);
     assert!(r.reason.unwrap().contains("removed from the end"));
     busy_on(&mut again);
-    assert!(!again.audit().unwrap().verify().unwrap().ok, "the finding is permanent");
+    assert!(
+        !again.audit().unwrap().verify().unwrap().ok,
+        "the finding is permanent"
+    );
 }
 
 fn busy_on(v: &mut Vault) {
-    v.audit_mut().unwrap().write("test.more", serde_json::Map::new()).unwrap();
+    v.audit_mut()
+        .unwrap()
+        .write("test.more", serde_json::Map::new())
+        .unwrap();
 }
 
 #[test]
@@ -375,9 +533,15 @@ fn an_unreadable_row_is_reported_as_corruption_and_does_not_lock_the_owner_out()
     busy(&mut fx);
     fx.vault.lock().unwrap();
     unprotect(&fx.vault);
-    exec(&fx.vault, "UPDATE audit SET record = '{}' WHERE seq = 2", &[]);
+    exec(
+        &fx.vault,
+        "UPDATE audit SET record = '{}' WHERE seq = 2",
+        &[],
+    );
     let mut again = Vault::open(fx.dir.path()).unwrap();
-    again.unlock(None).expect("a bad row must not cost the owner the vault");
+    again
+        .unlock(None)
+        .expect("a bad row must not cost the owner the vault");
     let c = again.audit().unwrap().corruption().cloned().unwrap();
     assert_eq!(c.lines, vec![2]);
     let r = again.audit().unwrap().verify().unwrap();
@@ -403,10 +567,26 @@ fn read_filters_by_kind_session_since_and_request_and_keeps_the_newest() {
     let mut fx = fresh();
     busy(&mut fx);
     let a = fx.vault.audit().unwrap();
-    let all = a.read(&ReadFilter { limit: 0, ..Default::default() }).unwrap();
-    let sessions = a.read(&ReadFilter { limit: 100, kind: Some("session".into()), ..Default::default() }).unwrap();
+    let all = a
+        .read(&ReadFilter {
+            limit: 0,
+            ..Default::default()
+        })
+        .unwrap();
+    let sessions = a
+        .read(&ReadFilter {
+            limit: 100,
+            kind: Some("session".into()),
+            ..Default::default()
+        })
+        .unwrap();
     assert!(sessions.iter().all(|r| r.kind.starts_with("session.")));
-    let two = a.read(&ReadFilter { limit: 2, ..Default::default() }).unwrap();
+    let two = a
+        .read(&ReadFilter {
+            limit: 2,
+            ..Default::default()
+        })
+        .unwrap();
     assert_eq!(two.len(), 2);
     assert_eq!(two[1].seq, all.last().unwrap().seq);
 }

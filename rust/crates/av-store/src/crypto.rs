@@ -242,8 +242,13 @@ pub fn scrypt_key(passphrase: &SecretString, salt: &[u8], params: &ScryptParams)
     }
     let p = scrypt::Params::new(params.log_n, params.r, params.p).map_err(|_| CryptoError::Kdf)?;
     let mut out = Zeroizing::new([0u8; 32]);
-    scrypt::scrypt(passphrase.expose_secret().as_bytes(), salt, &p, out.as_mut())
-        .map_err(|_| CryptoError::Kdf)?;
+    scrypt::scrypt(
+        passphrase.expose_secret().as_bytes(),
+        salt,
+        &p,
+        out.as_mut(),
+    )
+    .map_err(|_| CryptoError::Kdf)?;
     Ok(Key32::from_bytes(*out))
 }
 
@@ -264,7 +269,8 @@ pub fn argon2_key(passphrase: &SecretString, salt: &[u8], params: &Argon2Params)
 /// nonce and `aad` (UTF-8; empty means none). The caller zeroizes its
 /// plaintext. Ports `seal` in `src/store/crypto.js`, in format v2.
 pub fn seal(key: &Key32, plaintext: &[u8], aad: &str) -> Result<SealedV2> {
-    let cipher = XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
     let mut nonce = [0u8; V2_NONCE_LEN];
     fill_random(&mut nonce)?;
     let ct = cipher
@@ -296,7 +302,8 @@ pub fn open(key: &Key32, sealed: &SealedV2, aad: &str) -> Result<SecretBytes> {
     if ct.len() < TAG_LEN {
         return Err(CryptoError::Malformed.into());
     }
-    let cipher = XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
     let plain = cipher
         .decrypt(
             (&nonce).into(),
@@ -333,13 +340,16 @@ pub(crate) fn bytes_to_secret_string(bytes: SecretBytes) -> Result<SecretString>
 /// `migrate` and backup restore call this. Ports `openBytes` in
 /// `src/store/crypto.js` as the JS runs it.
 pub fn open_v1(key: &Key32, sealed: &SealedV1, aad: &str) -> Result<SecretBytes> {
-    let nonce = B64.decode(&sealed.nonce).map_err(|_| CryptoError::Malformed)?;
+    let nonce = B64
+        .decode(&sealed.nonce)
+        .map_err(|_| CryptoError::Malformed)?;
     let nonce: [u8; V1_NONCE_LEN] = nonce.try_into().map_err(|_| CryptoError::Malformed)?;
     let ct = B64.decode(&sealed.ct).map_err(|_| CryptoError::Malformed)?;
     if ct.len() < TAG_LEN {
         return Err(CryptoError::Malformed.into());
     }
-    let cipher = ChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
     let plain = cipher
         .decrypt(
             (&nonce).into(),
@@ -356,7 +366,8 @@ pub fn open_v1(key: &Key32, sealed: &SealedV1, aad: &str) -> Result<SecretBytes>
 /// but the tests need JS-shaped values to read back.
 #[cfg(test)]
 pub(crate) fn seal_v1(key: &Key32, plaintext: &[u8], aad: &str) -> Result<SealedV1> {
-    let cipher = ChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CryptoError::KeyLength)?;
     let mut nonce = [0u8; V1_NONCE_LEN];
     fill_random(&mut nonce)?;
     let ct = cipher
@@ -481,9 +492,11 @@ pub(crate) fn b64_strict(s: &str) -> Option<Vec<u8>> {
 /// Decode standard base64 the lenient way Node's `Buffer.from(s, 'base64')`
 /// does for a well-formed value (padding optional).
 pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
-    B64.decode(s)
-        .ok()
-        .or_else(|| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.trim_end_matches('=')).ok())
+    B64.decode(s).ok().or_else(|| {
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(s.trim_end_matches('='))
+            .ok()
+    })
 }
 
 /// `serde(with = ...)` helpers for a [`SecretString`] field in a JSON

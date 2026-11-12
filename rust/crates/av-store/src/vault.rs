@@ -33,9 +33,9 @@ use crate::ids;
 use crate::mlock::LockedKey;
 use crate::model::{
     dead_reason, CredentialField, CredentialRecord, FactorClass, FactorState, GrantCounters,
-    GrantRecord, GrantState, HealthRecord, HealthSource, HealthStatus, ListenerRecord,
-    ListenerTls, NotifyDetail, NotifyRecord, PlaceholderRow, PlaceholderState, PresenceFactor,
-    PresenceKey, QuarantineBy, QuarantineRecord, RetiredValue, ScrubPattern, SessionRecord,
+    GrantRecord, GrantState, HealthRecord, HealthSource, HealthStatus, ListenerRecord, ListenerTls,
+    NotifyDetail, NotifyRecord, PlaceholderRow, PlaceholderState, PresenceFactor, PresenceKey,
+    QuarantineBy, QuarantineRecord, RetiredValue, ScrubPattern, SessionRecord,
     SessionRequestRecord, SessionState, Settings, TemplateRecord, VmkWrap, WorkspaceRecord,
 };
 use crate::rows;
@@ -256,7 +256,8 @@ pub fn presence_key_record(input: &Value) -> Result<PresenceKey> {
     let credential_id = match obj.get("credentialId") {
         Some(Value::String(s))
             if !s.is_empty()
-                && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') =>
+                && s.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') =>
         {
             s.clone()
         }
@@ -270,7 +271,9 @@ pub fn presence_key_record(input: &Value) -> Result<PresenceKey> {
             && base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r) == credential_id
     });
     if !ok_id {
-        return Err(presence_refusal("credentialId is not a WebAuthn credential id"));
+        return Err(presence_refusal(
+            "credentialId is not a WebAuthn credential id",
+        ));
     }
     let spki = match obj.get("publicKeySpki") {
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
@@ -1138,7 +1141,12 @@ fn obj(v: Value) -> Map<String, Value> {
 }
 
 fn locked_error() -> Error {
-    deny(ErrorCode::Locked, "the vault is locked", DenyExtra::default()).into()
+    deny(
+        ErrorCode::Locked,
+        "the vault is locked",
+        DenyExtra::default(),
+    )
+    .into()
 }
 
 fn refuse(code: ErrorCode, detail: impl Into<String>, rule: &str) -> Error {
@@ -1241,7 +1249,10 @@ fn expiry_for_audit(map: &mut Map<String, Value>, expires_at: Option<&str>, requ
         map.insert("expires_at".into(), Value::Null);
         map.insert("has_expiry".into(), Value::Bool(expires_at.is_some()));
     } else {
-        map.insert("expires_at".into(), expires_at.map_or(Value::Null, Value::from));
+        map.insert(
+            "expires_at".into(),
+            expires_at.map_or(Value::Null, Value::from),
+        );
     }
 }
 
@@ -1264,7 +1275,9 @@ fn max_active_of(pp: &Value) -> u64 {
 
 /// `phPolicy.max_uses` when it is a finite number.
 fn ph_max_uses(pp: &Value) -> Option<f64> {
-    pp.get("max_uses").and_then(Value::as_f64).filter(|f| f.is_finite())
+    pp.get("max_uses")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite())
 }
 
 /// A positive finite number, else no limit.
@@ -1310,7 +1323,9 @@ fn wrap_vmk(device_key: &Key32, vmk: &Key32, material: WrapMaterial<'_>) -> Resu
         }
         WrapMaterial::Prf(secret) => {
             if secret.len() < 32 {
-                return Err(Error::Invariant("webauthn PRF secret must be 32 bytes".into()));
+                return Err(Error::Invariant(
+                    "webauthn PRF secret must be 32 bytes".into(),
+                ));
             }
             (
                 FactorClass::WebauthnPrf,
@@ -1388,7 +1403,8 @@ fn factor_key_for(wrap: &VmkWrap, material: &UnlockMaterial) -> Result<Option<Ze
 fn open_wrap(device_key: &Key32, wrap: &VmkWrap, factor_key: &[u8]) -> Result<Key32> {
     let kek = crypto::derive_kek(device_key, factor_key);
     let text = crypto::open_string(&kek, &wrap.sealed, &crypto::vmk_aad(class_name(wrap.class)))?;
-    let raw = Zeroizing::new(crypto::b64_decode(text.expose_secret()).ok_or(CryptoError::Malformed)?);
+    let raw =
+        Zeroizing::new(crypto::b64_decode(text.expose_secret()).ok_or(CryptoError::Malformed)?);
     let arr: [u8; 32] = raw
         .as_slice()
         .try_into()
@@ -1545,7 +1561,12 @@ fn check_template(name: &str, spec: &Value) -> Result<String> {
 }
 
 /// Ports `#templateRecord` in `src/store/vault.js`.
-fn template_record(name: &str, text: &str, old: Option<&TemplateRecord>, now: &str) -> Result<TemplateRecord> {
+fn template_record(
+    name: &str,
+    text: &str,
+    old: Option<&TemplateRecord>,
+    now: &str,
+) -> Result<TemplateRecord> {
     let stored: Value = serde_json::from_str(text)?;
     let hash = crypto::sha256_hex(av_core::operation::canonical_operation(&stored).as_bytes());
     Ok(TemplateRecord {
@@ -1660,14 +1681,22 @@ fn scrub_audit(t: &mut Tx<'_>, cred: &CredentialRecord, p: &ScrubPattern) -> Res
 
 /// The value of one field, quarantined or not. Ports `#unseal`.
 fn unseal(vmk: &Key32, cred: &CredentialRecord, field: &str) -> Result<SecretString> {
-    let f = cred.fields.iter().find(|f| f.name == field).ok_or_else(|| {
-        plain(
-            ErrorCode::NotFound,
-            format!("credential {} has no field {field}", cred.slug),
-        )
-    })?;
+    let f = cred
+        .fields
+        .iter()
+        .find(|f| f.name == field)
+        .ok_or_else(|| {
+            plain(
+                ErrorCode::NotFound,
+                format!("credential {} has no field {field}", cred.slug),
+            )
+        })?;
     let key = crypto::dek(vmk, &cred.id);
-    crypto::open_string(&key, &f.sealed, &crypto::field_aad(&cred.id, &f.name, f.key_version))
+    crypto::open_string(
+        &key,
+        &f.sealed,
+        &crypto::field_aad(&cred.id, &f.name, f.key_version),
+    )
 }
 
 /// Every unsealed value, retired ones in their window included. Ports
@@ -1974,7 +2003,10 @@ fn create_session_in(t: &mut Tx<'_>, opts: &CreateSessionOptions) -> Result<Crea
         ));
     }
     if opts.elevated.len() > ELEVATIONS.len()
-        || !opts.elevated.iter().all(|e| ELEVATIONS.contains(&e.as_str()))
+        || !opts
+            .elevated
+            .iter()
+            .all(|e| ELEVATIONS.contains(&e.as_str()))
     {
         return Err(refuse(
             ErrorCode::PolicyDenied,
@@ -2203,7 +2235,9 @@ fn issue_in(t: &mut Tx<'_>, opts: &IssueOptions) -> Result<IssuedPlaceholder> {
         let key = |p: &PlaceholderRow| {
             (
                 u8::from(p.uses != 0),
-                p.last_used_at.clone().unwrap_or_else(|| p.created_at.clone()),
+                p.last_used_at
+                    .clone()
+                    .unwrap_or_else(|| p.created_at.clone()),
             )
         };
         key(a).cmp(&key(b))
@@ -2224,8 +2258,9 @@ fn issue_in(t: &mut Tx<'_>, opts: &IssueOptions) -> Result<IssuedPlaceholder> {
     } else {
         max_uses_f.ceil() as u64
     };
-    let ttl = positive(opts.ttl_ms.map(|v| v as f64))
-        .min(positive(pp.get("ttl").and_then(Value::as_f64).map(|s| s * 1000.0)));
+    let ttl = positive(opts.ttl_ms.map(|v| v as f64)).min(positive(
+        pp.get("ttl").and_then(Value::as_f64).map(|s| s * 1000.0),
+    ));
     let expires = (t.now as f64 + ttl)
         .min(session_ceiling_ms(&session))
         .min(expiry_ms(grant.expires_at.as_deref()));
@@ -2340,7 +2375,10 @@ impl Vault {
     }
 
     fn vmk_key(&self) -> Result<Key32> {
-        self.vmk.as_ref().map(LockedKey::key).ok_or_else(locked_error)
+        self.vmk
+            .as_ref()
+            .map(LockedKey::key)
+            .ok_or_else(locked_error)
     }
 
     fn install(&mut self, vmk: &Key32) -> Result<()> {
@@ -2392,9 +2430,14 @@ impl Vault {
             },
         )?;
         if opts.factor == FactorClass::Passphrase && opts.passphrase.is_none() {
-            return Err(Error::Invariant("the passphrase factor needs a passphrase".into()));
+            return Err(Error::Invariant(
+                "the passphrase factor needs a passphrase".into(),
+            ));
         }
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         // A JS vault (vault.json) in the same dir is one too: its device key
         // must never be overwritten. That vault is migrated, not recreated.
@@ -2419,11 +2462,11 @@ impl Vault {
         let vmk = crypto::random_key()?;
         let material = match opts.factor {
             FactorClass::None => WrapMaterial::None,
-            FactorClass::Passphrase => WrapMaterial::Passphrase(
-                opts.passphrase
-                    .as_ref()
-                    .ok_or_else(|| Error::Invariant("the passphrase factor needs a passphrase".into()))?,
-            ),
+            FactorClass::Passphrase => {
+                WrapMaterial::Passphrase(opts.passphrase.as_ref().ok_or_else(|| {
+                    Error::Invariant("the passphrase factor needs a passphrase".into())
+                })?)
+            }
             FactorClass::WebauthnPrf => return Err(recovery_refusal()),
         };
         let wrap = wrap_vmk(&device_key, &vmk, material)?;
@@ -2625,7 +2668,11 @@ impl Vault {
     ) -> Result<()> {
         let vmk = self.vmk_key()?;
         let device_key = read_device_key(&self.dir)?;
-        let mut wrap = wrap_vmk(&device_key, &vmk, WrapMaterial::Prf(prf_secret.expose_secret()))?;
+        let mut wrap = wrap_vmk(
+            &device_key,
+            &vmk,
+            WrapMaterial::Prf(prf_secret.expose_secret()),
+        )?;
         wrap.credential_id = Some(credential_id.to_string());
         let mut next: Vec<VmkWrap> = self
             .read(rows::wraps_get)?
@@ -2670,7 +2717,10 @@ impl Vault {
                 )?;
             }
             if had {
-                t.audit_required("presence.factor_removed", json!({ "class": "webauthn-prf" }))?;
+                t.audit_required(
+                    "presence.factor_removed",
+                    json!({ "class": "webauthn-prf" }),
+                )?;
             }
             Ok(had)
         })
@@ -2977,7 +3027,10 @@ impl Vault {
         } else {
             self.all_secrets()?
         };
-        Ok(av_core::scrub::untrusted_text(Some(text), &core_secrets(&secrets), max).unwrap_or_default())
+        Ok(
+            av_core::scrub::untrusted_text(Some(text), &core_secrets(&secrets), max)
+                .unwrap_or_default(),
+        )
     }
 
     /// Every unsealed value, retired ones inside their window included, for
@@ -3066,7 +3119,8 @@ impl Vault {
                 Some(Value::Null) => Some(None),
                 Some(Value::Array(a))
                     if a.len() <= 64
-                        && a.iter().all(|s| s.as_str().is_some_and(|s| js_len(s) <= 128)) =>
+                        && a.iter()
+                            .all(|s| s.as_str().is_some_and(|s| js_len(s) <= 128)) =>
                 {
                     Some(Some(
                         a.iter()
@@ -3681,7 +3735,11 @@ impl Vault {
                 ),
                 pins: Some(c.pins.clone()),
                 expires_at: c.expires_at.clone(),
-                quarantine: c.quarantine.as_ref().map(serde_json::to_value).transpose()?,
+                quarantine: c
+                    .quarantine
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?,
             });
         }
         Ok(out)
@@ -3725,7 +3783,10 @@ impl Vault {
                 if c.fields.iter().any(|f| f.value.expose_secret().is_empty())
                     || names.len() != c.fields.len()
                 {
-                    return Err(backup_format(&format!("the fields of {} are malformed", c.slug)));
+                    return Err(backup_format(&format!(
+                        "the fields of {} are malformed",
+                        c.slug
+                    )));
                 }
                 let fields: Vec<(String, SecretString)> = c
                     .fields
@@ -3876,9 +3937,10 @@ impl Vault {
                     )?;
                 }
                 if let Some(q) = &cred.quarantine {
-                    let reason = q.reason_untrusted.as_deref().and_then(|r| {
-                        av_core::scrub::untrusted_text(Some(r), &scrub_set, 200)
-                    });
+                    let reason = q
+                        .reason_untrusted
+                        .as_deref()
+                        .and_then(|r| av_core::scrub::untrusted_text(Some(r), &scrub_set, 200));
                     t.audit_required(
                         "cred.quarantined",
                         json!({
@@ -4181,7 +4243,8 @@ impl Vault {
             let parent = session_live_in(t, stored.as_ref())?;
             let now = t.now;
             let parent_ends = session_expiry_ms(&parent);
-            let parent_ttl = (parent_ends != f64::INFINITY).then(|| (parent_ends - now as f64) as i64);
+            let parent_ttl =
+                (parent_ends != f64::INFINITY).then_some((parent_ends - now as f64) as i64);
             let ttl = match parent_ttl {
                 None => opts.ttl_ms,
                 Some(p) => Some(opts.ttl_ms.unwrap_or(p).min(p)),
@@ -4215,7 +4278,7 @@ impl Vault {
                 if ends <= now as f64 {
                     continue;
                 }
-                let ttl_ms = (ends != f64::INFINITY).then(|| (ends - now as f64) as i64);
+                let ttl_ms = (ends != f64::INFINITY).then_some((ends - now as f64) as i64);
                 create_grant_in(
                     t,
                     &CreateGrantOptions {
@@ -4322,7 +4385,9 @@ impl Vault {
             }
             let newer = match &newest {
                 None => true,
-                Some(n) => g.created_at > n.created_at || (g.created_at == n.created_at && g.id > n.id),
+                Some(n) => {
+                    g.created_at > n.created_at || (g.created_at == n.created_at && g.id > n.id)
+                }
             };
             if newer {
                 newest = Some(g);
@@ -4362,7 +4427,7 @@ impl Vault {
             if g.state != GrantState::Active || expiry_ms(g.expires_at.as_deref()) <= t.now as f64 {
                 return Ok(false);
             }
-            if n < 1 || n > av_core::policy::MAX_SAFE_INTEGER {
+            if !(1..=av_core::policy::MAX_SAFE_INTEGER).contains(&n) {
                 return Ok(false);
             }
             let used = g.budget_used;
@@ -4502,7 +4567,11 @@ impl Vault {
                     }
                     _ => ErrorCode::PhReplay,
                 };
-                let shown = if reason.is_empty() { "dead".to_string() } else { reason };
+                let shown = if reason.is_empty() {
+                    "dead".to_string()
+                } else {
+                    reason
+                };
                 return Err(deny(code, format!("placeholder is {shown}"), ph_next_hint()).into());
             }
             let session = rows::session_get(t.c, &row.sid)?;
@@ -4590,8 +4659,12 @@ impl Vault {
             };
             let grant = rows::grant_get(t.c, &row.grant_id)?;
             let session = rows::session_get(t.c, &row.sid)?;
-            let live = grant.as_ref().is_some_and(|g| g.state == GrantState::Active)
-                && session.as_ref().is_some_and(|s| s.state == SessionState::Active);
+            let live = grant
+                .as_ref()
+                .is_some_and(|g| g.state == GrantState::Active)
+                && session
+                    .as_ref()
+                    .is_some_and(|s| s.state == SessionState::Active);
             if !live {
                 let state_of = |v: Option<String>| v.unwrap_or_else(|| "missing".into());
                 t.audit(
@@ -4650,11 +4723,13 @@ impl Vault {
         self.run(|t| {
             let old = rows::ph_get(t.c, row_id)?
                 .ok_or_else(|| plain(ErrorCode::NotFound, format!("no placeholder {row_id}")))?;
-            let existing = rows::ph_of_grant(t.c, &old.grant_id)?.into_iter().find(|p| {
-                p.replaces_id.as_deref() == Some(row_id)
-                    && p.state == PlaceholderState::Active
-                    && p.uses == 0
-            });
+            let existing = rows::ph_of_grant(t.c, &old.grant_id)?
+                .into_iter()
+                .find(|p| {
+                    p.replaces_id.as_deref() == Some(row_id)
+                        && p.state == PlaceholderState::Active
+                        && p.uses == 0
+                });
             if let Some(row) = existing {
                 return Ok(NextPlaceholder {
                     placeholder: None,

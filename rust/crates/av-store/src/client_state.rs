@@ -90,7 +90,9 @@ pub fn state_dir() -> PathBuf {
     match std::env::var_os("AGENT_VAULT_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             home.join(DEFAULT_STATE_DIR)
         }
     }
@@ -103,7 +105,9 @@ pub fn state_path(dir: &Path) -> PathBuf {
 
 /// Whether `s` is `[A-Za-z0-9]+` (`alnum`), with `extra` allowed too.
 fn all_of(s: &str, extra: &[u8]) -> bool {
-    !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
+    !s.is_empty()
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(&c))
 }
 
 /// [`TOKEN_SHAPE`]: `avs1.<alnum>.<base64url>`.
@@ -139,7 +143,8 @@ fn is_base_url(s: &str) -> bool {
     if port.is_empty() || port.len() > 5 || !port.bytes().all(|c| c.is_ascii_digit()) {
         return false;
     }
-    tail.strip_prefix("p/").is_some_and(|slug| all_of(slug, b"._-"))
+    tail.strip_prefix("p/")
+        .is_some_and(|slug| all_of(slug, b"._-"))
 }
 
 /// `Number(v)` as the JS port check reads it, for the values JSON can hold.
@@ -184,7 +189,8 @@ pub fn load_state(path: &Path) -> ClientState {
     }
     // `agent-vault env` is meant for `eval`, so each field is dropped unless
     // it has the one shape it can legitimately have.
-    let shapes: [(&str, fn(&str) -> bool); 4] = [
+    type Shape = (&'static str, fn(&str) -> bool);
+    let shapes: [Shape; 4] = [
         ("token", is_token),
         ("placeholder", is_placeholder),
         ("session_id", is_session_id),

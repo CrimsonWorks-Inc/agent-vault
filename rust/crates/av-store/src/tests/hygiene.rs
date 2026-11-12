@@ -23,7 +23,8 @@ const SOURCES: &[(&str, &str)] = &[
 ];
 
 const SQL_WORDS: &[&str] = &[
-    "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA ", "CREATE ", "DROP ", "ALTER ", " WHERE ", " VALUES", " FROM ",
+    "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "PRAGMA ", "CREATE ", "DROP ", "ALTER ", " WHERE ",
+    " VALUES", " FROM ",
 ];
 
 /// The text of every `format!(...)` call in `src` (its argument list), by
@@ -73,7 +74,10 @@ fn no_sql_is_built_with_format() {
             bad.push(format!("{name}: format!({c})"));
         }
     }
-    assert!(calls > 50, "found only {calls} format! calls; the scan has stopped reading the source");
+    assert!(
+        calls > 50,
+        "found only {calls} format! calls; the scan has stopped reading the source"
+    );
     assert!(bad.is_empty(), "SQL built with format!: {bad:#?}");
 }
 
@@ -93,12 +97,15 @@ fn unsafe_appears_only_in_the_mlock_module() {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        let has = code.contains("unsafe {") || code.contains("unsafe fn") || code.contains("unsafe impl");
+        let has =
+            code.contains("unsafe {") || code.contains("unsafe fn") || code.contains("unsafe impl");
         if *name == "mlock.rs" {
             assert!(has, "mlock.rs lost its unsafe block; update this test");
         } else {
             assert!(!has, "{name} uses unsafe");
         }
     }
-    assert!(SOURCES.iter().any(|(n, s)| *n == "lib.rs" && s.contains("#![deny(unsafe_code)]")));
+    assert!(SOURCES
+        .iter()
+        .any(|(n, s)| *n == "lib.rs" && s.contains("#![deny(unsafe_code)]")));
 }

@@ -67,7 +67,12 @@ pub fn new_cred(slug: &str, kind: &str, host: &str, fields: &[(&str, &str)]) -> 
         fields: fields.iter().map(|(n, v)| (n.to_string(), s(v))).collect(),
         sites: fields
             .iter()
-            .map(|(n, _)| (n.to_string(), vec!["header:authorization:Bearer".to_string()]))
+            .map(|(n, _)| {
+                (
+                    n.to_string(),
+                    vec!["header:authorization:Bearer".to_string()],
+                )
+            })
             .collect::<BTreeMap<_, _>>(),
     }
 }
@@ -88,7 +93,12 @@ pub fn fresh_with(factor: FactorClass, passphrase: Option<&str>) -> Fx {
     )
     .unwrap();
     let cred = vault
-        .add_credential(new_cred("demo", "http", "api.example.com", &[("token", SECRET)]))
+        .add_credential(new_cred(
+            "demo",
+            "http",
+            "api.example.com",
+            &[("token", SECRET)],
+        ))
         .unwrap();
     let other = vault
         .add_credential(new_cred(

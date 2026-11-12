@@ -315,7 +315,9 @@ impl std::fmt::Debug for AuditLog {
 const HEX64_LEN: usize = 64;
 
 fn is_hex64(s: &str) -> bool {
-    s.len() == HEX64_LEN && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    s.len() == HEX64_LEN
+        && s.bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -397,7 +399,13 @@ impl AuditLog {
     /// A log positioned at `(seq, head)` with no anchor file and no stamp,
     /// for migrate, which writes the anchor itself once the new database is
     /// in place.
-    pub(crate) fn detached(conn: SharedConn, path: &Path, key: Key32, seq: u64, head: String) -> AuditLog {
+    pub(crate) fn detached(
+        conn: SharedConn,
+        path: &Path,
+        key: Key32,
+        seq: u64,
+        head: String,
+    ) -> AuditLog {
         AuditLog {
             path: path.to_path_buf(),
             key,
@@ -449,7 +457,10 @@ impl AuditLog {
 
     /// `HMAC(K_audit, "<seq>|<hash>")`.
     fn anchor_mac(&self, seq: u64, hash: &str) -> String {
-        crypto::hex(&crypto::hmac_sha256(&self.key, format!("{seq}|{hash}").as_bytes()))
+        crypto::hex(&crypto::hmac_sha256(
+            &self.key,
+            format!("{seq}|{hash}").as_bytes(),
+        ))
     }
 
     /// Write the anchor: a temp file renamed over the old one.
@@ -473,7 +484,11 @@ impl AuditLog {
         let hash = v.get("hash")?.as_str()?.to_string();
         let mac = v.get("mac")?.as_str()?.to_string();
         let want = self.anchor_mac(seq, &hash);
-        crypto::constant_time_eq(mac.as_bytes(), want.as_bytes()).then_some(Anchor { seq, hash, mac })
+        crypto::constant_time_eq(mac.as_bytes(), want.as_bytes()).then_some(Anchor {
+            seq,
+            hash,
+            mac,
+        })
     }
 
     fn recover(&mut self) -> Result<()> {
@@ -581,10 +596,7 @@ impl AuditLog {
     /// commit, never before, so a crash in between leaves the anchor behind
     /// (benign) rather than ahead (a false truncation).
     pub(crate) fn finish(&mut self) -> Result<()> {
-        let moved = self
-            .saved
-            .take()
-            .is_none_or(|(seq, _, _)| seq != self.seq);
+        let moved = self.saved.take().is_none_or(|(seq, _, _)| seq != self.seq);
         if moved {
             self.anchor()?;
         }
@@ -605,7 +617,9 @@ impl AuditLog {
         if let Some(reserved) = CHAIN_FIELDS.iter().find(|k| own.contains_key(**k)) {
             return Err(deny(
                 ErrorCode::Internal,
-                format!("audit record {kind} sets the chain field {reserved}; name it something else"),
+                format!(
+                    "audit record {kind} sets the chain field {reserved}; name it something else"
+                ),
                 DenyExtra::default(),
             )
             .into());
@@ -628,7 +642,10 @@ impl AuditLog {
             let mut fields = Map::new();
             fields.insert(
                 "mac".into(),
-                Value::from(crypto::hex(&crypto::hmac_sha256(&self.key, self.prev_hash.as_bytes()))),
+                Value::from(crypto::hex(&crypto::hmac_sha256(
+                    &self.key,
+                    self.prev_hash.as_bytes(),
+                ))),
             );
             let mut cp = AuditRecord {
                 seq: self.seq + 1,
@@ -664,9 +681,11 @@ impl AuditLog {
                     .is_none_or(|id| field(r, "request_id") == Some(Value::from(id.clone())))
             })
             .filter(|r| {
-                filter.kind.as_ref().filter(|k| !k.is_empty()).is_none_or(|k| {
-                    r.kind == *k || r.kind.starts_with(&format!("{k}."))
-                })
+                filter
+                    .kind
+                    .as_ref()
+                    .filter(|k| !k.is_empty())
+                    .is_none_or(|k| r.kind == *k || r.kind.starts_with(&format!("{k}.")))
             })
             .filter(|r| {
                 filter
@@ -732,10 +751,17 @@ impl AuditLog {
         };
         let next_seq = rows.last().map_or(opts.since_seq, |r| r.seq);
         let mut f = Map::new();
-        f.insert("from_seq".into(), rows.first().map_or(Value::Null, |r| r.seq.into()));
+        f.insert(
+            "from_seq".into(),
+            rows.first().map_or(Value::Null, |r| r.seq.into()),
+        );
         f.insert(
             "to_seq".into(),
-            if rows.is_empty() { Value::Null } else { next_seq.into() },
+            if rows.is_empty() {
+                Value::Null
+            } else {
+                next_seq.into()
+            },
         );
         f.insert("rows".into(), rows.len().into());
         self.write("audit.exported", f)?;
@@ -843,7 +869,9 @@ impl AuditLog {
             None => None,
         };
         id.filter(|s| !s.is_empty()).ok_or_else(|| {
-            Error::Invariant("this audit log belongs to no vault id, so it cannot be witnessed".into())
+            Error::Invariant(
+                "this audit log belongs to no vault id, so it cannot be witnessed".into(),
+            )
         })
     }
 }
@@ -859,7 +887,15 @@ fn to_map<T: Serialize>(v: &T) -> Result<Map<String, Value>> {
 /// have written it.
 pub(crate) fn insert_record(conn: &rusqlite::Connection, record: &AuditRecord) -> Result<()> {
     let line = serde_json::to_string(record)?;
-    insert_line(conn, record.seq, &record.ts, &record.kind, &record.prev_hash, &record.hash, &line)
+    insert_line(
+        conn,
+        record.seq,
+        &record.ts,
+        &record.kind,
+        &record.prev_hash,
+        &record.hash,
+        &line,
+    )
 }
 
 /// Insert one line exactly as given (migrate imports the JS log unchanged).
@@ -976,7 +1012,10 @@ pub(crate) fn verify_rows(key: &Key32, rows: &[AuditRow], anchor: Option<&Anchor
         Some(v) => v.to_string(),
         None => "undefined".into(),
     };
-    if let Some(cut) = records.iter().find(|r| r.kind == "audit.truncation_detected") {
+    if let Some(cut) = records
+        .iter()
+        .find(|r| r.kind == "audit.truncation_detected")
+    {
         return fail(
             Some(cut.seq),
             format!(
@@ -1044,7 +1083,10 @@ pub(crate) fn read_anchor_file(path: &Path, key: &Key32) -> Option<Anchor> {
     let seq = v.get("seq")?.as_u64()?;
     let hash = v.get("hash")?.as_str()?.to_string();
     let mac = v.get("mac")?.as_str()?.to_string();
-    let want = crypto::hex(&crypto::hmac_sha256(key, format!("{seq}|{hash}").as_bytes()));
+    let want = crypto::hex(&crypto::hmac_sha256(
+        key,
+        format!("{seq}|{hash}").as_bytes(),
+    ));
     crypto::constant_time_eq(mac.as_bytes(), want.as_bytes()).then_some(Anchor { seq, hash, mac })
 }
 
@@ -1053,7 +1095,10 @@ pub(crate) fn write_anchor_file(path: &Path, key: &Key32, seq: u64, hash: &str) 
     let body = Anchor {
         seq,
         hash: hash.to_string(),
-        mac: crypto::hex(&crypto::hmac_sha256(key, format!("{seq}|{hash}").as_bytes())),
+        mac: crypto::hex(&crypto::hmac_sha256(
+            key,
+            format!("{seq}|{hash}").as_bytes(),
+        )),
     };
     write_file_0600_atomic(path, serde_json::to_string(&body)?.as_bytes(), true)
 }
@@ -1095,7 +1140,9 @@ pub fn is_record(row: &Value) -> bool {
         && o.get("ts").is_some_and(Value::is_string)
         && o.get("kind").is_some_and(Value::is_string)
         && o.get("hash").and_then(Value::as_str).is_some_and(is_hex64)
-        && o.get("prev_hash").and_then(Value::as_str).is_some_and(is_hex64)
+        && o.get("prev_hash")
+            .and_then(Value::as_str)
+            .is_some_and(is_hex64)
 }
 
 /// Fields as the chain can hold them: a non-integer number becomes its
@@ -1117,7 +1164,9 @@ pub fn recordable(value: &Value) -> Value {
             }
         }
         Value::Array(a) => Value::Array(a.iter().map(recordable).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), recordable(v))).collect()),
+        Value::Object(o) => {
+            Value::Object(o.iter().map(|(k, v)| (k.clone(), recordable(v))).collect())
+        }
         other => other.clone(),
     }
 }
@@ -1134,6 +1183,9 @@ pub fn record_hash(key: &Key32, record: &AuditRecord, prev_hash: &str) -> String
         // A record the canonical form cannot hold matches no hash.
         return String::new();
     };
-    let msg = format!("{}|{}|{}|{}|{}", record.seq, record.ts, record.kind, canon, prev_hash);
+    let msg = format!(
+        "{}|{}|{}|{}|{}",
+        record.seq, record.ts, record.kind, canon, prev_hash
+    );
     crypto::hex(&crypto::hmac_sha256(key, msg.as_bytes()))
 }

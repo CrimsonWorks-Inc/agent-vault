@@ -32,9 +32,18 @@ fn f1_the_only_passphrase_cannot_be_removed() {
     let e = deny_of(fx.vault.remove_passphrase(&s(PASSPHRASE)));
     assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
     assert_eq!(e.extra.rule.as_deref(), Some("last_factor"));
-    assert!(e.extra.hint.as_deref().unwrap().contains("presence authenticator"));
+    assert!(e
+        .extra
+        .hint
+        .as_deref()
+        .unwrap()
+        .contains("presence authenticator"));
     assert!(fx.vault.has_passphrase().unwrap());
-    assert_eq!(snapshot(&fx.vault), before, "a refusal must not write the vault");
+    assert_eq!(
+        snapshot(&fx.vault),
+        before,
+        "a refusal must not write the vault"
+    );
     fx.vault.lock().unwrap();
     assert_eq!(code_of(fx.vault.unlock(None)), "AV_LOCKED");
     assert!(fx.vault.unlock(Some(&s(PASSPHRASE))).unwrap());
@@ -56,7 +65,10 @@ fn f1_removing_touch_id_unlock_first_does_not_make_the_passphrase_removable() {
 #[test]
 fn a_wrong_passphrase_is_still_a_failed_proof_not_a_factor_refusal() {
     let mut fx = fresh_with(FactorClass::Passphrase, Some(PASSPHRASE));
-    assert_eq!(code_of(fx.vault.remove_passphrase(&s("not the passphrase"))), "AV_LOCKED");
+    assert_eq!(
+        code_of(fx.vault.remove_passphrase(&s("not the passphrase"))),
+        "AV_LOCKED"
+    );
 }
 
 #[test]
@@ -97,21 +109,48 @@ fn control_a_passphrase_changes_with_the_current_one() {
     fx.vault
         .set_passphrase(&s("a brand new passphrase"), Some(&s(PASSPHRASE)))
         .unwrap();
-    assert!(fx.vault.verify_passphrase(&s("a brand new passphrase")).unwrap());
+    assert!(fx
+        .vault
+        .verify_passphrase(&s("a brand new passphrase"))
+        .unwrap());
     assert!(!fx.vault.verify_passphrase(&s(PASSPHRASE)).unwrap());
 }
 
 fn broken() -> Vec<(&'static str, Value)> {
     vec![
         ("an empty record", json!({})),
-        ("the reviewer's broken key", json!({ "credentialId": "broken", "publicKeySpki": "not-a-public-key", "signCount": 0 })),
-        ("no public key", json!({ "credentialId": cred_id(16), "signCount": 0 })),
-        ("a public key that does not parse", json!({ "credentialId": cred_id(16), "publicKeySpki": crate::crypto::b64(&[0u8; 91]), "signCount": 0 })),
-        ("an Ed25519 key", json!({ "credentialId": cred_id(16), "publicKeySpki": ED25519, "signCount": 0 })),
-        ("a P-384 key", json!({ "credentialId": cred_id(16), "publicKeySpki": P384, "signCount": 0 })),
-        ("a credential id too short", json!({ "credentialId": "aGVsbG8", "publicKeySpki": P256_B, "signCount": 0 })),
-        ("a negative counter", json!({ "credentialId": cred_id(16), "publicKeySpki": P256_B, "signCount": -1 })),
-        ("a counter past 32 bits", json!({ "credentialId": cred_id(16), "publicKeySpki": P256_B, "signCount": 1u64 << 40 })),
+        (
+            "the reviewer's broken key",
+            json!({ "credentialId": "broken", "publicKeySpki": "not-a-public-key", "signCount": 0 }),
+        ),
+        (
+            "no public key",
+            json!({ "credentialId": cred_id(16), "signCount": 0 }),
+        ),
+        (
+            "a public key that does not parse",
+            json!({ "credentialId": cred_id(16), "publicKeySpki": crate::crypto::b64(&[0u8; 91]), "signCount": 0 }),
+        ),
+        (
+            "an Ed25519 key",
+            json!({ "credentialId": cred_id(16), "publicKeySpki": ED25519, "signCount": 0 }),
+        ),
+        (
+            "a P-384 key",
+            json!({ "credentialId": cred_id(16), "publicKeySpki": P384, "signCount": 0 }),
+        ),
+        (
+            "a credential id too short",
+            json!({ "credentialId": "aGVsbG8", "publicKeySpki": P256_B, "signCount": 0 }),
+        ),
+        (
+            "a negative counter",
+            json!({ "credentialId": cred_id(16), "publicKeySpki": P256_B, "signCount": -1 }),
+        ),
+        (
+            "a counter past 32 bits",
+            json!({ "credentialId": cred_id(16), "publicKeySpki": P256_B, "signCount": 1u64 << 40 }),
+        ),
     ]
 }
 
@@ -124,12 +163,19 @@ fn f2_a_rotation_to_an_unusable_key_is_refused_and_the_sole_key_keeps_working() 
         let e = deny_of(fx.vault.set_presence_key(&body));
         assert_eq!(e.code.as_str(), "AV_POLICY_DENIED", "{name}");
         assert_eq!(e.extra.rule.as_deref(), Some("presence_key"), "{name}");
-        assert_eq!(fx.vault.presence_key().unwrap(), original, "{name}: the old key was replaced");
+        assert_eq!(
+            fx.vault.presence_key().unwrap(),
+            original,
+            "{name}: the old key was replaced"
+        );
         assert_eq!(snapshot(&fx.vault), before, "{name}");
     }
     let next = authenticator(P256_C);
     assert!(fx.vault.set_presence_key(&next).unwrap(), "replaced");
-    assert_eq!(fx.vault.presence_key().unwrap().unwrap().credential_id, next["credentialId"].as_str().unwrap());
+    assert_eq!(
+        fx.vault.presence_key().unwrap().unwrap().credential_id,
+        next["credentialId"].as_str().unwrap()
+    );
 }
 
 #[test]
@@ -142,13 +188,18 @@ fn f2_a_rotation_stores_the_credential_and_nothing_else_the_caller_sent() {
     let stored = serde_json::to_value(fx.vault.presence_key().unwrap().unwrap()).unwrap();
     let mut keys: Vec<&String> = stored.as_object().unwrap().keys().collect();
     keys.sort();
-    assert_eq!(keys, vec!["credentialId", "enrolledAt", "publicKeySpki", "signCount"]);
+    assert_eq!(
+        keys,
+        vec!["credentialId", "enrolledAt", "publicKeySpki", "signCount"]
+    );
 }
 
 #[test]
 fn f2_a_first_enrolment_is_held_to_the_same_shape() {
     let mut fx = fresh_with(FactorClass::Passphrase, Some(PASSPHRASE));
-    let e = deny_of(fx.vault.set_presence_key(&json!({ "credentialId": "broken", "publicKeySpki": "not-a-public-key", "signCount": 0 })));
+    let e = deny_of(fx.vault.set_presence_key(
+        &json!({ "credentialId": "broken", "publicKeySpki": "not-a-public-key", "signCount": 0 }),
+    ));
     assert_eq!(e.extra.rule.as_deref(), Some("presence_key"));
     assert!(fx.vault.presence_key().unwrap().is_none());
 }
@@ -175,21 +226,43 @@ fn a_presence_key_that_fails_to_save_leaves_the_old_one_in_place() {
 fn f3_the_store_factory_refuses_a_touch_id_unlock_wrap_with_no_passphrase() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("v");
-    let e = deny_of(Vault::create(&target, CreateOptions { factor: FactorClass::WebauthnPrf, passphrase: None }));
+    let e = deny_of(Vault::create(
+        &target,
+        CreateOptions {
+            factor: FactorClass::WebauthnPrf,
+            passphrase: None,
+        },
+    ));
     assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
     assert_eq!(e.extra.rule.as_deref(), Some("factor_order"));
     assert!(!target.join("vault.db").exists(), "no vault was written");
-    assert!(!target.join("device.key").exists(), "nothing was written at all");
+    assert!(
+        !target.join("device.key").exists(),
+        "nothing was written at all"
+    );
 }
 
 #[test]
 fn control_a_vault_created_with_a_passphrase_opens_with_it_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
-    let mut v = Vault::create(dir.path(), CreateOptions { factor: FactorClass::Passphrase, passphrase: Some(s(PASSPHRASE)) }).unwrap();
+    let mut v = Vault::create(
+        dir.path(),
+        CreateOptions {
+            factor: FactorClass::Passphrase,
+            passphrase: Some(s(PASSPHRASE)),
+        },
+    )
+    .unwrap();
     assert_eq!(v.factors().unwrap(), vec![FactorClass::Passphrase]);
     v.lock().unwrap();
-    assert_eq!(code_of(Vault::open(dir.path()).unwrap().unlock(None)), "AV_LOCKED");
-    assert!(Vault::open(dir.path()).unwrap().unlock(Some(&s(PASSPHRASE))).unwrap());
+    assert_eq!(
+        code_of(Vault::open(dir.path()).unwrap().unlock(None)),
+        "AV_LOCKED"
+    );
+    assert!(Vault::open(dir.path())
+        .unwrap()
+        .unlock(Some(&s(PASSPHRASE)))
+        .unwrap());
 }
 
 #[test]

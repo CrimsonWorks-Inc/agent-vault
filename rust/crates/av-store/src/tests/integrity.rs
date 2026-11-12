@@ -28,10 +28,19 @@ fn key() -> Key32 {
 fn mint_one(k: &Key32, rnd: &mut impl FnMut() -> f64) -> String {
     let n = (rnd() * 8.0) as usize;
     let slug: String = std::iter::once("ab".to_string())
-        .chain((0..n).map(|_| (LETTERS[(rnd() * LETTERS.len() as f64) as usize % LETTERS.len()] as char).to_string()))
+        .chain((0..n).map(|_| {
+            (LETTERS[(rnd() * LETTERS.len() as f64) as usize % LETTERS.len()] as char).to_string()
+        }))
         .collect();
     let sid = new_sid();
-    mint(&MintInput { k_ph: k, sid: &sid, slug: &slug, field: "token" }).unwrap().text
+    mint(&MintInput {
+        k_ph: k,
+        sid: &sid,
+        slug: &slug,
+        field: "token",
+    })
+    .unwrap()
+    .text
 }
 
 #[test]
@@ -64,7 +73,10 @@ fn changing_any_single_character_makes_a_placeholder_unusable() {
             let mutated: String = m.into_iter().collect();
             mutations += 1;
             if let Some(parsed) = parse_at(&mutated, 0) {
-                assert!(!verify(&k, &parsed), "a one-character change still verified: {mutated}");
+                assert!(
+                    !verify(&k, &parsed),
+                    "a one-character change still verified: {mutated}"
+                );
             }
         }
     }
@@ -89,9 +101,12 @@ fn random_text_is_never_mistaken_for_a_placeholder() {
     let chars: Vec<char> = "av1.0123456789abcdefghjkmnpqrstvwxyz_-".chars().collect();
     for _ in 0..20_000 {
         let len = 40 + (rnd() * 60.0) as usize;
-        let junk: String = std::iter::once("av1.".to_string())
-            .chain((0..len).map(|_| chars[(rnd() * chars.len() as f64) as usize % chars.len()].to_string()))
-            .collect();
+        let junk: String =
+            std::iter::once("av1.".to_string())
+                .chain((0..len).map(|_| {
+                    chars[(rnd() * chars.len() as f64) as usize % chars.len()].to_string()
+                }))
+                .collect();
         if let Some(parsed) = parse_at(&junk, 0) {
             assert!(!verify(&k, &parsed), "random text verified: {junk}");
         }
@@ -101,21 +116,43 @@ fn random_text_is_never_mistaken_for_a_placeholder() {
 #[test]
 fn operations_that_differ_in_any_way_canonicalise_differently() {
     let mut rnd = rng(2024);
-    let ops = ["session.create", "cred.add", "cred.remove", "approval.approve", "listener.add"];
+    let ops = [
+        "session.create",
+        "cred.add",
+        "cred.remove",
+        "approval.approve",
+        "listener.add",
+    ];
     let creds = ["prod", "prod2", "staging", "prod-key", ""];
-    let methods = [json!(["GET"]), json!(["GET", "POST"]), json!(["POST"]), json!(["GET", "POST", "DELETE"]), json!([])];
-    let paths = [json!(["/**"]), json!(["/v1/**"]), json!(["/user"]), json!(["/**", "/user"]), json!([])];
+    let methods = [
+        json!(["GET"]),
+        json!(["GET", "POST"]),
+        json!(["POST"]),
+        json!(["GET", "POST", "DELETE"]),
+        json!([]),
+    ];
+    let paths = [
+        json!(["/**"]),
+        json!(["/v1/**"]),
+        json!(["/user"]),
+        json!(["/**", "/user"]),
+        json!([]),
+    ];
     let mut seen: HashMap<String, String> = HashMap::new();
     let mut pairs = 0;
     for _ in 0..40_000 {
         let mut pick = |n: usize| (rnd() * n as f64) as usize % n;
         let op = json!({ "op": ops[pick(5)], "cred": creds[pick(5)], "methods": methods[pick(5)], "paths": paths[pick(5)] });
         let text = canonical_operation(&op);
-        let key = serde_json::to_string(&[&op["op"], &op["cred"], &op["methods"], &op["paths"]]).unwrap();
+        let key =
+            serde_json::to_string(&[&op["op"], &op["cred"], &op["methods"], &op["paths"]]).unwrap();
         match seen.get(&text) {
             Some(prev) => {
                 pairs += 1;
-                assert_eq!(prev, &key, "two different operations canonicalised identically: {text}");
+                assert_eq!(
+                    prev, &key,
+                    "two different operations canonicalised identically: {text}"
+                );
             }
             None => {
                 seen.insert(text, key);

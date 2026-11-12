@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 
 use av_core::secret::{ExposeSecret, Key32, SecretString};
 use rusqlite::Connection;
+use serde::Serialize;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
-use serde::Serialize;
 
 use crate::audit::{self, AuditLog, AuditRow};
 use crate::crypto::{self, SealedV1, SealedV2};
@@ -271,7 +271,10 @@ pub fn needs_passphrase(legacy: &LegacyVault) -> bool {
 
 /// Open the JS VMK: the `none` wrap with the device key alone, else the
 /// passphrase wrap (scrypt, as the JS derives it).
-fn unlock_legacy(legacy: &LegacyVault, passphrase: Option<&SecretString>) -> Result<Key32, MigrateError> {
+fn unlock_legacy(
+    legacy: &LegacyVault,
+    passphrase: Option<&SecretString>,
+) -> Result<Key32, MigrateError> {
     let open = |wrap: &VmkWrap<SealedV1>, factor_key: &[u8]| -> Option<Key32> {
         let kek = crypto::derive_kek(&legacy.device_key, factor_key);
         let class = crate::vault::class_name(wrap.class);
@@ -345,7 +348,10 @@ pub fn migrate(
         let at = report
             .broken_at
             .map_or_else(|| "the head anchor".to_string(), |s| format!("seq {s}"));
-        return Err(broken(at, report.reason.unwrap_or_else(|| "does not verify".into())));
+        return Err(broken(
+            at,
+            report.reason.unwrap_or_else(|| "does not verify".into()),
+        ));
     }
     let records: Vec<audit::AuditRecord> = rows
         .into_iter()
@@ -368,7 +374,7 @@ pub fn migrate(
         let stub = VmkWrap {
             class: w.class,
             salt: w.salt.clone(),
-            kdf: Some(crate::vault::passphrase_params()).filter(|_| w.class == FactorClass::Passphrase),
+            kdf: (w.class == FactorClass::Passphrase).then(crate::vault::passphrase_params),
             sealed: SealedV2 {
                 v: crypto::SEALED_V2,
                 alg: crypto::V2_ALG.into(),
@@ -412,7 +418,11 @@ pub fn migrate(
             let mut retired = Vec::new();
             for r in &f.retired {
                 retired.push(RetiredValue {
-                    sealed: reseal(&key, &r.sealed, &crypto::field_aad(&c.id, &f.name, r.key_version))?,
+                    sealed: reseal(
+                        &key,
+                        &r.sealed,
+                        &crypto::field_aad(&c.id, &f.name, r.key_version),
+                    )?,
                     key_version: r.key_version,
                     retired_at: r.retired_at.clone(),
                     retire_until: r.retire_until.clone(),
@@ -530,14 +540,11 @@ pub fn migrate(
         let tx = guard
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(Error::from)?;
-        tx.execute_batch("PRAGMA defer_foreign_keys = ON").map_err(Error::from)?;
+        tx.execute_batch("PRAGMA defer_foreign_keys = ON")
+            .map_err(Error::from)?;
         write_entities(&tx, doc, &credentials, &wraps, notify.as_ref(), &now)?;
         // Step 7: the JS log, line for line, then `vault.migrated`.
-        for (line, r) in legacy
-            .audit_lines
-            .iter()
-            .zip(records.iter())
-        {
+        for (line, r) in legacy.audit_lines.iter().zip(records.iter()) {
             audit::insert_line(&tx, r.seq, &r.ts, &r.kind, &r.prev_hash, &r.hash, line)?;
         }
         let mut log = AuditLog::detached(
@@ -545,7 +552,9 @@ pub fn migrate(
             &to.join(VAULT_DB_FILE),
             k_audit.clone(),
             last_seq,
-            old_head.clone().unwrap_or_else(|| audit::GENESIS.to_string()),
+            old_head
+                .clone()
+                .unwrap_or_else(|| audit::GENESIS.to_string()),
         );
         let fields = json!({
             "from": LEGACY_VAULT_FILE,
@@ -555,7 +564,12 @@ pub fn migrate(
             "dropped": dropped.iter().map(|d| d.what.clone()).collect::<Vec<_>>(),
         });
         let rec = log.write_in(&tx, "vault.migrated", obj(fields))?;
-        debug_assert_eq!(rec.prev_hash, old_head.clone().unwrap_or_else(|| audit::GENESIS.to_string()));
+        debug_assert_eq!(
+            rec.prev_hash,
+            old_head
+                .clone()
+                .unwrap_or_else(|| audit::GENESIS.to_string())
+        );
         new_seq = log.seq();
         new_head = log.head().to_string();
         tx.commit().map_err(Error::from)?;
@@ -633,7 +647,11 @@ impl Drop for TempDirGuard {
     }
 }
 
-fn new_wrap(device_key: &Key32, vmk: &Key32, passphrase: Option<&SecretString>) -> Result<VmkWrap, Error> {
+fn new_wrap(
+    device_key: &Key32,
+    vmk: &Key32,
+    passphrase: Option<&SecretString>,
+) -> Result<VmkWrap, Error> {
     let (class, factor_key, salt, kdf) = match passphrase {
         None => (FactorClass::None, Zeroizing::new(Vec::new()), None, None),
         Some(p) => {
@@ -651,7 +669,11 @@ fn new_wrap(device_key: &Key32, vmk: &Key32, passphrase: Option<&SecretString>) 
     };
     let kek = crypto::derive_kek(device_key, &factor_key);
     let text = Zeroizing::new(crypto::b64(vmk.expose()));
-    let sealed = crypto::seal(&kek, text.as_bytes(), &crypto::vmk_aad(crate::vault::class_name(class)))?;
+    let sealed = crypto::seal(
+        &kek,
+        text.as_bytes(),
+        &crypto::vmk_aad(crate::vault::class_name(class)),
+    )?;
     Ok(VmkWrap {
         class,
         salt,
@@ -672,7 +694,11 @@ fn write_entities(
 ) -> Result<(), Error> {
     let kv = &doc.kv;
     let meta = &kv.meta;
-    rows::kv_set(c, "created_at", &json!(meta.created_at.clone().unwrap_or_else(|| now.to_string())))?;
+    rows::kv_set(
+        c,
+        "created_at",
+        &json!(meta.created_at.clone().unwrap_or_else(|| now.to_string())),
+    )?;
     rows::kv_set(c, "locked", &Value::Bool(meta.locked))?;
     // The new log is anchored (the anchor is written beside vault.db).
     rows::kv_set(c, "audit_anchored", &Value::Bool(true))?;
