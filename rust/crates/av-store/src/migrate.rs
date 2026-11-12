@@ -368,6 +368,20 @@ fn reseal(key: &Key32, sealed: &SealedV1, aad: &str) -> Result<SealedV2, Error> 
     crypto::seal(key, plain.expose_secret(), aad)
 }
 
+/// The old files that are safe to delete once the owner is satisfied. The
+/// device key is shared when the new vault sits in the same directory
+/// (`--to` defaults to `--from`): `vault.db` is wrapped under it too, so it is
+/// never listed there. A device key in another directory was copied to
+/// `--to` and may go.
+fn removable_legacy_files(files: &[PathBuf], to: &Path) -> Vec<PathBuf> {
+    let kept = to.join(DEVICE_KEY_FILE);
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    };
+    files.iter().filter(|f| !same(f, &kept)).cloned().collect()
+}
+
 /// Steps 4–9: unlock with `passphrase` (or the device key alone for a
 /// factor-`none` vault) keeping the same VMK, re-wrap it under Argon2id,
 /// re-seal every field and sealed setting as v2, copy every entity with ids
@@ -396,7 +410,7 @@ pub fn migrate(
                 audit_head: None,
                 dropped: Vec::new(),
                 written: None,
-                legacy_files: legacy.files.clone(),
+                legacy_files: removable_legacy_files(&legacy.files, &opts.to),
             });
         }
         return Err(MigrateError::AlreadyMigrated(opts.to.clone()));
@@ -685,7 +699,7 @@ pub fn migrate(
         audit_head: old_head,
         dropped,
         written,
-        legacy_files: legacy.files.clone(),
+        legacy_files: removable_legacy_files(&legacy.files, &opts.to),
     })
 }
 

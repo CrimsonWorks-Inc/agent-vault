@@ -606,6 +606,49 @@ fn a_backup_the_js_daemon_made_restores_into_the_rust_vault() {
     let _ = PlaceholderState::Active;
 }
 
+/// Following the report's clean-up advice must leave a vault that opens: in
+/// place, the device key is shared with vault.db and is never listed.
+#[test]
+fn deleting_every_file_the_report_lists_leaves_a_vault_that_opens() {
+    let js = js_vault("none");
+    let legacy = read_legacy(&js.dir).unwrap();
+    let report = migrate(&opts(&js.dir, &js.dir, false), legacy, None).unwrap();
+    assert!(
+        !report
+            .legacy_files
+            .iter()
+            .any(|f| f.file_name().is_some_and(|n| n == "device.key")),
+        "{:?}",
+        report.legacy_files
+    );
+    assert!(report
+        .legacy_files
+        .iter()
+        .any(|f| f.file_name().is_some_and(|n| n == "vault.json")));
+    for f in &report.legacy_files {
+        std::fs::remove_file(f).unwrap();
+    }
+    let mut v = Vault::open(&js.dir).unwrap();
+    v.unlock(None).unwrap();
+    assert!(v.audit().unwrap().verify().unwrap().ok);
+
+    // Migrated into another directory, the key is copied there, so the old
+    // one may go.
+    let js = js_vault("none");
+    let to = js.dir.join("new");
+    let legacy = read_legacy(&js.dir).unwrap();
+    let report = migrate(&opts(&js.dir, &to, false), legacy, None).unwrap();
+    assert!(report
+        .legacy_files
+        .iter()
+        .any(|f| f.file_name().is_some_and(|n| n == "device.key")));
+    for f in &report.legacy_files {
+        std::fs::remove_file(f).unwrap();
+    }
+    let mut v = Vault::open(&to).unwrap();
+    v.unlock(None).unwrap();
+}
+
 #[test]
 fn migrate_never_writes_vault_db_in_place_the_finished_file_is_renamed() {
     let js = js_vault("none");

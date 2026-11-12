@@ -1051,3 +1051,13 @@ from = '''    let audit_lines: Vec<String> = audit_text
         .split('\n')'''
 to = '''    let audit_lines: Vec<String> = audit_text[..audit_text.rfind('\n').map_or(0, |i| i + 1)]
         .split('\n')'''
+
+# Found rehearsing the real migration (2026-11-12): in place, the report
+# listed device.key for deletion, and deleting it locks the new vault.
+
+[[mutation]]
+name = 'the migrate report lists the shared device key for deletion'
+file = "src/migrate.rs"
+from = '''    files.iter().filter(|f| !same(f, &kept)).cloned().collect()'''
+to = '''    files.to_vec()'''
+test = "tests::migrate::deleting_every_file"
