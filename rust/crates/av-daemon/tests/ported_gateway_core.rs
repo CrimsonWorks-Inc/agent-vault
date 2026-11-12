@@ -2152,3 +2152,27 @@ async fn real_gzip_upstream_reset_mid_stream_ends_with_cut_instead_of_hanging() 
     server.await.unwrap();
     ordinary_stream_control(&f, true).await;
 }
+
+#[tokio::test]
+async fn explicit_https_target_upgrades_http_credential_while_explicit_http_stays_http() {
+    let f = Fixture::new(&["header:x-key"]).await;
+    let (_, request) = network_pipeline(&f, 12345, "GET", None).await;
+    let pipeline = av_daemon::pipeline::Pipeline::new(
+        f.shared.clone(),
+        PipelineOptions {
+            upstream: Some(f.up.clone()),
+            ..Default::default()
+        },
+    );
+    for scheme in ["https", "http"] {
+        let mut req = request.clone();
+        req.path = format!("/t/{scheme}/127.0.0.1:12345/x");
+        let r = pipeline.handle(req).await;
+        assert_eq!(r.status, 200);
+        assert!(f
+            .last()
+            .url
+            .starts_with(&format!("{scheme}://127.0.0.1:12345/x")));
+        f.clean(&r).await;
+    }
+}

@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 148 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **833 not yet ported**.
+Totals: 1090 JS tests: 161 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **820 not yet ported**.
 
 ## Mutation check
 
@@ -552,21 +552,21 @@ the vault on every call instead of caching an audit handle.
 | gateway-response.test.js | a buffered upstream that completes its body is answered as before | tests/ported_gateway_core.rs::real_buffered_complete_response_and_delete_body_have_correct_framing |
 | gateway-response.test.js | a request body goes out with a Content-Length that matches it | `tests::gateway::hardening_a_compressed_request_body_and_a_duplicated_content_type_are_refused` |
 | gateway-response.test.js | a DELETE with a body reaches a real upstream framed | tests/ported_gateway_core.rs::real_buffered_complete_response_and_delete_body_have_correct_framing |
-| gateway-routing.test.js | /t/https/ to an http credential goes out over https, not in the clear | not yet ported |
-| gateway-routing.test.js | a placeholder with a forged checksum does not keep its session alive | not yet ported |
-| gateway-routing.test.js | a real placeholder as the only carrier still authenticates and keeps the session alive | not yet ported |
-| gateway-w2-model.test.js | model meters classify only the contracted endpoints and methods | not yet ported |
-| gateway-w2-model.test.js | metered JSON fails closed without echoing request contents | not yet ported |
-| gateway-w2-model.test.js | reservations use original UTF-8 byte length and provider output limits | not yet ported |
-| gateway-w2-model.test.js | invalid or absent output limits use the binding profile defaults | not yet ported |
-| gateway-w2-model.test.js | checked prices use microdollars per million tokens and reject unknown USD models | not yet ported |
-| gateway-w2-model.test.js | reservation prices round up exactly and reject integer overflow | not yet ported |
-| gateway-w2-model.test.js | buffered usage includes Anthropic cache tokens and both OpenAI response shapes | not yet ported |
-| gateway-w2-model.test.js | malformed, absent and partial usage cannot turn into a zero charge | not yet ported |
-| gateway-w2-model.test.js | Anthropic SSE merges message_start cache usage and cumulative message_delta | not yet ported |
-| gateway-w2-model.test.js | OpenAI and Google SSE final usage survives chunks without usage and repeated totals | not yet ported |
-| gateway-w2-model.test.js | missing usage charges the full reservation; actual usage may exceed it | not yet ported |
-| gateway-w2-model.test.js | Gemini thinking tokens are charged as output, and a thoughts-only reply still settles | not yet ported |
+| gateway-routing.test.js | /t/https/ to an http credential goes out over https, not in the clear | tests/ported_gateway_core.rs::explicit_https_target_upgrades_http_credential_while_explicit_http_stays_http |
+| gateway-routing.test.js | a placeholder with a forged checksum does not keep its session alive | not yet ported: waiting for session-expiry seam |
+| gateway-routing.test.js | a real placeholder as the only carrier still authenticates and keeps the session alive | not yet ported: waiting for session-expiry seam |
+| gateway-w2-model.test.js | model meters classify only the contracted endpoints and methods | tests/ported_gateway_model.rs::model_endpoint_and_method_classification_is_contract_exact |
+| gateway-w2-model.test.js | metered JSON fails closed without echoing request contents | tests/ported_gateway_model.rs::malformed_metered_json_fails_without_echo_and_vendor_json_is_ordinary |
+| gateway-w2-model.test.js | reservations use original UTF-8 byte length and provider output limits | tests/ported_gateway_model.rs::reservations_use_original_utf8_bytes_and_provider_output_limit_precedence |
+| gateway-w2-model.test.js | invalid or absent output limits use the binding profile defaults | tests/ported_gateway_model.rs::reservations_use_original_utf8_bytes_and_provider_output_limit_precedence |
+| gateway-w2-model.test.js | checked prices use microdollars per million tokens and reject unknown USD models | tests/ported_gateway_model.rs::checked_model_prices_round_up_reservations_and_refuse_unknown_or_overflow |
+| gateway-w2-model.test.js | reservation prices round up exactly and reject integer overflow | tests/ported_gateway_model.rs::checked_model_prices_round_up_reservations_and_refuse_unknown_or_overflow |
+| gateway-w2-model.test.js | buffered usage includes Anthropic cache tokens and both OpenAI response shapes | tests/ported_gateway_model.rs::buffered_provider_usage_includes_cache_and_thinking_tokens_and_rejects_partial_counts |
+| gateway-w2-model.test.js | malformed, absent and partial usage cannot turn into a zero charge | tests/ported_gateway_model.rs::buffered_provider_usage_includes_cache_and_thinking_tokens_and_rejects_partial_counts |
+| gateway-w2-model.test.js | Anthropic SSE merges message_start cache usage and cumulative message_delta | tests/ported_gateway_model.rs::cumulative_sse_usage_never_decreases_or_double_charges_and_survives_empty_chunks |
+| gateway-w2-model.test.js | OpenAI and Google SSE final usage survives chunks without usage and repeated totals | tests/ported_gateway_model.rs::cumulative_sse_usage_never_decreases_or_double_charges_and_survives_empty_chunks |
+| gateway-w2-model.test.js | missing usage charges the full reservation; actual usage may exceed it | tests/ported_gateway_model.rs::missing_or_unreadable_usage_charges_full_reservation_but_actual_usage_can_exceed_it |
+| gateway-w2-model.test.js | Gemini thinking tokens are charged as output, and a thoughts-only reply still settles | tests/ported_gateway_model.rs::buffered_provider_usage_includes_cache_and_thinking_tokens_and_rejects_partial_counts |
 | gateway-w2-payload.test.js | JSON constraints are strict, additive and pointer-aware | not yet ported |
 | gateway-w2-payload.test.js | JSON parser rejects duplicate decoded names, malformed input and excess depth | not yet ported |
 | gateway-w2-payload.test.js | form/query refuse ambiguity and enforce strict names | not yet ported |
