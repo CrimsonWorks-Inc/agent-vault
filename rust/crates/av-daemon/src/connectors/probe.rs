@@ -301,6 +301,15 @@ fn prepare(
     })
 }
 
+/// The pins a probe of `cred` would send, or its refusal (tests).
+#[cfg(test)]
+pub fn prepare_for_test(
+    cred: &CredentialRecord,
+    secret_of: impl FnOnce(&str, &str) -> Result<SecretString, VaultError>,
+) -> Result<Value, VaultError> {
+    prepare(cred, secret_of).map(|p| p.pins.as_value())
+}
+
 /// Run a credential's probe. Ports `runProbe` plus `Daemon.#probe`'s
 /// mapping of its refusals and the `cred.tested` record.
 pub async fn run_probe(
