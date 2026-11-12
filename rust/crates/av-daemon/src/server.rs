@@ -1335,7 +1335,7 @@ impl Daemon {
                     ("cache-control".into(), "no-cache".into()),
                     ("connection".into(), "keep-alive".into()),
                 ],
-                crate::http::AvBody::Text(rx),
+                crate::http::text_stream(rx),
             );
         }
         if req.method != "POST" {
@@ -2311,7 +2311,7 @@ impl Daemon {
                         ("cache-control".into(), "no-cache".into()),
                         ("connection".into(), "keep-alive".into()),
                     ],
-                    crate::http::AvBody::Text(rx),
+                    crate::http::text_stream(rx),
                 ),
                 Err(e) => json(e.http(), e.to_problem()),
             };

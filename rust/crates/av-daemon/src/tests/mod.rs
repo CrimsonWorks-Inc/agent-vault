@@ -29,6 +29,7 @@ mod mutants_sr;
 mod mutants_srv;
 mod mutants_srv2;
 mod mutants_ui;
+mod notify_slots;
 mod presence;
 mod ui;
 
