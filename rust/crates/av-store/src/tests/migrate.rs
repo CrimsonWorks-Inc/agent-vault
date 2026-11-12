@@ -20,10 +20,15 @@ struct JsVault {
 }
 
 fn repo_src() -> PathBuf {
+    // `cargo xtask mutation` tests a copy of rust/ alone, so it may point at
+    // the JS reference with AV_JS_SRC_DIR; otherwise it is beside rust/.
+    if let Some(d) = std::env::var_os("AV_JS_SRC_DIR") {
+        return PathBuf::from(d);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../src")
         .canonicalize()
-        .expect("the JS reference at src/")
+        .expect("the JS reference at src/ (or set AV_JS_SRC_DIR)")
 }
 
 /// Build a JS vault with the JS store (`node`, required: the fixture is the
