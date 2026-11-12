@@ -1,0 +1,423 @@
+//! Tests for the src/daemon/server.js entries of mutations.toml. Each names
+//! the protection (the `what` of test/mutation-check.js) it holds.
+
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
+
+use super::*;
+
+fn kinds<'a>(rows: &'a [Value], kind: &str) -> Vec<&'a Value> {
+    rows.iter().filter(|r| r["kind"] == kind).collect()
+}
+
+/// 'listen rm leaves pre-handshake TLS sockets connected'.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_listener_drops_its_idle_connections() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/listeners",
+            json!({"id": "lo", "address": "127.0.0.1:0", "surfaces": ["gateway"]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let rec: av_store::model::ListenerRecord = serde_json::from_value(v).unwrap();
+    let (_, port) = w.daemon.bind_listener(&rec).await.unwrap();
+    let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (s, v) = w.control("DELETE", "/v1/listeners?id=lo", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let mut buf = [0u8; 16];
+    let r = tokio::time::timeout(Duration::from_secs(3), idle.read(&mut buf)).await;
+    assert!(
+        matches!(r, Ok(Ok(0)) | Ok(Err(_))),
+        "the idle connection is closed: {r:?}"
+    );
+}
+
+/// 'listen.bind_failed records the bind error message (C28)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_bind_is_recorded_by_its_code() {
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = busy.local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
+    vault
+        .add_listener(
+            serde_json::from_value(json!({"id": "busy", "address": format!("127.0.0.1:{port}"), "surfaces": ["gateway"]}))
+                .unwrap(),
+        )
+        .unwrap();
+    let shared = crate::state::Shared::new(vault);
+    let daemon = crate::server::Daemon::new(
+        shared.clone(),
+        crate::server::DaemonOptions {
+            port: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    daemon.start().await.unwrap();
+    let rows = shared
+        .run(|core| {
+            core.vault
+                .audit()
+                .unwrap()
+                .read(&av_store::audit::ReadFilter {
+                    limit: 1000,
+                    ..Default::default()
+                })
+                .unwrap()
+                .into_iter()
+                .map(|r| serde_json::to_value(r).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+    let failed = kinds(&rows, "listen.bind_failed");
+    assert_eq!(failed.len(), 1, "{rows:?}");
+    assert_eq!(failed[0]["reason"], "EADDRINUSE", "{}", failed[0]);
+    drop(busy);
+}
+
+async fn ask(w: &World, body: Value) -> String {
+    let (s, v) = w.control("POST", "/v1/session-requests", body).await;
+    assert_eq!(s, 200, "{v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+/// The C25 entries: what the session-request records hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_request_records_hold_names_and_counts_never_values() {
+    let w = World::seeded(json!({})).await;
+    let a = ask(
+        &w,
+        json!({"cred": "demo", "methods": ["GET"], "paths": ["/zz-proposed/**"], "budget": 9}),
+    )
+    .await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id": a, "granted": true, "overrides": {"budget": 3}}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let b = ask(&w, json!({"cred": "demo", "paths": ["/zz-denied/**"]})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id": b, "granted": false}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let _c = ask(&w, json!({"cred": "demo", "paths": ["/zz-panic/**"]})).await;
+    let (s, v) = w.control("POST", "/v1/panic", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    let rows = w.audit().await;
+    let approved = kinds(&rows, "session_request.approved");
+    assert_eq!(approved.len(), 1);
+    assert_eq!(
+        approved[0]["granted"],
+        json!(["cred", "methods", "paths", "budget"]),
+        "{}",
+        approved[0]
+    );
+    assert_eq!(
+        approved[0]["narrowed"],
+        json!(["budget"]),
+        "{}",
+        approved[0]
+    );
+    assert_eq!(
+        approved[0]["proposed"],
+        json!(["cred", "methods", "paths", "budget"]),
+        "{}",
+        approved[0]
+    );
+    let denied = kinds(&rows, "session_request.denied");
+    assert_eq!(denied.len(), 2, "one by a human, one by panic");
+    let text = crate::util::js_stringify(&Value::Array(rows.clone()));
+    for p in ["zz-proposed", "zz-denied", "zz-panic"] {
+        assert!(!text.contains(p), "{p} is a value from a proposal");
+    }
+    assert!(!text.contains("session for demo"), "no summary is filed");
+    // The session and grant made from the request say so.
+    let created = kinds(&rows, "session.created");
+    let last = created.last().unwrap();
+    assert!(last.get("has_expiry").is_some(), "{last}");
+    let grant = kinds(&rows, "grant.created");
+    assert!(
+        grant.last().unwrap().get("has_expiry").is_some(),
+        "{}",
+        grant.last().unwrap()
+    );
+    assert!(
+        created[0].get("has_expiry").is_none(),
+        "an owner-made session is not marked"
+    );
+}
+
+/// 'decide-many counts any session-request id as one the daemon minted (r4
+/// F2)' and 'decide-many counts any held-request id as one the daemon
+/// minted (r4 F2)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn decide_many_files_only_ids_the_daemon_minted() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/pending/decide-many",
+            json!({"decisions": [
+                {"kind": "session", "id": "sr_forged-by-agent", "granted": false},
+                {"kind": "request", "id": "ap_forged-by-agent", "granted": false},
+            ]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let rows = w.audit().await;
+    let rec = kinds(&rows, "pending.decided_many");
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0]["unknown"], 2, "{}", rec[0]);
+    assert!(
+        !crate::util::js_stringify(rec[0]).contains("forged"),
+        "{}",
+        rec[0]
+    );
+}
+
+/// 'the daemon approves a session request whose overrides name a key it does
+/// not apply', 'a bulk decision drops a session override key it does not
+/// apply', 'a bulk decision drops the narrowing sent with a held request'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_narrowing_nothing_reads_is_refused_everywhere() {
+    let w = World::seeded(json!({"approval": "each"})).await;
+    let id = ask(&w, json!({"cred": "demo"})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests/decide",
+            json!({"id": id, "granted": true, "overrides": {"hosts": ["x"]}}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (403, Some("session_overrides")),
+        "{v}"
+    );
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/pending/decide-many",
+            json!({"decisions": [{"kind": "session", "id": id, "granted": true, "overrides": {"hosts": ["x"]}}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (403, Some("session_overrides")),
+        "{v}"
+    );
+    let r = w
+        .send(
+            "POST",
+            "/x",
+            vec![("authorization".into(), format!("Bearer {}", w.placeholder))],
+            Some("{}"),
+        )
+        .await;
+    assert_eq!(r.status, 202);
+    let (_, held) = w.control("GET", "/v1/approvals", json!({})).await;
+    let ap = held[0]["id"].as_str().unwrap().to_string();
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/pending/decide-many",
+            json!({"decisions": [{"kind": "request", "id": ap, "granted": true, "overrides": {"budget": 1}}]}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (403, Some("session_overrides")),
+        "{v}"
+    );
+}
+
+/// 'r6 B2: the preflight route ignores assume_placeholder', 'r6 B2: the
+/// preflight route assumes a placeholder for a caller that did not ask',
+/// 'r6 B2: assume_placeholder is not checked to be a boolean'.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_preflight_route_reads_assume_placeholder_as_a_boolean() {
+    let w = World::seeded(json!({})).await;
+    let pre = |body: Value| {
+        let w = &w;
+        async move {
+            let r = w
+                .daemon
+                .on_gateway(
+                    crate::server::Incoming {
+                        method: "POST".into(),
+                        target: "/v1/preflight".into(),
+                        headers: vec![
+                            ("host".into(), "127.0.0.1".into()),
+                            ("authorization".into(), format!("Bearer {}", w.token)),
+                            ("content-type".into(), "application/json".into()),
+                        ],
+                        body: crate::util::js_stringify(&body).into_bytes(),
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            let status = r.status().as_u16();
+            use http_body_util::BodyExt;
+            let bytes = r.into_body().collect().await.unwrap().to_bytes();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        }
+    };
+    let base = json!({"method": "GET", "path": "/p/demo/user"});
+    let (s, plain) = pre(base.clone()).await;
+    assert_eq!(s, 200, "{plain}");
+    let mut assumed = base.clone();
+    assumed["assume_placeholder"] = json!(true);
+    let (s, with) = pre(assumed).await;
+    assert_eq!(s, 200, "{with}");
+    assert_ne!(
+        plain, with,
+        "assuming a placeholder changes the answer: {plain} / {with}"
+    );
+    let mut bad = base;
+    bad["assume_placeholder"] = json!("yes");
+    let (s, v) = pre(bad).await;
+    assert_eq!(s, 403, "{v}");
+}
+
+/// 'r6 B1: rules never saved are null, which `tripwire show` cannot list'.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsaved_tripwire_rules_read_as_the_defaults() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w.control("GET", "/v1/tripwires", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["rules_saved"], false);
+    assert!(v["rules"].is_array() && v["rules"] == v["defaults"], "{v}");
+}
+
+/// The U3 daemon entries: the audit tail and pages.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_audit_route_filters_kind_before_the_limit_and_walks_by_seq() {
+    let w = World::seeded(json!({})).await;
+    for _ in 0..12 {
+        w.send("DELETE", "/x", vec![], None).await;
+    }
+    let all = w.audit().await;
+    let created = kinds(&all, "session.created").len();
+    assert!(created >= 1);
+    let get = |q: &str| {
+        let q = q.to_string();
+        let w = &w;
+        async move { w.control("GET", &format!("/v1/audit?{q}"), json!({})).await }
+    };
+    // kind before the limit, on the tail and on pages
+    let (s, v) = get("kind=session.created&limit=2").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v.as_array().unwrap().len(), created.min(2), "{v}");
+    let top = all.last().unwrap()["seq"].as_u64().unwrap() + 1;
+    let (s, v) = get(&format!("kind=session.created&before={top}&limit=5")).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["kind"] == "session.created"),
+        "{v}"
+    );
+    // before= walks
+    let (_, p1) = get(&format!("before={top}&limit=3")).await;
+    let first = p1[0]["seq"].as_u64().unwrap();
+    let (_, p2) = get(&format!("before={first}&limit=3")).await;
+    assert!(
+        p2.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["seq"].as_u64().unwrap() < first),
+        "{p2}"
+    );
+    // bounds
+    let (s, _) = get(&format!("before={top}&limit=600")).await;
+    assert_eq!(s, 403, "a page is at most 500 rows");
+    let (s, _) = get("kind=session.created&limit=abc").await;
+    assert_eq!(s, 403, "a kind-filtered tail is held to the page bound");
+    let (s, v) = get("limit=5000").await;
+    assert_eq!(s, 200, "the old unfiltered tail stays lenient: {v}");
+}
+
+/// 'the control API hands back an approval's cached upstream response'.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_answer_never_carries_the_stored_response() {
+    let w = World::seeded(json!({"approval": "each"})).await;
+    w.up.answer(Box::new(|_| {
+        Ok(json_response(200, &json!({"upstream-only": "zz-body"})))
+    }));
+    let r = w
+        .send(
+            "POST",
+            "/x",
+            vec![("authorization".into(), format!("Bearer {}", w.placeholder))],
+            Some("{}"),
+        )
+        .await;
+    assert_eq!(r.status, 202);
+    let (_, held) = w.control("GET", "/v1/approvals", json!({})).await;
+    let id = held[0]["id"].as_str().unwrap().to_string();
+    let (s, v) = w
+        .control("POST", "/v1/approvals", json!({"id": id, "granted": true}))
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let r = w
+        .send(
+            "POST",
+            "/x",
+            vec![("authorization".into(), format!("Bearer {}", w.placeholder))],
+            Some("{}"),
+        )
+        .await;
+    let (status, body, _) = body_of(r).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, again) = w
+        .control("POST", "/v1/approvals", json!({"id": id, "granted": false}))
+        .await;
+    let (_, list) = w.control("GET", "/v1/approvals", json!({})).await;
+    let st = w.daemon.pipeline.approval_status(id.clone()).await;
+    let text = format!("{again} {list} {st:?}");
+    assert!(!text.contains("zz-body"), "{text}");
+}
+
+/// 'the presence route stores whatever record it is sent'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_presence_record_that_is_not_a_webauthn_key_is_refused() {
+    let w = World::seeded(json!({})).await;
+    let (s, _) = w
+        .control(
+            "POST",
+            "/v1/passphrase",
+            json!({"passphrase": "test-passphrase-123"}),
+        )
+        .await;
+    assert_eq!(s, 200);
+    let k = crate::ui::webauthn::testkit::SoftKey::new();
+    let mut rec = k.record();
+    rec["credentialId"] = json!("abc");
+    rec["presence"] = json!({"passphrase": "test-passphrase-123"});
+    let (s, v) = w.control("POST", "/v1/presence", rec).await;
+    assert_ne!(s, 200, "{v}");
+    let (_, stored) = w.control("GET", "/v1/presence", json!({})).await;
+    assert_eq!(stored, Value::Null);
+}
