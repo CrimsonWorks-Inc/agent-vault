@@ -477,6 +477,7 @@ async fn a_search_cannot_test_a_withheld_value() {
             )
         })
         .await
+        .unwrap()
         .unwrap();
     assert!(
         u._w.audit_text().await.contains("avs1."),
