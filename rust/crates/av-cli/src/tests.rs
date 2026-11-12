@@ -242,3 +242,166 @@ fn bare_uses_and_session_are_refused() {
     assert!(refused("exec --uses -- cmd"), "exec --uses");
     assert!(refused("exec --session -- cmd"), "exec --session");
 }
+
+#[test]
+fn boolean_flag_rejects_a_value_and_empty_means_set() {
+    assert!(crate::policy_input::boolean_flag(Some(""), "force").unwrap());
+    assert!(!crate::policy_input::boolean_flag(None, "force").unwrap());
+    let err = crate::policy_input::boolean_flag(Some("false"), "force").unwrap_err();
+    assert!(err.message.contains("--force takes no value"));
+}
+
+#[test]
+fn optional_number_rejects_a_missing_value() {
+    let err = crate::policy_input::optional_number(
+        Some(""),
+        "uses",
+        crate::policy_input::NumberLimits::default(),
+    )
+    .unwrap_err();
+    assert!(err.message.contains("--uses needs a value"));
+}
+
+#[test]
+fn known_flags_refuses_an_unknown_limit() {
+    let err = crate::policy_input::known_flags(&["remote"], &["cred", "approval"], "session")
+        .unwrap_err();
+    assert_eq!(
+        err.message,
+        "session does not take --remote; nothing was sent"
+    );
+    assert!(crate::policy_input::known_flags(&["cred"], &["cred", "approval"], "session").is_ok());
+}
+
+#[test]
+fn approve_rate_stays_a_string() {
+    let cli = parse("approve ap_1 --rate 60/min");
+    let Some(Command::Approve(args)) = cli.command else {
+        panic!("not approve")
+    };
+    let body = crate::policy_input::approval_overrides(&args).unwrap();
+    assert_eq!(body.get("rate").and_then(|v| v.as_str()), Some("60/min"));
+}
+
+#[test]
+fn clean_text_drops_controls_and_bidi_and_keeps_tab_and_newline() {
+    let cleaned = crate::control_commands::clean_text("a\u{202e}b\n\tc\u{0007}d\r");
+    assert_eq!(cleaned, "ab\n\tcd");
+}
+
+#[test]
+fn approval_preview_bounds_the_body_and_names_the_agent() {
+    let preview = serde_json::json!({
+        "content_type": "text/plain",
+        "body": { "bytes": 3, "text": "one\ntwo\nthree\nfour\nfive\nsix\nseven" }
+    });
+    let short = crate::control_commands::approval_preview_lines(&preview, false);
+    assert!(short.iter().any(|l| l.contains("sends: text/plain")));
+    assert!(short.iter().any(|l| l.contains("3 bytes")));
+    let full = crate::control_commands::approval_preview_lines(&preview, true);
+    assert!(full
+        .iter()
+        .any(|l| l.contains("written by the agent, not verified")));
+}
+
+#[test]
+fn elevation_names_infinite_and_unreadable_grants() {
+    let infinite = serde_json::json!({ "infinite": true, "approval": "each", "methods": ["GET"] });
+    assert!(crate::commands::elevation_of(&infinite).contains(&"infinite"));
+    let bad = serde_json::json!({ "grants": { "nope": true } });
+    assert!(crate::commands::elevation_of(&bad).contains(&"approval_auto_writes"));
+}
+
+#[test]
+fn resolve_bin_is_absolute_and_refuses_path_fallback() {
+    for cmd in ["id", "launchctl", "chmod", "sleep", "curl", "setfacl"] {
+        match crate::setup::resolve_bin(cmd) {
+            Ok(path) => {
+                assert!(path.is_absolute(), "{cmd}");
+                assert!(path.exists(), "{cmd}");
+            }
+            Err(message) => {
+                assert!(
+                    message.contains("Refusing to fall back to PATH")
+                        || message.contains("not in the allow-list"),
+                    "{cmd}: {message}"
+                );
+            }
+        }
+    }
+    let err = crate::setup::resolve_bin("curl").unwrap_err();
+    assert!(err.contains("not in the allow-list"), "{err}");
+}
+
+#[test]
+fn copy_dereference_writes_the_target_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, "fixture-bytes").unwrap();
+    let link = tmp.path().join("link.txt");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let dest = tmp.path().join("out.txt");
+    crate::setup::copy_dereference(&link, &dest).unwrap();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "fixture-bytes");
+    assert!(!std::fs::symlink_metadata(&dest)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn self_install_and_systemd_restart_and_from_probe() {
+    assert!(crate::setup::refuses_self_install(
+        std::path::Path::new("/var/db/agent-vault/app"),
+        std::path::Path::new("/var/db/agent-vault/app")
+    ));
+    assert!(!crate::setup::refuses_self_install(
+        std::path::Path::new("/tmp/checkout"),
+        std::path::Path::new("/var/db/agent-vault/app")
+    ));
+    assert_eq!(
+        crate::setup::systemd_start_args(),
+        ["restart", "agent-vault.service"]
+    );
+    assert!(!crate::commands::installer_supports_from(b"no marker here"));
+    assert!(crate::commands::installer_supports_from(b"value('from')"));
+    assert!(crate::commands::installer_supports_from(
+        b"install --from /tmp"
+    ));
+    let (path, root) = crate::commands::choose_upgrade_installer(
+        std::path::Path::new("/no/such/installer"),
+        std::path::Path::new("/checkout/agent-vault-setup"),
+    );
+    assert!(!root);
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("/checkout/agent-vault-setup")
+    );
+}
+
+#[test]
+fn append_refuses_a_fifo_without_hanging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fifo = tmp.path().join("witness");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let started = std::time::Instant::now();
+    let err = crate::files::append_line_exclusive(&fifo, "line").unwrap_err();
+    assert!(started.elapsed().as_secs() < 2, "fifo open hung");
+    let text = err.to_string();
+    assert!(text.contains("is not a regular file"), "{text}");
+}
+
+#[test]
+fn retired_vault_path_is_outside_the_install_root() {
+    let retired = crate::setup::retired_vault_path();
+    let text = retired.display().to_string();
+    assert!(text.contains("agent-vault-retired-"), "{text}");
+    assert!(
+        !text.contains("/var/db/agent-vault/agent-vault-retired"),
+        "{text}"
+    );
+}

@@ -96,12 +96,1320 @@ pub struct UninstallArgs {
 /// Ports the `try { switch (verb) ... } catch (e) { die(e.message) }` body
 /// of `bin/agent-vault-setup.js`.
 pub fn run_setup(cli: SetupCli) -> Exit {
-    todo!()
+    let mut argv = Vec::new();
+    if cli.dry_run {
+        argv.push("--dry-run".into());
+    }
+    match cli.command {
+        Some(SetupCommand::Install(args)) => {
+            argv.push("install".into());
+            push_opt(&mut argv, "--user", args.user);
+            push_opt(&mut argv, "--port", args.port);
+            push_opt(&mut argv, "--use-node", args.use_node);
+            push_opt(&mut argv, "--from", args.from);
+        }
+        Some(SetupCommand::Uninstall(args)) => {
+            argv.push("uninstall".into());
+            if args.purge {
+                argv.push("--purge".into());
+            }
+        }
+        Some(SetupCommand::Status) => argv.push("status".into()),
+        Some(SetupCommand::Help) | None => argv.push("help".into()),
+    }
+    run_setup_argv(&argv)
+}
+
+fn push_opt(argv: &mut Vec<String>, flag: &str, value: Option<String>) {
+    if let Some(value) = value {
+        argv.push(flag.into());
+        argv.push(value);
+    }
 }
 
 /// Render a clap parse error as the installer would: an unknown or missing
 /// verb prints the help and exits 0; anything else is `die()`. Ports the
 /// `default: help()` case of `bin/agent-vault-setup.js`.
 pub fn setup_clap_failure(err: clap::Error) -> Exit {
-    todo!()
+    use clap::error::ErrorKind::{DisplayHelp, DisplayVersion, InvalidSubcommand};
+    match err.kind() {
+        DisplayHelp | DisplayVersion | InvalidSubcommand => {
+            help();
+            Exit::Ok
+        }
+        _ => {
+            emit_die(&Die {
+                message: err.to_string(),
+                hint: None,
+            });
+            Exit::Failure
+        }
+    }
 }
+
+/// JS-style argv: the verb is the first argument that does not start with `-`.
+pub fn run_setup_argv(argv: &[String]) -> Exit {
+    match dispatch(argv) {
+        Ok(()) => Exit::Ok,
+        Err(die) => {
+            emit_die(&die);
+            Exit::Failure
+        }
+    }
+}
+
+fn dispatch(argv: &[String]) -> Result<(), Die> {
+    let setup = Ctx {
+        args: argv.to_vec(),
+        dry: flag(argv, "dry-run"),
+        verb: verb_of(argv),
+    };
+    match setup.verb.as_str() {
+        "install" => install(&setup),
+        "uninstall" => uninstall(&setup),
+        "status" => status(&setup),
+        _ => {
+            help();
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Die {
+    pub(crate) message: String,
+    hint: Option<String>,
+}
+
+impl Die {
+    fn new(message: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: Some(hint.into()),
+        }
+    }
+
+    fn msg(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            hint: None,
+        }
+    }
+}
+
+impl From<std::io::Error> for Die {
+    fn from(error: std::io::Error) -> Self {
+        Self::msg(error.to_string())
+    }
+}
+
+fn emit_die(die: &Die) {
+    eprintln!("\ncannot continue  {}", die.message);
+    if let Some(hint) = &die.hint {
+        eprintln!("  {hint}");
+    }
+}
+
+struct Ctx {
+    args: Vec<String>,
+    dry: bool,
+    verb: String,
+}
+
+fn flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == &format!("--{name}"))
+}
+
+fn value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let key = format!("--{name}");
+    let index = args.iter().position(|a| a == &key)?;
+    args.get(index + 1).map(String::as_str)
+}
+
+fn verb_of(args: &[String]) -> String {
+    args.iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .unwrap_or_else(|| "help".into())
+}
+
+fn tty() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+fn paint(code: &str, text: &str) -> String {
+    if tty() {
+        format!("\u{1b}[{code}m{text}\u{1b}[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn say(text: &str) {
+    println!("{text}");
+}
+
+fn step(ctx: &Ctx, text: &str) {
+    let tag = if ctx.dry {
+        paint("33", "would")
+    } else {
+        paint("32", "ok   ")
+    };
+    say(&format!("{tag} {text}"));
+}
+
+const SERVICE_USER: &str = "_agentvault";
+const CLIENT_GROUP: &str = "_agentvault_users";
+const LAUNCHD_LABEL: &str = "com.agentvault.daemon";
+
+fn is_mac() -> bool {
+    cfg!(target_os = "macos")
+}
+
+fn root_dir() -> PathBuf {
+    // A non-root dry run may relocate the tree so tests never touch the real
+    // install. The privileged install does not read this variable.
+    if !is_root() {
+        if let Ok(path) = std::env::var("AGENT_VAULT_SETUP_DRY_ROOT") {
+            if !path.is_empty() {
+                return PathBuf::from(path);
+            }
+        }
+    }
+    if is_mac() {
+        PathBuf::from("/var/db/agent-vault")
+    } else {
+        PathBuf::from("/usr/libexec/agent-vault")
+    }
+}
+
+fn vault_dir() -> PathBuf {
+    if is_mac() {
+        root_dir().join("vault")
+    } else {
+        PathBuf::from("/var/lib/agent-vault")
+    }
+}
+
+fn run_dir() -> PathBuf {
+    if is_mac() {
+        root_dir().join("run")
+    } else {
+        PathBuf::from("/run/agent-vault")
+    }
+}
+
+fn app_dir() -> PathBuf {
+    root_dir().join("app")
+}
+
+fn state_path() -> PathBuf {
+    root_dir().join("state.json")
+}
+
+fn plist_path() -> PathBuf {
+    PathBuf::from("/Library/LaunchDaemons").join(format!("{LAUNCHD_LABEL}.plist"))
+}
+
+const SYSTEMD_UNIT: &str = "/etc/systemd/system/agent-vault.service";
+
+/// Fixed environment for every privileged helper. PATH is not inherited.
+const SAFE_ENV_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+fn safe_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert("PATH".into(), SAFE_ENV_PATH.into());
+    env.insert("LC_ALL".into(), "C".into());
+    env
+}
+
+/// Allow-list of privileged helpers. A name that is not here is never run.
+fn bin_candidates(cmd: &str) -> Option<&'static [&'static str]> {
+    Some(match cmd {
+        "id" => &["/usr/bin/id"],
+        "dscl" => &["/usr/bin/dscl"],
+        "dseditgroup" => &["/usr/sbin/dseditgroup"],
+        "getent" => &["/usr/bin/getent"],
+        "useradd" => &["/usr/sbin/useradd"],
+        "usermod" => &["/usr/sbin/usermod"],
+        "groupadd" => &["/usr/sbin/groupadd"],
+        "chown" => &["/usr/sbin/chown", "/bin/chown"],
+        "chmod" => &["/bin/chmod"],
+        "setfacl" => &["/usr/bin/setfacl", "/bin/setfacl"],
+        "launchctl" => &["/bin/launchctl"],
+        "systemctl" => &["/usr/bin/systemctl", "/bin/systemctl"],
+        "sleep" => &["/bin/sleep"],
+        _ => return None,
+    })
+}
+
+/// Resolve a helper to an absolute allow-listed path. Never a PATH lookup.
+pub(crate) fn resolve_bin(cmd: &str) -> Result<PathBuf, String> {
+    let Some(candidates) = bin_candidates(cmd) else {
+        return Err(format!(
+            "refusing to run \"{cmd}\": not in the allow-list of privileged helpers"
+        ));
+    };
+    if let Some(found) = candidates.iter().map(Path::new).find(|p| p.exists()) {
+        return Ok(found.to_path_buf());
+    }
+    Err(format!(
+        "cannot find {cmd} at {}. Refusing to fall back to PATH: this process is root, and PATH came from a user account an agent may control.",
+        candidates.join(" or ")
+    ))
+}
+
+fn run(ctx: &Ctx, cmd: &str, args: &[&str]) -> Result<String, Die> {
+    run_opts(ctx, cmd, args, false)
+}
+
+fn run_opts(ctx: &Ctx, cmd: &str, args: &[&str], allow_fail: bool) -> Result<String, Die> {
+    if ctx.dry {
+        say(&format!(
+            "       {}",
+            paint("2", &format!("{cmd} {}", args.join(" ")))
+        ));
+        return Ok(String::new());
+    }
+    let bin = resolve_bin(cmd).map_err(Die::msg)?;
+    let output = Command::new(&bin)
+        .args(args)
+        .env_clear()
+        .envs(safe_env())
+        .output()
+        .map_err(|e| Die::msg(format!("{cmd} {} failed: {e}", args.join(" "))))?;
+    if output.status.success() || allow_fail {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Die::msg(format!(
+        "{cmd} {} failed: {}",
+        args.join(" "),
+        stderr.trim()
+    )))
+}
+
+fn is_root() -> bool {
+    current_uid() == 0
+}
+
+fn current_uid() -> u32 {
+    Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1)
+}
+
+fn username() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "user".into())
+}
+
+fn require_root(ctx: &Ctx) -> Result<(), Die> {
+    // A dry run must be readable without sudo.
+    if ctx.dry {
+        return Ok(());
+    }
+    if !is_root() {
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-vault-setup"));
+        return Err(Die::new(
+            "this must run as root.",
+            format!("try: sudo {} {}", exe.display(), ctx.verb),
+        ));
+    }
+    Ok(())
+}
+
+struct Enrolled {
+    name: String,
+    uid: u32,
+}
+
+fn enrolled_user(ctx: &Ctx) -> Result<Enrolled, Die> {
+    let name = value(&ctx.args, "user")
+        .map(str::to_string)
+        .or_else(|| std::env::var("SUDO_USER").ok())
+        .or_else(|| if ctx.dry { Some(username()) } else { None });
+    let Some(name) = name.filter(|n| !n.is_empty()) else {
+        return Err(Die::new(
+            "cannot tell which account to enrol.",
+            "Run this through sudo from your own account, or pass --user <name>.",
+        ));
+    };
+    if name == "root" {
+        return Err(Die::new(
+            "refusing to enrol root.",
+            "Run sudo from your normal account.",
+        ));
+    }
+    let uid = if ctx.dry {
+        if name == username() {
+            current_uid()
+        } else {
+            0
+        }
+    } else {
+        let bin = resolve_bin("id").map_err(Die::msg)?;
+        let output = Command::new(bin)
+            .args(["-u", &name])
+            .env_clear()
+            .envs(safe_env())
+            .output()
+            .map_err(|_| Die::msg(format!("no such user: {name}")))?;
+        if !output.status.success() {
+            return Err(Die::msg(format!("no such user: {name}")));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .map_err(|_| Die::msg(format!("no such user: {name}")))?
+    };
+    Ok(Enrolled { name, uid })
+}
+
+fn is_root_owned(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.uid() == 0 && (meta.mode() & 0o022) == 0,
+        Err(_) => false,
+    }
+}
+
+fn assert_root_owned_chain(path: &Path, what: &str) -> Result<(), Die> {
+    let mut current = path.to_path_buf();
+    loop {
+        if current.exists() {
+            let meta = std::fs::metadata(&current)?;
+            let group_or_other = (meta.mode() & 0o022) != 0;
+            let sticky = (meta.mode() & 0o1000) != 0;
+            if meta.uid() != 0 || (group_or_other && !sticky) {
+                return Err(Die::new(
+                    format!(
+                        "{what} sits under {}, which is writable by uid {}.",
+                        current.display(),
+                        meta.uid()
+                    ),
+                    "Anything there can be replaced by a process running as you, so root must not execute from it.",
+                ));
+            }
+        }
+        let Some(parent) = current.parent() else {
+            return Ok(());
+        };
+        if parent == current {
+            return Ok(());
+        }
+        current = parent.to_path_buf();
+    }
+}
+
+fn user_exists(ctx: &Ctx, name: &str) -> Result<bool, Die> {
+    if is_mac() {
+        Ok(run_opts(
+            ctx,
+            "dscl",
+            &[".", "-read", &format!("/Users/{name}"), "UniqueID"],
+            true,
+        )?
+        .contains("UniqueID"))
+    } else {
+        Ok(!run_opts(ctx, "getent", &["passwd", name], true)?
+            .trim()
+            .is_empty())
+    }
+}
+
+fn group_exists(ctx: &Ctx, name: &str) -> Result<bool, Die> {
+    if is_mac() {
+        Ok(run_opts(
+            ctx,
+            "dscl",
+            &[".", "-read", &format!("/Groups/{name}")],
+            true,
+        )?
+        .contains("RecordName"))
+    } else {
+        Ok(!run_opts(ctx, "getent", &["group", name], true)?
+            .trim()
+            .is_empty())
+    }
+}
+
+fn create_service_user(ctx: &Ctx) -> Result<(), Die> {
+    // Under a dry run the service user was only described, not created, so
+    // the plan shows this step anyway.
+    if ctx.dry || user_exists(ctx, SERVICE_USER)? {
+        step(ctx, &format!("service user {SERVICE_USER} already exists"));
+        return Ok(());
+    }
+    if is_mac() {
+        let uid = mac_free_uid(ctx)?;
+        let user = format!("/Users/{SERVICE_USER}");
+        run(ctx, "dscl", &[".", "-create", &user])?;
+        run(
+            ctx,
+            "dscl",
+            &[".", "-create", &user, "UniqueID", &uid.to_string()],
+        )?;
+        run(
+            ctx,
+            "dscl",
+            &[".", "-create", &user, "PrimaryGroupID", &uid.to_string()],
+        )?;
+        run(
+            ctx,
+            "dscl",
+            &[".", "-create", &user, "UserShell", "/usr/bin/false"],
+        )?;
+        run(
+            ctx,
+            "dscl",
+            &[".", "-create", &user, "NFSHomeDirectory", "/var/empty"],
+        )?;
+        run(
+            ctx,
+            "dscl",
+            &[".", "-create", &user, "RealName", "agent-vault daemon"],
+        )?;
+        run(ctx, "dscl", &[".", "-create", &user, "IsHidden", "1"])?;
+        let _ = run_opts(
+            ctx,
+            "dscl",
+            &[".", "-create", &format!("/Groups/{SERVICE_USER}")],
+            true,
+        );
+        let _ = run_opts(
+            ctx,
+            "dscl",
+            &[
+                ".",
+                "-create",
+                &format!("/Groups/{SERVICE_USER}"),
+                "PrimaryGroupID",
+                &uid.to_string(),
+            ],
+            true,
+        );
+    } else {
+        let vault = vault_dir();
+        run(
+            ctx,
+            "useradd",
+            &[
+                "--system",
+                "--user-group",
+                "--home-dir",
+                &vault.to_string_lossy(),
+                "--shell",
+                "/usr/sbin/nologin",
+                "--comment",
+                "agent-vault daemon",
+                SERVICE_USER,
+            ],
+        )?;
+    }
+    step(
+        ctx,
+        &format!(
+            "created service user {} {}",
+            paint("1", SERVICE_USER),
+            paint("2", "(no shell, no home, hidden)")
+        ),
+    );
+    Ok(())
+}
+
+fn mac_free_uid(ctx: &Ctx) -> Result<u32, Die> {
+    if ctx.dry {
+        return Ok(399);
+    }
+    let listed = run(ctx, "dscl", &[".", "-list", "/Users", "UniqueID"])?;
+    let used: Vec<u32> = listed
+        .lines()
+        .filter_map(|line| line.split_whitespace().last()?.parse().ok())
+        .collect();
+    for uid in 300..400 {
+        if !used.contains(&uid) {
+            return Ok(uid);
+        }
+    }
+    Err(Die::msg("no free system uid between 300 and 399."))
+}
+
+fn create_client_group(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
+    if !group_exists(ctx, CLIENT_GROUP)? {
+        if is_mac() {
+            run(
+                ctx,
+                "dseditgroup",
+                &["-o", "create", "-r", "agent-vault clients", CLIENT_GROUP],
+            )?;
+        } else {
+            run(ctx, "groupadd", &["--system", CLIENT_GROUP])?;
+        }
+        step(
+            ctx,
+            &format!("created client group {}", paint("1", CLIENT_GROUP)),
+        );
+    } else {
+        step(ctx, &format!("client group {CLIENT_GROUP} already exists"));
+    }
+    if is_mac() {
+        run(
+            ctx,
+            "dseditgroup",
+            &[
+                "-o",
+                "edit",
+                "-a",
+                &enrolled.name,
+                "-t",
+                "user",
+                CLIENT_GROUP,
+            ],
+        )?;
+    } else {
+        run(ctx, "usermod", &["-aG", CLIENT_GROUP, &enrolled.name])?;
+    }
+    step(
+        ctx,
+        &format!(
+            "added {} to {CLIENT_GROUP} {}",
+            paint("1", &enrolled.name),
+            paint("2", "(effective at next login; an ACL covers this session)")
+        ),
+    );
+    // The daemon sets the group on each socket. A process cannot chown to a
+    // group it is not a member of.
+    if ctx.dry || user_exists(ctx, SERVICE_USER)? {
+        if is_mac() {
+            let _ = run_opts(
+                ctx,
+                "dseditgroup",
+                &["-o", "edit", "-a", SERVICE_USER, "-t", "user", CLIENT_GROUP],
+                true,
+            );
+        } else {
+            let _ = run_opts(ctx, "usermod", &["-aG", CLIENT_GROUP, SERVICE_USER], true);
+        }
+        step(
+            ctx,
+            &format!(
+                "added {} to {CLIENT_GROUP} {}",
+                paint("1", SERVICE_USER),
+                paint("2", "so it can group-own the sockets it creates")
+            ),
+        );
+    }
+    Ok(())
+}
+
+fn service_ids(ctx: &Ctx) -> Result<(u32, u32), Die> {
+    if ctx.dry {
+        return Ok((399, 399));
+    }
+    let uid: u32 = run(ctx, "id", &["-u", SERVICE_USER])?
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    let gid: u32 = run(ctx, "id", &["-g", SERVICE_USER])?
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Ok((uid, gid))
+}
+
+fn client_gid(ctx: &Ctx) -> Result<u32, Die> {
+    if ctx.dry {
+        return Ok(399);
+    }
+    if is_mac() {
+        let out = run(
+            ctx,
+            "dscl",
+            &[
+                ".",
+                "-read",
+                &format!("/Groups/{CLIENT_GROUP}"),
+                "PrimaryGroupID",
+            ],
+        )?;
+        Ok(out
+            .split(':')
+            .next_back()
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .unwrap_or(0))
+    } else {
+        let out = run(ctx, "getent", &["group", CLIENT_GROUP])?;
+        Ok(out.split(':').nth(2).unwrap_or("0").parse().unwrap_or(0))
+    }
+}
+
+fn make_dir(ctx: &Ctx, path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), Die> {
+    let octal = format!("0{mode:o}");
+    if ctx.dry {
+        say(&format!(
+            "       {}",
+            paint(
+                "2",
+                &format!("mkdir -m {octal} {}  (owner {uid}:{gid})", path.display())
+            )
+        ));
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)?;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(mode);
+    std::fs::set_permissions(path, perms)?;
+    run(
+        ctx,
+        "chown",
+        &[&format!("{uid}:{gid}"), &path.to_string_lossy()],
+    )?;
+    Ok(())
+}
+
+fn build_tree(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
+    let root = root_dir();
+    assert_root_owned_chain(root.parent().unwrap_or(&root), "the install root")?;
+    make_dir(ctx, &root, 0o755, 0, 0)?;
+    let (uid, gid) = service_ids(ctx)?;
+    let vault = vault_dir();
+    make_dir(ctx, &vault, 0o700, uid, gid)?;
+    step(
+        ctx,
+        &format!(
+            "{} {}",
+            paint("1", &vault.display().to_string()),
+            paint("2", &format!("0700 {SERVICE_USER} - this is the boundary"))
+        ),
+    );
+    let run_path = run_dir();
+    make_dir(ctx, &run_path, 0o2750, uid, client_gid(ctx)?)?;
+    if is_mac() {
+        let _ = run_opts(
+            ctx,
+            "chmod",
+            &[
+                "+a",
+                &format!(
+                    "user:{} allow read,write,execute,search,add_file,delete_child",
+                    enrolled.name
+                ),
+                &run_path.to_string_lossy(),
+            ],
+            true,
+        );
+    } else {
+        let _ = run_opts(
+            ctx,
+            "setfacl",
+            &[
+                "-m",
+                &format!("u:{}:rwx", enrolled.name),
+                &run_path.to_string_lossy(),
+            ],
+            true,
+        );
+    }
+    step(
+        ctx,
+        &format!(
+            "{} {}",
+            paint("1", &run_path.display().to_string()),
+            paint(
+                "2",
+                &format!(
+                    "2750 {SERVICE_USER}:{CLIENT_GROUP} setgid + ACL for {}",
+                    enrolled.name
+                )
+            )
+        ),
+    );
+    Ok(())
+}
+
+fn checkout_from(ctx: &Ctx) -> Result<PathBuf, Die> {
+    if let Some(from) = value(&ctx.args, "from") {
+        return Ok(PathBuf::from(from)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(from)));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut dir = exe.parent().map(Path::to_path_buf);
+        while let Some(current) = dir {
+            if current.join("src").is_dir()
+                && current.join("bin").is_dir()
+                && current.join("package.json").is_file()
+            {
+                return Ok(current);
+            }
+            dir = current.parent().map(Path::to_path_buf);
+        }
+    }
+    Err(Die::msg(
+        "could not find an agent-vault checkout. Pass --from <path to your checkout>.",
+    ))
+}
+
+/// True when installing `source` would overwrite the app directory itself.
+pub(crate) fn refuses_self_install(source: &Path, app: &Path) -> bool {
+    source == app
+}
+
+fn install_app(ctx: &Ctx) -> Result<(), Die> {
+    let source = checkout_from(ctx)?;
+    for required in ["src", "bin", "package.json"] {
+        if !source.join(required).exists() {
+            return Err(Die::msg(format!(
+                "{} does not look like an agent-vault checkout (no {required}).",
+                source.display()
+            )));
+        }
+    }
+    let app = app_dir();
+    if refuses_self_install(&source, &app) {
+        return Err(Die::new(
+            "refusing to install the app directory over itself.",
+            "Pass --from <path to your checkout> so there is something new to install.",
+        ));
+    }
+    assert_no_symlinks(&source, &["src", "bin", "package.json"])?;
+    if !ctx.dry {
+        if app.exists() {
+            std::fs::remove_dir_all(&app)?;
+        }
+        std::fs::create_dir_all(&app)?;
+        for part in ["src", "bin", "package.json"] {
+            // dereference: copy the target of a link, never the link itself.
+            copy_dereference(&source.join(part), &app.join(part))?;
+        }
+        copy_rust_bins(&app)?;
+        if is_mac() {
+            let _ = run_opts(
+                ctx,
+                "chown",
+                &["-R", "root:wheel", &app.to_string_lossy()],
+                true,
+            );
+        } else {
+            run(ctx, "chown", &["-R", "root:root", &app.to_string_lossy()])?;
+        }
+        run(ctx, "chmod", &["-R", "go-w", &app.to_string_lossy()])?;
+    }
+    step(
+        ctx,
+        &format!(
+            "copied the daemon into {} {}",
+            paint("1", &app.display().to_string()),
+            paint("2", &format!("from {}", source.display()))
+        ),
+    );
+    Ok(())
+}
+
+fn copy_rust_bins(app: &Path) -> Result<(), Die> {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return Ok(());
+    };
+    let Some(dir) = exe.parent() else {
+        return Ok(());
+    };
+    let dest = app.join("bin");
+    std::fs::create_dir_all(&dest)?;
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        let src = dir.join(name);
+        if src.is_file() {
+            if is_root() && !is_root_owned(&src) {
+                eprintln!(
+                    "\nwarning  the binary being copied ({}) is writable by uid {}, not root.",
+                    src.display(),
+                    std::fs::metadata(&src).map(|m| m.uid()).unwrap_or(0)
+                );
+            }
+            copy_dereference(&src, &dest.join(name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy `src` onto `dst`, following links. A symlink becomes a regular file
+/// (or a directory) holding the target's bytes.
+pub(crate) fn copy_dereference(src: &Path, dst: &Path) -> Result<(), Die> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src)?;
+        let abs = if target.is_absolute() {
+            target
+        } else {
+            src.parent().unwrap_or(Path::new(".")).join(target)
+        };
+        return copy_dereference(&abs, dst);
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_dereference(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst)?;
+    Ok(())
+}
+
+fn assert_no_symlinks(source: &Path, parts: &[&str]) -> Result<(), Die> {
+    fn walk(abs: &Path, shown: &str) -> Result<(), Die> {
+        let meta = std::fs::symlink_metadata(abs)?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(abs).unwrap_or_default();
+            return Err(Die::new(
+                format!("refusing to install: {shown} is a symbolic link."),
+                format!(
+                    "It points at {}, which is outside the tree root is about to own.",
+                    target.display()
+                ),
+            ));
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(abs)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let child = format!("{shown}/{}", name.to_string_lossy());
+                walk(&entry.path(), &child)?;
+            }
+        }
+        Ok(())
+    }
+    for part in parts {
+        walk(&source.join(part), part)?;
+    }
+    Ok(())
+}
+
+fn daemon_program() -> PathBuf {
+    app_dir().join("bin").join("agent-vault-daemon")
+}
+
+fn installed_setup() -> PathBuf {
+    app_dir().join("bin").join("agent-vault-setup")
+}
+
+/// systemd restarts the unit so a reinstall picks up the new binary.
+pub(crate) fn systemd_start_args() -> &'static [&'static str] {
+    &["restart", "agent-vault.service"]
+}
+
+fn install_service(ctx: &Ctx, enrolled: &Enrolled) -> Result<(), Die> {
+    let program = daemon_program();
+    let port = value(&ctx.args, "port").unwrap_or("7411");
+    let env = [
+        ("AV_VAULT_DIR", vault_dir().display().to_string()),
+        ("AV_RUN_DIR", run_dir().display().to_string()),
+        ("AV_ENROLLED_UID", enrolled.uid.to_string()),
+        ("AV_CLIENT_GROUP", CLIENT_GROUP.to_string()),
+        ("AV_PORT", port.to_string()),
+    ];
+    if is_mac() {
+        let mut body = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>{LAUNCHD_LABEL}</string>\n  \
+<key>ProgramArguments</key>\n  <array><string>{}</string></array>\n  \
+<key>UserName</key><string>{SERVICE_USER}</string>\n  \
+<key>GroupName</key><string>{SERVICE_USER}</string>\n  \
+<key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  \
+<key>EnvironmentVariables</key>\n  <dict>",
+            program.display()
+        );
+        for (key, val) in &env {
+            body.push_str(&format!("\n    <key>{key}</key><string>{val}</string>"));
+        }
+        body.push_str(&format!(
+            "\n  </dict>\n  <key>StandardOutPath</key><string>{}/daemon.out</string>\n  \
+<key>StandardErrorPath</key><string>{}/daemon.err</string>\n</dict>\n</plist>\n",
+            vault_dir().display(),
+            vault_dir().display()
+        ));
+        let plist = plist_path();
+        if ctx.dry {
+            say(&format!(
+                "       {}",
+                paint("2", &format!("write {}", plist.display()))
+            ));
+        } else {
+            if let Some(parent) = plist.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&plist, body)?;
+        }
+        bootstrap_launchd(ctx)?;
+        step(
+            ctx,
+            &format!(
+                "installed and started the launchd service {}",
+                paint("2", LAUNCHD_LABEL)
+            ),
+        );
+    } else {
+        let unit_path = PathBuf::from(SYSTEMD_UNIT);
+        if ctx.dry {
+            say(&format!(
+                "       {}",
+                paint("2", &format!("write {}", unit_path.display()))
+            ));
+        } else {
+            let mut unit = format!(
+                "[Service]\nExecStart={} \nUser={SERVICE_USER}\nGroup={SERVICE_USER}\n",
+                program.display()
+            );
+            for (key, val) in &env {
+                unit.push_str(&format!("Environment={key}={val}\n"));
+            }
+            std::fs::write(&unit_path, unit)?;
+        }
+        run(ctx, "systemctl", &["daemon-reload"])?;
+        let _ = run_opts(ctx, "systemctl", &["enable", "agent-vault.service"], true);
+        let args = systemd_start_args();
+        run(ctx, "systemctl", args)?;
+        step(ctx, "installed and started the systemd service");
+    }
+    Ok(())
+}
+
+/// Is the service currently known to launchd?
+fn service_loaded() -> bool {
+    if !is_root() {
+        return false;
+    }
+    let Ok(bin) = resolve_bin("launchctl") else {
+        return false;
+    };
+    Command::new(bin)
+        .args(["print", &format!("system/{LAUNCHD_LABEL}")])
+        .env_clear()
+        .envs(safe_env())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn sleep_ms(ms: u64) -> Result<(), Die> {
+    let bin = resolve_bin("sleep").map_err(Die::msg)?;
+    let _ = Command::new(bin)
+        .arg(format!("{}", ms as f64 / 1000.0))
+        .env_clear()
+        .envs(safe_env())
+        .status();
+    Ok(())
+}
+
+/// Load the service, tolerating the teardown race.
+///
+/// `launchctl bootout` returns before the job is actually gone, so an
+/// immediate bootstrap fails. Waiting, then kickstart when it is still
+/// registered, is what makes a reinstall reliable.
+fn bootstrap_launchd(ctx: &Ctx) -> Result<(), Die> {
+    if ctx.dry {
+        say(&format!(
+            "       {}",
+            paint(
+                "2",
+                &format!("launchctl bootout system/{LAUNCHD_LABEL}  (then wait for teardown)")
+            )
+        ));
+        say(&format!(
+            "       {}",
+            paint("2", &format!("launchctl enable system/{LAUNCHD_LABEL}"))
+        ));
+        say(&format!(
+            "       {}",
+            paint(
+                "2",
+                &format!("launchctl bootstrap system {}", plist_path().display())
+            )
+        ));
+        return Ok(());
+    }
+    let _ = run_opts(
+        ctx,
+        "launchctl",
+        &["bootout", &format!("system/{LAUNCHD_LABEL}")],
+        true,
+    );
+    let mut spins = 0;
+    while spins < 40 && service_loaded() {
+        sleep_ms(250)?;
+        spins += 1;
+    }
+    let _ = run_opts(
+        ctx,
+        "launchctl",
+        &["enable", &format!("system/{LAUNCHD_LABEL}")],
+        true,
+    );
+    let mut last_error = None;
+    for attempt in 1..=5 {
+        let bin = resolve_bin("launchctl").map_err(Die::msg)?;
+        let output = Command::new(bin)
+            .args(["bootstrap", "system", &plist_path().to_string_lossy()])
+            .env_clear()
+            .envs(safe_env())
+            .output()?;
+        if output.status.success() || service_loaded() {
+            last_error = None;
+            break;
+        }
+        last_error = Some(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        sleep_ms(500 * attempt)?;
+    }
+    if last_error.is_some() && !service_loaded() {
+        let bin = resolve_bin("launchctl").map_err(Die::msg)?;
+        let kicked = Command::new(bin)
+            .args(["kickstart", "-k", &format!("system/{LAUNCHD_LABEL}")])
+            .env_clear()
+            .envs(safe_env())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if kicked || service_loaded() {
+            last_error = None;
+        }
+    }
+    if let Some(error) = last_error {
+        if !service_loaded() {
+            return Err(Die::new(
+                format!("could not start the service: {error}"),
+                format!(
+                    "The files are installed. Start it with:\n    sudo launchctl bootout system/{LAUNCHD_LABEL} ; sudo launchctl bootstrap system {}",
+                    plist_path().display()
+                ),
+            ));
+        }
+    }
+    for _ in 0..20 {
+        if run_dir().join("control.sock").exists() {
+            return Ok(());
+        }
+        sleep_ms(250)?;
+    }
+    say(&format!(
+        "  {}  the service loaded but its socket has not appeared yet; check: agent-vault status",
+        paint("33", "warn")
+    ));
+    Ok(())
+}
+
+fn install(ctx: &Ctx) -> Result<(), Die> {
+    require_root(ctx)?;
+    if value(&ctx.args, "use-node").is_some() {
+        return Err(Die::msg(
+            "this installer ships the Rust daemon and does not install a Node runtime.",
+        ));
+    }
+    let enrolled = enrolled_user(ctx)?;
+    say(&format!(
+        "\n{}{}",
+        paint("1", "agent-vault install"),
+        if ctx.dry {
+            paint("33", "  (dry run: nothing will change)")
+        } else {
+            String::new()
+        }
+    ));
+    let os = if is_mac() { "macOS" } else { "Linux" };
+    say(&paint(
+        "2",
+        &format!(
+            "  enrolling {} (uid {}) on {os}\n",
+            enrolled.name, enrolled.uid
+        ),
+    ));
+    create_service_user(ctx)?;
+    create_client_group(ctx, &enrolled)?;
+    build_tree(ctx, &enrolled)?;
+    install_app(ctx)?;
+    step(
+        ctx,
+        "not installing a Node runtime; the service runs the Rust daemon",
+    );
+    install_service(ctx, &enrolled)?;
+    say(&format!("\n{}", paint("1", "done")));
+    say(&format!(
+        "  The daemon runs as {}. Your account cannot read {}.",
+        paint("1", SERVICE_USER),
+        vault_dir().display()
+    ));
+    say(&format!(
+        "  Check it: {} {}",
+        paint("1", &format!("cat {}/vault.json", vault_dir().display())),
+        paint("2", "should say Permission denied")
+    ));
+    say("");
+    say(&format!("  Next, as {}:", enrolled.name));
+    say(&format!("    {}", paint("1", "agent-vault status")));
+    say(&format!(
+        "    {}",
+        paint("1", "agent-vault cred add gh --kind github")
+    ));
+    say("");
+    say(&paint(
+        "2",
+        &format!(
+            "  To remove everything: sudo {} uninstall",
+            installed_setup().display()
+        ),
+    ));
+    say(&paint(
+        "2",
+        "  (the installed binary is root-owned; there is no Node runtime on root's PATH)",
+    ));
+    say("");
+    Ok(())
+}
+
+fn uninstall(ctx: &Ctx) -> Result<(), Die> {
+    require_root(ctx)?;
+    let purge = flag(&ctx.args, "purge");
+    say(&format!(
+        "\n{}{}\n",
+        paint("1", "agent-vault uninstall"),
+        if ctx.dry {
+            paint("33", "  (dry run)")
+        } else {
+            String::new()
+        }
+    ));
+    if is_mac() {
+        let _ = run_opts(
+            ctx,
+            "launchctl",
+            &["bootout", &format!("system/{LAUNCHD_LABEL}")],
+            true,
+        );
+    } else {
+        let _ = run_opts(
+            ctx,
+            "systemctl",
+            &["disable", "--now", "agent-vault.service"],
+            true,
+        );
+    }
+    step(ctx, "stopped the service");
+    let vault = vault_dir();
+    if vault.exists() && !ctx.dry {
+        if purge {
+            std::fs::remove_dir_all(&vault)?;
+            step(
+                ctx,
+                &paint("31", "deleted the vault and every credential in it"),
+            );
+        } else {
+            // Deliberately outside ROOT: the last step removes ROOT, and on
+            // macOS the vault lives inside it.
+            let retired = retired_vault_path();
+            if retired.starts_with(root_dir()) {
+                return Err(Die::msg(format!(
+                    "refusing to remove {}: your retired vault is inside it at {}",
+                    root_dir().display(),
+                    retired.display()
+                )));
+            }
+            std::fs::rename(&vault, &retired)?;
+            step(
+                ctx,
+                &format!(
+                    "kept your credentials at {} {}",
+                    paint("1", &retired.display().to_string()),
+                    paint("2", "(--purge deletes them instead)")
+                ),
+            );
+        }
+    }
+    if ctx.dry || user_exists(ctx, SERVICE_USER)? {
+        say(&paint(
+            "2",
+            &format!("       left the {SERVICE_USER} account in place; removing it would free its uid for reuse"),
+        ));
+    }
+    say(&format!(
+        "\n{}  Your own ~/.agent-vault dev vault, if any, is untouched.\n",
+        paint("1", "done")
+    ));
+    Ok(())
+}
+
+/// The path a retired vault moves to. It is a sibling of the install root,
+/// never a child of it.
+pub(crate) fn retired_vault_path() -> PathBuf {
+    let root = root_dir();
+    let parent = root.parent().unwrap_or(Path::new("/"));
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    parent.join(format!("agent-vault-retired-{millis}"))
+}
+
+fn status(ctx: &Ctx) -> Result<(), Die> {
+    let _ = ctx;
+    let installed = state_path().is_file();
+    say(&format!("\n{}\n", paint("1", "agent-vault system install")));
+    if !installed {
+        say(&format!(
+            "  {}  no {}",
+            paint("33", "not installed"),
+            state_path().display()
+        ));
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-vault-setup"));
+        say(&format!(
+            "  {}\n",
+            paint(
+                "2",
+                &format!("install with: sudo {} install", exe.display())
+            )
+        ));
+        return Ok(());
+    }
+    let user_ok = user_exists(
+        &Ctx {
+            args: Vec::new(),
+            dry: false,
+            verb: "status".into(),
+        },
+        SERVICE_USER,
+    )
+    .unwrap_or(false);
+    say(&format!(
+        "  {} service user                     {}",
+        if user_ok {
+            paint("32", "ok  ")
+        } else {
+            paint("33", "warn")
+        },
+        paint("2", SERVICE_USER)
+    ));
+    Ok(())
+}
+
+fn help() {
+    say(&format!(
+        "\n{}  the privileged installer\n\n  {} [--user <name>] [--port 7411] [--dry-run]\n  {} [--purge] [--dry-run]\n  {}\n\n  install creates the {SERVICE_USER} system user and a root-owned tree, so the\n  vault is unreadable to anything running as you. --dry-run prints every change\n  it would make and touches nothing.\n",
+        paint("1", "agent-vault-setup"),
+        paint("1", "sudo agent-vault-setup install"),
+        paint("1", "sudo agent-vault-setup uninstall"),
+        paint("1", "agent-vault-setup status"),
+    ));
+}
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use std::os::unix::fs::{MetadataExt, PermissionsExt};

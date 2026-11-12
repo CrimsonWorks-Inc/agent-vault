@@ -8,9 +8,16 @@ fn main() {
     if let Some(exit) = av_cli::refuse_root(&argv) {
         std::process::exit(exit.code());
     }
-    let cli = match av_cli::Cli::try_parse_from(&argv) {
+    let prepared = match av_cli::prepare(&argv) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            let json = argv.iter().any(|a| a == "--json");
+            std::process::exit(av_cli::emit(&err, json).code());
+        }
+    };
+    let cli = match av_cli::Cli::try_parse_from(&prepared.argv) {
         Ok(cli) => cli,
-        Err(err) => std::process::exit(av_cli::clap_failure(err, &argv).code()),
+        Err(err) => std::process::exit(av_cli::clap_failure(err, &prepared.argv).code()),
     };
     std::process::exit(av_cli::run(cli));
 }
