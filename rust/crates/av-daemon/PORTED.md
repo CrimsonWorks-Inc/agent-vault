@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 91 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **890 not yet ported**.
+Totals: 1090 JS tests: 111 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **870 not yet ported**.
 
 ## Mutation check
 
@@ -480,34 +480,34 @@ the vault on every call instead of caching an audit handle.
 | gateway-approvals.test.js | a resend while the approved request is still in flight keeps waiting on it | not yet ported |
 | gateway-approvals.test.js | renewing the placeholder inside a Basic header keeps the approval | not yet ported |
 | gateway-approvals.test.js | a different Basic user, or another spelling of the same header, still needs its own approval | not yet ported |
-| gateway-core.test.js | the scrubber catches the encodings it used to miss | not yet ported |
-| gateway-core.test.js | the scrubber leaves ordinary escaped and wrapped text alone | not yet ported |
-| gateway-core.test.js | a percent-encoded secret split across stream chunks is still caught | not yet ported |
-| gateway-core.test.js | a derived token straddling the stream hold-back is not emitted in halves | not yet ported |
-| gateway-core.test.js | the stream scrubber still emits ordinary text unchanged | not yet ported |
-| gateway-core.test.js | a backslash encoded more than once is still refused | not yet ported |
-| gateway-core.test.js | ordinary encoded paths still normalise | not yet ported |
-| gateway-core.test.js | a literal percent sign can be sent, and still cannot hide an escape | not yet ported |
-| gateway-core.test.js | intersecting two rates never allows more than either | not yet ported |
-| gateway-core.test.js | intersecting rates in the same unit is the smaller count | not yet ported |
-| gateway-core.test.js | lint accepts valid enforced limits | not yet ported |
+| gateway-core.test.js | the scrubber catches the encodings it used to miss | tests/ported_gateway_core_units.rs::escaped_and_wrapped_secret_shapes_are_redacted_with_ordinary_controls |
+| gateway-core.test.js | the scrubber leaves ordinary escaped and wrapped text alone | tests/ported_gateway_core_units.rs::ordinary_escaped_wrapped_and_partial_text_is_unchanged |
+| gateway-core.test.js | a percent-encoded secret split across stream chunks is still caught | tests/ported_gateway_core_units.rs::percent_secret_and_derived_token_straddling_holdback_are_not_emitted_in_halves |
+| gateway-core.test.js | a derived token straddling the stream hold-back is not emitted in halves | tests/ported_gateway_core_units.rs::percent_secret_and_derived_token_straddling_holdback_are_not_emitted_in_halves |
+| gateway-core.test.js | the stream scrubber still emits ordinary text unchanged | tests/ported_gateway_core_units.rs::percent_secret_and_derived_token_straddling_holdback_are_not_emitted_in_halves |
+| gateway-core.test.js | a backslash encoded more than once is still refused | tests/ported_gateway_core_units.rs::path_parser_refuses_reencoded_separators_but_preserves_ordinary_paths_and_literal_percent |
+| gateway-core.test.js | ordinary encoded paths still normalise | tests/ported_gateway_core_units.rs::path_parser_refuses_reencoded_separators_but_preserves_ordinary_paths_and_literal_percent |
+| gateway-core.test.js | a literal percent sign can be sent, and still cannot hide an escape | tests/ported_gateway_core_units.rs::path_parser_refuses_reencoded_separators_but_preserves_ordinary_paths_and_literal_percent |
+| gateway-core.test.js | intersecting two rates never allows more than either | tests/ported_gateway_core_units.rs::rate_intersections_never_widen_and_invalid_units_are_refused |
+| gateway-core.test.js | intersecting rates in the same unit is the smaller count | tests/ported_gateway_core_units.rs::rate_intersections_never_widen_and_invalid_units_are_refused |
+| gateway-core.test.js | lint accepts valid enforced limits | tests/ported_gateway_core_units.rs::lint_accepts_valid_enforced_rate_concurrency_and_budget_limits |
 | gateway-core.test.js | JSON substitution changes the one string and nothing else in the body | tests/ported_gateway_core.rs::json_substitution_preserves_numbers_spacing_and_escapes |
-| gateway-core.test.js | JSON substitution follows the same duplicate key and pointer escaping as the parser | not yet ported |
+| gateway-core.test.js | JSON substitution follows the same duplicate key and pointer escaping as the parser | tests/ported_gateway_core_units.rs::json_duplicate_pointer_and_basic_header_substitution_use_the_parser_selected_position |
 | gateway-core.test.js | form substitution leaves the rest of the field and the body as written | tests/ported_gateway_core.rs::form_substitution_preserves_other_bytes_and_encoded_placeholder_spelling |
-| gateway-core.test.js | Basic substitution writes the Authorization header the placeholder was found in | not yet ported |
+| gateway-core.test.js | Basic substitution writes the Authorization header the placeholder was found in | tests/ported_gateway_core_units.rs::json_duplicate_pointer_and_basic_header_substitution_use_the_parser_selected_position |
 | gateway-core.test.js | Basic substitution through the pipeline, with a second Authorization header present | tests/ported_gateway_core.rs::duplicate_basic_authorization_is_refused_and_single_basic_is_substituted |
 | gateway-core.test.js | an ordinary single Basic header is substituted as before | tests/ported_gateway_core.rs::duplicate_basic_authorization_is_refused_and_single_basic_is_substituted |
-| gateway-core.test.js | rate layers preserve canonical windows and refuse unknown units at evaluation | not yet ported |
-| gateway-core.test.js | base64 wrapped at any width, and hex in mixed case, are redacted | not yet ported |
-| gateway-core.test.js | several wrapped blobs in one body are each searched, and the search ends | not yet ported |
-| gateway-core.test.js | wrapped prose, short lines, ordinary blobs and ordinary mixed-case hex are left alone | not yet ported |
-| gateway-core.test.js | the wrapped and mixed-case views stay linear on large bodies | not yet ported |
+| gateway-core.test.js | rate layers preserve canonical windows and refuse unknown units at evaluation | tests/ported_gateway_core_units.rs::rate_intersections_never_widen_and_invalid_units_are_refused |
+| gateway-core.test.js | base64 wrapped at any width, and hex in mixed case, are redacted | tests/ported_gateway_core_units.rs::escaped_and_wrapped_secret_shapes_are_redacted_with_ordinary_controls |
+| gateway-core.test.js | several wrapped blobs in one body are each searched, and the search ends | tests/ported_gateway_core_units.rs::each_wrapped_blob_is_searched_without_changing_neighbors |
+| gateway-core.test.js | wrapped prose, short lines, ordinary blobs and ordinary mixed-case hex are left alone | tests/ported_gateway_core_units.rs::ordinary_escaped_wrapped_and_partial_text_is_unchanged |
+| gateway-core.test.js | the wrapped and mixed-case views stay linear on large bodies | tests/ported_gateway_core_units.rs::wrapped_and_mixed_case_views_scale_linearly_on_large_ordinary_bodies |
 | gateway-core.test.js | a path whose escape was itself encoded is refused, however many times it was | tests/ported_gateway_core.rs::nested_percent_escapes_never_reach_upstream |
 | gateway-core.test.js | a path encoded once is sent and checked as before | tests/ported_gateway_core.rs::once_encoded_paths_are_normalized_and_preserved_on_wire |
 | gateway-core.test.js | a form placeholder with a percent-encoded character leaves the rest of the body as written | tests/ported_gateway_core.rs::form_substitution_preserves_other_bytes_and_encoded_placeholder_spelling |
 | gateway-core.test.js | a placeholder hidden by a duplicate JSON key is refused, however it is hidden | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
-| gateway-core.test.js | locate() reports a placeholder in a shadowed duplicate by position | not yet ported |
-| gateway-core.test.js | a substituted placeholder left anywhere in the outgoing request is found | not yet ported |
+| gateway-core.test.js | locate() reports a placeholder in a shadowed duplicate by position | tests/ported_gateway_core_units.rs::shadowed_placeholder_and_unsubstituted_nonce_are_detected_by_position |
+| gateway-core.test.js | a substituted placeholder left anywhere in the outgoing request is found | tests/ported_gateway_core_units.rs::shadowed_placeholder_and_unsubstituted_nonce_are_detected_by_position |
 | gateway-core.test.js | ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
 | gateway-hardening.test.js | a secret in a JSON body with `/` and `uXXXX` escapes does not reach the agent | tests/ported_gateway_core.rs::escaped_json_secrets_are_scrubbed_and_ordinary_json_survives |
 | gateway-hardening.test.js | a secret that starts in a content block and continues in its deltas is cut, identity and gzip | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
