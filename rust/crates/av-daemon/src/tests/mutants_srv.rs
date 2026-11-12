@@ -737,3 +737,35 @@ async fn a_quarantined_credential_is_refused_before_anyone_is_asked() {
         "{v}"
     );
 }
+
+/// 'a grant lifetime is accepted and never given to the store (F18)'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_lifetime_reaches_the_store() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/sessions",
+            json!({"cred": "demo", "methods": ["GET"], "grant_ttl_minutes": 5, "ttl_hours": 1}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v["grants"][0]["expires_at"].is_string(), "{v}");
+}
+
+/// 'a session request is opened without being built first, so one that
+/// could never be created reaches a human'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_request_that_could_never_be_made_is_refused_at_once() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/session-requests",
+            json!({"cred": "demo", "budget": 0}),
+        )
+        .await;
+    assert_eq!((s, v["rule"].as_str()), (403, Some("budget")), "{v}");
+    let (_, list) = w.control("GET", "/v1/session-requests", json!({})).await;
+    assert_eq!(list, json!([]));
+}
