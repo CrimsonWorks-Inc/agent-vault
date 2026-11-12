@@ -31,6 +31,7 @@ use crate::toml_lite;
 pub struct Options {
     only: Vec<String>,
     keep: bool,
+    scoped: bool,
 }
 
 impl Options {
@@ -40,6 +41,7 @@ impl Options {
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--keep" => o.keep = true,
+                "--scoped" => o.scoped = true,
                 "--only" => o.only.push(it.next().ok_or("--only needs a name")?.clone()),
                 s if s.starts_with("--only=") => o.only.push(s["--only=".len()..].to_string()),
                 other => return Err(format!("unknown option `{other}`")),
@@ -129,7 +131,7 @@ fn run_inner(opts: &Options) -> Result<bool, String> {
 
     // The unmutated tree has to be green, or every mutant looks caught.
     let base_log = logs.join("baseline.log");
-    match cargo_test(&tree, &target, None, timeout, &base_log)? {
+    match cargo_test(&tree, &target, None, None, timeout, &base_log)? {
         Outcome::Missed => {} // tests passed: the baseline is green
         other => {
             return Err(format!(
@@ -147,7 +149,8 @@ fn run_inner(opts: &Options) -> Result<bool, String> {
         fs::write(&path, &mutated).map_err(|e| format!("{}: {e}", path.display()))?;
         let log = logs.join(format!("{i:03}.log"));
         let started = Instant::now();
-        let result = cargo_test(&tree, &target, m.test.as_deref(), timeout, &log);
+        let package = opts.scoped.then_some(m.crate_name.as_str());
+        let result = cargo_test(&tree, &target, package, m.test.as_deref(), timeout, &log);
         // Restore before anything else, even if the run itself errored.
         fs::write(&path, &original).map_err(|e| format!("{}: {e}", path.display()))?;
         let outcome = result?;
@@ -249,10 +252,31 @@ fn load_all(root: &Path) -> Result<Vec<Mutation>, String> {
     Ok(out)
 }
 
+// Keep the integration gate's whole-workspace behavior as the default.
+// The opt-in scoped mode still compiles and runs all tests in the owner crate.
+fn cargo_test_args(package: Option<&str>, no_run: bool) -> Vec<String> {
+    let mut args = vec!["test".to_owned()];
+    if let Some(package) = package {
+        args.extend(["--package".to_owned(), package.to_owned()]);
+    } else {
+        args.extend([
+            "--workspace".to_owned(),
+            "--exclude".to_owned(),
+            "xtask".to_owned(),
+        ]);
+    }
+    if no_run {
+        args.push("--no-run".into());
+    }
+    args.push("--quiet".into());
+    args
+}
+
 /// Build the tests, then run them. `Missed` means they all passed.
 fn cargo_test(
     tree: &Path,
     target: &Path,
+    package: Option<&str>,
     filter: Option<&str>,
     timeout: Duration,
     log: &Path,
@@ -271,14 +295,7 @@ fn cargo_test(
 
     let (o, e) = logf()?;
     let built = Command::new(&cargo)
-        .args([
-            "test",
-            "--workspace",
-            "--exclude",
-            "xtask",
-            "--no-run",
-            "--quiet",
-        ])
+        .args(cargo_test_args(package, true))
         .current_dir(tree)
         .env("CARGO_TARGET_DIR", target)
         .env("CARGO_BUILD_JOBS", &jobs)
@@ -292,7 +309,7 @@ fn cargo_test(
 
     let (o, e) = logf()?;
     let mut cmd = Command::new(&cargo);
-    cmd.args(["test", "--workspace", "--exclude", "xtask", "--quiet"]);
+    cmd.args(cargo_test_args(package, false));
     if let Some(f) = filter {
         cmd.args(["--", f]);
     }
@@ -419,6 +436,35 @@ mod tests {
         assert_eq!(o.only, vec!["a".to_string(), "b".to_string()]);
         assert!(o.keep);
         assert!(Options::parse(&["--bogus".into()]).is_err());
+    }
+
+    #[test]
+    fn scoped_mode_is_opt_in_and_retains_build_and_test_modes() {
+        assert!(!Options::parse(&[]).unwrap().scoped);
+        assert!(Options::parse(&["--scoped".into()]).unwrap().scoped);
+        assert_eq!(
+            cargo_test_args(None, true),
+            [
+                "test",
+                "--workspace",
+                "--exclude",
+                "xtask",
+                "--no-run",
+                "--quiet"
+            ]
+        );
+        assert_eq!(
+            cargo_test_args(None, false),
+            ["test", "--workspace", "--exclude", "xtask", "--quiet"]
+        );
+        assert_eq!(
+            cargo_test_args(Some("av-core"), true),
+            ["test", "--package", "av-core", "--no-run", "--quiet"]
+        );
+        assert_eq!(
+            cargo_test_args(Some("av-store"), false),
+            ["test", "--package", "av-store", "--quiet"]
+        );
     }
 
     #[test]
