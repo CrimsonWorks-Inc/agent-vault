@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 69 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **912 not yet ported**.
+Totals: 1090 JS tests: 78 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **903 not yet ported**.
 
 ## Mutation check
 
@@ -491,24 +491,24 @@ the vault on every call instead of caching an audit handle.
 | gateway-core.test.js | intersecting two rates never allows more than either | not yet ported |
 | gateway-core.test.js | intersecting rates in the same unit is the smaller count | not yet ported |
 | gateway-core.test.js | lint accepts valid enforced limits | not yet ported |
-| gateway-core.test.js | JSON substitution changes the one string and nothing else in the body | not yet ported |
+| gateway-core.test.js | JSON substitution changes the one string and nothing else in the body | tests/ported_gateway_core.rs::json_substitution_preserves_numbers_spacing_and_escapes |
 | gateway-core.test.js | JSON substitution follows the same duplicate key and pointer escaping as the parser | not yet ported |
-| gateway-core.test.js | form substitution leaves the rest of the field and the body as written | not yet ported |
+| gateway-core.test.js | form substitution leaves the rest of the field and the body as written | tests/ported_gateway_core.rs::form_substitution_preserves_other_bytes_and_encoded_placeholder_spelling |
 | gateway-core.test.js | Basic substitution writes the Authorization header the placeholder was found in | not yet ported |
-| gateway-core.test.js | Basic substitution through the pipeline, with a second Authorization header present | not yet ported |
-| gateway-core.test.js | an ordinary single Basic header is substituted as before | not yet ported |
+| gateway-core.test.js | Basic substitution through the pipeline, with a second Authorization header present | tests/ported_gateway_core.rs::duplicate_basic_authorization_is_refused_and_single_basic_is_substituted |
+| gateway-core.test.js | an ordinary single Basic header is substituted as before | tests/ported_gateway_core.rs::duplicate_basic_authorization_is_refused_and_single_basic_is_substituted |
 | gateway-core.test.js | rate layers preserve canonical windows and refuse unknown units at evaluation | not yet ported |
 | gateway-core.test.js | base64 wrapped at any width, and hex in mixed case, are redacted | not yet ported |
 | gateway-core.test.js | several wrapped blobs in one body are each searched, and the search ends | not yet ported |
 | gateway-core.test.js | wrapped prose, short lines, ordinary blobs and ordinary mixed-case hex are left alone | not yet ported |
 | gateway-core.test.js | the wrapped and mixed-case views stay linear on large bodies | not yet ported |
-| gateway-core.test.js | a path whose escape was itself encoded is refused, however many times it was | not yet ported |
-| gateway-core.test.js | a path encoded once is sent and checked as before | not yet ported |
-| gateway-core.test.js | a form placeholder with a percent-encoded character leaves the rest of the body as written | not yet ported |
-| gateway-core.test.js | a placeholder hidden by a duplicate JSON key is refused, however it is hidden | not yet ported |
+| gateway-core.test.js | a path whose escape was itself encoded is refused, however many times it was | tests/ported_gateway_core.rs::nested_percent_escapes_never_reach_upstream |
+| gateway-core.test.js | a path encoded once is sent and checked as before | tests/ported_gateway_core.rs::once_encoded_paths_are_normalized_and_preserved_on_wire |
+| gateway-core.test.js | a form placeholder with a percent-encoded character leaves the rest of the body as written | tests/ported_gateway_core.rs::form_substitution_preserves_other_bytes_and_encoded_placeholder_spelling |
+| gateway-core.test.js | a placeholder hidden by a duplicate JSON key is refused, however it is hidden | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
 | gateway-core.test.js | locate() reports a placeholder in a shadowed duplicate by position | not yet ported |
 | gateway-core.test.js | a substituted placeholder left anywhere in the outgoing request is found | not yet ported |
-| gateway-core.test.js | ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before | not yet ported |
+| gateway-core.test.js | ordinary JSON, duplicates without a placeholder in the shadowed copy included, is substituted as before | tests/ported_gateway_core.rs::shadowed_json_placeholders_are_refused_and_ordinary_duplicates_survive |
 | gateway-hardening.test.js | a secret in a JSON body with `/` and `uXXXX` escapes does not reach the agent | not yet ported |
 | gateway-hardening.test.js | a secret that starts in a content block and continues in its deltas is cut, identity and gzip | `sse::tests::hardening_a_secret_split_across_json_fields_cuts_the_stream` |
 | gateway-hardening.test.js | a secret split across events whose index disagrees with its array position is cut | not yet ported |
