@@ -196,6 +196,39 @@ async fn explain_denial_answers_only_about_the_callers_own_requests() {
     );
 }
 
+/// integrate3-r5.test.js:140-147: past DENIAL_TTL_MS the sentence is
+/// forgotten, but vault_explain_denial still answers with the code and rule.
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_denial_keeps_code_and_rule_after_the_sentence_ages_out() {
+    let w = World::seeded(json!({})).await;
+    let r = text_of(
+        &call(
+            &w,
+            "vault_http",
+            json!({"cred": "demo", "method": "DELETE", "path": "/x", "reason": "r"}),
+            true,
+        )
+        .await,
+    );
+    let rid = r["request_id"].as_str().unwrap().to_string();
+    let fresh = text_of(&call(&w, "vault_explain_denial", json!({"request_id": rid}), true).await);
+    assert_eq!(fresh["code"], "AV_POLICY_DENIED", "{fresh}");
+    assert!(fresh["detail"].as_str().is_some(), "{fresh}");
+    w.shared
+        .run(|core| core.pl_age_denials(crate::pipeline::DENIAL_TTL_MS as i64 + 1))
+        .await
+        .unwrap();
+    let late = text_of(&call(&w, "vault_explain_denial", json!({"request_id": rid}), true).await);
+    assert_eq!(late["code"], "AV_POLICY_DENIED", "{late}");
+    assert_eq!(late["rule"], fresh["rule"], "{late}");
+    assert_eq!(late["rule"], "methods", "{late}");
+    assert!(
+        late.get("detail").is_some(),
+        "detail is present, as null: {late}"
+    );
+    assert_eq!(late["detail"], Value::Null, "{late}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn request_session_is_the_proposer_and_polls_with_the_secret_only() {
     let w = World::seeded(json!({})).await;
