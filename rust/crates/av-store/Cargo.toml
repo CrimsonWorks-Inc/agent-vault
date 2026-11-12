@@ -27,6 +27,7 @@ libc.workspace = true
 p256.workspace = true
 url.workspace = true
 time.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

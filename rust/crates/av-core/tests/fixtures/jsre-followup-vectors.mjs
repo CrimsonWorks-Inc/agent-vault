@@ -1,7 +1,8 @@
 import {compileScrubPattern} from '../../../../../src/core/scrub.js';
 import {requestHash} from '../../../../../src/core/canon.js';
 const probes=[];
-function add(source,text,{flags='',refuse=false,scalarException=false}={}) {let row={source,text,flags,refuse,scalarException};try{row.js=new RegExp(source,flags).test(text)}catch{row.js=null}probes.push(row)}
+// Refused patterns have no portable JavaScript result (inline modifiers vary by Node).
+function add(source,text,{flags='',refuse=false,scalarException=false}={}) {let row={source,text,flags,refuse,scalarException};if(!refuse){try{row.js=new RegExp(source,flags).test(text)}catch{row.js=null}}probes.push(row)}
 for(const text of ['a','é','\u0085','\n','\r','\u2028','\u2029','😀'])add('^.$',text,{scalarException:text==='😀'});
 add('^\\.$','.'); add('^[.]$','.'); add('^.$','aa');
 for(const source of ['sek[ab]ret','sek[a&b]ret','sek[a&&b]ret','sek[a~~b]ret','sek[a--z]ret'])for(const text of ['sekaret','sek&ret','sek~ret','ordinary'])add(source,text,{refuse:source.includes('--')});

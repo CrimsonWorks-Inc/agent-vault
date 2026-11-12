@@ -16,9 +16,9 @@ use crate::crypto::{Argon2Params, SealedV2};
 use crate::error::Result;
 use crate::model::{
     ApprovalRecord, ClientRecord, CredentialField, CredentialRecord, FactorClass, GrantRecord,
-    GrantState, ListenerRecord, NotifyRecord, PlaceholderRow, PlaceholderState, PresenceFactor,
-    PresenceKey, RetiredValue, SessionRecord, SessionRequestRecord, SessionState, Settings,
-    TemplateRecord, VmkWrap, WorkspaceRecord,
+    GrantRuntime, GrantState, ListenerRecord, NotifyRecord, PlaceholderRow, PlaceholderState,
+    PresenceFactor, PresenceKey, RetiredValue, SessionRecord, SessionRequestRecord, SessionState,
+    Settings, TemplateRecord, VmkWrap, WorkspaceRecord,
 };
 
 pub(crate) fn json<T: Serialize>(v: &T) -> Result<String> {
@@ -705,6 +705,31 @@ pub(crate) fn grant_put(c: &Connection, g: &GrantRecord) -> Result<()> {
         g.expires_at,
     ])?;
     Ok(())
+}
+
+/// A grant's runtime state; `None` when there is no such grant.
+pub(crate) fn grant_runtime_get(c: &Connection, id: &str) -> Result<Option<GrantRuntime>> {
+    let row: Option<(Option<String>, Option<String>)> = c
+        .prepare_cached("SELECT quota_state, spend FROM grants WHERE id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((quota_state, spend)) = row else {
+        return Ok(None);
+    };
+    Ok(Some(GrantRuntime {
+        quota_state: quota_state.as_deref().map(parse).transpose()?,
+        spend: spend.as_deref().map(parse).transpose()?,
+    }))
+}
+
+/// Replace a grant's runtime state; false when there is no such grant.
+pub(crate) fn grant_runtime_set(c: &Connection, id: &str, rt: &GrantRuntime) -> Result<bool> {
+    let quota_state = rt.quota_state.as_ref().map(json).transpose()?;
+    let spend = rt.spend.as_ref().map(json).transpose()?;
+    let n = c
+        .prepare_cached("UPDATE grants SET quota_state = ?2, spend = ?3 WHERE id = ?1")?
+        .execute(params![id, quota_state, spend])?;
+    Ok(n == 1)
 }
 
 // ----------------------------------------------------------- placeholders

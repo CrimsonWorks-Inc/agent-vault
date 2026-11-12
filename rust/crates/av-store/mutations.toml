@@ -601,11 +601,11 @@ file = "src/backup.rs"
 from = '''        Ok(o) => o,
         Err(e) => return Err(refused(vault, e)),
     };
-    let audit'''
+    Ok(RestoreResult {'''
 to = '''        Ok(o) => o,
         Err(e) => return Err(e),
     };
-    let audit'''
+    Ok(RestoreResult {'''
 
 [[mutation]]
 name = "touchSession extends a session that has ended"
@@ -945,3 +945,60 @@ to = '''    let ct = cipher
         .map_err(|_| CryptoError::Open)?;
     let _ = aad;
     Ok(SealedV2 {'''
+
+# ---- fixes from the first review (review-store-1.md)
+
+[[mutation]]
+name = "migrate drops each grant's quota window and spend ledger"
+file = "src/migrate.rs"
+from = '''            rows::grant_runtime_set(c, &g.id, rt)?;'''
+to = '''            let _ = rt;'''
+test = "tests::migrate::"
+
+[[mutation]]
+name = "backup.restored is written after the restore has already committed"
+file = "src/backup.rs"
+from = '''    // `backup.restored` is written in the same transaction as the restore.
+    let out = match vault.restore_entries(crate::vault::RestoreEntries {
+        credentials: plan,
+        templates: plain.templates,
+        summary: Some(crate::vault::RestoreSummary {
+            skipped: skipped.clone(),
+            renamed: serde_json::to_value(&renames)?,
+            bundle_sha256: bundle_digest(bundle),
+        }),
+    }) {
+        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };'''
+to = '''    let out = match vault.restore_entries(crate::vault::RestoreEntries {
+        credentials: plan,
+        templates: plain.templates,
+        summary: None,
+    }) {
+        Ok(o) => o,
+        Err(e) => return Err(refused(vault, e)),
+    };
+    let audit = vault.audit_mut().ok_or_else(locked)?;
+    let mut f = Map::new();
+    f.insert("restored".into(), serde_json::to_value(&out.restored)?);
+    f.insert("skipped".into(), serde_json::to_value(&skipped)?);
+    f.insert("renamed".into(), serde_json::to_value(&renames)?);
+    f.insert("bundle_sha256".into(), bundle_digest(bundle).into());
+    audit.write("backup.restored", f)?;'''
+test = "tests::"
+
+[[mutation]]
+name = "Vault::create leaves the first VMK wrap in the WAL"
+file = "src/vault.rs"
+from = '''            rows::kv_set(t.c, "locked", &Value::Bool(false))?;
+            t.checkpoint = true;'''
+to = '''            rows::kv_set(t.c, "locked", &Value::Bool(false))?;'''
+test = "tests::review_store_1::"
+
+[[mutation]]
+name = "a busy WAL checkpoint is treated as done"
+file = "src/vault.rs"
+from = '''    if busy != 0 {'''
+to = '''    if busy < 0 {'''
+test = "tests::review_store_1::"
