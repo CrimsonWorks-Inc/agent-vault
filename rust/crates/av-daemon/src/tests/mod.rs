@@ -32,6 +32,7 @@ mod mutants_srv2;
 mod mutants_ui;
 mod notify_slots;
 mod presence;
+mod read_ahead_edges;
 mod ui;
 
 /// The fixture secret (obviously fake).

@@ -3027,3 +3027,12 @@ file = "src/listen.rs"
 from = '''                std::task::Poll::Ready(Ok(())) if full => c.ended = true,'''
 to = '''                std::task::Poll::Ready(Ok(())) if full && false => c.ended = true,'''
 
+
+# review-daemon-2 minor 1: a TCP reset (SO_LINGER 0) is a read error, and it
+# must end the text stream like a half-close does.
+
+[[mutation]]
+name = 'a read error on the watched connection is ignored, so a reset client keeps its slot'
+file = "src/listen.rs"
+from = '''                std::task::Poll::Ready(Err(_)) => c.ended = true,'''
+to = '''                std::task::Poll::Ready(Err(_)) => {}'''

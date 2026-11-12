@@ -11,7 +11,8 @@
 //! test = "pragmas"                         # optional `cargo test` name filter
 //! ```
 //!
-//! For every entry the swap is made in a temporary copy of `rust/`, then
+//! For every entry the swap is made in a temporary copy of `rust/` (plus the
+//! repo inputs the tests read: `src/`, `web/src`, `README.md`), then
 //! `cargo test --workspace` runs there. The mutant must compile (a swap that
 //! breaks the build proves nothing) and the tests must fail. A test run that
 //! outlives the timeout counts as caught, as in the JS check. The working tree
@@ -116,6 +117,7 @@ fn run_inner(opts: &Options) -> Result<bool, String> {
     let copy = TempTree::new(opts.keep)?;
     let tree = copy.path.join("rust");
     copy_tree(&root, &tree).map_err(|e| format!("copying {}: {e}", root.display()))?;
+    copy_repo_inputs(&root, &copy.path)?;
     // A target dir of its own, so the copy never fights the working tree's
     // build for the lock, and later runs reuse what was compiled.
     let target = root.join("target").join("mutation");
@@ -339,6 +341,34 @@ fn cargo_test(
     }
 }
 
+/// Files outside `rust/` that the tests read through `../../../`: the JS
+/// reference sources and the built UI (`src/`), the UI sources (`web/src`)
+/// and the README. They are copied beside the `rust/` copy so the copy's
+/// tests see the same tree the working copy's tests do. A missing input is
+/// skipped; the baseline run then fails and names it.
+const REPO_INPUTS: &[&str] = &["src", "web/src", "README.md"];
+
+fn copy_repo_inputs(root: &Path, dest: &Path) -> Result<(), String> {
+    let Some(repo) = root.parent() else {
+        return Ok(());
+    };
+    for rel in REPO_INPUTS {
+        let from = repo.join(rel);
+        let to = dest.join(rel);
+        let res = if from.is_dir() {
+            copy_tree(&from, &to)
+        } else if from.is_file() {
+            to.parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::copy(&from, &to).map(|_| ()))
+        } else {
+            continue;
+        };
+        res.map_err(|e| format!("copying {}: {e}", from.display()))?;
+    }
+    Ok(())
+}
+
 /// Copy `from` to `to`, skipping build output and VCS metadata.
 fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir_all(to)?;
@@ -421,6 +451,36 @@ mod tests {
             age.elapsed().unwrap() < Duration::from_secs(60),
             "copies are stamped with now"
         );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn repo_inputs_are_copied_beside_the_rust_copy() {
+        let base = std::env::temp_dir().join(format!("av-xtask-inputs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        fs::create_dir_all(repo.join("rust")).unwrap();
+        fs::create_dir_all(repo.join("src/ui/dist")).unwrap();
+        fs::create_dir_all(repo.join("web/src")).unwrap();
+        fs::write(repo.join("src/ui/dist/index.html"), "ui").unwrap();
+        fs::write(repo.join("web/src/app.jsx"), "app").unwrap();
+        fs::write(repo.join("README.md"), "readme").unwrap();
+        fs::write(repo.join("secret.txt"), "not an input").unwrap();
+        let dest = base.join("copy");
+        copy_repo_inputs(&repo.join("rust"), &dest).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("src/ui/dist/index.html")).unwrap(),
+            "ui"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("web/src/app.jsx")).unwrap(),
+            "app"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("README.md")).unwrap(),
+            "readme"
+        );
+        assert!(!dest.join("secret.txt").exists(), "only the named inputs");
         fs::remove_dir_all(&base).unwrap();
     }
 

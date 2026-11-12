@@ -569,3 +569,192 @@ async fn on_listener(
     }
     d.on_gateway(inc, Some(info), None).await
 }
+
+#[cfg(test)]
+mod read_ahead_edges {
+    //! Direct drives of `poll_closed` (adopted from the review-daemon-2
+    //! probes). They stay in this module because `Conn` is private.
+    use super::*;
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+    use tokio::io::AsyncRead;
+
+    enum Step {
+        Bytes(Vec<u8>),
+        Eof,
+        Err,
+        Wait,
+    }
+
+    struct StepIo {
+        steps: VecDeque<Step>,
+        /// Bytes from a scripted read that did not fit in the caller's buffer.
+        rest: Vec<u8>,
+        waker: Arc<Mutex<Option<Waker>>>,
+    }
+
+    impl tokio::io::AsyncRead for StepIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if !this.rest.is_empty() {
+                let n = this.rest.len().min(buf.remaining());
+                buf.put_slice(&this.rest[..n]);
+                this.rest.drain(..n);
+                return Poll::Ready(Ok(()));
+            }
+            match this.steps.pop_front() {
+                None | Some(Step::Wait) => {
+                    *this.waker.lock().unwrap() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                Some(Step::Eof) => Poll::Ready(Ok(())),
+                Some(Step::Err) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "reset",
+                ))),
+                Some(Step::Bytes(b)) => {
+                    let n = b.len().min(buf.remaining());
+                    buf.put_slice(&b[..n]);
+                    if n < b.len() {
+                        this.rest = b[n..].to_vec();
+                    }
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+    }
+
+    fn conn(
+        steps: Vec<Step>,
+        stash: Vec<u8>,
+    ) -> (Arc<Mutex<Conn<StepIo>>>, Arc<Mutex<Option<Waker>>>) {
+        let waker = Arc::new(Mutex::new(None));
+        let conn = Arc::new(Mutex::new(Conn {
+            io: StepIo {
+                steps: steps.into(),
+                rest: Vec::new(),
+                waker: waker.clone(),
+            },
+            stash,
+            ended: false,
+        }));
+        (conn, waker)
+    }
+
+    fn once<T>(fut: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(&waker);
+        fut.poll(&mut cx)
+    }
+
+    #[test]
+    fn a_full_stash_still_registers_a_waker_and_then_sees_eof() {
+        let (c, wakers) = conn(vec![Step::Wait], vec![0; STASH_LIMIT]);
+        let closed = std::future::poll_fn({
+            let c = c.clone();
+            move |cx| c.poll_closed(cx)
+        });
+        let mut closed = std::pin::pin!(closed);
+        assert!(once(closed.as_mut()).is_pending());
+        assert!(
+            wakers.lock().unwrap().is_some(),
+            "a full stash returned Pending without a waker"
+        );
+        assert!(!c.lock().unwrap().ended);
+        assert_eq!(c.lock().unwrap().stash.len(), STASH_LIMIT);
+        c.lock().unwrap().io.steps.push_back(Step::Eof);
+        assert!(once(closed.as_mut()).is_ready());
+        let g = c.lock().unwrap();
+        assert!(g.ended);
+        assert_eq!(g.stash.len(), STASH_LIMIT, "eof grew the stash");
+    }
+
+    #[test]
+    fn eof_error_and_extra_bytes_set_ended_without_growing_the_stash() {
+        let cases = [
+            ("eof", vec![Step::Eof], false),
+            ("err", vec![Step::Err], false),
+            ("extra", vec![Step::Bytes(vec![9, 9, 9])], true),
+        ];
+        for (name, steps, full) in cases {
+            let stash = if full {
+                vec![1; STASH_LIMIT]
+            } else {
+                vec![1, 2, 3]
+            };
+            let before = stash.len();
+            let (c, _) = conn(steps, stash);
+            let closed = std::future::poll_fn({
+                let c = c.clone();
+                move |cx| c.poll_closed(cx)
+            });
+            let mut closed = std::pin::pin!(closed);
+            assert!(once(closed.as_mut()).is_ready(), "{name}");
+            let g = c.lock().unwrap();
+            assert!(g.ended, "{name}");
+            assert_eq!(g.stash.len(), before, "{name}: stash grew");
+        }
+    }
+
+    fn read_shared(io: &mut Shared<StepIo>) -> std::io::Result<Vec<u8>> {
+        let mut chunk = [0u8; 128];
+        let mut buf = tokio::io::ReadBuf::new(&mut chunk);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(io).poll_read(&mut cx, &mut buf) {
+            Poll::Ready(Ok(())) => Ok(buf.filled().to_vec()),
+            Poll::Ready(Err(e)) => Err(e),
+            Poll::Pending => panic!("shared read parked"),
+        }
+    }
+
+    #[test]
+    fn bytes_already_stashed_reach_hyper_and_a_discarded_tail_does_not() {
+        let kept = b"GET /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello".to_vec();
+        let (c, _) = conn(vec![Step::Bytes(kept.clone()), Step::Wait], Vec::new());
+        let closed = std::future::poll_fn({
+            let c = c.clone();
+            move |cx| c.poll_closed(cx)
+        });
+        let mut closed = std::pin::pin!(closed);
+        assert!(once(closed.as_mut()).is_pending());
+        let mut io = Shared(c.clone());
+        assert_eq!(read_shared(&mut io).unwrap(), kept);
+        assert!(!c.lock().unwrap().ended);
+
+        // One read fills the stash exactly; the next chunk is discarded and
+        // the client counts as gone. hyper still receives the first chunk.
+        let first = vec![b'A'; STASH_LIMIT];
+        let (c, _) = conn(
+            vec![
+                Step::Bytes(first.clone()),
+                Step::Bytes(b"TAIL-SHOULD-NOT-APPEAR".to_vec()),
+            ],
+            Vec::new(),
+        );
+        let closed = std::future::poll_fn({
+            let c = c.clone();
+            move |cx| c.poll_closed(cx)
+        });
+        let mut closed = std::pin::pin!(closed);
+        assert!(once(closed.as_mut()).is_ready());
+        let mut io = Shared(c.clone());
+        let mut got = Vec::new();
+        loop {
+            let n = read_shared(&mut io).unwrap();
+            if n.is_empty() {
+                break;
+            }
+            got.extend_from_slice(&n);
+        }
+        assert_eq!(got, first);
+        assert!(!got.windows(21).any(|w| w == b"TAIL-SHOULD-NOT-APPEAR"));
+    }
+}

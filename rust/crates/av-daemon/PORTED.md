@@ -31,7 +31,7 @@ The UI parity fixture `tests/fixtures/ui-parity/server-browser-v1.json` is share
 
 ## Mutation check
 
-`mutations.toml` has 344 entries covering the test/mutation-check.js entries
+`mutations.toml` has 345 entries covering the test/mutation-check.js entries
 for src/daemon/*, src/ui/*, src/connectors/pinning.js and
 src/connectors/probe.js (the src/pending.js entries are av-store's), plus
 Rust-only entries for the port's own seams. A few JS entries have no Rust
