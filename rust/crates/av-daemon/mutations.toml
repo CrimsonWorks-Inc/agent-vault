@@ -922,7 +922,7 @@ from = '''log.read(&av_store::audit::ReadFilter { request_id: Some(r.clone()), l
 to = '''log.read(&av_store::audit::ReadFilter { limit: 200, ..Default::default() })
                                     .v()?
                                     .into_iter()
-                                    .filter(|x| x.request_id.as_deref() == Some(r.as_str()))'''
+                                    .filter(|x| serde_json::to_value(x).ok().and_then(|v| v.get("request_id").cloned()) == Some(Value::from(r.as_str())))'''
 
 [[mutation]]
 name = 'r6 F2 (Grok): a caller with no session gets the sentence of any no-session denial'
