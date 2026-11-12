@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 553 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **543 not yet ported**.
+Totals: 1207 JS tests: 577 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **519 not yet ported**.
 
 ## Mutation check
 
@@ -913,37 +913,37 @@ the vault on every call instead of caching an audit handle.
 | locked.test.js | a locked vault says its record count is unknown, not zero | not yet ported |
 | locked.test.js | the reads the unlock screen depends on still work | not yet ported |
 | locked.test.js | unlocking restores the audit log | not yet ported |
-| mcp-tools.test.js | a request inside the grant works, so the refusals below mean something | not yet ported |
-| mcp-tools.test.js | a path outside the grant never reaches the upstream | not yet ported |
-| mcp-tools.test.js | traversal cannot climb out of the granted path | not yet ported |
-| mcp-tools.test.js | a credential this session was never granted is unreachable | not yet ported |
-| mcp-tools.test.js | CRLF in a path or a header cannot smuggle anything upstream | not yet ported |
-| mcp-tools.test.js | the agent cannot set the daemon’s own headers through a tool argument | not yet ported |
-| mcp-tools.test.js | a body goes upstream with exactly one content-type | not yet ported |
-| mcp-tools.test.js | vault_get_placeholder is bound to the session’s own grants | not yet ported |
-| mcp-tools.test.js | no tool returns a credential value, whatever it is asked | not yet ported |
-| mcp-tools.test.js | the tool list is exactly the documented tools | not yet ported |
-| mcp-tools.test.js | the one capability-shaped tool cannot create capability | not yet ported |
-| mcp-tools.test.js | a concurrent request cannot hijack a batch mid-flight | not yet ported |
-| mcp-tools.test.js | an agent can ask for the least lifetime it needs, not just the least scope | not yet ported |
-| mcp-tools.test.js | no error path names an MCP tool that does not exist | not yet ported |
-| mcp-tools.test.js | an agent can find out whether the human answered | not yet ported |
+| mcp-tools.test.js | a request inside the grant works, so the refusals below mean something | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | a path outside the grant never reaches the upstream | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | traversal cannot climb out of the granted path | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | a credential this session was never granted is unreachable | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | CRLF in a path or a header cannot smuggle anything upstream | `ported_gateway_core::mcp_tools_crlf_path_and_header_are_refused_by_real_http_transport_without_smuggling` |
+| mcp-tools.test.js | the agent cannot set the daemon’s own headers through a tool argument | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | a body goes upstream with exactly one content-type | `ported_gateway_core::mcp_tools_grant_boundary_traversal_ungranted_credential_and_crlf_never_smuggle_upstream` |
+| mcp-tools.test.js | vault_get_placeholder is bound to the session’s own grants | `ported_gateway_core::mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials` |
+| mcp-tools.test.js | no tool returns a credential value, whatever it is asked | `ported_gateway_core::mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials` |
+| mcp-tools.test.js | the tool list is exactly the documented tools | `ported_gateway_core::mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials` |
+| mcp-tools.test.js | the one capability-shaped tool cannot create capability | `ported_gateway_core::mcp_tools_session_proposals_never_issue_capability_before_human_and_batch_cannot_switch_identity` |
+| mcp-tools.test.js | a concurrent request cannot hijack a batch mid-flight | `ported_gateway_core::mcp_tools_session_proposals_never_issue_capability_before_human_and_batch_cannot_switch_identity` |
+| mcp-tools.test.js | an agent can ask for the least lifetime it needs, not just the least scope | `ported_gateway_core::mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials` |
+| mcp-tools.test.js | no error path names an MCP tool that does not exist | `ported_gateway_core::mcp_tools_every_production_error_string_tool_reference_names_an_advertised_tool` |
+| mcp-tools.test.js | an agent can find out whether the human answered | `ported_gateway_core::mcp_tools_placeholder_scope_all_outputs_and_documented_names_never_expose_credentials` |
 | mcp.test.js | initialize returns a protocol version, server info and a session id | `tests::mcp::the_handshake_and_the_ungated_tools_work_without_a_session` |
 | mcp.test.js | no bearer token buys no capability, on any tool that spends it | `tests::mcp::hardening_every_tool_that_spends_capability_checks_for_a_session` |
-| mcp.test.js | the MCP session id alone never authenticates | not yet ported |
+| mcp.test.js | the MCP session id alone never authenticates | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
 | mcp.test.js | the handshake works without a session, and says what is missing | `tests::mutants::hardening_the_mcp_handshake_works_without_a_session_over_http` |
 | mcp.test.js | asking for a session needs no session, exactly as the HTTP route does not | `tests::mcp::request_session_is_the_proposer_and_polls_with_the_secret_only` |
-| mcp.test.js | an unknown MCP session id is rejected rather than silently accepted | not yet ported |
-| mcp.test.js | an unsupported protocol version is refused with the supported list | not yet ported |
+| mcp.test.js | an unknown MCP session id is rejected rather than silently accepted | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
+| mcp.test.js | an unsupported protocol version is refused with the supported list | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
 | mcp.test.js | a browser cannot drive the MCP endpoint | `tests::mutants::hardening_the_mcp_handshake_works_without_a_session_over_http` |
 | mcp.test.js | tools/list advertises the tools an agent needs and no secret-bearing tool | `tests::mcp::the_handshake_and_the_ungated_tools_work_without_a_session` |
-| mcp.test.js | vault_list_creds tells the agent exactly where a placeholder goes | not yet ported |
+| mcp.test.js | vault_list_creds tells the agent exactly where a placeholder goes | `ported_gateway_core::mcp_transport_direct_handler_and_http_agree_on_status_and_usage_and_share_policy_denials` |
 | mcp.test.js | vault_http runs the full pipeline and never returns the secret | `tests::mcp::vault_http_runs_the_pipeline_sends_the_token_and_burns_its_placeholder` |
-| mcp.test.js | vault_http is bound by the same policy as the gateway | not yet ported |
-| mcp.test.js | DELETE ends the transport session but not the vault session | not yet ported |
-| mcp.test.js | transport parity: stdio and HTTP produce identical tool results | not yet ported |
-| mcp.test.js | batched JSON-RPC messages are answered as a batch | not yet ported |
-| mcp.test.js | a notification gets 202 with no body, per the transport spec | not yet ported |
+| mcp.test.js | vault_http is bound by the same policy as the gateway | `ported_gateway_core::mcp_transport_direct_handler_and_http_agree_on_status_and_usage_and_share_policy_denials` |
+| mcp.test.js | DELETE ends the transport session but not the vault session | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
+| mcp.test.js | transport parity: stdio and HTTP produce identical tool results | `ported_gateway_core::mcp_transport_direct_handler_and_http_agree_on_status_and_usage_and_share_policy_denials` |
+| mcp.test.js | batched JSON-RPC messages are answered as a batch | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
+| mcp.test.js | a notification gets 202 with no body, per the transport spec | `ported_gateway_core::mcp_transport_routing_id_never_authenticates_protocol_checks_and_batch_notification_lifetimes` |
 | path-parsing.test.js | the paths the deny list is for are denied | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
 | path-parsing.test.js | a tab, newline or carriage return cannot smuggle a path past the deny list | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
 | path-parsing.test.js | an encoded fragment or query cannot truncate the path after the check | `ported_gateway_core::path_policy_refuses_every_ambiguous_deny_spelling_and_wire_controls_keep_the_decided_path` |
