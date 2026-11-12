@@ -31,12 +31,12 @@ use tokio::sync::mpsc;
 
 use crate::err::{d, dr, internal, rule_of, DenyExt, C};
 use crate::preview::{approval_preview, preview_part, PreviewDecision, PreviewRequest, PreviewSub};
-use crate::runtime::GrantRuntime;
 use crate::state::{Core, Shared, StoreResult, VaultRef};
 use crate::upstream::{Body, Pins, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse};
 use crate::util::{
     as_integer, iso_now, js_f64, js_pretty, latin1_bytes, latin1_string, now_ms, num, parse_iso_ms,
 };
+use av_store::model::GrantRuntime;
 
 /// Hosts the gateway accepts in `Host`. Ports `ALLOWED_HOSTS`
 /// (module-private) in `src/daemon/pipeline.js`.
@@ -569,11 +569,19 @@ impl Core {
     }
 
     fn rt(&self, grant_id: &str) -> GrantRuntime {
-        self.runtime.get(&self.vault, grant_id)
+        // A grant with no row reads as the JS defaults (a fresh window,
+        // zero spend), as `grant.quota_state` / `grant.spend` do in the JS.
+        self.vault
+            .grant_runtime(grant_id)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     fn rt_set(&mut self, grant_id: &str, rt: GrantRuntime) {
-        self.runtime.set(&mut self.vault, grant_id, rt);
+        // The JS sets the field on the grant object and saves with
+        // `durable: false`; a grant that has gone away has nowhere to keep it.
+        let _ = self.vault.set_grant_runtime(grant_id, &rt);
     }
 
     /// `#refuseBrowsers(req)`.
@@ -1247,7 +1255,12 @@ impl Core {
             return;
         }
         self.pl.spend_recovered = true;
-        for grant_id in self.runtime.grant_ids() {
+        let grant_ids: Vec<String> = self
+            .vault
+            .grants()
+            .map(|gs| gs.into_iter().map(|g| g.id).collect())
+            .unwrap_or_default();
+        for grant_id in grant_ids {
             let Ok(mut state) = self.pl_spend_state(&grant_id) else {
                 continue;
             };
