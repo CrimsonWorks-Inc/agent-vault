@@ -49,13 +49,22 @@ async fn a_hop_forwards_an_allowlist_of_headers_only() {
             format!("Bearer {}", w.placeholder),
         ),
         ("x-agent-chosen".to_string(), "1".to_string()),
+        ("cookie".to_string(), "sid=agent".to_string()),
+        ("x-forwarded-host".to_string(), "evil.test".to_string()),
         ("anthropic-version".to_string(), "2023-06-01".to_string()),
         ("x-github-api-version".to_string(), "2022-11-28".to_string()),
     ];
     let r = w.send("GET", "/start", h, None).await;
     assert_eq!(r.status, 200, "{:?}", r.error);
     let hop = hop_of(&w).expect("the hop was sent");
-    assert!(!has(&hop, "x-agent-chosen"), "{:?}", hop.headers);
+    for n in [
+        "x-agent-chosen",
+        "cookie",
+        "x-forwarded-host",
+        "x-forwarded-for",
+    ] {
+        assert!(!has(&hop, n), "{n}: {:?}", hop.headers);
+    }
     assert!(
         has(&hop, "anthropic-version") && has(&hop, "x-github-api-version"),
         "{:?}",
