@@ -271,7 +271,7 @@ pub fn request_view<'a>(input: &RequestInput<'a>) -> RequestView<'a> {
                 let end = end_re.find(rest);
                 let disposition = fold.replace_all(
                     end.map_or(rest, |m| &rest[..m.start()]),
-                    |c: &regex::Captures<'_>| if c[0].starts_with(';') { "; " } else { " " },
+                    |c: &crate::jsre::Captures<'_>| if c[0].starts_with(';') { "; " } else { " " },
                 );
                 let disposition = disposition.split(['\r', '\n']).next().unwrap_or("");
                 let value = end
