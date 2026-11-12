@@ -164,3 +164,39 @@ async fn a_wrong_shape_health_value_does_not_fail_the_credential_list() {
     assert_eq!(demo["health"], Value::Null, "{demo}");
     assert!(!w.audit_text().await.contains("daemon.handler_error"));
 }
+
+/// The control socket reads an absolute-form target as Node's `req.url`
+/// does, then `new URL(req.url, 'http://control')`: the path inside it is
+/// routed and the authority in it is not trusted for anything. (The UI
+/// server, which routes only literal paths, refuses such a target.)
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_socket_routes_an_absolute_form_target_by_its_path_as_js_does() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let w = World::seeded(json!({})).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.sock");
+    let listener = crate::listen::bind_unix(&path).unwrap();
+    let d = w.daemon.clone();
+    tokio::spawn(crate::listen::serve_unix(listener, None, move |req| {
+        let d = d.clone();
+        async move { d.on_control(req).await }
+    }));
+    for (target, want) in [
+        ("http://evil.example/v1/status", 200),
+        ("/v1/status", 200),
+        ("http://evil.example/v1/nope", 404),
+    ] {
+        let mut s = tokio::net::UnixStream::connect(&path).await.unwrap();
+        s.write_all(
+            format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let status: u16 = text.split(' ').nth(1).unwrap().parse().unwrap();
+        assert_eq!(status, want, "{target}: {text}");
+    }
+}
