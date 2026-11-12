@@ -144,7 +144,11 @@ impl SecretFlagTraps {
     /// Whether any secret flag was given. Ports the
     /// `Object.hasOwn(args, key)` check in `main` in `src/cli/index.js`.
     pub fn any(&self) -> bool {
-        todo!()
+        self.value.is_some()
+            || self.webhook_url_dash.is_some()
+            || self.webhook_url_underscore.is_some()
+            || self.recovery_passphrase_dash.is_some()
+            || self.recovery_passphrase_underscore.is_some()
     }
 }
 

@@ -41,6 +41,15 @@ pub use state::{Shared, VaultRef};
 /// [`server::Daemon`] and run until SIGINT/SIGTERM. Ports the whole of
 /// `bin/agent-vault-daemon.js`.
 pub fn run_from_env() -> Exit {
+    run_from_env_unlocking(None)
+}
+
+/// [`run_from_env`] with the passphrase `agent-vault daemon --passphrase`
+/// read from the terminal. It is passed to
+/// [`av_store::vault::Vault::start_in_recorded_state`] and is not stored in
+/// the environment. `None` leaves a passphrase vault that cannot be opened
+/// locked, which is what a boot without the flag does.
+pub fn run_from_env_unlocking(passphrase: Option<av_core::secret::SecretString>) -> Exit {
     if let Err(e) = peercred::disable_core_dumps() {
         eprintln!("agent-vault-daemon: could not turn off core dumps: {e}");
     }
@@ -81,6 +90,7 @@ pub fn run_from_env() -> Exit {
         port,
         enrolled,
         group,
+        passphrase,
     ))
 }
 
@@ -90,6 +100,7 @@ async fn run(
     port: u16,
     enrolled: Option<u32>,
     group: Option<String>,
+    passphrase: Option<av_core::secret::SecretString>,
 ) -> Exit {
     use av_store::vault::{CreateOptions, Vault};
     let db = vault_dir.join(av_store::vault::VAULT_DB_FILE);
@@ -104,7 +115,9 @@ async fn run(
                 return Exit::Failure;
             }
         };
-        let unlocked = v.start_in_recorded_state(None).unwrap_or(false);
+        let unlocked = v
+            .start_in_recorded_state(passphrase.as_ref())
+            .unwrap_or(false);
         (v, unlocked)
     } else if vault_dir.join(av_store::vault::LEGACY_VAULT_FILE).exists() {
         eprintln!(

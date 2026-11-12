@@ -1,12 +1,11 @@
 //! `agent-vault-setup`, the privileged installer. Ports
 //! `bin/agent-vault-setup.js`.
-
-use clap::Parser;
+//!
+//! The verb is the first argument that does not start with `-`, matching the
+//! JS installer. Clap's [`av_cli::SetupCli`] remains for callers that already
+//! parsed a command tree.
 
 fn main() {
-    let cli = match av_cli::SetupCli::try_parse() {
-        Ok(cli) => cli,
-        Err(err) => std::process::exit(av_cli::setup::setup_clap_failure(err).code()),
-    };
-    std::process::exit(av_cli::run_setup(cli).code());
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(av_cli::setup::run_setup_argv(&argv).code());
 }
