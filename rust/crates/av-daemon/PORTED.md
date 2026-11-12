@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 171 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, **810 not yet ported**.
+Totals: 1090 JS tests: 180 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **800 not yet ported**.
 
 ## Mutation check
 
@@ -638,16 +638,16 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-policy.test.js | stored effective route and payload policies retain all ancestor constraints | tests/ported_gateway_core_units.rs::reused_effective_route_and_payload_sets_retain_every_ancestor_constraint |
 | gateway-w2-policy.test.js | malformed stored route and payload constraints refuse before reaching upstream | tests/ported_gateway_core_units.rs::malformed_stored_route_payload_and_unknown_approval_modes_fail_closed |
 | gateway-w2-policy.test.js | creation refuses coercion, supports zero limits, and cannot escape credential hosts | tests/ported_gateway_core_units.rs::grant_creation_rejects_coercion_and_host_escape_but_allows_zero_limits |
-| gateway-w2-scrub.test.js | restricted scrub grammar refuses dangerous or broad expressions | not yet ported |
-| gateway-w2-scrub.test.js | extra patterns are additive to stored secret and derived protections | not yet ported |
-| gateway-w2-scrub.test.js | extra patterns survive every stream chunk boundary | not yet ported |
-| gateway-w2-scrub.test.js | long custom tokens do not leak when bounded suffix spans stream windows | not yet ported |
-| gateway-w2-scrub.test.js | invalid persisted compiled patterns fail closed | not yet ported |
-| gateway-w2-scrub.test.js | escaped literal prefixes retain custom matches across chunks | not yet ported |
-| gateway-w2-scrub.test.js | bounded grammar refuses combinatorial repetition and accepts realistic shapes promptly | not yet ported |
-| gateway-w2-scrub.test.js | every accepted pattern scans hostile input in under 50 ms | not yet ported |
-| gateway-w2-scrub.test.js | a stream that mentions a pattern prefix keeps flowing, and its holdback stays bounded | not yet ported |
-| gateway-w2-scrub.test.js | a custom token straddling every possible cut is redacted whole, in any chunking | not yet ported |
+| gateway-w2-scrub.test.js | restricted scrub grammar refuses dangerous or broad expressions | tests/ported_gateway_scrub.rs::restricted_custom_pattern_grammar_rejects_dangerous_and_broad_expressions |
+| gateway-w2-scrub.test.js | extra patterns are additive to stored secret and derived protections | tests/ported_gateway_scrub.rs::custom_patterns_are_additive_to_stored_and_derived_secret_protection |
+| gateway-w2-scrub.test.js | extra patterns survive every stream chunk boundary | tests/ported_gateway_scrub.rs::custom_token_is_redacted_at_every_two_chunk_cut_and_every_odd_chunk_width |
+| gateway-w2-scrub.test.js | long custom tokens do not leak when bounded suffix spans stream windows | tests/ported_gateway_scrub.rs::long_bounded_tokens_and_escaped_prefixes_are_redacted_across_single_character_chunks |
+| gateway-w2-scrub.test.js | invalid persisted compiled patterns fail closed | not applicable, because Rust ExtraPattern stores source and recompiles it; the JS precompiled-regex-without-metadata shape is unrepresentable (corrupt-source control: tests/ported_gateway_scrub.rs::corrupt_persisted_pattern_source_fails_closed_before_any_output) |
+| gateway-w2-scrub.test.js | escaped literal prefixes retain custom matches across chunks | tests/ported_gateway_scrub.rs::long_bounded_tokens_and_escaped_prefixes_are_redacted_across_single_character_chunks |
+| gateway-w2-scrub.test.js | bounded grammar refuses combinatorial repetition and accepts realistic shapes promptly | tests/ported_gateway_scrub.rs::bounded_grammar_refuses_combinatorial_repetition_and_scans_realistic_shapes_promptly |
+| gateway-w2-scrub.test.js | every accepted pattern scans hostile input in under 50 ms | tests/ported_gateway_scrub.rs::hostile_input_scans_meet_bound_and_non_bmp_repetitions_are_refused_as_planned; ported (intended difference: rust/PLAN.md non-BMP repetition) |
+| gateway-w2-scrub.test.js | a stream that mentions a pattern prefix keeps flowing, and its holdback stays bounded | tests/ported_gateway_scrub.rs::ordinary_prefix_traffic_keeps_flowing_with_bounded_holdback |
+| gateway-w2-scrub.test.js | a custom token straddling every possible cut is redacted whole, in any chunking | tests/ported_gateway_scrub.rs::custom_token_is_redacted_at_every_two_chunk_cut_and_every_odd_chunk_width |
 | gateway-w2-seams.test.js | pins on a plaintext credential refuse before any connection; no pins still connects | not yet ported |
 | gateway-w2-seams.test.js | a throwing health reader or recorder never turns an executed request into a failure | not yet ported |
 | gateway-w2-seams.test.js | onPending gets the id and headline only, and a throwing hook still holds the request | not yet ported |
