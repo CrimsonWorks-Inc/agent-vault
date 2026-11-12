@@ -11976,3 +11976,264 @@ async fn control_mcp_status_shows_lifetimes_but_only_human_pending_views_receive
     .await
     .expect("MCP preview separation timed out");
 }
+
+#[tokio::test]
+async fn control_gate_human_window_approves_but_agent_cannot_bind_or_replace_certificate_and_socket_is_private(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        use std::os::unix::fs::PermissionsExt;
+        let f=approval_fixture("each",&["header:x-key"]).await;credential_factor(&f).await;assert_eq!(std::fs::metadata(f._dir.path().join("control.sock")).unwrap().permissions().mode()&0o007,0);
+        credential_presence_refused(credential_api(&f,"POST","/v1/listeners",json!({"id":"agent-added","address":"0.0.0.0:0","surfaces":["gateway","mcp"],"tls":{"managed":true}})).await);let(_,listed)=credential_api(&f,"GET","/v1/listeners",json!({})).await;assert!(!listed.as_array().unwrap().iter().any(|l|l["id"]=="agent-added"));
+        let(s,first)=credential_api(&f,"POST","/v1/tls/ensure",json!({})).await;assert_eq!(s,200,"{first}");credential_presence_refused(credential_api(&f,"POST","/v1/tls/ensure",json!({"force":true})).await);assert_eq!(credential_api(&f,"POST","/v1/tls/ensure",json!({})).await.1["fingerprint"],first["fingerprint"]);
+        let held=f.get().await;let id=held_id(&held);credential_presence_refused(credential_api(&f,"POST","/v1/approvals",json!({"id":id,"granted":true})).await);assert_eq!(f.get().await.status,202);assert!(f.up.hits.lock().unwrap().is_empty());credential_gate(&f,true).await;assert_eq!(credential_api(&f,"POST","/v1/approvals",json!({"id":id,"granted":true})).await.0,200);assert_eq!(f.get().await.status,200);assert!(f.up.hits.lock().unwrap().iter().any(|r|r.headers.iter().any(|(_,v)|v==SECRET)));credential_finish(&f).await;
+    }).await.expect("human gate control timed out");
+}
+
+async fn control_gate_snapshot(f: &Fixture) -> Value {
+    let rows = store_snapshot(f).await;
+    let rest=f.shared.run(|c|json!({"settings":c.vault.get_settings().unwrap(),"templates":c.vault.list_templates().unwrap(),"notify":c.vault.notify_config().unwrap()})).await.unwrap();
+    json!({"rows":rows,"rest":rest})
+}
+
+#[tokio::test]
+async fn control_gate_every_widening_route_refuses_without_writing_but_reads_remain_open() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let sid=control_session_sid(&f).await;let pin=format!("sha256/{}=","A".repeat(43));let before=control_gate_snapshot(&f).await;
+        for(method,path,body)in [
+            ("POST","/v1/credentials",json!({"slug":"x","kind":"http","value":"v"})),("DELETE","/v1/credentials?slug=demo",json!({})),("POST","/v1/sessions",json!({"cred":"demo"})),("POST","/v1/placeholders",json!({"cred":"demo"})),("POST","/v1/placeholders/batch",json!({"sid":sid,"items":[{"cred":"demo"}]})),("POST","/v1/approvals",json!({"id":"whatever","granted":true})),("POST","/v1/listeners",json!({"id":"n","address":"127.0.0.1:0","surfaces":["mcp"]})),("POST","/v1/presence",json!({"credentialId":"c","publicKeySpki":"k"})),("POST","/v1/factors/webauthn",json!({"credential_id":"c","prf_secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="})),("POST","/v1/factors/webauthn",json!({"action":"remove"})),("POST","/v1/credentials/rotate",json!({"slug":"demo","value":"ROTATED-GATE-VALUE-0099887766"})),("POST","/v1/credentials/scrub",json!({"slug":"demo","pattern":"acme_[a-z0-9]{20}"})),("DELETE","/v1/credentials/scrub?slug=demo&id=sp_x",json!({})),("POST","/v1/credentials/expiry",json!({"slug":"demo","expires_at":null})),("POST","/v1/credentials/pins",json!({"slug":"demo","host":"api.example.test","pins":[pin]})),("DELETE","/v1/credentials/pins?slug=demo&host=api.example.test",json!({})),("POST","/v1/credentials/release",json!({"slug":"demo"})),("POST","/v1/tripwires",json!({"enabled":false})),("POST","/v1/tripwires",json!({"enabled":true,"rules":"defaults"})),("POST","/v1/tripwires",json!({"rules":[]})),("POST","/v1/templates",json!({"name":"gate","spec":{"cred":"demo"}})),("POST","/v1/backup/restore",json!({"bundle":{"format":"agent-vault-backup"},"recovery_passphrase":"a recovery passphrase"})),("POST","/v1/notify",json!({"webhook_url":"https://hooks.example/abc"}))
+        ] {let r=credential_api(&f,method,path,body).await;assert_eq!(r.0,401,"{method} {path}: {}",r.1);assert_eq!(r.1["code"],"AV_PRESENCE_REQUIRED");}
+        assert_eq!(control_gate_snapshot(&f).await,before);
+        for path in ["/v1/status","/v1/lockstate","/v1/credentials","/v1/sessions","/v1/listeners","/v1/approvals","/v1/tripwires","/v1/templates","/v1/notify","/v1/audit/checkpoint","/v1/audit/export","/v1/report/access",&format!("/v1/sessions/detail?sid={sid}")] {let(s,v)=credential_api(&f,"GET",path,json!({})).await;assert_eq!(s,200,"{path}: {v}");}assert_eq!(f.get().await.status,200);credential_finish(&f).await;
+    }).await.expect("whole widening surface timed out");
+}
+
+#[tokio::test]
+async fn control_gate_narrowing_and_read_only_wave_three_routes_remain_open_with_factor_enrolled() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = approval_fixture("on-write", &["header:x-key"]).await;
+        credential_factor(&f).await;
+        let sid = control_session_sid(&f).await;
+        assert_eq!(f.get().await.status, 200);
+        for (method, path, body, want) in [
+            (
+                "POST",
+                "/v1/sessions/narrow",
+                json!({"sid":sid,"narrow":{"methods":["GET"]}}),
+                200,
+            ),
+            ("POST", "/v1/tripwires", json!({"enabled":true}), 200),
+            ("POST", "/v1/credentials/test", json!({"slug":"demo"}), 404),
+            ("DELETE", "/v1/templates?name=none", json!({}), 200),
+            ("DELETE", "/v1/notify", json!({}), 200),
+            ("POST", "/v1/notify/test", json!({}), 404),
+            (
+                "POST",
+                "/v1/backup/inspect",
+                json!({"bundle":{"format":"other"},"recovery_passphrase":"a recovery passphrase"}),
+                403,
+            ),
+            (
+                "POST",
+                "/v1/audit/verify-witness",
+                json!({"checkpoints":[]}),
+                200,
+            ),
+            (
+                "POST",
+                "/v1/credentials/quarantine",
+                json!({"slug":"demo"}),
+                200,
+            ),
+            ("POST", "/v1/panic", json!({}), 200),
+        ] {
+            let (s, v) = credential_api(&f, method, path, body).await;
+            assert_eq!(s, want, "{method} {path}: {v}");
+            assert_ne!(v["code"], "AV_PRESENCE_REQUIRED");
+        }
+        f.shared
+            .run(|c| {
+                assert!(c
+                    .vault
+                    .sessions()
+                    .unwrap()
+                    .iter()
+                    .all(|s| s.state == av_store::model::SessionState::Revoked));
+                assert!(c
+                    .vault
+                    .find_credential("demo")
+                    .unwrap()
+                    .unwrap()
+                    .quarantine
+                    .is_some());
+            })
+            .await
+            .unwrap();
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("open narrowing surface timed out");
+}
+
+#[tokio::test]
+async fn control_gate_authenticator_alone_gates_the_socket_and_cannot_be_ransomed_by_first_passphrase(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use base64::Engine;
+        use p256::pkcs8::EncodePublicKey;
+        let f = Fixture::new(&["header:x-key"]).await;
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"}))
+                .await
+                .0,
+            200
+        );
+        let key = p256::ecdsa::SigningKey::from_slice(&[23; 32]).unwrap();
+        let spki = base64::engine::general_purpose::STANDARD
+            .encode(key.verifying_key().to_public_key_der().unwrap().as_bytes());
+        let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([23; 16]);
+        f.shared
+            .run(move |c| {
+                c.vault
+                    .set_presence_key(
+                        &json!({"credentialId":id,"publicKeySpki":spki,"signCount":0}),
+                    )
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["code"], "AV_PRESENCE_REQUIRED");
+        assert_eq!(v["factors"], json!(["authenticator"]));
+        assert!(v["hint"].as_str().unwrap().contains("web UI"));
+        credential_presence_refused(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/passphrase",
+                json!({"passphrase":"agent-chosen-ransom-phrase"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/lock", json!({})).await.0,
+            200
+        );
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await.0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("authenticator-only gate timed out");
+}
+
+#[tokio::test]
+async fn control_gate_all_scrypt_routes_throttle_real_guesses_without_extending_backoff() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        for (path, body) in [
+            (
+                "/v1/presence/window",
+                json!({"passphrase":"wrong-passphrase-here"}),
+            ),
+            (
+                "/v1/passphrase",
+                json!({"passphrase":"a-new-passphrase","current":"wrong-passphrase-here"}),
+            ),
+        ] {
+            let f = Fixture::new(&["header:x-key"]).await;
+            credential_factor(&f).await;
+            for _ in 0..5 {
+                let (_, v) = credential_api(&f, "POST", path, body.clone()).await;
+                assert_ne!(
+                    v["code"], "AV_RATE_LIMITED",
+                    "five free attempts should be checked"
+                );
+                assert_ne!(v["code"], Value::Null);
+            }
+            let records = audit_records(&f).await;
+            let until = records
+                .iter()
+                .rev()
+                .find(|r| r["kind"] == "presence.throttled")
+                .unwrap()["until"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let end = av_daemon::util::parse_iso_ms(&until).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let (s, v) = credential_api(&f, "POST", path, body.clone()).await;
+            assert_eq!(s, 429, "{v}");
+            assert_eq!(v["code"], "AV_RATE_LIMITED");
+            assert!(v["detail"].as_str().unwrap().contains("try again in"));
+            assert_eq!(audit_records(&f).await, records);
+            let wait = (end - av_daemon::util::now_ms()).max(0) as u64;
+            tokio::time::sleep(std::time::Duration::from_millis(wait + 50)).await;
+            credential_gate(&f, true).await;
+            for _ in 0..4 {
+                assert_ne!(
+                    credential_api(
+                        &f,
+                        "POST",
+                        "/v1/presence/window",
+                        json!({"passphrase":"wrong again"})
+                    )
+                    .await
+                    .1["code"],
+                    "AV_RATE_LIMITED"
+                );
+            }
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .expect("all scrypt route throttle timed out");
+}
+
+#[tokio::test]
+async fn control_gate_grant_placeholder_ceiling_beats_agent_control_and_direct_issuance() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::configured(
+            &["header:x-key"],
+            SECRET,
+            None,
+            json!({"placeholder_policy":{"max_uses":1}}),
+        )
+        .await;
+        credential_factor(&f).await;
+        let sid = control_session_sid(&f).await;
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/placeholders",
+            json!({"cred":"demo","sid":sid,"uses":1000000}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let direct = f.mint(Some(9999)).await;
+        let gid = f.grant_id.clone();
+        f.shared
+            .run(move |c| {
+                let rows = c.vault.list_placeholders(None).unwrap();
+                assert!(rows.iter().filter(|p| p.grant_id == gid).count() >= 3);
+                assert!(rows
+                    .iter()
+                    .filter(|p| p.grant_id == gid)
+                    .all(|p| p.max_uses == 1));
+            })
+            .await
+            .unwrap();
+        let r = f
+            .send("GET", "/ordinary", vec![("x-key".into(), direct)], None)
+            .await;
+        assert_eq!(r.status, 200);
+        f.clean(&r).await;
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("grant placeholder ceiling timed out");
+}

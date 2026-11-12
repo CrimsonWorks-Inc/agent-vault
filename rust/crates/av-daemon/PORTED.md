@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 520 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **577 not yet ported**.
+Totals: 1207 JS tests: 530 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 85 CLI-only, 1 not applicable, **566 not yet ported**.
 
 ## Mutation check
 
@@ -253,23 +253,23 @@ the vault on every call instead of caching an audit handle.
 | control-cli-watch.test.js | JSON passes an ordinary entry through unchanged | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
 | control-gate.test.js | an agent cannot approve its own held request | `tests::mutants::hardening_every_answer_a_human_gives_needs_the_human` |
 | control-gate.test.js | denying needs a human too, because it did not only narrow | `tests::mutants::hardening_every_answer_a_human_gives_needs_the_human` |
-| control-gate.test.js | a human with a window can approve, so the gate is not a wall | not yet ported |
-| control-gate.test.js | an agent cannot bind a new listener | not yet ported |
+| control-gate.test.js | a human with a window can approve, so the gate is not a wall | `ported_gateway_core::control_gate_human_window_approves_but_agent_cannot_bind_or_replace_certificate_and_socket_is_private` |
+| control-gate.test.js | an agent cannot bind a new listener | `ported_gateway_core::control_gate_human_window_approves_but_agent_cannot_bind_or_replace_certificate_and_socket_is_private` |
 | control-gate.test.js | the signature counter cannot be moved by anyone who asks | `tests::presence::hardening_the_signature_counter_is_not_settable_and_a_trusted_origin_needs_fresh_presence` |
-| control-gate.test.js | an agent cannot force a new certificate and break existing trust | not yet ported |
-| control-gate.test.js | no mutating control route widens capability without a human | not yet ported |
-| control-gate.test.js | the wave-3 routes that only narrow or read stay open, even with the gate on (A.2) | not yet ported |
+| control-gate.test.js | an agent cannot force a new certificate and break existing trust | `ported_gateway_core::control_gate_human_window_approves_but_agent_cannot_bind_or_replace_certificate_and_socket_is_private` |
+| control-gate.test.js | no mutating control route widens capability without a human | `ported_gateway_core::control_gate_every_widening_route_refuses_without_writing_but_reads_remain_open` |
+| control-gate.test.js | the wave-3 routes that only narrow or read stay open, even with the gate on (A.2) | `ported_gateway_core::control_gate_narrowing_and_read_only_wave_three_routes_remain_open_with_factor_enrolled` |
 | control-gate.test.js | an elevated session is refused inside an open window without a fresh proof | `tests::presence::hardening_fresh_presence_never_rides_the_window` |
 | control-gate.test.js | an elevated session is refused on a vault with no factor, where ordinary ones are open | `tests::control::hardening_an_elevated_session_needs_a_factor_and_the_list_reports_its_elevation` |
-| control-gate.test.js | an enrolled authenticator counts as a human factor on its own | not yet ported |
+| control-gate.test.js | an enrolled authenticator counts as a human factor on its own | `ported_gateway_core::control_gate_authenticator_alone_gates_the_socket_and_cannot_be_ransomed_by_first_passphrase` |
 | control-gate.test.js | an agent cannot enrol its own key on a fresh vault and take it over | `tests::presence::hardening_an_authenticator_needs_a_passphrase_first_and_cannot_be_enrolled_by_the_window` |
-| control-gate.test.js | an agent cannot set the first passphrase and lock the owner out | not yet ported |
+| control-gate.test.js | an agent cannot set the first passphrase and lock the owner out | `ported_gateway_core::control_gate_authenticator_alone_gates_the_socket_and_cannot_be_ransomed_by_first_passphrase` |
 | control-gate.test.js | passphrase attempts are charged for, in time and in the log | `tests::presence::hardening_failed_passphrases_back_off_and_a_right_one_resets` |
-| control-gate.test.js | every route that spends scrypt is throttled, not just the ones I remembered | not yet ported |
-| control-gate.test.js | the control socket is never world-connectable, not even for an instant | not yet ported |
-| control-gate.test.js | the CLI names the factor that exists, not the one it expects | not yet ported |
+| control-gate.test.js | every route that spends scrypt is throttled, not just the ones I remembered | `ported_gateway_core::control_gate_all_scrypt_routes_throttle_real_guesses_without_extending_backoff` |
+| control-gate.test.js | the control socket is never world-connectable, not even for an instant | `ported_gateway_core::control_gate_human_window_approves_but_agent_cannot_bind_or_replace_certificate_and_socket_is_private` |
+| control-gate.test.js | the CLI names the factor that exists, not the one it expects | av-cli |
 | control-gate.test.js | one malformed byte on the control socket does not kill the daemon | `tests::control::hardening_malformed_json_and_an_unknown_route_are_answers_not_crashes` |
-| control-gate.test.js | the grant’s placeholder ceiling beats what the agent asks for | not yet ported |
+| control-gate.test.js | the grant’s placeholder ceiling beats what the agent asks for | `ported_gateway_core::control_gate_grant_placeholder_ceiling_beats_agent_control_and_direct_issuance` |
 | control-ui-docs.test.js | the served page is one module script from the bundle, and nothing inline | not yet ported |
 | control-ui-docs.test.js | containment and recovery covers every wave-3 safety feature | not yet ported |
 | control-ui-docs.test.js | the agent tools are documented, read-only ones said to be so | not yet ported |
