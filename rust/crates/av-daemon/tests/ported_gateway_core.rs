@@ -15416,3 +15416,379 @@ async fn r1_bulk_one_elevated_item_requires_fresh_proof_for_all_and_ordinary_bat
     tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let plain=r1_ask(&f,json!(["GET"])).await;let wide=r1_ask(&f,json!(["GET","POST"])).await;let decisions=json!([{"id":plain,"kind":"session","granted":true},{"id":wide,"kind":"session","granted":true,"overrides":{"approval":"auto"}}]);credential_gate(&f,true).await;let before=store_snapshot(&f).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":decisions})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"fresh_presence");assert_eq!(store_snapshot(&f).await,before);let(_,pending)=credential_api(&f,"GET","/v1/session-requests",json!({})).await;for id in [&plain,&wide]{assert_eq!(pending.as_array().unwrap().iter().find(|r|r["id"]==*id).unwrap()["state"],"pending");}
  let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":decisions,"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(v["decided"].as_array().unwrap().iter().map(|r|r["outcome"].as_str().unwrap()).collect::<Vec<_>>(),vec!["decided","decided"]);let a=r1_ask(&f,json!(["GET"])).await;let b=r1_ask(&f,json!(["GET"])).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":a,"kind":"session","granted":true},{"id":b,"kind":"session","granted":false,"overrides":{"approval":"auto"}}]})).await;assert_eq!(s,200,"{v}");assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
 }
+
+#[tokio::test]
+async fn r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let inf = json!({"cred":"demo","infinite":true});
+        let before = store_snapshot(&f).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", inf.clone()).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "factor_required");
+        assert_eq!(store_snapshot(&f).await, before);
+        assert_eq!(f.get().await.status, 200);
+        credential_factor(&f).await;
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(&f, "POST", "/v1/sessions", inf.clone()).await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "fresh_presence");
+        let before = store_snapshot(&f).await;
+        for presence in [Value::Null, json!({"passphrase":WIDEN_PASS})] {
+            let (s, v) = credential_api(
+                &f,
+                "POST",
+                "/v1/sessions",
+                json!({"cred":"demo","infinite":true,"remote":true,"presence":presence}),
+            )
+            .await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["code"], "AV_REMOTE_FORBIDDEN");
+            assert_eq!(v["rule"], "infinite_remote");
+        }
+        for body in [
+            json!({"cred":"demo","ttl_hours":"abc"}),
+            json!({"cred":"demo","ttl_hours":0}),
+            json!({"cred":"demo","ttl_hours":-1}),
+            json!({"cred":"demo","ttl_hours":"8"}),
+            json!({"cred":"demo","infinite":true,"ttl_hours":1}),
+            json!({"cred":"demo","infinite":"yes"}),
+            json!({"cred":"demo","infinite":1}),
+        ] {
+            let (s, v) = credential_api(&f, "POST", "/v1/sessions", body).await;
+            assert_eq!(s, 403, "{v}");
+            assert_eq!(v["rule"], "ttl");
+        }
+        assert_eq!(store_snapshot(&f).await, before);
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"cred":"demo","infinite":true,"presence":{"passphrase":WIDEN_PASS}}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["infinite"], true);
+        assert!(v["expires_at"].is_null());
+        let (_, listed) = credential_api(&f, "GET", "/v1/sessions", json!({})).await;
+        let row = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == v["session_id"])
+            .unwrap();
+        assert_eq!(row["elevated"], json!(["infinite"]));
+        assert_eq!(row["infinite"], true);
+        assert!(row["expires_at"].is_null());
+        let (s, _, body) = loopback_http(
+            f.daemon.gateway_port().unwrap(),
+            "GET",
+            "/v1/session",
+            vec![(
+                "authorization".into(),
+                format!("Bearer {}", v["token"].as_str().unwrap()),
+            )],
+            vec![],
+        )
+        .await;
+        assert_eq!(s, 200);
+        let own: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(own["infinite"], true);
+        assert!(own["expires_at"].is_null());
+        assert!(!String::from_utf8_lossy(&body).contains(SECRET));
+        let original = control_session_sid(&f).await;
+        assert_eq!(
+            credential_api(
+                &f,
+                "DELETE",
+                &format!("/v1/sessions?sid={original}"),
+                json!({})
+            )
+            .await
+            .0,
+            200
+        );
+        credential_gate(&f, true).await;
+        let (s, issued) =
+            credential_api(&f, "POST", "/v1/placeholders", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{issued}");
+        let parsed =
+            av_core::placeholder::parse_at(issued["placeholder"].as_str().unwrap(), 0).unwrap();
+        assert_eq!(parsed.sid, v["session_id"].as_str().unwrap());
+        let sid = v["session_id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            credential_api(&f, "DELETE", &format!("/v1/sessions?sid={sid}"), json!({}))
+                .await
+                .0,
+            200
+        );
+        f.shared
+            .run({
+                let sid = sid.clone();
+                move |c| {
+                    let rows = c.vault.list_placeholders(Some(&sid)).unwrap();
+                    assert!(!rows.is_empty());
+                    for p in rows {
+                        assert_eq!(p.state, av_store::model::PlaceholderState::Dead);
+                        assert_eq!(p.dead_reason.as_deref(), Some("session_ended"));
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        let (_, listed) = credential_api(&f, "GET", "/v1/sessions", json!({})).await;
+        assert_eq!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == sid)
+                .unwrap()["state"],
+            "revoked"
+        );
+        let (s, control) = credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+        assert_eq!(s, 200, "{control}");
+        assert_eq!(
+            control_session_request(&f, &control, "demo", "GET", "/ordinary")
+                .await
+                .status,
+            200
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn r3_explicit_finite_lifetimes_keep_their_ceiling_while_default_idle_lifetime_extends() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"cred":"demo","ttl_hours":1}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["infinite"], false);
+        let sid = v["session_id"].as_str().unwrap().to_owned();
+        f.shared
+            .run(move |c| {
+                let s = c.vault.session(&sid).unwrap().unwrap();
+                let expires =
+                    av_daemon::util::parse_iso_ms(s.expires_at.as_ref().unwrap()).unwrap();
+                let left = expires - av_daemon::util::now_ms();
+                assert!(left > 59 * 60000 && left <= 3600000);
+                assert_eq!(s.max_expires_at, s.expires_at);
+                c.vault.touch_session(&sid).unwrap();
+                let after = c.vault.session(&sid).unwrap().unwrap();
+                assert!(
+                    av_daemon::util::parse_iso_ms(after.expires_at.as_ref().unwrap()).unwrap()
+                        <= expires
+                );
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/sessions",
+                json!({"cred":"demo","ttl_hours":0.5})
+            )
+            .await
+            .0,
+            200
+        );
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"cred":"demo","ttl_hours":null}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        let sid = v["session_id"].as_str().unwrap().to_owned();
+        let seed_sid = sid.clone();
+        let soon = av_daemon::util::iso_of_ms(av_daemon::util::now_ms() + 60000);
+        let f = control_session_restart_after_seed(f, move |dir| {
+            ported_common::seed_session_expiry(dir, &seed_sid, &soon)
+        })
+        .await;
+        f.shared
+            .run(move |c| {
+                c.vault.touch_session(&sid).unwrap();
+                let s = c.vault.session(&sid).unwrap().unwrap();
+                let end = av_daemon::util::parse_iso_ms(s.expires_at.as_ref().unwrap()).unwrap();
+                assert!(end > av_daemon::util::now_ms() + 60000);
+                assert!(
+                    end <= av_daemon::util::parse_iso_ms(s.max_expires_at.as_ref().unwrap())
+                        .unwrap()
+                );
+            })
+            .await
+            .unwrap();
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn r3_owner_can_approve_infinite_only_with_fresh_proof_and_without_a_proposed_lifetime() {
+    tokio::time::timeout(std::time::Duration::from_secs(25),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;let(s,timed)=credential_api(&f,"POST","/v1/session-requests",json!({"cred":"demo","ttl_minutes":30,"reason":"long job"})).await;assert_eq!(s,200,"{timed}");let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":timed["id"],"granted":true,"overrides":{"infinite":true},"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,403,"{v}");assert_eq!(v["rule"],"ttl");let id=r1_ask(&f,json!(["GET"])).await;credential_gate(&f,true).await;let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":{"infinite":true}})).await;assert_eq!(s,401,"{v}");assert_eq!(v["rule"],"fresh_presence");credential_gate(&f,false).await;let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",json!({"id":id,"granted":true,"overrides":{"infinite":true},"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(v["session"]["infinite"],true);assert!(v["session"]["expires_at"].is_null());assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}
+#[tokio::test]
+async fn r3_null_or_unparseable_stored_expiry_is_never_live() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for expiry in [Value::Null, json!("garbage")] {
+            let f = Fixture::new(&["header:x-key"]).await;
+            let (s, made) =
+                credential_api(&f, "POST", "/v1/sessions", json!({"cred":"demo"})).await;
+            assert_eq!(s, 200, "{made}");
+            let sid = made["session_id"].as_str().unwrap().to_owned();
+            let gid = made["grant_id"].as_str().unwrap().to_owned();
+            let seed_sid = sid.clone();
+            let f = control_session_restart_after_seed(f, move |dir| {
+                ported_common::seed_gateway_rows(
+                    dir,
+                    &seed_sid,
+                    &gid,
+                    &json!({"expires_at":expiry}),
+                    &json!({}),
+                )
+            })
+            .await;
+            f.shared
+                .run(move |c| {
+                    let s = c.vault.session(&sid).unwrap().unwrap();
+                    let e = c.vault.assert_session_live(Some(&s)).unwrap_err();
+                    let av_store::error::Error::Vault(e) = e else {
+                        panic!("vault refusal")
+                    };
+                    assert_eq!(e.code.as_str(), "AV_SESSION_EXPIRED");
+                })
+                .await
+                .unwrap();
+            assert_eq!(f.get().await.status, 200);
+            credential_finish(&f).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn c3_created_record(f: &Fixture, sid: &Value) -> Value {
+    let rows = audit_records(f)
+        .await
+        .into_iter()
+        .filter(|r| r["kind"] == "session.created" && r["session_id"] == *sid)
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "one created record per session");
+    rows[0].clone()
+}
+#[tokio::test]
+async fn c3_owner_created_sessions_record_their_own_elevation_and_expiry() {
+    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        for (mut body, want, infinite) in [
+            (json!({"cred":"demo","methods":["GET"]}), json!([]), false),
+            (
+                json!({"cred":"demo","methods":["GET","POST"],"approval":"auto"}),
+                json!(["approval_auto_writes"]),
+                false,
+            ),
+            (
+                json!({"cred":"demo","methods":["GET"],"infinite":true}),
+                json!(["infinite"]),
+                true,
+            ),
+            (
+                json!({"cred":"demo","methods":["POST"],"approval":"auto","infinite":true}),
+                json!(["infinite", "approval_auto_writes"]),
+                true,
+            ),
+        ] {
+            credential_gate(&f, true).await;
+            body["presence"] = json!({"passphrase":WIDEN_PASS});
+            let (s, v) = credential_api(&f, "POST", "/v1/sessions", body).await;
+            assert_eq!(s, 200, "{v}");
+            let row = c3_created_record(&f, &v["session_id"]).await;
+            assert_eq!(row["elevated"], want);
+            assert_eq!(row["infinite"], infinite);
+            if infinite {
+                assert!(row["expires_at"].is_null());
+            } else {
+                assert!(
+                    av_daemon::util::parse_iso_ms(row["expires_at"].as_str().unwrap()).unwrap()
+                        > av_daemon::util::now_ms()
+                );
+            }
+        }
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn c3_single_and_bulk_approved_sessions_record_each_final_proposal_elevation() {
+    tokio::time::timeout(std::time::Duration::from_secs(30),async{let f=Fixture::new(&["header:x-key"]).await;credential_factor(&f).await;
+ for (methods,overrides,want) in [(json!(["GET"]),Value::Null,json!([])),(json!(["GET","POST"]),json!({"approval":"auto"}),json!(["approval_auto_writes"])),(json!(["GET"]),json!({"infinite":true}),json!(["infinite"]))]{let id=r1_ask(&f,methods).await;credential_gate(&f,true).await;let mut body=json!({"id":id,"granted":true,"presence":{"passphrase":WIDEN_PASS}});if !overrides.is_null(){body["overrides"]=overrides;}let(s,v)=credential_api(&f,"POST","/v1/session-requests/decide",body).await;assert_eq!(s,200,"{v}");assert_eq!(c3_created_record(&f,&v["session"]["session_id"]).await["elevated"],want);}
+ let plain=r1_ask(&f,json!(["GET"])).await;let wide=r1_ask(&f,json!(["GET","POST"])).await;let forever=r1_ask(&f,json!(["GET"])).await;let(s,v)=credential_api(&f,"POST","/v1/pending/decide-many",json!({"decisions":[{"id":plain,"kind":"session","granted":true},{"id":wide,"kind":"session","granted":true,"overrides":{"approval":"auto"}},{"id":forever,"kind":"session","granted":true,"overrides":{"infinite":true}}],"presence":{"passphrase":WIDEN_PASS}})).await;assert_eq!(s,200,"{v}");assert_eq!(v["decided"].as_array().unwrap().iter().map(|r|r["outcome"].as_str().unwrap()).collect::<Vec<_>>(),vec!["decided","decided","decided"]);let rows=audit_records(&f).await;for(id,want)in [(plain,json!([])),(wide,json!(["approval_auto_writes"])),(forever,json!(["infinite"]))]{let session=&rows.iter().find(|r|r["kind"]=="session_request.approved"&&r["request_id"]==id).unwrap()["session_id"];assert_eq!(c3_created_record(&f,session).await["elevated"],want);}
+ assert_eq!(f.get().await.status,200);credential_finish(&f).await;}).await.unwrap();
+}
+
+#[tokio::test]
+async fn c3_unknown_elevation_real_store_refusal_writes_nothing_and_valid_control_creation_works() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let before = store_snapshot(&f).await;
+        let audit = audit_records(&f).await;
+        for elevated in [
+            vec!["root".to_owned()],
+            vec!["approval_auto_writes".to_owned(), "root".to_owned()],
+        ] {
+            f.shared
+                .run(move |c| {
+                    let e = c
+                        .vault
+                        .create_session(av_store::vault::CreateSessionOptions {
+                            elevated,
+                            ..Default::default()
+                        })
+                        .unwrap_err();
+                    let av_store::error::Error::Vault(e) = e else {
+                        panic!("vault refusal")
+                    };
+                    assert_eq!(e.code.as_str(), "AV_POLICY_DENIED");
+                    assert_eq!(e.extra.rule.as_deref(), Some("elevation_invalid"));
+                })
+                .await
+                .unwrap();
+            assert_eq!(store_snapshot(&f).await, before);
+            assert_eq!(audit_records(&f).await, audit);
+        }
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/sessions",
+            json!({"cred":"demo","methods":["GET"]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            control_session_request(&f, &v, "demo", "GET", "/ordinary")
+                .await
+                .status,
+            200
+        );
+        credential_finish(&f).await;
+    })
+    .await
+    .unwrap();
+}

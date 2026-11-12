@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 697 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 110 CLI-only, 4 not applicable, **371 not yet ported**.
+Totals: 1207 JS tests: 709 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **357 not yet ported**.
 
 ## Mutation check
 
@@ -1013,10 +1013,10 @@ the vault on every call instead of caching an audit handle.
 | remote.test.js | a listener serving a surface that may never leave the machine is refused | not yet ported |
 | remote.test.js | a refused listener is recorded, not silently dropped | not yet ported |
 | remote.test.js | a remote session carries its own shorter ceiling | not yet ported |
-| requested-c3.test.js | a session the owner creates records its elevation, [] when ordinary | not yet ported |
-| requested-c3.test.js | an approved request records the elevation of what the owner approved | not yet ported |
-| requested-c3.test.js | a bulk decision records each session's own elevation, not the batch's | not yet ported |
-| requested-c3.test.js | an elevation the store does not know is refused, and nothing is written | not yet ported |
+| requested-c3.test.js | a session the owner creates records its elevation, [] when ordinary | `ported_gateway_core::c3_owner_created_sessions_record_their_own_elevation_and_expiry` |
+| requested-c3.test.js | an approved request records the elevation of what the owner approved | `ported_gateway_core::c3_single_and_bulk_approved_sessions_record_each_final_proposal_elevation` |
+| requested-c3.test.js | a bulk decision records each session's own elevation, not the batch's | `ported_gateway_core::c3_single_and_bulk_approved_sessions_record_each_final_proposal_elevation` |
+| requested-c3.test.js | an elevation the store does not know is refused, and nothing is written | `ported_gateway_core::c3_unknown_elevation_real_store_refusal_writes_nothing_and_valid_control_creation_works` |
 | requested-r1.test.js | elevationOf names auto with a write method, and nothing ordinary | `ported_requested::r1_elevation_names_only_auto_writes_and_infinite_with_ordinary_controls` |
 | requested-r1.test.js | elevationOf fails closed on anything it cannot read | `ported_requested::r1_unreadable_specs_and_lists_elevate_independently_of_approval_mode` |
 | requested-r1.test.js | elevationOf fails closed on an unreadable list whatever the approval mode | `ported_requested::r1_unreadable_specs_and_lists_elevate_independently_of_approval_mode` |
@@ -1072,18 +1072,18 @@ the vault on every call instead of caching an audit handle.
 | requested-r2.test.js | exec --map puts a placeholder in the child under the name a tool reads | av-cli |
 | requested-r2.test.js | exec reports a missing command as 127 | av-cli |
 | requested-r2.test.js | session create takes several credentials and prints a block for each | av-cli |
-| requested-r3.test.js | a session with no expiry needs a fresh proof, and gets one from the passphrase | not yet ported |
-| requested-r3.test.js | a vault with no factor refuses a session with no expiry | not yet ported |
-| requested-r3.test.js | a session with no expiry is never remote, and says so before asking for anything | not yet ported |
-| requested-r3.test.js | a lifetime is a positive number, and infinite has none to set | not yet ported |
-| requested-r3.test.js | ordinary finite sessions are unchanged | not yet ported |
-| requested-r3.test.js | revoking a session with no expiry kills its placeholders | not yet ported |
-| requested-r3.test.js | the owner can add no expiry when approving, but not on top of a lifetime the agent asked for | not yet ported |
+| requested-r3.test.js | a session with no expiry needs a fresh proof, and gets one from the passphrase | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
+| requested-r3.test.js | a vault with no factor refuses a session with no expiry | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
+| requested-r3.test.js | a session with no expiry is never remote, and says so before asking for anything | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
+| requested-r3.test.js | a lifetime is a positive number, and infinite has none to set | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
+| requested-r3.test.js | ordinary finite sessions are unchanged | `ported_gateway_core::r3_explicit_finite_lifetimes_keep_their_ceiling_while_default_idle_lifetime_extends` |
+| requested-r3.test.js | revoking a session with no expiry kills its placeholders | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
+| requested-r3.test.js | the owner can add no expiry when approving, but not on top of a lifetime the agent asked for | `ported_gateway_core::r3_owner_can_approve_infinite_only_with_fresh_proof_and_without_a_proposed_lifetime` |
 | requested-r3.test.js | an authenticator assertion creates one from the UI, which marks it everywhere | not yet ported |
-| requested-r3.test.js | the CLI refuses --ttl with --infinite, and lists an infinite session as never | not yet ported |
-| requested-r3.test.js | the CLI on a vault with no factor says to set a passphrase first | not yet ported |
-| requested-r3.test.js | a stored expiry that does not parse is never live | not yet ported |
-| requested-r3.test.js | an infinite session is the default for an implicit placeholder when it is the only one | not yet ported |
+| requested-r3.test.js | the CLI refuses --ttl with --infinite, and lists an infinite session as never | av-cli |
+| requested-r3.test.js | the CLI on a vault with no factor says to set a passphrase first | av-cli |
+| requested-r3.test.js | a stored expiry that does not parse is never live | `ported_gateway_core::r3_null_or_unparseable_stored_expiry_is_never_live` |
+| requested-r3.test.js | an infinite session is the default for an implicit placeholder when it is the only one | `ported_gateway_core::r3_infinite_creation_validation_agent_view_implicit_selection_and_revocation` |
 | requested-seams.test.js | a session for a quarantined credential is refused before the gate asks for anything | `ported_gateway_core::requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending` |
 | requested-seams.test.js | approving a request for a quarantined credential is refused and leaves it pending | `ported_gateway_core::requested_quarantine_precedes_presence_and_single_bulk_decisions_leave_pending` |
 | requested-seams.test.js | a placeholder batch for a quarantined credential is refused whole, with the store's rule | `ported_gateway_core::requested_batch_quarantined_later_item_is_atomic_and_grant_ceiling_wins` |
