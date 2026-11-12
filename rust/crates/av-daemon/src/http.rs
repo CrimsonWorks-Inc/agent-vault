@@ -19,8 +19,18 @@ pub enum AvBody {
     Full(Option<Bytes>),
     /// Streamed bytes.
     Frames(mpsc::Receiver<Vec<u8>>),
-    /// Streamed text (the notifier's).
-    Text(mpsc::UnboundedReceiver<String>),
+    /// Streamed text (the notifier's and the MCP event stream's), ended
+    /// as soon as the client's side of the connection closes.
+    Text(mpsc::UnboundedReceiver<String>, Option<Closed>),
+}
+
+/// Ready once the connection a response is written to has closed.
+pub type Closed = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// A text event stream that ends when its client goes away
+/// (`res.on('close')`), even while nothing is being written.
+pub fn text_stream(rx: mpsc::UnboundedReceiver<String>) -> AvBody {
+    AvBody::Text(rx, crate::listen::conn_closed())
 }
 
 impl hyper::body::Body for AvBody {
@@ -36,9 +46,16 @@ impl hyper::body::Body for AvBody {
             AvBody::Frames(rx) => rx
                 .poll_recv(cx)
                 .map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
-            AvBody::Text(rx) => rx
-                .poll_recv(cx)
-                .map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v))))),
+            AvBody::Text(rx, closed) => {
+                if let Some(c) = closed {
+                    if std::future::Future::poll(c.as_mut(), cx).is_ready() {
+                        rx.close();
+                        return Poll::Ready(None);
+                    }
+                }
+                rx.poll_recv(cx)
+                    .map(|o| o.map(|v| Ok(Frame::data(Bytes::from(v)))))
+            }
         }
     }
 

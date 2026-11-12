@@ -45,20 +45,147 @@ async fn incoming(req: hyper::Request<hyper::body::Incoming>) -> Result<Incoming
 type Answer =
     std::pin::Pin<Box<dyn Future<Output = Result<Resp, std::convert::Infallible>> + Send>>;
 
+/// Watches the connection a handler answers for the client going away.
+pub trait ConnWatch: Send + Sync {
+    /// Ready once the client's side of the connection has closed.
+    fn poll_closed(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()>;
+}
+
+tokio::task_local! {
+    static CONN: Arc<dyn ConnWatch>;
+}
+
+/// Ready once the connection the current handler answers has closed; None
+/// outside a served connection (in-process calls).
+pub fn conn_closed() -> Option<crate::http::Closed> {
+    let w = CONN.try_with(Clone::clone).ok()?;
+    Some(Box::pin(std::future::poll_fn(move |cx| w.poll_closed(cx))))
+}
+
+/// The most a watcher stashes for hyper before it stops reading ahead.
+const STASH_LIMIT: usize = 64 * 1024;
+
+struct Conn<IO> {
+    io: IO,
+    /// Bytes read ahead by a watcher, handed to hyper first.
+    stash: Vec<u8>,
+    /// The client's side ended (end of input or a read error).
+    ended: bool,
+}
+
+/// The connection's IO, shared between hyper and a stream that watches for
+/// the client going away. hyper (with `half_close`, which a client that
+/// half-closes before reading needs) does not read while it writes a
+/// response, so an endless event stream reads ahead itself: what it reads
+/// is kept for hyper, and the end of input closes the stream at once, as
+/// `res.on('close')` does in Node.
+struct Shared<IO>(Arc<std::sync::Mutex<Conn<IO>>>);
+
+impl<IO> Shared<IO> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Conn<IO>> {
+        self.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl<IO: tokio::io::AsyncRead + Unpin + Send> ConnWatch for std::sync::Mutex<Conn<IO>> {
+    fn poll_closed(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let mut c = self.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if c.ended {
+                return std::task::Poll::Ready(());
+            }
+            if c.stash.len() >= STASH_LIMIT {
+                return std::task::Poll::Pending;
+            }
+            let mut chunk = [0u8; 4096];
+            let mut buf = tokio::io::ReadBuf::new(&mut chunk);
+            match std::pin::Pin::new(&mut c.io).poll_read(cx, &mut buf) {
+                std::task::Poll::Ready(Ok(())) if buf.filled().is_empty() => c.ended = true,
+                std::task::Poll::Ready(Ok(())) => {
+                    let got = buf.filled().to_vec();
+                    c.stash.extend_from_slice(&got);
+                }
+                std::task::Poll::Ready(Err(_)) => c.ended = true,
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
+impl<IO: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Shared<IO> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let mut c = self.lock();
+        if !c.stash.is_empty() {
+            let n = c.stash.len().min(buf.remaining());
+            buf.put_slice(&c.stash[..n]);
+            c.stash.drain(..n);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        if c.ended {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut c.io).poll_read(cx, buf)
+    }
+}
+
+impl<IO: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Shared<IO> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.lock().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.lock().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.lock().io).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.lock().io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.lock().io.is_write_vectored()
+    }
+}
+
 /// `#guard`: a handler that panics answers 500, never ends the daemon.
-fn guarded<F, Fut>(f: F) -> impl Fn(hyper::Request<hyper::body::Incoming>) -> Answer + Clone
+fn guarded<F, Fut>(
+    f: F,
+    conn: Arc<dyn ConnWatch>,
+) -> impl Fn(hyper::Request<hyper::body::Incoming>) -> Answer + Clone
 where
     F: Fn(Incoming) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Resp> + Send + 'static,
 {
     move |req| {
         let f = f.clone();
+        let conn = conn.clone();
         Box::pin(async move {
             let inc = match incoming(req).await {
                 Ok(i) => i,
                 Err(r) => return Ok(*r),
             };
-            let task = tokio::spawn(f(inc));
+            let task = tokio::spawn(CONN.scope(conn, f(inc)));
             Ok(match task.await {
                 Ok(r) => r,
                 Err(_) => crate::http::response(
@@ -77,7 +204,13 @@ where
     F: Fn(Incoming) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Resp> + Send + 'static,
 {
-    let svc = guarded(handler);
+    let conn = Arc::new(std::sync::Mutex::new(Conn {
+        io,
+        stash: Vec::new(),
+        ended: false,
+    }));
+    let svc = guarded(handler, conn.clone());
+    let io = Shared(conn);
     async move {
         let _ = hyper::server::conn::http1::Builder::new()
             .keep_alive(true)
