@@ -12,7 +12,8 @@
 //! ```
 //!
 //! For every entry the swap is made in a temporary copy of `rust/` (plus the
-//! repo inputs the tests read: `src/`, `web/src`, `README.md`), then
+//! repo inputs the tests read: `src/`, `bin/`, `package.json`, `web/src`,
+//! `README.md`), then
 //! `cargo test --workspace` runs there. The mutant must compile (a swap that
 //! breaks the build proves nothing) and the tests must fail. A test run that
 //! outlives the timeout counts as caught, as in the JS check. The working tree
@@ -342,11 +343,12 @@ fn cargo_test(
 }
 
 /// Files outside `rust/` that the tests read through `../../../`: the JS
-/// reference sources and the built UI (`src/`), the UI sources (`web/src`)
-/// and the README. They are copied beside the `rust/` copy so the copy's
+/// reference sources and the built UI (`src/`), the JS entry points and
+/// package manifest (`bin/`, `package.json`; contract tests start the JS
+/// daemon), the UI sources (`web/src`) and the README. They are copied beside the `rust/` copy so the copy's
 /// tests see the same tree the working copy's tests do. A missing input is
 /// skipped; the baseline run then fails and names it.
-const REPO_INPUTS: &[&str] = &["src", "web/src", "README.md"];
+const REPO_INPUTS: &[&str] = &["src", "bin", "package.json", "web/src", "README.md"];
 
 fn copy_repo_inputs(root: &Path, dest: &Path) -> Result<(), String> {
     let Some(repo) = root.parent() else {
