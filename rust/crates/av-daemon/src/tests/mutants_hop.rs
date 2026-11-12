@@ -269,3 +269,85 @@ async fn preflight_refuses_a_single_valued_header_sent_twice() {
         .expect_err("refused");
     assert_eq!(e.extra.rule.as_deref(), Some("header_duplicate"));
 }
+
+/// "a hop's override check reads the raw URL instead of the view" and 'a
+/// hop to a Location with a stray name is followed'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_location_is_read_through_the_request_view() {
+    for loc in ["/next?_METHOD=DELETE", "/next?%5Bx=1"] {
+        let w = hopping(json!({"redirects": 2}), 302, loc).await;
+        let r = w.get("/start").await;
+        assert_eq!(r.header("av-redirect-stopped"), Some("path"), "{loc}");
+        assert_eq!(w.up.count(), 1, "{loc}");
+    }
+}
+
+fn pin(c: char) -> String {
+    format!("sha256/{}=", c.to_string().repeat(43))
+}
+
+/// "the gateway's upstream drops the credential's pins" and 'the gateway
+/// looks pins up by exact key, so a malformed pin table means no pins'.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_upstream_call_carries_the_pins_for_the_url_host() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials/pins",
+            json!({"slug": "demo", "host": "api.example.test", "pins": [pin('A')]}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(w.get("/x").await.status, 200);
+    let pins = w.up.hits.lock().unwrap()[0].pins.as_value();
+    assert_eq!(pins, json!([pin('A')]));
+    // A key spelled another way still names the URL's host.
+    let c = rusqlite::Connection::open(w._dir.path().join("vault.db")).unwrap();
+    c.execute_batch("UPDATE pins SET host = 'API.Example.test.'")
+        .unwrap();
+    drop(c);
+    assert_eq!(w.get("/y").await.status, 200);
+    let pins = w.up.hits.lock().unwrap()[1].pins.as_value();
+    assert_eq!(pins, json!([pin('A')]));
+}
+
+/// 'a refusal from pinnedRequest is reported as an unreachable upstream and
+/// not refunded'.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_request_refusal_is_a_refunded_policy_denial() {
+    let w = World::seeded(json!({})).await;
+    w.up.answer(Box::new(|_| {
+        Err(UpstreamError {
+            vault: Some(Box::new(crate::err::dr(
+                crate::err::C::PolicyDenied,
+                "the Host header names a different host than the URL",
+                "host_mismatch",
+            ))),
+            ..Default::default()
+        })
+    }));
+    let sid = w.session_id.clone();
+    let used = |w: &World| {
+        let (shared, sid) = (w.shared.clone(), sid.clone());
+        async move {
+            shared
+                .run(move |c| {
+                    c.vault
+                        .list_placeholders(Some(&sid))
+                        .unwrap()
+                        .iter()
+                        .map(|p| p.uses)
+                        .sum::<u64>()
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let before = used(&w).await;
+    let r = w.get("/x").await;
+    assert_eq!(r.status, 403, "{:?}", r.error);
+    let e = r.error.unwrap();
+    assert_eq!(e.extra.rule.as_deref(), Some("host_mismatch"));
+    assert_eq!(used(&w).await, before, "the use was refunded");
+}
