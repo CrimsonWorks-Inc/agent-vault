@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 750 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 112 CLI-only, 4 not applicable, **316 not yet ported**.
+Totals: 1207 JS tests: 794 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 115 CLI-only, 4 not applicable, **269 not yet ported**.
 
 ## Mutation check
 
@@ -335,11 +335,11 @@ the vault on every call instead of caching an audit handle.
 | exfil.test.js | with a passphrase set, an agent cannot mint capability without it | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
 | exfil.test.js | an agent cannot mint a placeholder against a grant it does not own | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
 | exfil.test.js | a human with a presence window can still issue placeholders | `ported_gateway_core::exfil_passphrase_gates_unlock_creation_and_borrowed_grants_but_presence_restores_issuance` |
-| fix-control-approvals.test.js | denying with no human present is refused, and the request stays pending | not yet ported |
-| fix-control-approvals.test.js | a signature for approving cannot be spent on denying | not yet ported |
-| fix-control-approvals.test.js | a deny signed for exactly that deny goes through, as the UI sends it | not yet ported |
-| fix-control-approvals.test.js | a deny inside a passphrase window goes through, as the CLI sends it | not yet ported |
-| fix-control-approvals.test.js | an approval that already ran never hands its cached response back | not yet ported |
+| fix-control-approvals.test.js | denying with no human present is refused, and the request stays pending | `ported_gateway_core::integration_fix_approval_denials_require_matching_presence_and_cached_agent_responses_never_return_to_control` |
+| fix-control-approvals.test.js | a signature for approving cannot be spent on denying | `ported_gateway_core::integration_fix_approval_denials_require_matching_presence_and_cached_agent_responses_never_return_to_control` |
+| fix-control-approvals.test.js | a deny signed for exactly that deny goes through, as the UI sends it | `ported_gateway_core::integration_fix_approval_denials_require_matching_presence_and_cached_agent_responses_never_return_to_control` |
+| fix-control-approvals.test.js | a deny inside a passphrase window goes through, as the CLI sends it | `ported_gateway_core::integration_fix_approval_denials_require_matching_presence_and_cached_agent_responses_never_return_to_control` |
+| fix-control-approvals.test.js | an approval that already ran never hands its cached response back | `ported_gateway_core::integration_fix_approval_denials_require_matching_presence_and_cached_agent_responses_never_return_to_control` |
 | fix-control-audit.test.js | an untouched log reopens and verifies clean | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | a brand-new vault verifies clean | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | deleting the log is not a fresh start | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -819,25 +819,25 @@ the vault on every call instead of caching an audit handle.
 | integrate3-c25.test.js | C25: a human override holding a former secret and a PIN is recorded as the names it narrowed, nothing more | `ported_gateway_core::c25_rotated_proposal_and_human_override_keep_values_in_grants_and_out_of_audits` |
 | integrate3-c25.test.js | F6: placeholder.issued and placeholder.refunded carry no use ceiling; a human-made session keeps its expiry in the log | `ported_gateway_core::c25_human_expiry_stays_public_but_placeholder_use_ceiling_and_agent_expiry_do_not` |
 | integrate3-c25.test.js | C25: no request record is written with a value even when the secrets cannot be read | `ported_gateway_core::c25_real_secret_reader_failure_cannot_turn_shape_only_auditing_into_value_logging` |
-| integrate3-e2e-approvals.test.js | A.7 6 (F13, F14): watch prints a held POST, the preview hides the placeholder, and the approved resend runs once | not yet ported |
-| integrate3-e2e-approvals.test.js | A.7 7 (F15): session narrow --methods GET mid-run refuses the next POST and keeps GET working | not yet ported |
-| integrate3-e2e-approvals.test.js | A.7 7 (F16): with the tripwire on, a replayed placeholder revokes its session before the answer returns | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F1): --rate and --quota refuse the call past the limit with retry_after, and nothing past it is sent | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F1): --concurrency 1 refuses a second call while the first is in flight, and not one after it | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F2): a JSON payload rule refuses a value outside it before anything is sent, and passes one inside it | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F3): method-bound routes allow each method only on its own paths | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F5): a token budget refuses a call that could exceed it, and settles a call that fits on its real usage | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 4 (F6): --redirects follows a hop the policy allows, stops at one it does not, and never follows without it | not yet ported |
-| integrate3-e2e-gateway.test.js | A.7 5 (F7): rotating with keep while an agent loops loses no request, and the old value stays scrubbed | not yet ported |
-| integrate3-e2e-preflight.test.js | A.7 10 (F19, F20): a preflight changes nothing but its audit record, and session show counts only the real request | not yet ported |
-| integrate3-e2e-sessions.test.js | A.7 1 (R1): --approval auto asks for the passphrase on a terminal, and a POST is then not held | not yet ported |
-| integrate3-e2e-sessions.test.js | A.7 1 (R1): the same command with the window open and no passphrase is refused, and nothing is made | not yet ported |
-| integrate3-e2e-sessions.test.js | A.7 2 (R2): env writes a 0600 file of placeholders, refuses to replace it, and exec sends the real value upstream | not yet ported |
-| integrate3-e2e-sessions.test.js | A.7 3 (R3): an infinite session lists as never, says infinite over MCP, and panic revokes it | not yet ported |
-| integrate3-e2e-templates.test.js | A.7 8 (F17): a session requested by template matches the snapshot it was asked from, not the edited template | not yet ported |
-| integrate3-e2e-templates.test.js | A.7 9 (F18): a grant with --grant-ttl 1 ends with AV_GRANT_EXPIRED on a fake clock; the other grant still works | not yet ported |
-| integrate3-fix1.test.js | D1: the daemon refuses a decision whose overrides name a key it will not apply, naming the key, and decides nothing | not yet ported |
-| integrate3-fix1.test.js | D1: nothing the CLI or the page can send on a valid path names a key the daemon refuses | not yet ported |
+| integrate3-e2e-approvals.test.js | A.7 6 (F13, F14): watch prints a held POST, the preview hides the placeholder, and the approved resend runs once | `ported_gateway_core::integration_e2e_held_preview_notifier_agent_status_and_approved_mcp_resend_execute_once`; CLI half: integration e2e, deferred |
+| integrate3-e2e-approvals.test.js | A.7 7 (F15): session narrow --methods GET mid-run refuses the next POST and keeps GET working | `ported_gateway_core::integration_e2e_infinite_mcp_metadata_and_live_narrowing_take_effect_before_next_request`; CLI half: integration e2e, deferred |
+| integrate3-e2e-approvals.test.js | A.7 7 (F16): with the tripwire on, a replayed placeholder revokes its session before the answer returns | `ported_gateway_core::integration_e2e_burned_placeholder_replay_tripwire_revokes_before_response_and_mcp_is_dead`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F1): --rate and --quota refuse the call past the limit with retry_after, and nothing past it is sent | `ported_gateway_core::integration_e2e_rate_quota_payload_and_route_limits_are_effective_through_mcp`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F1): --concurrency 1 refuses a second call while the first is in flight, and not one after it | `ported_gateway_core::integration_e2e_mcp_concurrency_refusal_releases_its_slot_after_the_real_call`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F2): a JSON payload rule refuses a value outside it before anything is sent, and passes one inside it | `ported_gateway_core::integration_e2e_rate_quota_payload_and_route_limits_are_effective_through_mcp`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F3): method-bound routes allow each method only on its own paths | `ported_gateway_core::integration_e2e_rate_quota_payload_and_route_limits_are_effective_through_mcp`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F5): a token budget refuses a call that could exceed it, and settles a call that fits on its real usage | `ported_gateway_core::integration_e2e_model_spend_and_multicred_placeholder_handoff_reach_only_the_intended_credentials`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 4 (F6): --redirects follows a hop the policy allows, stops at one it does not, and never follows without it | `ported_gateway_core::integration_e2e_redirect_policy_and_midrun_keep_rotation_are_observed_by_mcp`; CLI half: integration e2e, deferred |
+| integrate3-e2e-gateway.test.js | A.7 5 (F7): rotating with keep while an agent loops loses no request, and the old value stays scrubbed | `ported_gateway_core::integration_e2e_redirect_policy_and_midrun_keep_rotation_are_observed_by_mcp`; CLI half: integration e2e, deferred |
+| integrate3-e2e-preflight.test.js | A.7 10 (F19, F20): a preflight changes nothing but its audit record, and session show counts only the real request | `ported_gateway_core::integration_e2e_preflight_audit_only_and_activity_counts_only_the_real_request`; CLI half: integration e2e, deferred |
+| integrate3-e2e-sessions.test.js | A.7 1 (R1): --approval auto asks for the passphrase on a terminal, and a POST is then not held | `ported_gateway_core::integration_e2e_auto_proof_is_fresh_without_a_window_and_mcp_write_runs_unheld`; CLI half: integration e2e, deferred |
+| integrate3-e2e-sessions.test.js | A.7 1 (R1): the same command with the window open and no passphrase is refused, and nothing is made | `ported_gateway_core::integration_e2e_auto_proof_is_fresh_without_a_window_and_mcp_write_runs_unheld`; CLI half: integration e2e, deferred |
+| integrate3-e2e-sessions.test.js | A.7 2 (R2): env writes a 0600 file of placeholders, refuses to replace it, and exec sends the real value upstream | `ported_gateway_core::integration_e2e_model_spend_and_multicred_placeholder_handoff_reach_only_the_intended_credentials`; CLI half: integration e2e, deferred |
+| integrate3-e2e-sessions.test.js | A.7 3 (R3): an infinite session lists as never, says infinite over MCP, and panic revokes it | `ported_gateway_core::integration_e2e_infinite_mcp_metadata_and_live_narrowing_take_effect_before_next_request`; CLI half: integration e2e, deferred |
+| integrate3-e2e-templates.test.js | A.7 8 (F17): a session requested by template matches the snapshot it was asked from, not the edited template | `ported_gateway_core::integration_e2e_template_snapshot_collect_and_gateway_enforce_the_version_the_agent_saw`; CLI half: integration e2e, deferred |
+| integrate3-e2e-templates.test.js | A.7 9 (F18): a grant with --grant-ttl 1 ends with AV_GRANT_EXPIRED on a fake clock; the other grant still works | `ported_gateway_core::integration_e2e_per_grant_expiry_denies_mcp_and_gateway_while_other_grant_and_session_live`; CLI half: integration e2e, deferred |
+| integrate3-fix1.test.js | D1: the daemon refuses a decision whose overrides name a key it will not apply, naming the key, and decides nothing | `ported_gateway_core::integration_d1_unknown_override_keys_and_nonobjects_refuse_atomically_on_single_and_bulk_routes` |
+| integrate3-fix1.test.js | D1: nothing the CLI or the page can send on a valid path names a key the daemon refuses | `ported_gateway_core::integration_d1_shared_parser_emits_only_daemon_supported_override_keys` |
 | integrate3-fix1.test.js | D2: towardPage withholds passphrase at any depth, in any case or hyphenation | not yet ported |
 | integrate3-fix1.test.js | D2 (round 3): a run of hyphens, underscores or spaces is one separator, so pass--phrase, pass__phrase and "pass phrase" are withheld | not yet ported |
 | integrate3-gates.test.js | C19: the page, webauthn.js and so the daemon digest every secret-bearing key the same way | not yet ported |
@@ -853,28 +853,28 @@ the vault on every call instead of caching an audit handle.
 | integrate3-narrowing.test.js | a narrowing that cannot be read: the UI server answers 400 and the daemon 4xx, and nothing is approved | not yet ported |
 | integrate3-narrowing.test.js | a key no approval applies is refused by the shared parser, the UI server (400), the page and the CLI, as the daemon refuses it | not yet ported |
 | integrate3-narrowing.test.js | OVERRIDE_KEYS is the list the self-contained parser reads, key for key | not yet ported |
-| integrate3-r4.test.js | C27: a secret as the path glob and the route glob is in no gateway row, before or after rotation; the grant still allows the path | not yet ported |
-| integrate3-r4.test.js | C27: a path-only grant records path_rule and a null route_rule, never the glob | not yet ported |
-| integrate3-r4.test.js | C27: a deny pattern added by an open narrowing is named by index in the denial, never by its text | not yet ported |
-| integrate3-r4.test.js | F2: decide-many writes only ids the daemon minted, and counts the rest | not yet ported |
+| integrate3-r4.test.js | C27: a secret as the path glob and the route glob is in no gateway row, before or after rotation; the grant still allows the path | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
+| integrate3-r4.test.js | C27: a path-only grant records path_rule and a null route_rule, never the glob | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
+| integrate3-r4.test.js | C27: a deny pattern added by an open narrowing is named by index in the denial, never by its text | `ported_gateway_core::integration_c27_path_route_and_deny_rules_log_indexes_before_and_after_rotation` |
+| integrate3-r4.test.js | F2: decide-many writes only ids the daemon minted, and counts the rest | `ported_gateway_core::integration_c27_bulk_logs_only_minted_ids_and_counts_unknown_attacker_ids` |
 | integrate3-r4.test.js | C26: elevationOf names first-use with a write method, and not read-only first-use | `ported_requested::c26_first_use_write_elevation_has_read_only_controls` |
-| integrate3-r4.test.js | C26: creating first-use with writes needs a fresh proof; read-only first-use rides the window | not yet ported |
-| integrate3-r4.test.js | C26: approving a request into first-use with writes needs a fresh proof, not the window | not yet ported |
-| integrate3-r4.test.js | C26: narrowing a request into first-use with a write left needs a fresh proof; narrowing it to read-only does not | not yet ported |
-| integrate3-r4.test.js | C26: a live narrowing cannot loosen a write grant into first-use | not yet ported |
-| integrate3-r4.test.js | a boolean flag given a value, even "false", is refused with exit 2 naming the flag | not yet ported |
-| integrate3-r4.test.js | a numeric flag with no value is refused with exit 2 naming the flag, not read as 1 | not yet ported |
-| integrate3-r5.test.js | F1: a refused Touch ID assertion records a closed code, never the client data it quotes, on all three surfaces | not yet ported |
-| integrate3-r5.test.js | C28: a denial row has the code, rule, method and path, and no sentence; explain-denial gives the sentence to its own session only | not yet ported |
-| integrate3-r5.test.js | C28: a payload rule names its key by index, and a strict query names the parameter by position, on all three surfaces | not yet ported |
-| integrate3-r5.test.js | C28: a redirect refused for its host records no host it was not allowed to reach | not yet ported |
-| integrate3-r5.test.js | C28: a fault is recorded by class, never by message | not yet ported |
-| integrate3-r5.test.js | C28: a listener that cannot bind records its system code, not the message | not yet ported |
-| integrate3-r5.test.js | C28: session.created says whether a session has a label, not what it says | not yet ported |
-| integrate3-r5.test.js | C28: a failed webhook records a system code or `error`, never other text from the error | not yet ported |
-| integrate3-r5.test.js | C28: every *_untrusted field is scrubbed whole, cleaned of placeholders, and cut to 200 | not yet ported |
-| integrate3-r5.test.js | C28: a quarantine reason restored from a bundle is cleaned before it is recorded | not yet ported |
-| integrate3-r5.test.js | item 3: mcp install --tls takes no value; bare --tls is the https URL and its absence the plain one | not yet ported |
+| integrate3-r4.test.js | C26: creating first-use with writes needs a fresh proof; read-only first-use rides the window | `ported_gateway_core::integration_c26_first_use_writes_need_fresh_proof_for_create_and_decide_but_reads_use_window` |
+| integrate3-r4.test.js | C26: approving a request into first-use with writes needs a fresh proof, not the window | `ported_gateway_core::integration_c26_first_use_writes_need_fresh_proof_for_create_and_decide_but_reads_use_window` |
+| integrate3-r4.test.js | C26: narrowing a request into first-use with a write left needs a fresh proof; narrowing it to read-only does not | `ported_gateway_core::integration_c26_first_use_writes_need_fresh_proof_for_create_and_decide_but_reads_use_window` |
+| integrate3-r4.test.js | C26: a live narrowing cannot loosen a write grant into first-use | `ported_gateway_core::integration_c26_first_use_writes_need_fresh_proof_for_create_and_decide_but_reads_use_window` |
+| integrate3-r4.test.js | a boolean flag given a value, even "false", is refused with exit 2 naming the flag | not applicable to av-daemon: drives CLI-only flag validation, files and exit codes (av-cli) |
+| integrate3-r4.test.js | a numeric flag with no value is refused with exit 2 naming the flag, not read as 1 | not applicable to av-daemon: drives CLI-only flag validation, files and exit codes (av-cli) |
+| integrate3-r5.test.js | F1: a refused Touch ID assertion records a closed code, never the client data it quotes, on all three surfaces | `ported_gateway_core::integration_c28_presence_denials_record_closed_codes_for_real_bad_assertions_and_accept_a_valid_signature` |
+| integrate3-r5.test.js | C28: a denial row has the code, rule, method and path, and no sentence; explain-denial gives the sentence to its own session only | `ported_gateway_core::integration_c28_denials_keep_sentences_private_bounded_and_recover_codes_after_restart`; TTL: covered by av-daemon unit test: `tests::mcp::explain_denial_keeps_code_and_rule_after_the_sentence_ages_out` |
+| integrate3-r5.test.js | C28: a payload rule names its key by index, and a strict query names the parameter by position, on all three surfaces | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
+| integrate3-r5.test.js | C28: a redirect refused for its host records no host it was not allowed to reach | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
+| integrate3-r5.test.js | C28: a fault is recorded by class, never by message | not yet ported; production mismatch, fix pending: handler panic guard must return 500 and audit daemon.handler_error; typed property: `ported_gateway_core::integration_c28_every_typed_fault_class_is_its_av_code_never_attacker_detail_or_hint`; real store failure: `ported_gateway_core::integration_c28_real_malformed_metadata_failure_returns_generic_internal_and_no_error_text_in_audits`; forged JS Error.name/plain-object classes cannot be represented by `server::error_class(&VaultError)` at server.rs:97 |
+| integrate3-r5.test.js | C28: a listener that cannot bind records its system code, not the message | `ported_gateway_core::integration_c28_busy_listener_audits_only_system_code_and_daemon_remains_usable` |
+| integrate3-r5.test.js | C28: session.created says whether a session has a label, not what it says | `ported_gateway_core::integration_c28_payload_indexes_host_refusal_and_session_labels_keep_attacker_text_out_of_all_audits` |
+| integrate3-r5.test.js | C28: a failed webhook records a system code or `error`, never other text from the error | `ported_gateway_core::integration_c28_real_webhook_connection_and_protocol_failures_log_only_closed_reasons` |
+| integrate3-r5.test.js | C28: every *_untrusted field is scrubbed whole, cleaned of placeholders, and cut to 200 | `ported_gateway_core::integration_c28_untrusted_mcp_hold_and_panic_reasons_are_scrubbed_before_the_two_hundred_unit_cut` |
+| integrate3-r5.test.js | C28: a quarantine reason restored from a bundle is cleaned before it is recorded | `ported_gateway_core::integration_c28_restored_quarantine_reason_is_cleaned_before_any_record_is_written` |
+| integrate3-r5.test.js | item 3: mcp install --tls takes no value; bare --tls is the https URL and its absence the plain one | not applicable to av-daemon: drives CLI-only flag parsing and printed MCP URLs (av-cli) |
 | integrate3-r6.test.js | B1: tripwire show on a vault that never saved rules lists the defaults; set edits them; on keeps them | not yet ported |
 | integrate3-r6.test.js | B1: the page shows the defaults as defaults, and turning on stores them, when none were saved | not yet ported |
 | integrate3-r6.test.js | B2: preflight as documented predicts allow, hold and refuse correctly, and changes nothing but its records | not yet ported |
@@ -882,9 +882,9 @@ the vault on every call instead of caching an audit handle.
 | integrate3-r6.test.js | N2: cred test names a kind with no probe as exit 7, and --all skips it without hiding a real failure | not yet ported |
 | integrate3-r6.test.js | N4: bidi controls and line separators in agent text never reach the terminal | not yet ported |
 | integrate3-r6.test.js | N4: every shared cleaner strips bidi controls; the terminal ones strip line separators too | not yet ported |
-| integrate3-r6.test.js | r6 F1: a streamed response records a closed media type and encoding, never the upstream header text | not yet ported |
-| integrate3-r6.test.js | r6 F2: explain-denial gives code and rule however much was logged since, after eviction and after a restart | not yet ported |
-| integrate3-r6.test.js | r6 F2: a caller with no session gets the code and rule of a no-session denial, never its sentence | not yet ported |
+| integrate3-r6.test.js | r6 F1: a streamed response records a closed media type and encoding, never the upstream header text | `ported_gateway_core::integration_r6_stream_audit_media_types_are_closed_even_when_upstream_headers_contain_secrets` |
+| integrate3-r6.test.js | r6 F2: explain-denial gives code and rule however much was logged since, after eviction and after a restart | `ported_gateway_core::integration_c28_denials_keep_sentences_private_bounded_and_recover_codes_after_restart` |
+| integrate3-r6.test.js | r6 F2: a caller with no session gets the code and rule of a no-session denial, never its sentence | `ported_gateway_core::integration_r6_no_session_denial_explains_only_code_and_rule_and_a_session_cannot_read_it` |
 | integrate3-seams.test.js | the README and the docs page say how many MCP tools there are, and it is how many mcp.js has | not yet ported |
 | integrate3-seams.test.js | F13: a held request carries its preview from the gateway through pending.js and the UI server, and the page escapes it | not yet ported |
 | integrate3-seams.test.js | C18: an infinite token is refused on a 0.0.0.0 and a [::] TLS listener by every wave-3 surface, and a finite one works | `ported_gateway_core::integrate3_c18_real_ipv4_ipv6_tls_preflight_and_description_refuse_infinite_and_keep_finite_peeks_unsent` |
