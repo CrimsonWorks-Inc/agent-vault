@@ -285,3 +285,28 @@ pub fn seed_legacy_health_shape(dir: &std::path::Path) {
         1
     );
 }
+
+/// Append an audit tail to the closed temporary DB without weakening constraints.
+pub fn seed_audit_tail(dir: &std::path::Path, record: &str) -> Result<u64, rusqlite::Error> {
+    assert!(dir.starts_with("/tmp") || dir.starts_with(std::env::temp_dir()));
+    let conn = rusqlite::Connection::open(dir.join("vault.db"))?;
+    let (seq, previous): (i64, String) = conn.query_row(
+        "SELECT seq,hash FROM audit ORDER BY seq DESC LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let next = seq + 1;
+    let hash = format!("{next:064x}");
+    conn.execute(
+        "INSERT INTO audit(seq,ts,kind,prev_hash,hash,record) VALUES(?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![
+            next,
+            "2026-11-12T00:00:00.000Z",
+            "fixture.tail",
+            previous,
+            hash,
+            record
+        ],
+    )?;
+    Ok(next as u64)
+}

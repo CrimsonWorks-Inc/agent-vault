@@ -20,11 +20,12 @@ What each status means:
   tested through the daemon). Rows there that defer to av-daemon or to
   conformance are not counted.
 - **not applicable to av-daemon**: the test drives the CLI; av-cli owns it.
+- **frontend: stays with the src/ui JS tests**: unchanged browser functions or bundle/source contracts remain in their JS suite; Rust serves the same bundle bytes (covered by `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy`).
 - **not yet ported**: no av-daemon test and no conformance test makes this
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 834 to an av-daemon Rust test, 1 covered by conformance, 27 ported in av-core or av-store, 115 CLI-only, 4 not applicable, **226 not yet ported**.
+Totals: 1207 JS tests: 875 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **155 not yet ported**.
 
 ## Mutation check
 
@@ -172,7 +173,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-api-notify.test.js | a test notification is throttled, a failure is recorded once, and no webhook is not found | `ported_gateway_core::control_notify_test_route_throttles_and_real_http_500_failures_are_audited_once` |
 | control-api-notify.test.js | a stored secret an agent puts in a proposal path does not reach the stream or the webhook (F14) | `ported_gateway_core::control_notify_minimal_webhook_posts_once_per_interval_and_secret_headlines_are_scrubbed_live_and_snapshot; ported_gateway_core::control_notify_two_real_pending_records_queued_under_state_lock_reserve_only_one_post` |
 | control-api-notify.test.js | a headline with no secret in it is sent as the summary, unchanged (F14) | `ported_gateway_core::control_notify_payloads_are_bounded_counts_or_clean_headlines_and_stored_redaction_keeps_plain_text` |
-| control-api-overrides.test.js | parseOverrides is self-contained: built from its source in a fresh scope, it agrees on every field (C21, C23) | not yet ported |
+| control-api-overrides.test.js | parseOverrides is self-contained: built from its source in a fresh scope, it agrees on every field (C21, C23) | frontend: stays with the src/ui JS tests |
 | control-api-overrides.test.js | routes and payload as JSON strings are parsed; a value passes through; bad JSON throws (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | a numeric narrowing is Number(v), and anything not finite throws, naming the field (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | control-api-overrides.test.js | rate and quota: a string is trimmed, anything else passes through for the daemon (C23) | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -278,40 +279,40 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-gate.test.js | the CLI names the factor that exists, not the one it expects | av-cli |
 | control-gate.test.js | one malformed byte on the control socket does not kill the daemon | `tests::control::hardening_malformed_json_and_an_unknown_route_are_answers_not_crashes` |
 | control-gate.test.js | the grant’s placeholder ceiling beats what the agent asks for | `ported_gateway_core::control_gate_grant_placeholder_ceiling_beats_agent_control_and_direct_issuance` |
-| control-ui-docs.test.js | the served page is one module script from the bundle, and nothing inline | not yet ported |
-| control-ui-docs.test.js | containment and recovery covers every wave-3 safety feature | not yet ported |
-| control-ui-docs.test.js | the agent tools are documented, read-only ones said to be so | not yet ported |
-| control-ui-docs.test.js | the new session limits and templates are explained where sessions are | not yet ported |
-| control-ui-docs.test.js | the commands section lists every command after wave 3 (A.5) | not yet ported |
-| control-ui-guard.test.js | a token or placeholder a daemon route returns never reaches the page | not yet ported |
-| control-ui-guard.test.js | ordinary text is untouched | not yet ported |
-| control-ui-guard.test.js | the approvals list, a webhook URL and an error message are held to the same line | not yet ported |
-| control-ui-guard.test.js | the hand-off for a session made here still carries what the agent needs | not yet ported |
-| control-ui-guard.test.js | the page runs the very parser the server rebinds a narrowing with (C21) | not yet ported |
-| control-ui-handoff.test.js | an error from POST sessions reaches the page with none of the withheld fields (F1) | not yet ported |
-| control-ui-handoff.test.js | a successful hand-off carries the token and placeholders, and nothing else withheld (F1) | not yet ported |
-| control-ui-handoff.test.js | a card field is copied back only as a scalar or a list of scalars (F1) | not yet ported |
-| control-ui-handoff.test.js | a withheld key is withheld in any case, hyphenated, nested, and inside arrays (F2) | not yet ported |
-| control-ui-handoff.test.js | towardPage folds case and hyphens and leaves other keys alone (F2) | not yet ported |
-| control-ui-handoff.test.js | a reserved operation field is a 403 refusal, not a 500, and is not forwarded | not yet ported |
-| control-ui-narrowing.test.js | a narrowing the parser refuses is said, and nothing is signed or sent (C23) | not yet ported |
-| control-ui-narrowing.test.js | a narrowing that parses is signed and sent as parsed | not yet ported |
-| control-ui-narrowing.test.js | a denial reads no narrowing, so text the parser refuses cannot block it | not yet ported |
-| control-ui-narrowing.test.js | the narrowing is read by the shared parser, and a refusal is never read as no narrowing | not yet ported |
-| control-ui-page.test.js | a notification says what the daemon saw, never what the agent claimed | not yet ported |
-| control-ui-page.test.js | a notification has no actions; clicking it only opens the approvals view | not yet ported |
-| control-ui-page.test.js | panic is confirmed in a dialog the page draws, never window.confirm, and is not gated | not yet ported |
-| control-ui-page.test.js | a credential’s badges and pins say what is wrong without echoing anything | not yet ported |
-| control-ui-page.test.js | the session Markdown says when it never expires and when history is incomplete | not yet ported |
-| control-ui-page.test.js | Copy as Markdown carries no terminal controls from what the agent sent | not yet ported |
-| control-ui-page.test.js | a narrow result lists only what changed | not yet ported |
-| control-ui-page.test.js | a tripwire rule reads the way the CLI prints it | not yet ported |
-| control-ui-page.test.js | a template’s limits are read across every grant | not yet ported |
-| control-ui-page.test.js | overrides on a template only ever narrow it | not yet ported |
-| control-ui-page.test.js | an untouched template form sends nothing, and a narrowing sends just that | not yet ported |
-| control-ui-page.test.js | advanced limits become GrantSpec fields, and a bad payload is said before signing | not yet ported |
-| control-ui-page.test.js | the session form sends spend limits only for a model provider’s credential | not yet ported |
-| control-ui-page.test.js | a probe result is text, never markup | not yet ported |
+| control-ui-docs.test.js | the served page is one module script from the bundle, and nothing inline | frontend: stays with the src/ui JS tests; served bundle byte identity: `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy` |
+| control-ui-docs.test.js | containment and recovery covers every wave-3 safety feature | frontend: stays with the src/ui JS tests; served bundle byte identity: `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy` |
+| control-ui-docs.test.js | the agent tools are documented, read-only ones said to be so | frontend: stays with the src/ui JS tests; served bundle byte identity: `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy` |
+| control-ui-docs.test.js | the new session limits and templates are explained where sessions are | frontend: stays with the src/ui JS tests; served bundle byte identity: `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy` |
+| control-ui-docs.test.js | the commands section lists every command after wave 3 (A.5) | frontend: stays with the src/ui JS tests; served bundle byte identity: `ported_gateway_core::ui_default_serves_exact_shipped_index_and_asset_bytes_with_strict_policy` |
+| control-ui-guard.test.js | a token or placeholder a daemon route returns never reaches the page | `ported_gateway_core::ui_guard_leaked_capabilities_are_scrubbed_on_reads_and_errors_but_created_cards_work` |
+| control-ui-guard.test.js | ordinary text is untouched | `ported_gateway_core::ui_guard_leaked_capabilities_are_scrubbed_on_reads_and_errors_but_created_cards_work` |
+| control-ui-guard.test.js | the approvals list, a webhook URL and an error message are held to the same line | `ported_gateway_core::ui_guard_leaked_capabilities_are_scrubbed_on_reads_and_errors_but_created_cards_work` |
+| control-ui-guard.test.js | the hand-off for a session made here still carries what the agent needs | `ported_gateway_core::ui_guard_leaked_capabilities_are_scrubbed_on_reads_and_errors_but_created_cards_work` |
+| control-ui-guard.test.js | the page runs the very parser the server rebinds a narrowing with (C21) | frontend: stays with the src/ui JS tests |
+| control-ui-handoff.test.js | an error from POST sessions reaches the page with none of the withheld fields (F1) | `ported_gateway_core::ui_handoff_errors_never_copy_secrets_and_success_only_copies_card_fields` |
+| control-ui-handoff.test.js | a successful hand-off carries the token and placeholders, and nothing else withheld (F1) | `ported_gateway_core::ui_handoff_errors_never_copy_secrets_and_success_only_copies_card_fields` |
+| control-ui-handoff.test.js | a card field is copied back only as a scalar or a list of scalars (F1) | `ported_gateway_core::ui_handoff_scalar_copy_and_recursive_key_folding_leave_ordinary_fields_untouched` |
+| control-ui-handoff.test.js | a withheld key is withheld in any case, hyphenated, nested, and inside arrays (F2) | `ported_gateway_core::ui_handoff_scalar_copy_and_recursive_key_folding_leave_ordinary_fields_untouched` |
+| control-ui-handoff.test.js | towardPage folds case and hyphens and leaves other keys alone (F2) | `ported_gateway_core::ui_handoff_scalar_copy_and_recursive_key_folding_leave_ordinary_fields_untouched` |
+| control-ui-handoff.test.js | a reserved operation field is a 403 refusal, not a 500, and is not forwarded | `ported_gateway_core::ui_handoff_errors_never_copy_secrets_and_success_only_copies_card_fields` |
+| control-ui-narrowing.test.js | a narrowing the parser refuses is said, and nothing is signed or sent (C23) | frontend: stays with the src/ui JS tests |
+| control-ui-narrowing.test.js | a narrowing that parses is signed and sent as parsed | frontend: stays with the src/ui JS tests |
+| control-ui-narrowing.test.js | a denial reads no narrowing, so text the parser refuses cannot block it | frontend: stays with the src/ui JS tests |
+| control-ui-narrowing.test.js | the narrowing is read by the shared parser, and a refusal is never read as no narrowing | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a notification says what the daemon saw, never what the agent claimed | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a notification has no actions; clicking it only opens the approvals view | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | panic is confirmed in a dialog the page draws, never window.confirm, and is not gated | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a credential’s badges and pins say what is wrong without echoing anything | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | the session Markdown says when it never expires and when history is incomplete | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | Copy as Markdown carries no terminal controls from what the agent sent | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a narrow result lists only what changed | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a tripwire rule reads the way the CLI prints it | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a template’s limits are read across every grant | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | overrides on a template only ever narrow it | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | an untouched template form sends nothing, and a narrowing sends just that | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | advanced limits become GrantSpec fields, and a bad payload is said before signing | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | the session form sends spend limits only for a model provider’s credential | frontend: stays with the src/ui JS tests |
+| control-ui-page.test.js | a probe result is text, never markup | frontend: stays with the src/ui JS tests |
 | control-ui-rotate.test.js | the current key can enrol its replacement, and only the replacement works afterwards | not yet ported |
 | control-ui-rotate.test.js | a replacement with no signature, or signed by the new key itself, is refused | not yet ported |
 | control-ui-rotate.test.js | the record enrolled is the one registered here, not one the request names | not yet ported |
@@ -329,10 +330,10 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | control-ui-routes.test.js | panic needs no fingerprint, and only a real true locks | not yet ported |
 | control-ui-routes.test.js | the read routes reach the routes the contract names | not yet ported |
 | control-ui-routes.test.js | the audit view can ask for one kind of record, and gets only that kind | not yet ported |
-| control-ui-webauthn.test.js | every secret-bearing field is bound by digest, never in clear | not yet ported |
-| control-ui-webauthn.test.js | a string digests exactly as it always did | not yet ported |
-| control-ui-webauthn.test.js | two different bundles give two different operations | not yet ported |
-| control-ui-webauthn.test.js | the same bundle with its keys in another order is the same operation | not yet ported |
+| control-ui-webauthn.test.js | every secret-bearing field is bound by digest, never in clear | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
+| control-ui-webauthn.test.js | a string digests exactly as it always did | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
+| control-ui-webauthn.test.js | two different bundles give two different operations | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
+| control-ui-webauthn.test.js | the same bundle with its keys in another order is the same operation | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | control-ui-webauthn.test.js | the page builds the same operation as the servers, field for field | not yet ported |
 | control-ui-webauthn.test.js | the page's digested fields are the servers' digested fields | not yet ported |
 | exfil.test.js | the control socket refuses a session aimed at a host the credential does not permit | `ported_gateway_core::exfil_control_refuses_foreign_hosts_and_ungated_session_creation_is_audited` |
@@ -355,14 +356,14 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-audit.test.js | emptying the log and deleting its anchor is not a fresh start | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | a log deleted while the daemon runs is reported, not passed | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | a damaged line in the middle does not lock the owner out, and is reported | ported in av-store (see rust/crates/av-store/PORTED.md) |
-| fix-control-audit.test.js | a last line that lost only its newline survives two restarts | not yet ported |
-| fix-control-audit.test.js | a torn half-written last line is still dropped quietly | not yet ported |
+| fix-control-audit.test.js | a last line that lost only its newline survives two restarts | not applicable, because live SQLite audit rows have no JSONL delimiters and reject incomplete JSON via CHECK json_valid; surrounding two-restart control: `ported_gateway_core::fix_audit_sqlite_rows_survive_two_restarts_and_incomplete_json_cannot_be_written`; legacy migrate coverage: `tests::migrate::a_last_audit_record_without_its_newline_migrates_as_a_complete_record` |
+| fix-control-audit.test.js | a torn half-written last line is still dropped quietly | not applicable, because live SQLite audit rows have no JSONL delimiters and reject incomplete JSON via CHECK json_valid; surrounding two-restart control: `ported_gateway_core::fix_audit_sqlite_rows_survive_two_restarts_and_incomplete_json_cannot_be_written`; legacy migrate coverage: `tests::migrate::a_torn_last_audit_record_is_dropped_and_the_anchor_still_holds` |
 | fix-control-audit.test.js | the anchor is replaced whole, never rewritten in place | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | a float in caller fields is recorded, not thrown after the fact | ported in av-store (see rust/crates/av-store/PORTED.md) |
-| fix-control-audit.test.js | a session request with a non-string reason is stored and recorded | not yet ported |
-| fix-control-audit.test.js | an empty object as the last line does not lock the owner out, and is reported | not yet ported |
-| fix-control-audit.test.js | a record with a string seq as the last line does not lock the owner out, and is reported | not yet ported |
-| fix-control-audit.test.js | a record with no hashes as the last line does not lock the owner out, and is reported | not yet ported |
+| fix-control-audit.test.js | a session request with a non-string reason is stored and recorded | `ported_gateway_core::fix_audit_nonstring_session_reason_is_stored_without_putting_agent_words_in_audits` |
+| fix-control-audit.test.js | an empty object as the last line does not lock the owner out, and is reported | `ported_gateway_core::fix_audit_valid_json_but_malformed_last_records_never_lock_out_owner_and_stay_reported`; production parity fixed by c373b8c |
+| fix-control-audit.test.js | a record with a string seq as the last line does not lock the owner out, and is reported | `ported_gateway_core::fix_audit_valid_json_but_malformed_last_records_never_lock_out_owner_and_stay_reported`; production parity fixed by c373b8c |
+| fix-control-audit.test.js | a record with no hashes as the last line does not lock the owner out, and is reported | `ported_gateway_core::fix_audit_valid_json_but_malformed_last_records_never_lock_out_owner_and_stay_reported`; production parity fixed by c373b8c |
 | fix-control-audit.test.js | an empty object in the middle does not lock the owner out, and is reported | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-audit.test.js | ordinary records, checkpoints included, are all recognised as records | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-cli.test.js | the printed try: command carries the token where it cannot collide with the placeholder | not applicable to av-daemon: drives the CLI (av-cli, cli worker) |
@@ -405,13 +406,13 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-ledger.test.js | a rotated placeholder says to ask again, and the newest still works | `ported_gateway_core::fix_ledger_mcp_native_requests_bound_live_rows_keep_unrotated_rows_and_refuse_rotated_rows` |
 | fix-control-ledger.test.js | an explicit placeholder ttl cannot outlast the grant's | ported in av-store: `tests::ledger::an_explicit_placeholder_ttl_cannot_outlast_the_grants` (see rust/crates/av-store/PORTED.md) |
 | fix-control-ledger.test.js | an explicit placeholder ttl shorter than the grant's is kept | ported in av-store: `tests::ledger::an_explicit_placeholder_ttl_shorter_than_the_grants_is_kept` (see rust/crates/av-store/PORTED.md) |
-| fix-control-listeners.test.js | listen rm stops the listener at once, not at the next restart | not yet ported |
-| fix-control-listeners.test.js | removing a listener that is configured but not bound still works | not yet ported |
-| fix-control-listeners.test.js | --allow-cidr is enforced: a peer outside it is refused | not yet ported |
-| fix-control-listeners.test.js | a peer inside --allow-cidr is served, and no list means no restriction | not yet ported |
-| fix-control-listeners.test.js | an allow-cidr that cannot be parsed is refused, not stored and ignored | not yet ported |
-| fix-control-listeners.test.js | a TLS peer connected before listen rm is not served after it | not yet ported |
-| fix-control-listeners.test.js | an established TLS connection is dropped by listen rm, and a fresh one is served before it | not yet ported |
+| fix-control-listeners.test.js | listen rm stops the listener at once, not at the next restart | `ported_gateway_core::fix_listeners_removal_cidr_and_invalid_configuration_have_live_socket_controls` |
+| fix-control-listeners.test.js | removing a listener that is configured but not bound still works | `ported_gateway_core::fix_listeners_removal_cidr_and_invalid_configuration_have_live_socket_controls` |
+| fix-control-listeners.test.js | --allow-cidr is enforced: a peer outside it is refused | `ported_gateway_core::fix_listeners_removal_cidr_and_invalid_configuration_have_live_socket_controls` |
+| fix-control-listeners.test.js | a peer inside --allow-cidr is served, and no list means no restriction | `ported_gateway_core::fix_listeners_removal_cidr_and_invalid_configuration_have_live_socket_controls` |
+| fix-control-listeners.test.js | an allow-cidr that cannot be parsed is refused, not stored and ignored | `ported_gateway_core::fix_listeners_removal_cidr_and_invalid_configuration_have_live_socket_controls` |
+| fix-control-listeners.test.js | a TLS peer connected before listen rm is not served after it | `ported_gateway_core::fix_listeners_silent_and_established_tls_peers_are_dropped_on_removal_while_another_listener_works` |
+| fix-control-listeners.test.js | an established TLS connection is dropped by listen rm, and a fresh one is served before it | `ported_gateway_core::fix_listeners_silent_and_established_tls_peers_are_dropped_on_removal_while_another_listener_works` |
 | fix-control-mcp.test.js | a streamed response comes back as a body, and the stream is read to the end | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
 | fix-control-mcp.test.js | a buffered response is unchanged | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
 | fix-control-mcp.test.js | vault_http does not leave a live placeholder behind per call | `ported_gateway_core::fix_mcp_stream_drains_to_eof_buffered_answer_stays_exact_and_calls_leave_no_live_capabilities` |
@@ -434,8 +435,8 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-presence.test.js | trusting another UI origin needs the owner, and then it works | `ported_gateway_core::fix_presence_caller_origins_do_not_grant_trust_but_default_and_freshly_authorized_origins_work` |
 | fix-control-presence.test.js | with no factor enrolled, a fresh-presence change is refused, not waved through | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
 | fix-control-presence.test.js | a fresh proof opens no window | `ported_gateway_core::fix_presence_one_window_records_each_ordinary_step_and_lock_and_fresh_proofs_never_leave_it_open` |
-| fix-control-process.test.js | an uncaught error in the daemon is recorded, and the daemon keeps answering | not yet ported |
-| fix-control-process.test.js | an ordinary run records no fault, and stopping removes the guard | not yet ported |
+| fix-control-process.test.js | an uncaught error in the daemon is recorded, and the daemon keeps answering | not applicable, because Rust has no process-global JS uncaughtException/unhandledRejection listeners (rust/PLAN.md daemon.uncaught contract); surrounding run/stop: `ported_gateway_core::fix_process_ordinary_daemon_run_and_stop_emit_no_process_global_uncaught_records`; panic isolation: `tests::handler_guard::a_handler_that_panics_is_recorded_answered_500_and_the_next_request_works` |
+| fix-control-process.test.js | an ordinary run records no fault, and stopping removes the guard | not applicable, because Rust has no process-global JS uncaughtException/unhandledRejection listeners (rust/PLAN.md daemon.uncaught contract); surrounding run/stop: `ported_gateway_core::fix_process_ordinary_daemon_run_and_stop_emit_no_process_global_uncaught_records`; panic isolation: `tests::handler_guard::a_handler_that_panics_is_recorded_answered_500_and_the_next_request_works` |
 | fix-control-session-requests.test.js | asking returns a collect secret, and nothing lists it | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
 | fix-control-session-requests.test.js | another agent cannot collect a token by knowing the request id | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
 | fix-control-session-requests.test.js | over MCP, polling needs the secret the request returned | `ported_gateway_core::fix_session_requests_collect_secrets_are_private_and_stolen_ids_cannot_consume_the_answer` |
@@ -451,7 +452,7 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-store.test.js | the no-wider check itself refuses a result that dropped a constraint | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | narrowGrant can only intersect, never widen | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | narrowGrant still narrows | ported in av-store (see rust/crates/av-store/PORTED.md) |
-| fix-control-store.test.js | a forked session can only narrow its parent's grants | not yet ported |
+| fix-control-store.test.js | a forked session can only narrow its parent's grants | ported in av-store: `tests::store_fixes::a_forked_session_can_only_narrow_its_parents_grants` |
 | fix-control-store.test.js | an expired session takes its placeholders with it | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | the ledger bound collects active rows whose time has passed | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-store.test.js | a placeholder lives as long as its session, idle extension included | ported in av-store (see rust/crates/av-store/PORTED.md) |
@@ -460,17 +461,17 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | fix-control-store.test.js | booting an unlocked vault still unlocks it | ported in av-store (see rust/crates/av-store/PORTED.md) |
 | fix-control-touchid.test.js | enrolling Touch ID unlock from the UI works with one tap | not yet ported |
 | fix-control-touchid.test.js | a tap over one PRF secret cannot enrol another | not yet ported |
-| fix-control-touchid.test.js | the daemon still refuses an enrol that carries no proof at all | not yet ported |
+| fix-control-touchid.test.js | the daemon still refuses an enrol that carries no proof at all | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
 | fix-control-touchid.test.js | removing Touch ID unlock from the UI works with one tap | not yet ported |
 | fix-control-touchid.test.js | without a passphrase, Touch ID unlock is refused before the tap, and says what to do | not yet ported |
 | fix-control-touchid.test.js | once a passphrase is set, the same vault enrols Touch ID unlock with one tap, and both open it | not yet ported |
-| fix-control-touchid.test.js | a vault with no factor at all is refused Touch ID unlock with the same way forward | not yet ported |
+| fix-control-touchid.test.js | a vault with no factor at all is refused Touch ID unlock with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
 | fix-control-touchid.test.js | without a passphrase, the presence authenticator rotates by a tap from itself, through the UI | not yet ported |
-| fix-control-touchid.test.js | a first presence enrolment without a passphrase is refused with the same way forward | not yet ported |
+| fix-control-touchid.test.js | a first presence enrolment without a passphrase is refused with the same way forward | `ported_gateway_core::touchid_daemon_bare_enrollment_and_missing_recovery_factor_have_actionable_refusals` |
 | fix-control-uicookie.test.js | an authenticated call slides the cookie; an unauthenticated one is not activity | not yet ported |
-| fix-control-webauthn.test.js | a request field named op cannot replace the route op | not yet ported |
-| fix-control-webauthn.test.js | a supplied digest cannot replace the one computed from the secret | not yet ported |
-| fix-control-webauthn.test.js | an ordinary request still binds every field, and the secret only by digest | not yet ported |
+| fix-control-webauthn.test.js | a request field named op cannot replace the route op | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
+| fix-control-webauthn.test.js | a supplied digest cannot replace the one computed from the secret | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
+| fix-control-webauthn.test.js | an ordinary request still binds every field, and the secret only by digest | `ported_gateway_core::ui_operation_secrets_are_canonical_digests_and_request_fields_cannot_overwrite_them` |
 | fix-control-webauthn.test.js | a signature for a narrow session cannot issue a placeholder | not yet ported |
 | fix-control-webauthn.test.js | a signature over the real placeholder request still works | not yet ported |
 | gateway-approvals.test.js | an approval that already ran cannot be denied, and the deny hands back nothing | tests/ported_gateway_core.rs::consumed_approval_cannot_be_denied_or_rearmed_and_resend_only_replays |
@@ -846,8 +847,8 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | integrate3-e2e-templates.test.js | A.7 9 (F18): a grant with --grant-ttl 1 ends with AV_GRANT_EXPIRED on a fake clock; the other grant still works | `ported_gateway_core::integration_e2e_per_grant_expiry_denies_mcp_and_gateway_while_other_grant_and_session_live`; CLI half: integration e2e, deferred |
 | integrate3-fix1.test.js | D1: the daemon refuses a decision whose overrides name a key it will not apply, naming the key, and decides nothing | `ported_gateway_core::integration_d1_unknown_override_keys_and_nonobjects_refuse_atomically_on_single_and_bulk_routes` |
 | integrate3-fix1.test.js | D1: nothing the CLI or the page can send on a valid path names a key the daemon refuses | `ported_gateway_core::integration_d1_shared_parser_emits_only_daemon_supported_override_keys` |
-| integrate3-fix1.test.js | D2: towardPage withholds passphrase at any depth, in any case or hyphenation | not yet ported |
-| integrate3-fix1.test.js | D2 (round 3): a run of hyphens, underscores or spaces is one separator, so pass--phrase, pass__phrase and "pass phrase" are withheld | not yet ported |
+| integrate3-fix1.test.js | D2: towardPage withholds passphrase at any depth, in any case or hyphenation | `ported_gateway_core::ui_guard_passphrase_spellings_and_separator_runs_are_withheld_at_every_depth` |
+| integrate3-fix1.test.js | D2 (round 3): a run of hyphens, underscores or spaces is one separator, so pass--phrase, pass__phrase and "pass phrase" are withheld | `ported_gateway_core::ui_guard_passphrase_spellings_and_separator_runs_are_withheld_at_every_depth` |
 | integrate3-gates.test.js | C19: the page, webauthn.js and so the daemon digest every secret-bearing key the same way | not yet ported |
 | integrate3-gates.test.js | every gated UI route: the operation the page signs is the one the UI server and the real daemon rebuild | not yet ported |
 | integrate3-gates.test.js | C22(4): a pin removal signed without spki, or for another spki, is refused by the UI and by the daemon | not yet ported |
@@ -883,12 +884,12 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | integrate3-r5.test.js | C28: every *_untrusted field is scrubbed whole, cleaned of placeholders, and cut to 200 | `ported_gateway_core::integration_c28_untrusted_mcp_hold_and_panic_reasons_are_scrubbed_before_the_two_hundred_unit_cut` |
 | integrate3-r5.test.js | C28: a quarantine reason restored from a bundle is cleaned before it is recorded | `ported_gateway_core::integration_c28_restored_quarantine_reason_is_cleaned_before_any_record_is_written` |
 | integrate3-r5.test.js | item 3: mcp install --tls takes no value; bare --tls is the https URL and its absence the plain one | not applicable to av-daemon: drives CLI-only flag parsing and printed MCP URLs (av-cli) |
-| integrate3-r6.test.js | B1: tripwire show on a vault that never saved rules lists the defaults; set edits them; on keeps them | not yet ported |
+| integrate3-r6.test.js | B1: tripwire show on a vault that never saved rules lists the defaults; set edits them; on keeps them | `ported_gateway_core::integration_r6_tripwire_defaults_are_read_only_edits_keep_other_rules_and_enable_keeps_edits`; CLI half: integration e2e, deferred |
 | integrate3-r6.test.js | B1: the page shows the defaults as defaults, and turning on stores them, when none were saved | not yet ported |
-| integrate3-r6.test.js | B2: preflight as documented predicts allow, hold and refuse correctly, and changes nothing but its records | not yet ported |
-| integrate3-r6.test.js | N1: approving a narrowed session request prints what was granted, not what the agent asked for | not yet ported |
-| integrate3-r6.test.js | N2: cred test names a kind with no probe as exit 7, and --all skips it without hiding a real failure | not yet ported |
-| integrate3-r6.test.js | N4: bidi controls and line separators in agent text never reach the terminal | not yet ported |
+| integrate3-r6.test.js | B2: preflight as documented predicts allow, hold and refuse correctly, and changes nothing but its records | `ported_gateway_core::integration_r6_preflight_assumption_is_explicit_boolean_and_never_hides_a_misplaced_placeholder`; CLI half: integration e2e, deferred |
+| integrate3-r6.test.js | N1: approving a narrowed session request prints what was granted, not what the agent asked for | `ported_gateway_core::integration_r6_approved_request_returns_granted_shape_and_probe_all_preserves_no_probe_and_real_failures`; CLI half: integration e2e, deferred |
+| integrate3-r6.test.js | N2: cred test names a kind with no probe as exit 7, and --all skips it without hiding a real failure | `ported_gateway_core::integration_r6_approved_request_returns_granted_shape_and_probe_all_preserves_no_probe_and_real_failures`; CLI half: integration e2e, deferred |
+| integrate3-r6.test.js | N4: bidi controls and line separators in agent text never reach the terminal | `ported_gateway_core::integration_r6_bidi_reason_request_and_held_write_keep_the_daemon_protocol_and_safe_headline`; CLI half: integration e2e, deferred |
 | integrate3-r6.test.js | N4: every shared cleaner strips bidi controls; the terminal ones strip line separators too | not yet ported |
 | integrate3-r6.test.js | r6 F1: a streamed response records a closed media type and encoding, never the upstream header text | `ported_gateway_core::integration_r6_stream_audit_media_types_are_closed_even_when_upstream_headers_contain_secrets` |
 | integrate3-r6.test.js | r6 F2: explain-denial gives code and rule however much was logged since, after eviction and after a restart | `ported_gateway_core::integration_c28_denials_keep_sentences_private_bounded_and_recover_codes_after_restart` |
@@ -907,15 +908,15 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | listener.test.js | addresses parse, and nonsense is refused rather than half-bound | `tests::control::allow_lists_and_addresses_read_as_the_js_does` |
 | listener.test.js | a hostname that merely starts with 127 is not loopback | `tests::control::allow_lists_and_addresses_read_as_the_js_does` |
 | listener.test.js | loopback is recognised in every form it arrives in | `tests::control::allow_lists_and_addresses_read_as_the_js_does` |
-| listener.test.js | the certificate covers both names a client may use to reach loopback | not yet ported |
+| listener.test.js | the certificate covers both names a client may use to reach loopback | `ported_gateway_core::listeners_certificate_names_surface_isolation_trust_and_pipeline_peer_are_real` |
 | listener.test.js | the private key is not readable by anyone else | `tls::tests::makes_a_loopback_certificate_once_and_keeps_its_key_private` |
 | listener.test.js | generating twice reuses the certificate rather than churning it | `tls::tests::makes_a_loopback_certificate_once_and_keeps_its_key_private` |
 | listener.test.js | a key that became readable is refused, not loaded anyway | `tls::tests::hardening_a_group_readable_key_is_refused` |
-| listener.test.js | a TLS listener binds and serves only the surface it declares | not yet ported |
+| listener.test.js | a TLS listener binds and serves only the surface it declares | `ported_gateway_core::listeners_certificate_names_surface_isolation_trust_and_pipeline_peer_are_real` |
 | listener.test.js | an address with no port is refused when it is added, not at the next restart | `tests::control::listeners_are_validated_and_bound_and_unbound` |
 | listener.test.js | a network listener with no TLS is refused at add time too | `tests::control::listeners_are_validated_and_bound_and_unbound` |
 | listener.test.js | a listener on a network address without TLS is refused | `tests::control::listeners_are_validated_and_bound_and_unbound` |
-| listener.test.js | the listener a request arrived on reaches the pipeline at all | not yet ported |
+| listener.test.js | the listener a request arrived on reaches the pipeline at all | `ported_gateway_core::listeners_certificate_names_surface_isolation_trust_and_pipeline_peer_are_real` |
 | locked.test.js | reading the audit log says the vault is locked, not that something broke | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
 | locked.test.js | verifying the audit chain says the same | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
 | locked.test.js | a locked vault says its record count is unknown, not zero | `ported_gateway_core::fix_locked_reads_report_locked_unknown_audit_count_and_unlock_restores_records` |
