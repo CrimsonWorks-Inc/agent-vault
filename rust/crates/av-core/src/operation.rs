@@ -27,7 +27,10 @@ pub fn operation_for(
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
     use crate::errors::{deny, DenyExtra, ErrorCode};
     let mut out = serde_json::Map::new();
-    for (key, v) in params {
+    let mut keys: Vec<_> = params.keys().collect();
+    keys.sort_by_key(|s| s.encode_utf16().collect::<Vec<_>>());
+    for key in keys {
+        let v = &params[key];
         if key == "presence" || (key == "op" && v.as_str() == Some(op)) {
             continue;
         }

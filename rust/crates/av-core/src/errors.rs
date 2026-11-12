@@ -445,7 +445,6 @@ impl VaultError {
         for (key, value) in [
             ("rule", &self.extra.rule),
             ("request_id", &self.extra.request_id),
-            ("next_placeholder", &self.extra.next_placeholder),
         ] {
             if let Some(v) = value.as_ref().filter(|s| !s.is_empty()) {
                 body[key] = v.clone().into();
@@ -465,6 +464,14 @@ impl VaultError {
         }
         if let Some(v) = self.extra.refunded {
             body["refunded"] = v.into();
+        }
+        if let Some(v) = self
+            .extra
+            .next_placeholder
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            body["next_placeholder"] = v.clone().into();
         }
         if let Some(v) = self.extra.retry_after {
             body["retry_after"] = v.into();
