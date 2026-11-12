@@ -20,6 +20,7 @@ const SECRET: &str = "test-secret-ported-gateway-0123456789";
 struct RecordingUpstream {
     hits: Mutex<Vec<UpstreamRequest>>,
     reply: Mutex<Option<Reply>>,
+    sequence: Mutex<std::collections::VecDeque<Result<Reply, UpstreamError>>>,
     failure: Mutex<Option<UpstreamError>>,
     gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     source: Mutex<Option<Body>>,
@@ -37,6 +38,7 @@ impl Upstream for RecordingUpstream {
     fn send(&self, req: UpstreamRequest) -> BoxFuture<'_, Result<UpstreamResponse, UpstreamError>> {
         self.hits.lock().unwrap().push(req);
         let reply = self.reply.lock().unwrap().clone();
+        let queued = self.sequence.lock().unwrap().pop_front();
         let failure = self.failure.lock().unwrap().clone();
         let gate = self.gate.lock().unwrap().clone();
         let source = self.source.lock().unwrap().take();
@@ -47,7 +49,7 @@ impl Upstream for RecordingUpstream {
             if let Some(failure) = failure {
                 return Err(failure);
             }
-            if let Some(reply) = reply {
+            if let Some(reply) = queued.transpose()?.or(reply) {
                 return Ok(UpstreamResponse {
                     status: reply.status,
                     headers: reply.headers,
@@ -124,6 +126,25 @@ impl Fixture {
         scrub_budget: Option<(Option<usize>, Option<usize>)>,
         policy_patch: Value,
     ) -> Self {
+        Self::configured_kind(
+            sites,
+            secret,
+            scrub_budget,
+            policy_patch,
+            "http",
+            "api.example.test",
+        )
+        .await
+    }
+
+    async fn configured_kind(
+        sites: &[&str],
+        secret: &str,
+        scrub_budget: Option<(Option<usize>, Option<usize>)>,
+        policy_patch: Value,
+        kind: &'static str,
+        host: &'static str,
+    ) -> Self {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let vault = av_store::vault::Vault::create(dir.path(), Default::default()).unwrap();
         let shared = Shared::new(vault);
@@ -147,7 +168,7 @@ impl Fixture {
             &dir.path().join("control.sock"),
             "/v1/credentials",
             json!({
-                "slug": "demo", "kind": "http", "host": "api.example.test",
+                "slug": "demo", "kind": kind, "host": host,
                 "value": secret, "sites": sites
             }),
         )
@@ -160,7 +181,7 @@ impl Fixture {
             use av_store::vault::{CreateSessionOptions, CreateGrantOptions, IssueOptions};
             let credential = core.vault.find_credential("demo").unwrap().unwrap();
             let session = core.vault.create_session(CreateSessionOptions::default()).unwrap();
-            let mut policy = json!({"hosts": ["api.example.test"], "methods": ["GET", "POST"], "paths": ["/**"], "budget": {"unit": "requests", "limit": 1000}, "approval": "auto"});
+            let mut policy = json!({"hosts": [host], "methods": ["GET", "POST"], "paths": ["/**"], "budget": {"unit": "requests", "limit": 1000}, "approval": "auto"});
             for (k,v) in policy_patch.as_object().unwrap() { policy[k] = v.clone(); }
             let grant = core.vault.create_grant(CreateGrantOptions {
                 session_id: session.session.id,
@@ -1365,7 +1386,11 @@ async fn granted_approval_cannot_flip_and_pending_decisions_return_no_cached_res
 #[tokio::test]
 async fn literal_hash_marker_cannot_swap_header_and_json_injection_sites() {
     let f = approval_fixture("each", &["header:x-key", "json:/token"]).await;
-    let marker = format!("<av:{}:key>", f.grant_id);
+    let marker = format!(
+        "<av:{}:{}>",
+        f.grant_id,
+        av_core::profiles::default_field("http")
+    );
     let send = |header: String, token: String| {
         f.send(
             "POST",
@@ -3263,5 +3288,1053 @@ async fn preflight_observes_limits_without_mutating_vault_or_creating_approval()
         .unwrap();
     let r = f.get().await;
     assert_eq!(r.status, 403);
+    f.clean(&r).await;
+}
+
+// Model spend is reserved before an upstream byte and settled after usage.
+fn model_body() -> Vec<u8> {
+    serde_json::to_vec(&json!({"model":"gpt-4.1-mini","max_tokens":30,"messages":[{"role":"user","content":"hi"}]})).unwrap()
+}
+fn model_request(f: &Fixture, body: Vec<u8>) -> GatewayRequest {
+    gateway_input(
+        f,
+        "POST",
+        "/v1/chat/completions",
+        "",
+        Some("application/json"),
+        Some(body),
+    )
+}
+fn model_reservation() -> u64 {
+    use av_core::model_usage::*;
+    let body = model_body();
+    let m = meter_request(
+        "openai",
+        &MeterInput {
+            method: Some("POST"),
+            path: Some("/v1/chat/completions"),
+            content_type: Some("application/json"),
+            body: Some(&body),
+        },
+    )
+    .unwrap();
+    reservation_for("openai", &m, Default::default())
+        .unwrap()
+        .tokens
+}
+async fn model_fixture(policy: Value) -> Fixture {
+    Fixture::configured_kind(
+        &["header:x-key"],
+        SECRET,
+        None,
+        policy,
+        "openai",
+        "api.openai.com",
+    )
+    .await
+}
+async fn spend_state(f: &Fixture) -> Value {
+    let id = f.grant_id.clone();
+    f.shared
+        .run(move |core| {
+            core.vault
+                .grant_runtime(&id)
+                .unwrap()
+                .and_then(|r| r.spend)
+                .unwrap_or(Value::Null)
+        })
+        .await
+        .unwrap()
+}
+async fn wait_settled(f: &Fixture) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = spend_state(f).await;
+            if state["reserved"] == json!({}) {
+                return state;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("spend never settled")
+}
+#[tokio::test]
+async fn token_reservations_refuse_concurrent_overspend_and_settle_buffered_usage() {
+    let reserve = model_reservation();
+    let f = model_fixture(json!({"spend":{"tokens":reserve+1}})).await;
+    f.reply(200,"application/json",json!({"usage":{"prompt_tokens":5,"completion_tokens":7},"ordinary":"ordinary-traffic-control"}).to_string());
+    let release = Arc::new(tokio::sync::Notify::new());
+    *f.up.gate.lock().unwrap() = Some(release.clone());
+    let running = f.daemon.pipeline().handle(model_request(&f, model_body()));
+    tokio::pin!(running);
+    tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::select!{_=&mut running=>panic!("upstream did not wait"),_=async{loop{if !f.up.hits.lock().unwrap().is_empty(){break;}tokio::task::yield_now().await;}}=>{}}}).await.unwrap();
+    assert_eq!(
+        f.daemon
+            .pipeline()
+            .spend_for(f.grant_id.clone())
+            .await
+            .unwrap()
+            .unwrap()["reserved_tokens"],
+        reserve
+    );
+    let denied = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        f.daemon.pipeline().handle(model_request(&f, model_body())),
+    )
+    .await
+    .expect("second call reached gated upstream");
+    assert_eq!(
+        denied.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("spend")
+    );
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&denied).await;
+    release.notify_one();
+    let r = running.await;
+    assert_eq!(r.status, 200);
+    assert!(String::from_utf8_lossy(&r.body).contains("ordinary-traffic-control"));
+    f.clean(&r).await;
+    let state = wait_settled(&f).await;
+    assert_eq!(state["tokens_used"], 12);
+    assert_eq!(
+        f.daemon
+            .pipeline()
+            .spend_for(f.grant_id.clone())
+            .await
+            .unwrap()
+            .unwrap()["reserved_tokens"],
+        0
+    );
+}
+#[tokio::test]
+async fn unpriced_and_unmodeled_spend_refuse_while_free_get_uses_no_spend_ledger() {
+    let f = model_fixture(json!({"spend":{"tokens":100000,"usd_micros":100000}})).await;
+    let req = model_request(&f, b"{\"model\":\"unknown\",\"max_tokens\":1}".to_vec());
+    let r = f.daemon.pipeline().handle(req.clone()).await;
+    assert_eq!(
+        r.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("spend_unpriced")
+    );
+    f.clean(&r).await;
+    let mut unmodeled = req;
+    unmodeled.path = "/p/demo/v1/unknown".into();
+    let r = f.daemon.pipeline().handle(unmodeled).await;
+    assert_eq!(
+        r.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("spend_unmodeled")
+    );
+    f.clean(&r).await;
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    let r = f.get().await;
+    assert_eq!(r.status, 200);
+    assert_eq!(spend_state(&f).await, Value::Null);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn missing_or_cut_usage_charges_full_reservation_and_complete_crlf_streams_charge_actual_usage(
+) {
+    for mode in ["buffer", "abort", "complete", "crlf", "cut"] {
+        let f = model_fixture(json!({"spend":{"tokens":10000}})).await;
+        let reserve = model_reservation();
+        let mut writer = None;
+        if mode != "buffer" {
+            stream_reply(&f, "", false);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+            writer = Some(tx);
+        }
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(model_request(&f, model_body()))
+            .await;
+        assert_eq!(r.status, 200);
+        if mode == "abort" {
+            drop(r);
+            drop(writer);
+        } else if let Some(tx) = writer {
+            let events=match mode {"cut"=>format!("data: {{\"delta\":\"{}\"}}\n\ndata: {{\"delta\":\"{}\"}}\n\ndata: {{\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\n",&SECRET[..15],&SECRET[15..]),"crlf"=>"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\r\n\r\n".into(),_=>"data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4}}\n\n".into()};
+            tx.send(Ok(events.into_bytes())).await.unwrap();
+            drop(tx);
+            let r = drain(r).await;
+            if mode == "cut" {
+                assert!(String::from_utf8_lossy(&r.body).contains("AV_UNSCANNABLE"));
+            }
+            f.clean(&r).await;
+        } else {
+            assert_eq!(r.body, b"ordinary-traffic-control");
+            f.clean(&r).await;
+        }
+        let state = wait_settled(&f).await;
+        assert_eq!(
+            state["tokens_used"],
+            if ["complete", "crlf"].contains(&mode) {
+                7
+            } else {
+                reserve
+            },
+            "{mode}"
+        );
+        if mode != "buffer" {
+            assert_eq!(
+                audit_records(&f)
+                    .await
+                    .into_iter()
+                    .filter(|r| r["kind"] == "spend.settled")
+                    .count(),
+                1,
+                "{mode}"
+            );
+        }
+    }
+}
+#[tokio::test]
+async fn preconnect_spend_is_refunded_and_restart_charges_outstanding_reservations() {
+    let f = model_fixture(json!({"spend":{"tokens":10000}})).await;
+    *f.up.failure.lock().unwrap() = Some(UpstreamError::new("ENOTFOUND", "test missing host"));
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(model_request(&f, model_body()))
+        .await;
+    assert_eq!(r.status, 502);
+    f.clean(&r).await;
+    let state = wait_settled(&f).await;
+    assert_eq!(state["tokens_used"], 0);
+    let id = f.grant_id.clone();
+    f.shared
+        .run(move |core| {
+            let mut rt = core.vault.grant_runtime(&id).unwrap().unwrap();
+            rt.spend.as_mut().unwrap()["reserved"]["rq_stale"] =
+                json!({"tokens":50,"usd_micros":6,"at":av_daemon::util::now_ms()});
+            core.vault.set_grant_runtime(&id, &rt).unwrap();
+        })
+        .await
+        .unwrap();
+    let _fresh = av_daemon::pipeline::Pipeline::new(f.shared.clone(), PipelineOptions::default());
+    let state = spend_state(&f).await;
+    assert_eq!(state["tokens_used"], 50);
+    assert_eq!(state["usd_micros_used"], 6);
+    assert_eq!(state["reserved"], json!({}));
+    *f.up.failure.lock().unwrap() = None;
+    let r = f.get().await;
+    assert_eq!(r.status, 200);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn locked_pipeline_recovers_stale_reservation_on_first_request_after_unlock() {
+    let f = model_fixture(json!({"spend":{"tokens":100000}})).await;
+    let id = f.grant_id.clone();
+    f.shared.run(move |core|core.vault.set_grant_runtime(&id,&av_store::model::GrantRuntime{quota_state:None,spend:Some(json!({"tokens_used":0,"usd_micros_used":0,"reserved":{"rq_stale":{"tokens":40,"usd_micros":0,"at":av_daemon::util::now_ms()}}}))}).unwrap()).await.unwrap();
+    let reopened = av_store::vault::Vault::open(f._dir.path()).unwrap();
+    assert!(reopened.locked());
+    let shared = Shared::new(reopened);
+    let pipeline = av_daemon::pipeline::Pipeline::new(
+        shared.clone(),
+        PipelineOptions {
+            upstream: Some(f.up.clone()),
+            ..Default::default()
+        },
+    );
+    let id = f.grant_id.clone();
+    shared
+        .run(move |core| {
+            core.vault.unlock(None).unwrap();
+            assert_eq!(
+                core.vault
+                    .grant_runtime(&id)
+                    .unwrap()
+                    .unwrap()
+                    .spend
+                    .unwrap()["reserved"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                1
+            );
+        })
+        .await
+        .unwrap();
+    let r = pipeline
+        .handle(gateway_input(&f, "GET", "/ordinary", "", None, None))
+        .await;
+    assert_eq!(r.status, 200);
+    f.clean(&r).await;
+    let state = spend_state(&f).await;
+    assert_eq!(state["tokens_used"], 40);
+    assert_eq!(state["reserved"], json!({}));
+    assert_eq!(
+        audit_records(&f)
+            .await
+            .into_iter()
+            .filter(|r| r["kind"] == "spend.reservation_charged")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn spend_denial_explains_remaining_and_worst_case_while_bounded_call_settles_real_usage() {
+    let f = model_fixture(json!({"spend":{"tokens":1000}})).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(model_request(
+            &f,
+            b"{\"model\":\"gpt-4.1-mini\",\"messages\":[]}".to_vec(),
+        ))
+        .await;
+    let e = r.error.as_ref().unwrap();
+    assert_eq!(e.extra.rule.as_deref(), Some("spend"));
+    let problem = e.to_problem();
+    assert!(av_core::jsre::compile(
+        r"may spend 1000 more tokens; this call could cost up to 16\d{3} tokens"
+    )
+    .unwrap()
+    .is_match(problem["hint"].as_str().unwrap()));
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    f.clean(&r).await;
+    f.reply(
+        200,
+        "application/json",
+        json!({"usage":{"prompt_tokens":5,"completion_tokens":7}}).to_string(),
+    );
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(model_request(
+            &f,
+            b"{\"model\":\"gpt-4.1-mini\",\"max_tokens\":50,\"messages\":[]}".to_vec(),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(wait_settled(&f).await["tokens_used"], 12);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn approval_preview_hides_secrets_and_placeholders_and_notifies_exactly_once() {
+    let f = approval_fixture("each", &["header:authorization:Bearer"]).await;
+    let mut notices = f
+        .shared
+        .run(|core| core.notifier.as_ref().unwrap().subscribe(vec![]).unwrap())
+        .await
+        .unwrap();
+    assert!(notices.recv().await.unwrap().starts_with("event: snapshot"));
+    for _ in 0..2 {
+        let r = f
+            .send(
+                "POST",
+                "/ordinary",
+                vec![
+                    ("authorization".into(), format!("Bearer {}", f.ph)),
+                    ("content-type".into(), "application/json".into()),
+                ],
+                Some(json!({"comment":format!("hello {SECRET}")}).to_string()),
+            )
+            .await;
+        assert_eq!(r.status, 202);
+        f.clean(&r).await;
+    }
+    let pending = f.daemon.pipeline().pending_approvals().await;
+    assert_eq!(pending.len(), 1);
+    let approval = &pending[0];
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), notices.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payloads(&frame).next().unwrap()["id"], approval["id"]);
+    assert!(notices.try_recv().is_err());
+    let preview = &approval["preview"];
+    assert!(preview["body"]["text"].as_str().unwrap().contains("hello"));
+    let all = serde_json::to_string(preview).unwrap();
+    assert!(!all.contains(SECRET) && !all.contains(&f.ph));
+    assert!(!preview["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h[0] == "authorization"));
+    assert!(all.len() <= 8192);
+    assert!(f
+        .daemon
+        .pipeline()
+        .approval_status(approval["id"].as_str().unwrap().into())
+        .await
+        .unwrap()
+        .get("preview")
+        .is_none());
+    assert!(f.up.hits.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn held_preview_labels_injection_redacts_secret_and_token_and_keeps_comment_out_of_audit() {
+    let f = approval_fixture("each", &["header:authorization:Bearer", "json:/auth"]).await;
+    let r = f
+        .send(
+            "POST",
+            "/ordinary",
+            vec![
+                ("authorization".into(), format!("Bearer {}", f.ph)),
+                ("content-type".into(), "application/json".into()),
+                ("x-trace".into(), "ordinary-header".into()),
+            ],
+            Some(
+                json!({"auth":f.ph,"text":format!("private comment {SECRET} {}",f.token)})
+                    .to_string(),
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 202);
+    f.clean(&r).await;
+    let pending = f.daemon.pipeline().pending_approvals().await;
+    let preview = &pending[0]["preview"];
+    let text = preview["body"]["text"].as_str().unwrap();
+    assert!(text.contains("«demo.token @ JSON body at /auth»"));
+    assert!(text.contains("[[av:redacted:demo]]"));
+    assert!(text.contains("«session token»"));
+    assert!(text.contains("private comment"));
+    assert!(preview["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h == &json!(["x-trace", "ordinary-header"])));
+    assert!(!preview["headers"].as_array().unwrap().iter().any(|h| h[0]
+        .as_str()
+        .is_some_and(|n| n == "authorization" || n.starts_with("av-"))));
+    let all = serde_json::to_string(preview).unwrap();
+    for value in [&f.ph, &f.token, &SECRET.to_string()] {
+        assert!(!all.contains(value));
+    }
+    assert!(!serde_json::to_string(&audit_records(&f).await)
+        .unwrap()
+        .contains("private comment"));
+    assert!(f
+        .daemon
+        .pipeline()
+        .approval_status(pending[0]["id"].as_str().unwrap().into())
+        .await
+        .unwrap()
+        .get("preview")
+        .is_none());
+}
+#[tokio::test]
+async fn preview_builder_replaces_encoded_placeholders_preserves_duplicate_json_and_caps_size() {
+    use av_daemon::preview::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let f = approval_fixture("each", &["header:authorization:Bearer"]).await;
+    let encoded = av_daemon::util::encode_uri_component(&f.ph).replace('.', "%2E");
+    let b64 = STANDARD.encode(&f.ph);
+    let headers = vec![
+        ("content-type".into(), "application/json".into()),
+        ("authorization".into(), format!("Bearer {}", f.ph)),
+        ("x-carrier".into(), format!("Bearer {}", f.ph)),
+    ];
+    let subs = vec![PreviewSub {
+        text: f.ph.clone(),
+        label: "demo.key".into(),
+        location: "header authorization".into(),
+        part: "headers",
+    }];
+    let build = |body: &str, query: &str| {
+        approval_preview(
+            &PreviewRequest {
+                query,
+                headers: &headers,
+                body: Some(body.as_bytes()),
+            },
+            &PreviewDecision {
+                method: "POST",
+                host: "api.example.test",
+                path: "/x",
+            },
+            &subs,
+            &mut |s| s.replace(SECRET, "[[av:redacted:demo]]"),
+        )
+    };
+    let preview = build(
+        &json!({"a":encoded,"b":b64,"c":SECRET}).to_string(),
+        &format!("q={encoded}"),
+    );
+    let all = serde_json::to_string(&preview).unwrap();
+    assert!(preview["body"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("«placeholder»"));
+    for value in [&f.ph, &encoded, &b64, &SECRET.to_string()] {
+        assert!(!all.contains(value));
+    }
+    assert!(preview["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h == &json!(["x-carrier", "Bearer «demo.key @ header authorization»"])));
+    assert_eq!(
+        preview["query"],
+        json!([["q", "«demo.key @ header authorization»"]])
+    );
+    let dup = build(
+        "{\"channel\":\"general\",\"channel\":\"secret-ops\"}",
+        &format!("q={encoded}"),
+    );
+    let text = dup["body"]["text"].as_str().unwrap();
+    assert!(text.contains("general") && text.contains("secret-ops"));
+    let big = build(
+        &json!({"x":"y".repeat(50000)}).to_string(),
+        &format!("q={}", "z".repeat(20000)),
+    );
+    assert!(serde_json::to_vec(&big).unwrap().len() <= 8192);
+    assert_eq!(big["body"]["truncated"], true);
+}
+
+fn redirect_reply(status: u16, location: &str) -> Reply {
+    Reply {
+        streaming: false,
+        status,
+        headers: vec![
+            ("location".into(), location.into()),
+            ("content-type".into(), "text/plain".into()),
+        ],
+        body: b"redirect".to_vec(),
+    }
+}
+fn done_reply() -> Reply {
+    Reply {
+        streaming: false,
+        status: 200,
+        headers: vec![("content-type".into(), "text/plain".into())],
+        body: b"done".to_vec(),
+    }
+}
+async fn hop_fixture(policy: Value, location: &str, status: u16) -> Fixture {
+    let mut spec = json!({"methods":["GET","HEAD","POST","DELETE"],"redirects":{"max":2}});
+    for (k, v) in policy.as_object().unwrap() {
+        spec[k] = v.clone();
+    }
+    let f = Fixture::configured(&["header:authorization:Bearer"], SECRET, None, spec).await;
+    f.up.sequence
+        .lock()
+        .unwrap()
+        .extend([Ok(redirect_reply(status, location)), Ok(done_reply())]);
+    f
+}
+fn hop_request(f: &Fixture, method: &str, path: &str) -> GatewayRequest {
+    let mut req = gateway_input(f, method, path, "", None, None);
+    req.headers.retain(|(k, _)| k != "x-key");
+    req.headers
+        .push(("authorization".into(), format!("Bearer {}", f.ph)));
+    req
+}
+#[tokio::test]
+async fn redirect_port_must_match_and_failed_hop_is_not_refunded() {
+    for (location, stopped, hits) in [
+        ("https://api.example.test:8443/ordinary", Some("host"), 1),
+        ("https://api.example.test/next", None, 2),
+    ] {
+        let f = hop_fixture(json!({}), location, 302).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "GET", "/ordinary"))
+            .await;
+        assert_eq!(r.header("av-redirect-stopped"), stopped);
+        assert_eq!(f.up.hits.lock().unwrap().len(), hits);
+        f.clean(&r).await;
+    }
+    let f = hop_fixture(json!({}), "/next", 302).await;
+    let closed = Arc::new(tokio::sync::Notify::new());
+    // A streamed redirect body is dropped before the next connection starts.
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    *f.up.source.lock().unwrap() = Some(Body::Stream(rx));
+    let observed = closed.clone();
+    let watcher = tokio::spawn(async move {
+        tx.closed().await;
+        observed.notify_one();
+    });
+    f.up.sequence.lock().unwrap().pop_back();
+    f.up.sequence
+        .lock()
+        .unwrap()
+        .push_back(Err(UpstreamError::new("ECONNRESET", "test reset")));
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(
+        r.error.as_ref().unwrap().code.as_str(),
+        "AV_UPSTREAM_UNREACHABLE"
+    );
+    assert_eq!(r.error.as_ref().unwrap().extra.refunded, Some(false));
+    tokio::time::timeout(std::time::Duration::from_secs(2), closed.notified())
+        .await
+        .expect("redirect source was not closed");
+    watcher.await.unwrap();
+    assert_eq!(grant_counters(&f).await.1, vec![1]);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn allowed_redirect_charges_each_hop_preserves_pins_and_never_forwards_body() {
+    let f = hop_fixture(json!({}), "/ordinary", 302).await;
+    let pin = format!("sha256/{}=", "A".repeat(43));
+    let expected = pin.clone();
+    f.shared
+        .run(move |core| {
+            core.vault
+                .set_pins("demo", "api.example.test", &[pin])
+                .unwrap()
+        })
+        .await
+        .unwrap();
+    *f.up.sequence.lock().unwrap() = std::collections::VecDeque::from([
+        Ok(redirect_reply(302, "/ordinary")),
+        Ok(redirect_reply(302, "/ordinary")),
+        Ok(done_reply()),
+    ]);
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.body, b"done");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 3);
+    assert_eq!(grant_counters(&f).await.0, 3);
+    let sent = f.up.hits.lock().unwrap().clone();
+    for hop in &sent[1..] {
+        assert_eq!(hop.body, None);
+        assert_eq!(
+            hop.pins,
+            av_daemon::upstream::Pins::List(vec![json!(expected)])
+        );
+    }
+    f.clean(&r).await;
+    f.up.hits.lock().unwrap().clear();
+    *f.up.reply.lock().unwrap() = Some(redirect_reply(302, "/ordinary"));
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.header("av-redirect-stopped"), Some("max"));
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops() {
+    let graphql = json!({"operations":["query"],"deny_fields":["createDeployKey"]});
+    for document in [
+        "mutation { createDeployKey(input:{title:\"x\"}) { id } }",
+        "mutation { innocent: createDeployKey(input:{title:\"x\"}) { id } }",
+        "query A { viewer { id } } mutation B { createDeployKey(input:{title:\"x\"}) { id } }",
+    ] {
+        let f = hop_fixture(
+            json!({"payload":{"graphql":graphql}}),
+            &format!(
+                "https://api.example.test/graphql?query={}",
+                av_daemon::util::encode_uri_component(document)
+            ),
+            302,
+        )
+        .await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "GET", "/ordinary"))
+            .await;
+        assert_eq!(r.status, 302);
+        assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        assert_eq!(grant_counters(&f).await.0, 1);
+        f.clean(&r).await;
+    }
+    let f = hop_fixture(
+        json!({"payload":{"graphql":{"operations":["query"]}}}),
+        &format!(
+            "/graphql?query={}",
+            av_daemon::util::encode_uri_component("mutation { a }")
+        ),
+        302,
+    )
+    .await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&r).await;
+    let f = hop_fixture(
+        json!({"payload":{"graphql":graphql}}),
+        &format!(
+            "/graphql?query={}",
+            av_daemon::util::encode_uri_component("{ viewer { id } }")
+        ),
+        302,
+    )
+    .await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"done");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    f.clean(&r).await;
+    let f = hop_fixture(
+        json!({"payload":{"json":{"/confirm":{"required":true}}}}),
+        "/next",
+        302,
+    )
+    .await;
+    let mut req = hop_request(&f, "GET", "/ordinary");
+    req.headers
+        .push(("content-type".into(), "application/json".into()));
+    req.body = Some(b"{\"confirm\":true}".to_vec());
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&r).await;
+    let f = hop_fixture(
+        json!({"payload":{"json":{"/force":{"absent":true}},"form":{"mode":{"one_of":["safe"]}}}}),
+        "/next",
+        302,
+    )
+    .await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn location_method_override_fields_are_not_followed() {
+    for location in [
+        "/next?_method=DELETE",
+        "/next?a=1&%5Fmethod=delete",
+        "/next?_METHOD=PUT",
+    ] {
+        let f = hop_fixture(json!({}), location, 302).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "GET", "/ordinary"))
+            .await;
+        assert_eq!(r.status, 302);
+        assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        f.clean(&r).await;
+    }
+    let f = hop_fixture(json!({}), "/next?q=ordinary", 302).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/ordinary"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"done");
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn redirect_method_is_checked_and_post_is_never_followed_under_any_status() {
+    for status in [303, 307, 308] {
+        let f = hop_fixture(
+            json!({"routes":[{"methods":["POST","GET"],"paths":["/**"]}]}),
+            "/next",
+            status,
+        )
+        .await;
+        let mut req = hop_request(&f, "POST", "/ordinary");
+        req.body = Some(b"{}".to_vec());
+        req.headers
+            .push(("content-type".into(), "application/json".into()));
+        let r = f.daemon.pipeline().handle(req).await;
+        assert_eq!(r.status, status);
+        assert_eq!(r.header("av-redirect-stopped"), Some("approval"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        f.clean(&r).await;
+    }
+    for status in [302, 303, 307, 308] {
+        let f = hop_fixture(json!({}), "/next", status).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "HEAD", "/ordinary"))
+            .await;
+        assert_eq!(r.status, 200);
+        assert_eq!(f.last().method, "HEAD");
+        f.clean(&r).await;
+        let f=hop_fixture(json!({"routes":[{"methods":["HEAD"],"paths":["/ordinary"]},{"methods":["GET"],"paths":["/next"]}]}),"/next",status).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "HEAD", "/ordinary"))
+            .await;
+        assert_eq!(r.header("av-redirect-stopped"), Some("path"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        f.clean(&r).await;
+    }
+    for status in [301, 302, 303, 307, 308] {
+        let f = hop_fixture(json!({}), "/next", status).await;
+        let r = f
+            .daemon
+            .pipeline()
+            .handle(hop_request(&f, "GET", "/ordinary"))
+            .await;
+        assert_eq!(r.status, 200);
+        assert_eq!(f.last().method, "GET");
+        f.clean(&r).await;
+    }
+}
+
+fn route_pairs() -> Value {
+    json!([{"methods":["GET","DELETE"],"paths":["/public/**"]},{"methods":["GET"],"paths":["/admin/**"]}])
+}
+fn header_names(req: &UpstreamRequest) -> Vec<String> {
+    let mut names = req
+        .headers
+        .iter()
+        .map(|(n, _)| n.to_lowercase())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+#[tokio::test]
+async fn method_override_writes_never_follow_redirect_even_after_human_approval() {
+    for name in [
+        "X-HTTP-Method-Override",
+        "x-http-method",
+        "X-Method-Override",
+    ] {
+        let f = hop_fixture(
+            json!({"routes":route_pairs()}),
+            "https://api.example.test/admin/keys",
+            302,
+        )
+        .await;
+        let mut req = hop_request(&f, "GET", "/public/start");
+        req.headers.push((name.into(), "DELETE".into()));
+        let r = f.daemon.pipeline().handle(req).await;
+        assert_eq!(r.status, 302);
+        assert_eq!(r.header("av-redirect-stopped"), Some("approval"));
+        assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+        assert_eq!(grant_counters(&f).await.0, 1);
+        f.clean(&r).await;
+    }
+    let f = hop_fixture(
+        json!({"methods":["GET","DELETE"],"approval":"on-write"}),
+        "/other",
+        302,
+    )
+    .await;
+    let mut req = hop_request(&f, "GET", "/ordinary");
+    req.headers
+        .push(("X-HTTP-Method-Override".into(), "DELETE".into()));
+    let id = held_id(&f.daemon.pipeline().handle(req.clone()).await);
+    f.daemon.pipeline().decide_approval(id, true).await.unwrap();
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.header("av-redirect-stopped"), Some("approval"));
+    assert_eq!(f.up.hits.lock().unwrap().len(), 1);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn direct_route_override_is_denied_but_ordinary_redirect_still_follows() {
+    let f = hop_fixture(json!({"routes":route_pairs()}), "/public/next", 302).await;
+    let mut req = hop_request(&f, "GET", "/admin/keys");
+    req.headers
+        .push(("X-HTTP-Method-Override".into(), "DELETE".into()));
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 403);
+    assert_eq!(
+        r.error.as_ref().unwrap().extra.rule.as_deref(),
+        Some("routes")
+    );
+    assert!(f.up.hits.lock().unwrap().is_empty());
+    f.clean(&r).await;
+    let r = f
+        .daemon
+        .pipeline()
+        .handle(hop_request(&f, "GET", "/public/start"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, b"done");
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    let hop = f.last();
+    assert_eq!(hop.url, "https://api.example.test/public/next");
+    assert!(hop
+        .headers
+        .iter()
+        .any(|(n, v)| n == "authorization" && v == &format!("Bearer {SECRET}")));
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn hop_forwards_only_credential_and_allowlisted_agent_headers_and_omits_framing_credentials()
+{
+    let f = hop_fixture(
+        json!({"routes":route_pairs()}),
+        "https://api.example.test/admin/keys",
+        302,
+    )
+    .await;
+    let mut req = hop_request(&f, "GET", "/public/start");
+    req.headers.extend(
+        [
+            ("X-HTTP-Method-Override", "GET"),
+            ("content-type", "application/json"),
+            ("range", "bytes=0-1"),
+            ("if-match", "\"x\""),
+            ("x-custom", "dropped"),
+            ("accept", "application/json"),
+            ("user-agent", "probe/1"),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.into(), v.into())),
+    );
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    let hop = f.last();
+    assert_eq!(hop.method, "GET");
+    assert_eq!(hop.body, None);
+    assert_eq!(url::Url::parse(&hop.url).unwrap().path(), "/admin/keys");
+    assert_eq!(
+        header_names(&hop),
+        vec![
+            "accept",
+            "accept-encoding",
+            "authorization",
+            "host",
+            "user-agent"
+        ]
+    );
+    for (n, v) in [
+        ("authorization", format!("Bearer {SECRET}")),
+        ("accept-encoding", "identity".into()),
+        ("host", "api.example.test".into()),
+        ("accept", "application/json".into()),
+        ("user-agent", "probe/1".into()),
+    ] {
+        assert!(hop.headers.iter().any(|(hn, hv)| hn == n && hv == &v));
+    }
+    f.clean(&r).await;
+    let f = Fixture::configured(
+        &["header:content-type"],
+        SECRET,
+        None,
+        json!({"redirects":{"max":2}}),
+    )
+    .await;
+    f.up.sequence
+        .lock()
+        .unwrap()
+        .extend([Ok(redirect_reply(302, "/next")), Ok(done_reply())]);
+    let r = f
+        .send(
+            "GET",
+            "/ordinary",
+            vec![("content-type".into(), f.ph.clone())],
+            None,
+        )
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(f.up.hits.lock().unwrap()[0]
+        .headers
+        .iter()
+        .any(|(n, v)| n == "content-type" && v == SECRET));
+    assert_eq!(header_names(&f.last()), vec!["accept-encoding", "host"]);
+    f.clean(&r).await;
+}
+#[tokio::test]
+async fn provider_version_headers_survive_hops_and_cookie_override_forwarding_headers_do_not() {
+    let f = Fixture::configured_kind(
+        &["header:x-api-key"],
+        SECRET,
+        None,
+        json!({"redirects":{"max":2}}),
+        "anthropic",
+        "api.anthropic.com",
+    )
+    .await;
+    f.up.sequence.lock().unwrap().extend([
+        Ok(redirect_reply(302, "/v1/models?limit=5")),
+        Ok(done_reply()),
+    ]);
+    let mut req = gateway_input(&f, "GET", "/v1/models", "", None, None);
+    req.headers.retain(|(k, _)| k != "x-key");
+    req.headers.push(("x-api-key".into(), f.ph.clone()));
+    req.headers.extend(
+        [
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-2024"),
+            ("accept-language", "en"),
+            ("cache-control", "no-cache"),
+            ("if-none-match", "\"e\""),
+            ("if-modified-since", "Mon, 26 Oct 2026 00:00:00 GMT"),
+            ("cookie", "session=agent"),
+            ("X-HTTP-Method-Override", "GET"),
+            ("x-forwarded-for", "10.0.0.1"),
+            ("x-forwarded-host", "evil.test"),
+            ("range", "bytes=0-1"),
+            ("authorization", "Bearer agent-chosen"),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.into(), v.into())),
+    );
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(f.up.hits.lock().unwrap().len(), 2);
+    let hop = f.last();
+    assert_eq!(
+        header_names(&hop),
+        vec![
+            "accept-encoding",
+            "accept-language",
+            "anthropic-beta",
+            "anthropic-version",
+            "cache-control",
+            "host",
+            "if-modified-since",
+            "if-none-match",
+            "x-api-key"
+        ]
+    );
+    for (n, v) in [
+        ("anthropic-version", "2023-06-01"),
+        ("x-api-key", SECRET),
+        ("host", "api.anthropic.com"),
+    ] {
+        assert!(hop.headers.iter().any(|(hn, hv)| hn == n && hv == v));
+    }
+    f.clean(&r).await;
+    let f = hop_fixture(json!({}), "/next", 302).await;
+    let mut req = hop_request(&f, "GET", "/ordinary");
+    req.headers.extend(
+        [
+            ("OpenAI-Beta", "assistants=v2"),
+            ("openai-organization", "org"),
+            ("openai-project", "p"),
+            ("x-api-version", "1"),
+            ("api-version", "2"),
+            ("Cookie", "a=b"),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.into(), v.into())),
+    );
+    let r = f.daemon.pipeline().handle(req).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(
+        header_names(&f.last()),
+        vec![
+            "accept-encoding",
+            "api-version",
+            "authorization",
+            "host",
+            "openai-beta",
+            "openai-organization",
+            "openai-project",
+            "x-api-version"
+        ]
+    );
     f.clean(&r).await;
 }

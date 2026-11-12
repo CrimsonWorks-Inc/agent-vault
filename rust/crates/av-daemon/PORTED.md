@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1090 JS tests: 200 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **780 not yet ported**.
+Totals: 1090 JS tests: 221 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **759 not yet ported**.
 
 ## Mutation check
 
@@ -580,40 +580,40 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-pipeline.test.js | SSE slots release on completion, immediate close and scrubber cut | tests/ported_gateway_core.rs::sse_concurrency_slots_release_on_completion_agent_close_and_scrubber_cut |
 | gateway-w2-pipeline.test.js | payload and method-bound routes run before approval and consume | tests/ported_gateway_core.rs::payload_and_method_bound_routes_refuse_before_approval_or_consume |
 | gateway-w2-pipeline.test.js | custom patterns from every credential scrub bodies, headers and errors; corrupt pattern withholds | not yet ported |
-| gateway-w2-pipeline.test.js | token reservations block concurrent overspend and settle buffered usage | not yet ported |
-| gateway-w2-pipeline.test.js | unpriced and unmodeled spend refuses while ordinary free GET passes | not yet ported |
-| gateway-w2-pipeline.test.js | missing usage and aborted SSE charge full reservation; completed SSE uses usage | not yet ported |
-| gateway-w2-pipeline.test.js | restart charges outstanding reservation and pre-connect failure releases it | not yet ported |
-| gateway-w2-pipeline.test.js | redirects check hosts, paths, scheme, method, approval and max before sending | `tests::gateway::redirects_are_not_followed_unless_the_grant_says_so`, `tests::gateway::hardening_a_redirect_hop_is_checked_against_the_grant_paths` (hosts, paths and max; the scheme, method and approval cases are not yet ported) |
-| gateway-w2-pipeline.test.js | allowed redirect follows, charges each hop and forwards correct pins without body | not yet ported |
+| gateway-w2-pipeline.test.js | token reservations block concurrent overspend and settle buffered usage | tests/ported_gateway_core.rs::token_reservations_refuse_concurrent_overspend_and_settle_buffered_usage |
+| gateway-w2-pipeline.test.js | unpriced and unmodeled spend refuses while ordinary free GET passes | tests/ported_gateway_core.rs::unpriced_and_unmodeled_spend_refuse_while_free_get_uses_no_spend_ledger |
+| gateway-w2-pipeline.test.js | missing usage and aborted SSE charge full reservation; completed SSE uses usage | tests/ported_gateway_core.rs::missing_or_cut_usage_charges_full_reservation_and_complete_crlf_streams_charge_actual_usage |
+| gateway-w2-pipeline.test.js | restart charges outstanding reservation and pre-connect failure releases it | tests/ported_gateway_core.rs::preconnect_spend_is_refunded_and_restart_charges_outstanding_reservations |
+| gateway-w2-pipeline.test.js | redirects check hosts, paths, scheme, method, approval and max before sending | not yet ported: partial existing coverage only; hosts, paths and max in tests::gateway::redirects_are_not_followed_unless_the_grant_says_so and tests::gateway::hardening_a_redirect_hop_is_checked_against_the_grant_paths; full table including malformed stored redirect max still needs coverage |
+| gateway-w2-pipeline.test.js | allowed redirect follows, charges each hop and forwards correct pins without body | tests/ported_gateway_core.rs::allowed_redirect_charges_each_hop_preserves_pins_and_never_forwards_body |
 | gateway-w2-pipeline.test.js | pins map to safe problem and refund; health observer receives response metadata | not yet ported |
-| gateway-w2-pipeline.test.js | approval preview scrubs secrets and placeholders and notifications fire once | not yet ported |
+| gateway-w2-pipeline.test.js | approval preview scrubs secrets and placeholders and notifications fire once | tests/ported_gateway_core.rs::approval_preview_hides_secrets_and_placeholders_and_notifies_exactly_once |
 | gateway-w2-pipeline.test.js | quarantine and grant expiry stop before consume, and denyApprovals returns only a count | tests/ported_gateway_core.rs::quarantine_and_grant_expiry_stop_before_consume_and_bulk_deny_returns_count |
 | gateway-w2-pipeline.test.js | preflight is observational, peeks limits and reports a hold without creating approval | tests/ported_gateway_core.rs::preflight_observes_limits_without_mutating_vault_or_creating_approval |
 | gateway-w2-pipeline.test.js | preflight denial never trips and the eleventh call is throttled | not yet ported |
 | gateway-w2-pipeline.test.js | tripwires revoke only authenticated matching session and deny its approvals | not yet ported |
 | gateway-w2-pipeline.test.js | tripwires default off; panic hook awaits and reports unwired or failed denial honestly | not yet ported |
 | gateway-w2-pipeline.test.js | legacy decimal budgets work while noncanonical values never reach comparisons | not yet ported |
-| gateway-w2-pipeline.test.js | a held request previews its label, a redacted secret and no placeholder, token or audit body | not yet ported |
-| gateway-w2-pipeline.test.js | the preview builder replaces encoded placeholders, keeps duplicate JSON keys as sent, and stays under 8 KiB | not yet ported |
+| gateway-w2-pipeline.test.js | a held request previews its label, a redacted secret and no placeholder, token or audit body | tests/ported_gateway_core.rs::held_preview_labels_injection_redacts_secret_and_token_and_keeps_comment_out_of_audit |
+| gateway-w2-pipeline.test.js | the preview builder replaces encoded placeholders, keeps duplicate JSON keys as sent, and stays under 8 KiB | tests/ported_gateway_core.rs::preview_builder_replaces_encoded_placeholders_preserves_duplicate_json_and_caps_size |
 | gateway-w2-pipeline.test.js | preflight expiration has no state changes and uses the shared expiry predicates | not yet ported |
 | gateway-w2-pipeline.test.js | expired grant fallback keeps its specific error after store marked it expired | not yet ported |
 | gateway-w2-pipeline.test.js | quarantine tripwire pauses only its credential and leaves other sessions active | not yet ported |
-| gateway-w2-pipeline.test.js | a redirect hop is held to the GraphQL rules a direct request is held to | not yet ported |
-| gateway-w2-pipeline.test.js | a redirect hop answers to the body rules as a body-less request, not to none | not yet ported |
+| gateway-w2-pipeline.test.js | a redirect hop is held to the GraphQL rules a direct request is held to | tests/ported_gateway_core.rs::graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops |
+| gateway-w2-pipeline.test.js | a redirect hop answers to the body rules as a body-less request, not to none | tests/ported_gateway_core.rs::graphql_and_required_body_rules_are_applied_to_bodyless_redirect_hops |
 | gateway-w2-pipeline.test.js | a single-valued header sent twice, differently, is refused before anything is sent | tests/ported_gateway_core.rs::conflicting_single_valued_headers_are_refused_without_spending_or_upstream |
 | gateway-w2-pipeline.test.js | one Content-Type, or an exact repeat of it, is checked and sent as that one value | tests/ported_gateway_core.rs::exact_repeat_content_type_is_sent_once_and_the_selected_form_rules_apply |
 | gateway-w2-pipeline.test.js | a repeated list header goes upstream once per name, carrying every value | not yet ported: waiting for daemon header fix; regression tests/ported_gateway_core.rs::repeated_list_headers_preserve_every_value_and_substitute_only_the_targeted_copy |
 | gateway-w2-pipeline.test.js | a query a URL would cut or rewrite is refused before the payload rules read it | tests/ported_gateway_core.rs::query_url_rewrite_shapes_are_refused_and_encoded_value_controls_pass |
-| gateway-w2-pipeline.test.js | a request a method override made a write does not have its redirect followed | not yet ported |
-| gateway-w2-pipeline.test.js | a followed redirect sends nothing of the agent's but the credential and the hop allowlist | not yet ported |
-| gateway-w2-pipeline.test.js | a credential declared at a body or framing header is not sent on a hop | not yet ported |
-| gateway-w2-pipeline.test.js | a Location carrying _method is not followed | not yet ported |
-| gateway-w2-pipeline.test.js | a hop is checked as the method it is sent with: 307 and 308 keep it, 301 to 303 send a GET | not yet ported |
-| gateway-w2-pipeline.test.js | a method override on a direct request is still refused, and an ordinary redirect still follows | not yet ported |
+| gateway-w2-pipeline.test.js | a request a method override made a write does not have its redirect followed | tests/ported_gateway_core.rs::method_override_writes_never_follow_redirect_even_after_human_approval |
+| gateway-w2-pipeline.test.js | a followed redirect sends nothing of the agent's but the credential and the hop allowlist | tests/ported_gateway_core.rs::hop_forwards_only_credential_and_allowlisted_agent_headers_and_omits_framing_credentials |
+| gateway-w2-pipeline.test.js | a credential declared at a body or framing header is not sent on a hop | tests/ported_gateway_core.rs::hop_forwards_only_credential_and_allowlisted_agent_headers_and_omits_framing_credentials |
+| gateway-w2-pipeline.test.js | a Location carrying _method is not followed | tests/ported_gateway_core.rs::location_method_override_fields_are_not_followed |
+| gateway-w2-pipeline.test.js | a hop is checked as the method it is sent with: 307 and 308 keep it, 301 to 303 send a GET | tests/ported_gateway_core.rs::redirect_method_is_checked_and_post_is_never_followed_under_any_status |
+| gateway-w2-pipeline.test.js | a method override on a direct request is still refused, and an ordinary redirect still follows | tests/ported_gateway_core.rs::direct_route_override_is_denied_but_ordinary_redirect_still_follows |
 | gateway-w2-pipeline.test.js | a method-override field naming another method is refused, and nothing is sent | not yet ported |
 | gateway-w2-pipeline.test.js | a method-override field naming the request's own method is sent as it is | not yet ported |
-| gateway-w2-pipeline.test.js | a hop keeps the API-version headers a provider needs, and never a cookie, override or forwarding header | not yet ported |
+| gateway-w2-pipeline.test.js | a hop keeps the API-version headers a provider needs, and never a cookie, override or forwarding header | tests/ported_gateway_core.rs::provider_version_headers_survive_hops_and_cookie_override_forwarding_headers_do_not |
 | gateway-w2-pipeline.test.js | Grok round 5, finding 1: a Location naming another method in a folded spelling is not followed | not yet ported |
 | gateway-w2-pipeline.test.js | Grok round 5, finding 2: a ; in the query cannot hide a parameter from the payload rules | not yet ported |
 | gateway-w2-pipeline.test.js | every override spelling is refused on a direct request and stops a hop | not yet ported |
@@ -660,14 +660,14 @@ the vault on every call instead of caching an audit handle.
 | gateway-w2-seams.test.js | a quarantined credential is refused before anything is spent, and works again once released | tests/ported_gateway_core.rs::quarantine_refuses_without_spending_limits_and_release_restores_ordinary_request |
 | gateway-w2-seams.test.js | preflight and the real route agree on finite, expired, infinite and legacy sessions and grants | not yet ported |
 | gateway-w2-seams.test.js | preflight writes one record with nulls, not undefined, and puts no hint where there was none | tests/ported_gateway_core.rs::preflight_audit_uses_nulls_and_unhinted_checks_never_have_nonstring_hints |
-| gateway-w2-seams.test.js | a redirect to another port on an allowed host is not followed; the same port is | not yet ported |
-| gateway-w2-seams.test.js | a redirect hop that cannot connect closes the redirect it was following and is not refunded | not yet ported |
+| gateway-w2-seams.test.js | a redirect to another port on an allowed host is not followed; the same port is | tests/ported_gateway_core.rs::redirect_port_must_match_and_failed_hop_is_not_refunded |
+| gateway-w2-seams.test.js | a redirect hop that cannot connect closes the redirect it was following and is not refunded | tests/ported_gateway_core.rs::redirect_port_must_match_and_failed_hop_is_not_refunded |
 | gateway-w2-seams.test.js | GraphQL rules read the URL query on a POST too, and the decided path ends the /graphql check | tests/ported_gateway_core.rs::graphql_checks_post_url_query_and_normalized_graphql_path |
 | gateway-w2-seams.test.js | a binary upload passes a grant whose payload rules only constrain the query | tests/ported_gateway_core.rs::query_only_payload_rules_allow_binary_upload_and_refuse_unsafe_query |
 | gateway-w2-seams.test.js | a strict-query refusal names the parameter by its index and never echoes a name or value | tests/ported_gateway_core.rs::strict_query_denials_name_positions_and_never_echo_hostile_names_or_values |
-| gateway-w2-seams.test.js | a spend refusal says what is left and what the call could cost; a call that fits passes | not yet ported |
-| gateway-w2-seams.test.js | a CRLF-framed stream settles on its usage; a cut stream charges the full reservation | not yet ported |
-| gateway-w2-seams.test.js | a pipeline built while the vault is locked charges stale reservations at the first request after unlock | not yet ported |
+| gateway-w2-seams.test.js | a spend refusal says what is left and what the call could cost; a call that fits passes | tests/ported_gateway_core.rs::spend_denial_explains_remaining_and_worst_case_while_bounded_call_settles_real_usage |
+| gateway-w2-seams.test.js | a CRLF-framed stream settles on its usage; a cut stream charges the full reservation | tests/ported_gateway_core.rs::missing_or_cut_usage_charges_full_reservation_and_complete_crlf_streams_charge_actual_usage |
+| gateway-w2-seams.test.js | a pipeline built while the vault is locked charges stale reservations at the first request after unlock | tests/ported_gateway_core.rs::locked_pipeline_recovers_stale_reservation_on_first_request_after_unlock |
 | gateway-w2-seams.test.js | an extra pattern scrubs an error detail, is redacted within an event, and cuts a stream that splits it | not yet ported |
 | gateway-w2-seams.test.js | a method-override header is held to the route pairs as well as the methods list | tests/ported_gateway_core.rs::method_override_is_bound_by_route_pairs_and_allowed_tmp_control_runs |
 | gateway-w2-seams.test.js | a held request is recorded as held, an allowed one as allow, a refused one as deny (C11) | tests/ported_gateway_core.rs::held_allowed_and_denied_requests_are_recorded_with_the_right_decisions |
