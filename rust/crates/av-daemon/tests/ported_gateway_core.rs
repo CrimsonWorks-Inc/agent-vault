@@ -9970,7 +9970,7 @@ async fn credential_tool(f: &Fixture, name: &str, args: Value, session: bool) ->
 }
 async fn credential_finish(f: &Fixture) {
     let text = serde_json::to_string(&audit_records(f).await).unwrap();
-    for secret in [&f.secret, CONTROL_ROTATED] {
+    for secret in [&f.secret, CONTROL_ROTATED, WIDEN_PASS, CONTROL_RECOVERY] {
         assert!(!text.contains(secret), "credential leaked to audit");
     }
     f.daemon.stop().await;
@@ -10726,4 +10726,380 @@ async fn control_containment_route_enabled_replay_revokes_before_response_but_di
     })
     .await
     .expect("tripwire replay routes timed out");
+}
+
+const CONTROL_RECOVERY: &str = "fake recovery passphrase for disposable vault";
+async fn control_export(f: &Fixture) -> Value {
+    use base64::Engine;
+    let (s, v) = credential_api(
+        f,
+        "POST",
+        "/v1/backup/export",
+        json!({"recovery_passphrase":CONTROL_RECOVERY,"presence":{"passphrase":WIDEN_PASS}}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let text = v.to_string();
+    assert!(!text.contains(CONTROL_RECOVERY));
+    assert!(!text.contains(&base64::engine::general_purpose::STANDARD.encode(&f.secret)));
+    v
+}
+fn is_hex_digest(v: &Value) {
+    let s = v.as_str().unwrap();
+    assert_eq!(s.len(), 64);
+    assert!(s
+        .bytes()
+        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+}
+
+#[tokio::test]
+async fn control_backup_export_requires_factor_and_fresh_proof_even_with_window_and_hides_every_secret(
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/backup/export",
+            json!({"recovery_passphrase":CONTROL_RECOVERY}),
+        )
+        .await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "factor_required");
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/lock", json!({})).await.0,
+            200
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/backup/export",
+                json!({"recovery_passphrase":CONTROL_RECOVERY})
+            )
+            .await
+            .1["code"],
+            "AV_LOCKED"
+        );
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await.0,
+            200
+        );
+        credential_factor(&f).await;
+        credential_gate(&f, true).await;
+        let (s, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/backup/export",
+            json!({"recovery_passphrase":CONTROL_RECOVERY}),
+        )
+        .await;
+        assert_eq!(s, 401, "{v}");
+        assert_eq!(v["rule"], "fresh_presence");
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/backup/export",
+                json!({"recovery_passphrase":CONTROL_RECOVERY,"presence":{"passphrase":"not it"}})
+            )
+            .await
+            .1["code"],
+            "AV_PRESENCE_DENIED"
+        );
+        credential_gate(&f, false).await;
+        let exported = control_export(&f).await;
+        assert_eq!(exported["summary"]["credentials"], 1);
+        is_hex_digest(&exported["bundle_sha256"]);
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/backup/export",
+                json!({"recovery_passphrase":"short","presence":{"passphrase":WIDEN_PASS}})
+            )
+            .await
+            .1["rule"],
+            "recovery_passphrase"
+        );
+        assert!(audit_records(&f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "presence.verified"
+                && r["op"] == "backup export"
+                && r["fresh"] == true));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("backup export timed out");
+}
+
+#[tokio::test]
+async fn control_backup_inspection_is_open_and_real_auth_failures_survive_success_until_backoff() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&f).await;
+        let bundle = control_export(&f).await["bundle"].clone();
+        let inspect = |pass: &str| json!({"bundle":bundle,"recovery_passphrase":pass});
+        let (s, v) =
+            credential_api(&f, "POST", "/v1/backup/inspect", inspect(CONTROL_RECOVERY)).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(
+            v["credentials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["demo"]
+        );
+        assert_eq!(
+            audit_records(&f)
+                .await
+                .iter()
+                .filter(|r| r["kind"] == "backup.inspected")
+                .count(),
+            1
+        );
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/backup/inspect",
+                json!({"bundle":{"format":"other"},"recovery_passphrase":CONTROL_RECOVERY})
+            )
+            .await
+            .1["rule"],
+            "backup_format"
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                credential_api(
+                    &f,
+                    "POST",
+                    "/v1/backup/inspect",
+                    inspect("wrong recovery passphrase")
+                )
+                .await
+                .1["rule"],
+                "backup_auth"
+            );
+        }
+        // A successful recovery read must not erase three real failed guesses.
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/backup/inspect", inspect(CONTROL_RECOVERY))
+                .await
+                .0,
+            200
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                credential_api(
+                    &f,
+                    "POST",
+                    "/v1/backup/inspect",
+                    inspect("wrong recovery passphrase")
+                )
+                .await
+                .1["rule"],
+                "backup_auth"
+            );
+        }
+        let (s, v) =
+            credential_api(&f, "POST", "/v1/backup/inspect", inspect(CONTROL_RECOVERY)).await;
+        assert_eq!(s, 429, "{v}");
+        assert_eq!(v["code"], "AV_RATE_LIMITED");
+        assert!(audit_records(&f)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "presence.throttled" && r["consecutive_failures"] == 5));
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("backup inspection and real throttle timed out");
+}
+
+#[tokio::test]
+async fn control_backup_restore_is_gated_renames_credentials_but_never_imports_sessions() {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        let a = Fixture::new(&["header:x-key"]).await;
+        let b = Fixture::new(&["header:x-key"]).await;
+        credential_factor(&a).await;
+        credential_factor(&b).await;
+        let bundle = control_export(&a).await["bundle"].clone();
+        let request =
+            json!({"bundle":bundle,"recovery_passphrase":CONTROL_RECOVERY,"on_conflict":"rename"});
+        credential_presence_refused(
+            credential_api(&b, "POST", "/v1/backup/restore", request.clone()).await,
+        );
+        credential_gate(&b, true).await;
+        let mut wrong = request.clone();
+        wrong["recovery_passphrase"] = json!("wrong recovery passphrase");
+        assert_eq!(
+            credential_api(&b, "POST", "/v1/backup/restore", wrong)
+                .await
+                .1["rule"],
+            "backup_auth"
+        );
+        let (s, v) = credential_api(&b, "POST", "/v1/backup/restore", request).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["renamed"], json!([{"from":"demo","to":"demo-restored"}]));
+        let (_, creds) = credential_api(&b, "GET", "/v1/credentials", json!({})).await;
+        assert!(creds
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["slug"] == "demo-restored"));
+        let refused = b
+            .daemon
+            .pipeline()
+            .handle(GatewayRequest {
+                method: "GET".into(),
+                path: "/p/demo-restored/x".into(),
+                headers: vec![
+                    ("host".into(), "127.0.0.1".into()),
+                    ("authorization".into(), format!("Bearer {}", a.token)),
+                ],
+                ..Default::default()
+            })
+            .await;
+        assert_ne!(refused.status, 200);
+        assert!(b.up.hits.lock().unwrap().is_empty());
+        assert_eq!(
+            credential_api(
+                &b,
+                "POST",
+                "/v1/backup/restore",
+                json!({"bundle":bundle,"recovery_passphrase":CONTROL_RECOVERY,"on_conflict":"fail"})
+            )
+            .await
+            .1["rule"],
+            "backup_conflict"
+        );
+        // Four further real auth failures prove the restore failure was charged.
+        for _ in 0..4 {
+            assert_eq!(
+                credential_api(
+                    &b,
+                    "POST",
+                    "/v1/backup/inspect",
+                    json!({"bundle":bundle,"recovery_passphrase":"wrong recovery passphrase"})
+                )
+                .await
+                .1["rule"],
+                "backup_auth"
+            );
+        }
+        assert!(audit_records(&b)
+            .await
+            .iter()
+            .any(|r| r["kind"] == "presence.throttled" && r["consecutive_failures"] == 5));
+        assert_eq!(a.get().await.status, 200);
+        assert_eq!(b.get().await.status, 200);
+        credential_finish(&a).await;
+        credential_finish(&b).await;
+    })
+    .await
+    .expect("backup restoration timed out");
+}
+
+#[tokio::test]
+async fn control_audit_pages_validate_ranges_and_witnesses_are_open_but_refused_while_locked() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let f = Fixture::new(&["header:x-key"]).await;
+        let (s, page) =
+            credential_api(&f, "GET", "/v1/audit/export?since_seq=0&limit=3", json!({})).await;
+        assert_eq!(s, 200, "{page}");
+        assert_eq!(page["rows"].as_array().unwrap().len(), 3);
+        assert_eq!(page["next_seq"], page["rows"][2]["seq"]);
+        let (_, rest) = credential_api(
+            &f,
+            "GET",
+            &format!("/v1/audit/export?since_seq={}", page["next_seq"]),
+            json!({}),
+        )
+        .await;
+        assert!(rest["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["seq"].as_u64().unwrap() > page["next_seq"].as_u64().unwrap()));
+        for query in [
+            "since_seq=x",
+            "since_seq=-1",
+            "since_seq=1.5",
+            "limit=",
+            "limit=1e3",
+            "since_seq=%201",
+        ] {
+            let (s, v) =
+                credential_api(&f, "GET", &format!("/v1/audit/export?{query}"), json!({})).await;
+            assert_eq!(s, 403, "{query}: {v}");
+            assert_eq!(v["rule"], "audit_range");
+        }
+        let (s, cp) = credential_api(&f, "GET", "/v1/audit/checkpoint", json!({})).await;
+        assert_eq!(s, 200, "{cp}");
+        is_hex_digest(&cp["mac"]);
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/audit/verify-witness",
+                json!({"checkpoints":[cp]})
+            )
+            .await
+            .1["ok"],
+            true
+        );
+        let mut forged = cp.clone();
+        forged["seq"] = json!(cp["seq"].as_u64().unwrap() - 1);
+        let (_, v) = credential_api(
+            &f,
+            "POST",
+            "/v1/audit/verify-witness",
+            json!({"checkpoints":[forged]}),
+        )
+        .await;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["forged"], json!([0]));
+        assert_eq!(
+            credential_api(
+                &f,
+                "POST",
+                "/v1/audit/verify-witness",
+                json!({"checkpoints":"all"})
+            )
+            .await
+            .1["rule"],
+            "audit_range"
+        );
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/lock", json!({})).await.0,
+            200
+        );
+        for (method, path, body) in [
+            ("GET", "/v1/audit/export", json!({})),
+            ("GET", "/v1/audit/checkpoint", json!({})),
+            (
+                "POST",
+                "/v1/audit/verify-witness",
+                json!({"checkpoints":[]}),
+            ),
+        ] {
+            assert_eq!(
+                credential_api(&f, method, path, body).await.1["code"],
+                "AV_LOCKED"
+            );
+        }
+        assert_eq!(
+            credential_api(&f, "POST", "/v1/unlock", json!({})).await.0,
+            200
+        );
+        assert_eq!(f.get().await.status, 200);
+        credential_finish(&f).await;
+    })
+    .await
+    .expect("audit read routes timed out");
 }

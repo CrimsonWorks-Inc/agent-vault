@@ -24,7 +24,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 491 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **606 not yet ported**.
+Totals: 1207 JS tests: 496 to an av-daemon Rust test, 1 covered by conformance, 24 ported in av-core or av-store, 84 CLI-only, 1 not applicable, **601 not yet ported**.
 
 ## Mutation check
 
@@ -118,11 +118,11 @@ the vault on every call instead of caching an audit handle.
 | connectors-probe.test.js | pins under two spellings of the same host are joined, and an empty one does not hide the other | not yet ported |
 | connectors-probe.test.js | F-1: pins are looked up by the host of the URL the probe sends to, however the key or the declared host spells it | not yet ported |
 | connectors-probe.test.js | with the real upstream: a root pin adds to CA verification, a mismatch sends nothing, and a match probes only /user | not yet ported |
-| control-api-backup-audit.test.js | export needs a fresh proof: the window is refused, the passphrase works, and the bundle holds no secret | not yet ported |
-| control-api-backup-audit.test.js | export is refused on a vault with no human factor, and while locked | not yet ported |
-| control-api-backup-audit.test.js | inspect is open, but a wrong recovery passphrase is counted, and a right one does not clear the count | not yet ported |
-| control-api-backup-audit.test.js | restore needs a human, and gives back credentials but never a session | not yet ported |
-| control-api-backup-audit.test.js | audit export, checkpoint and witness check are open reads, refused while locked (F9) | not yet ported |
+| control-api-backup-audit.test.js | export needs a fresh proof: the window is refused, the passphrase works, and the bundle holds no secret | `ported_gateway_core::control_backup_export_requires_factor_and_fresh_proof_even_with_window_and_hides_every_secret` |
+| control-api-backup-audit.test.js | export is refused on a vault with no human factor, and while locked | `ported_gateway_core::control_backup_export_requires_factor_and_fresh_proof_even_with_window_and_hides_every_secret` |
+| control-api-backup-audit.test.js | inspect is open, but a wrong recovery passphrase is counted, and a right one does not clear the count | `ported_gateway_core::control_backup_inspection_is_open_and_real_auth_failures_survive_success_until_backoff` |
+| control-api-backup-audit.test.js | restore needs a human, and gives back credentials but never a session | `ported_gateway_core::control_backup_restore_is_gated_renames_credentials_but_never_imports_sessions` |
+| control-api-backup-audit.test.js | audit export, checkpoint and witness check are open reads, refused while locked (F9) | `ported_gateway_core::control_audit_pages_validate_ranges_and_witnesses_are_open_but_refused_while_locked` |
 | control-api-c18.test.js | gateway POST /v1/preflight: an infinite token on a network listener is refused, a finite one works (C18) | not yet ported |
 | control-api-c18.test.js | MCP vault_describe_access: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
 | control-api-c18.test.js | MCP vault_preflight: refused for an infinite session on a network listener, over HTTP and in the tool itself (C18) | not yet ported |
