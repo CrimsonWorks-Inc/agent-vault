@@ -50,6 +50,10 @@ fn js_scrub_non_bmp_repetitions_refuse_with_invalid_pattern_problem() {
 }
 #[test]
 fn js_request_hash_utf16_names_credentials_and_ascii_control() {
+    assert_eq!(
+        vectors()["requests"][2]["hash"],
+        "f9eb2734ea7f1c885e34e8b00b426fcac1b294f6f774b3f98d539b0ab66609f3"
+    );
     for row in vectors()["requests"].as_array().unwrap() {
         let input = &row["input"];
         let headers =
