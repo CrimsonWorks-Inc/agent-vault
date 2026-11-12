@@ -188,16 +188,26 @@ impl FakeAuthenticator {
         serde_json::json!({"attestationObject":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes),"clientDataJSON":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(client)})
     }
     pub fn assertion(&self, challenge: &str, origin: &str) -> serde_json::Value {
+        self.assertion_options(challenge, origin, true, 0, "webauthn.get")
+    }
+    pub fn assertion_options(
+        &self,
+        challenge: &str,
+        origin: &str,
+        uv: bool,
+        count: u32,
+        kind: &str,
+    ) -> serde_json::Value {
         use base64::Engine;
         use p256::ecdsa::signature::Signer;
         use sha2::{Digest, Sha256};
         let client = serde_json::to_vec(
-            &serde_json::json!({"type":"webauthn.get","challenge":challenge,"origin":origin}),
+            &serde_json::json!({"type":kind,"challenge":challenge,"origin":origin}),
         )
         .unwrap();
         let mut data = Sha256::digest(b"localhost").to_vec();
-        data.push(0x05);
-        data.extend_from_slice(&0u32.to_be_bytes());
+        data.push(if uv { 0x05 } else { 0x01 });
+        data.extend_from_slice(&count.to_be_bytes());
         let mut signed = data.clone();
         signed.extend_from_slice(&Sha256::digest(&client));
         let signature: p256::ecdsa::Signature = self.key.sign(&signed);

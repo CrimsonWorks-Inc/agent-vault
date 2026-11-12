@@ -25,7 +25,7 @@ What each status means:
   check yet. This is the remaining work for the piece, and it is listed as
   such rather than mapped to a test that only resembles it.
 
-Totals: 1207 JS tests: 875 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **155 not yet ported**.
+Totals: 1207 JS tests: 890 to an av-daemon Rust test, 1 covered by conformance, 28 ported in av-core or av-store, 115 CLI-only, 8 not applicable, 25 frontend (stays with JS), **140 not yet ported**.
 
 ## Mutation check
 
@@ -1225,21 +1225,21 @@ Where the Rust behaviour deliberately differs from the JS, and why.
 | ui.test.js | the enrollment is recorded in the audit log | not yet ported |
 | ui.test.js | a batch with no signature is refused, like a single decision | not yet ported |
 | ui.test.js | the operation bound for a batch is the list exactly as it was sent | not yet ported |
-| webauthn.test.js | a registration produces a credential the daemon can store | not yet ported |
-| webauthn.test.js | registration without user verification is refused | not yet ported |
-| webauthn.test.js | a valid assertion for the issued challenge verifies | not yet ported |
-| webauthn.test.js | a different authenticator cannot sign for the enrolled credential | not yet ported |
-| webauthn.test.js | an attacker who copies the enrolled credential id still cannot sign | not yet ported |
-| webauthn.test.js | a signature for one operation does not authorise another | not yet ported |
-| webauthn.test.js | the operation challenge changes with every field of the operation | not yet ported |
-| webauthn.test.js | the same operation with a fresh nonce yields a fresh challenge | not yet ported |
-| webauthn.test.js | an assertion from another origin is refused | not yet ported |
-| webauthn.test.js | a registration response replayed as an assertion is refused | not yet ported |
-| webauthn.test.js | an assertion without user verification is refused | not yet ported |
-| webauthn.test.js | a signature counter that goes backwards is treated as a cloned credential | not yet ported |
-| webauthn.test.js | only ES256 on P-256 is accepted | not yet ported |
-| webauthn.test.js | the CBOR reader rejects what it does not understand rather than guessing | not yet ported |
-| webauthn.test.js | an assertion is bounded before anything parses it | not yet ported |
+| webauthn.test.js | a registration produces a credential the daemon can store | `ported_webauthn::registration_is_storable_and_registration_without_human_verification_is_refused` |
+| webauthn.test.js | registration without user verification is refused | `ported_webauthn::registration_is_storable_and_registration_without_human_verification_is_refused` |
+| webauthn.test.js | a valid assertion for the issued challenge verifies | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | a different authenticator cannot sign for the enrolled credential | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | an attacker who copies the enrolled credential id still cannot sign | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | a signature for one operation does not authorise another | `ported_webauthn::operation_challenges_bind_every_field_and_nonce_and_wrong_operation_never_verifies` |
+| webauthn.test.js | the operation challenge changes with every field of the operation | `ported_webauthn::operation_challenges_bind_every_field_and_nonce_and_wrong_operation_never_verifies` |
+| webauthn.test.js | the same operation with a fresh nonce yields a fresh challenge | `ported_webauthn::operation_challenges_bind_every_field_and_nonce_and_wrong_operation_never_verifies` |
+| webauthn.test.js | an assertion from another origin is refused | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | a registration response replayed as an assertion is refused | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | an assertion without user verification is refused | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | a signature counter that goes backwards is treated as a cloned credential | `ported_webauthn::assertion_identity_signature_origin_type_uv_and_counter_have_valid_ceremony_controls` |
+| webauthn.test.js | only ES256 on P-256 is accepted | `ported_webauthn::unsupported_cose_cbor_and_oversized_assertion_fields_fail_before_parsing_with_ordinary_controls` |
+| webauthn.test.js | the CBOR reader rejects what it does not understand rather than guessing | `ported_webauthn::unsupported_cose_cbor_and_oversized_assertion_fields_fail_before_parsing_with_ordinary_controls` |
+| webauthn.test.js | an assertion is bounded before anything parses it | `ported_webauthn::unsupported_cose_cbor_and_oversized_assertion_fields_fail_before_parsing_with_ordinary_controls` |
 | widening.test.js | the passphrase gate is on, so an unsigned call is refused | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
 | widening.test.js | creating a session from the UI works with one fingerprint | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
 | widening.test.js | the credential list says where a placeholder may go | `ported_gateway_core::widening_signed_ui_session_and_credential_changes_work_and_never_reveal_secret` |
