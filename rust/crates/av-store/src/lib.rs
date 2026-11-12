@@ -26,3 +26,6 @@ mod rows;
 pub mod schema;
 mod util;
 pub mod vault;
+
+#[cfg(test)]
+mod tests;

@@ -16,9 +16,14 @@ pub fn ulid() -> String {
     ulid_at(now)
 }
 
-/// The last millisecond and random part handed out, so ids minted within one
-/// millisecond increment instead of redrawing.
-static LAST: std::sync::Mutex<(u64, Option<[u8; 10]>)> = std::sync::Mutex::new((0, None));
+thread_local! {
+    /// The last millisecond and random part this thread handed out, so ids
+    /// minted within one millisecond increment instead of redrawing. Per
+    /// thread: the JS module state is per process, and a process is one
+    /// thread there; two threads drawing in the same millisecond each get
+    /// fresh randomness.
+    static LAST: std::cell::Cell<(u64, Option<[u8; 10]>)> = const { std::cell::Cell::new((0, None)) };
+}
 
 /// A ULID for the given epoch milliseconds (for tests). Ports `ulid(now)` in
 /// `src/store/ids.js`.
@@ -29,8 +34,8 @@ pub fn ulid_at(now_ms: u64) -> String {
         *slot = CROCKFORD[(t % 32) as usize];
         t /= 32;
     }
-    let random = {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let random = LAST.with(|cell| {
+        let last = cell.get();
         match last.1 {
             Some(mut r) if last.0 == now_ms => {
                 // Increment as a big-endian number, carrying; all-255 wraps.
@@ -42,7 +47,7 @@ pub fn ulid_at(now_ms: u64) -> String {
                 if i > 0 {
                     r[i - 1] += 1;
                 }
-                last.1 = Some(r);
+                cell.set((now_ms, Some(r)));
                 r
             }
             _ => {
@@ -52,11 +57,11 @@ pub fn ulid_at(now_ms: u64) -> String {
                 if getrandom::fill(&mut r).is_err() {
                     r[..8].copy_from_slice(&now_ms.to_be_bytes());
                 }
-                *last = (now_ms, Some(r));
+                cell.set((now_ms, Some(r)));
                 r
             }
         }
-    };
+    });
     let mut out = String::with_capacity(26);
     out.extend(time.iter().map(|&c| c as char));
     let mut acc: u32 = 0;

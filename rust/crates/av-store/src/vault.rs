@@ -2333,6 +2333,12 @@ impl Vault {
         f(&guard)
     }
 
+    /// The connection, for tests that inspect or corrupt rows directly.
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        lock_conn(&self.conn)
+    }
+
     fn vmk_key(&self) -> Result<Key32> {
         self.vmk.as_ref().map(LockedKey::key).ok_or_else(locked_error)
     }
@@ -4271,7 +4277,7 @@ impl Vault {
                 t.c.prepare_cached("DELETE FROM sessions WHERE id = ?1")?
                     .execute([&s.id])?;
             }
-            if report.sessions > 0 {
+            {
                 t.audit_required(
                     "history.pruned",
                     json!({
@@ -4884,4 +4890,18 @@ pub(crate) fn checkpoint_truncate(c: &Connection) -> Result<()> {
             e => Err(e),
         })?;
     Ok(())
+}
+
+/// Test access to key material the tests must compare against.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub(crate) fn device_key(dir: &Path) -> Key32 {
+        read_device_key(dir).unwrap()
+    }
+
+    pub(crate) fn vmk(v: &Vault) -> Key32 {
+        v.vmk_key().unwrap()
+    }
 }

@@ -7,8 +7,27 @@
 //! difference: a date-time with no offset is read as UTC, where V8 reads it
 //! as local time. Every date the vault writes carries `Z`.
 
+#[cfg(test)]
+thread_local! {
+    /// A fixed clock for this test thread (the JS tests replace `Date.now`).
+    static FIXED_NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the clock at `ms` on this thread. Test-only.
+#[cfg(test)]
+pub(crate) fn at<T>(ms: i64, f: impl FnOnce() -> T) -> T {
+    let before = FIXED_NOW.with(|c| c.replace(Some(ms)));
+    let out = f();
+    FIXED_NOW.with(|c| c.set(before));
+    out
+}
+
 /// Milliseconds since the epoch, now.
 pub(crate) fn now_ms() -> i64 {
+    #[cfg(test)]
+    if let Some(t) = FIXED_NOW.with(|c| c.get()) {
+        return t;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
