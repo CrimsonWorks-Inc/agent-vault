@@ -1116,28 +1116,18 @@ impl Daemon {
         if !state.await?? {
             return Ok((200, json!({"ok": true, "locked": false, "already": true})));
         }
-        // An Argon2 check off the lock first: a wrong guess never holds it.
-        let pre_ok = match &pass {
-            Some(p) if prf.is_none() => {
-                let ok = self
-                    .shared
-                    .verify_passphrase(SecretString::from(p.clone()))
-                    .await;
-                if !ok {
-                    let has = self
-                        .shared
-                        .run(|core| core.vault.has_passphrase().unwrap_or(false))
-                        .await?;
-                    if has {
-                        // Fall through to the real unlock, which refuses with the
-                        // store's own error and records the attempt.
-                    }
-                }
-                ok
-            }
-            _ => true,
+        // An Argon2 check off the lock first, so a wrong guess never holds
+        // it: a passphrase that does not open the passphrase wrap is left
+        // out of the unlock below, which then fails (or opens another
+        // factor) exactly as the JS unlock would with that wrong guess.
+        let pass = match pass {
+            Some(p) if prf.is_none() => self
+                .shared
+                .verify_passphrase(SecretString::from(p.clone()))
+                .await
+                .then_some(p),
+            other => other,
         };
-        let _ = pre_ok;
         let v = self
             .shared
             .run(move |core| -> R<Value> {

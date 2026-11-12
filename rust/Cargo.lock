@@ -225,7 +225,6 @@ dependencies = [
  "p256",
  "rand",
  "rcgen",
- "regex",
  "rustls",
  "rustls-webpki",
  "secrecy",
