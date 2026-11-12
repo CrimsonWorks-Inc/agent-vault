@@ -2613,6 +2613,7 @@ from = '''        let mut p = effective.clone();
 to = '''        let mut p = effective.clone();
         p.methods = None;
         p.routes = None;
+        p.route_sets = None;
         p.paths = None;
         policy::evaluate_http(
             &p,'''

@@ -124,7 +124,7 @@ async fn a_minimal_webhook_carries_no_headline() {
 /// control-api-notify.test.js:130: events back to back, with no await
 /// between them, still make one POST per interval; the first takes the
 /// slot before the second can look at it.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "current_thread")]
 async fn events_back_to_back_make_one_post() {
     let posts: Posts = Arc::new(Mutex::new(Vec::new()));
     let p2 = posts.clone();
@@ -148,16 +148,16 @@ async fn events_back_to_back_make_one_post() {
         .await;
     assert_eq!(s, 200, "{v}");
     assert!(posts.lock().unwrap().is_empty());
+    // On this one-thread runtime, run_sync holds the only worker: no task the
+    // notifier spawns can run between the three events, so the slot must be
+    // taken synchronously, under the lock, for them to make one POST.
     let n = w.daemon.notifier.clone();
-    w.shared
-        .run(move |core| {
-            let event = core.dm_waiting_items().remove(0);
-            for _ in 0..3 {
-                n.pending(core, &event);
-            }
-        })
-        .await
-        .unwrap();
+    w.shared.run_sync(move |core| {
+        let event = core.dm_waiting_items().remove(0);
+        for _ in 0..3 {
+            n.pending(core, &event);
+        }
+    });
     posted(&posts, 1).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(posts.lock().unwrap().len(), 1, "one post per interval");

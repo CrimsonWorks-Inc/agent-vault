@@ -258,6 +258,33 @@ async fn a_quarantined_credential_is_refused_before_a_use_is_spent() {
     assert_eq!(uses(&w).await, before, "no use was spent");
 }
 
+/// 'a quarantined credential is not refused before its use is spent': the
+/// quarantine answers first, before the grant or the policy is consulted, so
+/// a request the policy would also refuse still names the quarantine.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quarantine_answers_before_the_policy_does() {
+    let w = World::seeded(json!({})).await;
+    let (s, v) = w
+        .control(
+            "POST",
+            "/v1/credentials/quarantine",
+            json!({"slug": "demo", "reason": "test"}),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let r = w
+        .send(
+            "DELETE",
+            "/user",
+            vec![("authorization".into(), format!("Bearer {}", w.placeholder))],
+            None,
+        )
+        .await;
+    let e = r.error.expect("refused");
+    assert_eq!(e.code.as_str(), "AV_QUARANTINED", "{e:?}");
+    assert_eq!(w.up.count(), 0);
+}
+
 /// 'the gateway does not ask the store whether the grant is still live'.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_expired_grant_is_refused_at_the_gateway() {
@@ -266,9 +293,38 @@ async fn an_expired_grant_is_refused_at_the_gateway() {
         &w,
         "UPDATE grants SET expires_at = '2020-01-01T00:00:00.000Z'",
     );
-    let r = w.get("/user").await;
+    // A method the policy refuses: the grant's expiry still answers first.
+    let r = w
+        .send(
+            "DELETE",
+            "/user",
+            vec![("authorization".into(), format!("Bearer {}", w.placeholder))],
+            None,
+        )
+        .await;
     assert!(r.status >= 400, "{:?}", r.error);
+    assert_eq!(
+        r.error.map(|e| e.code.as_str().to_string()).as_deref(),
+        Some("AV_GRANT_EXPIRED")
+    );
     assert_eq!(w.up.count(), 0);
+    let states = w
+        .shared
+        .run(|c| {
+            c.vault
+                .grants()
+                .unwrap()
+                .into_iter()
+                .map(|g| g.state)
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        states,
+        vec![av_store::model::GrantState::Expired],
+        "the store was asked, and marked the grant expired"
+    );
 }
 
 /// 'the spend check ignores what calls in flight have reserved'.

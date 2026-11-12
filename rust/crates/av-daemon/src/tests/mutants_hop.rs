@@ -146,11 +146,23 @@ async fn a_hop_never_sends_a_framing_header_even_one_a_credential_uses() {
         .send(
             "GET",
             "/start",
-            vec![("x-key".into(), w.placeholder.clone())],
+            vec![
+                ("x-key".into(), w.placeholder.clone()),
+                ("content-type".into(), w.placeholder.clone()),
+            ],
             None,
         )
         .await;
     assert_eq!(r.status, 200, "{:?}", r.error);
+    let first = w.up.hits.lock().unwrap()[0].clone();
+    assert!(
+        first
+            .headers
+            .iter()
+            .any(|(n, v)| n == "content-type" && v == SECRET),
+        "the first call carries the secret there: {:?}",
+        first.headers
+    );
     let hop = hop_of(&w).unwrap();
     assert!(!has(&hop, "content-type"), "{:?}", hop.headers);
     assert!(has(&hop, "x-key"));
