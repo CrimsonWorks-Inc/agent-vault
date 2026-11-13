@@ -518,22 +518,29 @@ fn checkout_root_refuses_the_installed_app() {
     assert_eq!(found, named);
     assert!(!crate::commands::is_installed_app(&named));
 
-    // The real installed app, both spellings. This only stats that tree.
-    let via_var = std::path::PathBuf::from("/var/db/agent-vault/app");
-    let via_private = std::path::PathBuf::from("/private/var/db/agent-vault/app");
+    // The real installed app. This only stats that tree. On macOS the
+    // root sits under /var, which is a link to /private/var, so both
+    // spellings must name it; elsewhere SYSTEM_ROOT has no second spelling.
+    let via_var = std::path::PathBuf::from(crate::SYSTEM_ROOT).join("app");
     assert!(
         crate::commands::is_installed_app(&via_var),
-        "the /var spelling was not the installed app"
+        "the SYSTEM_ROOT spelling was not the installed app"
     );
-    assert!(
-        crate::commands::is_installed_app(&via_private),
-        "the /private/var spelling was not the installed app"
-    );
-    assert_eq!(
-        crate::setup::canonical_prefix(&via_var),
-        crate::setup::canonical_prefix(&via_private)
-    );
-    for start in [via_var.join("bin"), via_private.join("bin")] {
+    let mut starts = vec![via_var.join("bin")];
+    #[cfg(target_os = "macos")]
+    {
+        let via_private = std::path::PathBuf::from("/private/var/db/agent-vault/app");
+        assert!(
+            crate::commands::is_installed_app(&via_private),
+            "the /private/var spelling was not the installed app"
+        );
+        assert_eq!(
+            crate::setup::canonical_prefix(&via_var),
+            crate::setup::canonical_prefix(&via_private)
+        );
+        starts.push(via_private.join("bin"));
+    }
+    for start in starts {
         let err = crate::commands::resolve_checkout_root(std::slice::from_ref(&start)).unwrap_err();
         let text = err.to_string();
         assert!(
