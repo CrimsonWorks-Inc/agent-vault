@@ -7212,9 +7212,14 @@ async fn real_health_write_contention_preserves_executed_response_consumption_an
     assert_eq!(grant_counters(&f).await, (1, vec![1]));
     let lock = ported_common::TempWriteLock::acquire(f._dir.path());
     gate.notify_one();
+    // The health write starts at T, gives up on the lock after SQLite's 5 s
+    // busy timeout, and the audit write after it must not give up too, so the
+    // release must land in (T+5, T+10). 9.5 s tolerates the response side
+    // starting up to ~4 s late on a loaded runner; 6 s tolerated only ~1 s
+    // and flaked on macOS CI. `request` keeps being polled while we wait.
     let response = tokio::select! {
         response=&mut request=>{drop(lock);response},
-        _=tokio::time::sleep(std::time::Duration::from_secs(6))=>{
+        _=tokio::time::sleep(std::time::Duration::from_millis(9500))=>{
             drop(lock);
             tokio::time::timeout(std::time::Duration::from_secs(5),&mut request).await.unwrap()
         }
