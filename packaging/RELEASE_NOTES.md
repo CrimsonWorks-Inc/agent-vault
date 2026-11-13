@@ -4,7 +4,7 @@ Install or upgrade:
 curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/download/install.sh | sh
 ```
 
-or with Homebrew: `brew install crimsonworks/tap/agent-vault`, then `agent-vault setup`.
+or with Homebrew: `brew install crimsonworks-inc/tap/agent-vault`, then `agent-vault setup`.
 
 Each archive is listed in `SHA256SUMS` and has build provenance from this repository's release workflow:
 
