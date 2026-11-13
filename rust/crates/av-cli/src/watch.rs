@@ -199,7 +199,9 @@ pub(crate) fn stream_refusal(status: u16, problem: &Value) -> CliError {
 
 /// osascript that shows `argv`'s first item. The notification text is an
 /// argument, never interpolated into the script. Ports the `osascript`
-/// invocation in `src/cli/watch.js`.
+/// invocation in `src/cli/watch.js`. Only macOS runs it; the unit test runs
+/// everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn macos_notify_script() -> &'static [&'static str] {
     &[
         "-e",

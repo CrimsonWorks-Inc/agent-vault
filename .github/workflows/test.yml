@@ -37,4 +37,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # The reference's parity tests bundle web/ with Vite.
+      - name: Install devDependencies from the lockfile
+        run: npm ci
       - run: npm run test:legacy
