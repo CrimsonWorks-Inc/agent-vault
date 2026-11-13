@@ -15,6 +15,12 @@ fn main() {
             std::process::exit(av_cli::emit(&err, json).code());
         }
     };
+    if prepared.version {
+        std::process::exit(av_cli::print_version(prepared.json).code());
+    }
+    if let Some(topic) = &prepared.help_topic {
+        std::process::exit(av_cli::print_help_topic(topic, prepared.json).code());
+    }
     let cli = match av_cli::Cli::try_parse_from(&prepared.argv) {
         Ok(cli) => cli,
         Err(err) => std::process::exit(av_cli::clap_failure(err, &prepared.argv).code()),

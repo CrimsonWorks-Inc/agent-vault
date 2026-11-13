@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`--version`** (also `-V` and `version`) prints the version; with
+  `--json`, `{ok:true,data:{version}}`. `agent-vault-setup` and
+  `agent-vault-daemon` take `--version` too.
+- **`-h` drills down.** `-h`, `--help` and `help` work after any command words
+  and print just those commands' usage under their section: `av cred -h`,
+  `av session create -h`, `av help mcp install`. Unknown words fall back to
+  the closest group, then the whole page. `-h` inside `exec`'s command line
+  still belongs to the command (`av exec ls -h`). `agent-vault-daemon -h`
+  explains that it takes no arguments.
+- `cred release` has its own help line.
+
 ## 0.3.0
 
 agent-vault is now Rust, with its vault in SQLite. `av` felt slow; the measured

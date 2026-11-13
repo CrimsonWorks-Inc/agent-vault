@@ -2110,3 +2110,114 @@ fn upgrade_from_a_release_directory_names_the_root_owned_installer() {
         &app
     ));
 }
+
+fn prep(words: &[&str]) -> crate::Prepared {
+    let mut argv = vec!["agent-vault".to_string()];
+    argv.extend(words.iter().map(|w| w.to_string()));
+    match crate::prepare(&argv) {
+        Ok(p) => p,
+        Err(e) => panic!("{words:?}: {}", e.message),
+    }
+}
+
+#[test]
+fn dash_h_and_help_name_the_command_words_they_were_asked_about() {
+    let topic = |w: &[&str]| prep(w).help_topic;
+    assert_eq!(topic(&["-h"]), Some(vec![]));
+    assert_eq!(topic(&["--help"]), Some(vec![]));
+    assert_eq!(topic(&["help"]), Some(vec![]));
+    assert_eq!(topic(&["cred", "-h"]), Some(vec!["cred".into()]));
+    assert_eq!(
+        topic(&["cred", "add", "-h"]),
+        Some(vec!["cred".into(), "add".into()])
+    );
+    assert_eq!(
+        topic(&["cred", "add", "my-slug", "--help"]),
+        Some(vec!["cred".into(), "add".into()])
+    );
+    assert_eq!(
+        topic(&["help", "session", "create"]),
+        Some(vec!["session".into(), "create".into()])
+    );
+    // An unknown second word still gets the group's help, not an error.
+    assert_eq!(topic(&["cred", "frob", "-h"]), Some(vec!["cred".into()]));
+    // Inside exec's command line, -h belongs to the command.
+    let exec = prep(&["exec", "ls", "-h"]);
+    assert_eq!(exec.help_topic, None);
+    assert!(exec.argv.iter().any(|a| a == "-h"), "{:?}", exec.argv);
+    assert_eq!(prep(&["exec", "-h"]).help_topic, Some(vec!["exec".into()]));
+    // After `--`, -h is the command's.
+    assert_eq!(prep(&["exec", "--", "ls", "-h"]).help_topic, None);
+}
+
+#[test]
+fn version_flags_and_the_bare_version_command_ask_for_the_version() {
+    for words in [
+        &["--version"][..],
+        &["-V"],
+        &["version"],
+        &["--json", "--version"],
+    ] {
+        let p = prep(words);
+        assert!(p.version, "{words:?}");
+        assert_eq!(p.help_topic, None, "{words:?}");
+    }
+    assert!(prep(&["--json", "--version"]).json);
+    assert!(!prep(&["status"]).version);
+    assert!(!prep(&["help", "version"]).version);
+}
+
+#[test]
+fn topic_help_keeps_only_the_named_commands_under_their_headings() {
+    let full = "title\n\nsetup\n  setup [--dev]          install\n  status | doctor        what runs\n\ncredentials\n  cred add <slug> --kind K\n  cred list | cred rm <slug>\n  cred rotate <slug> [--field F]\n                         replace the value\n  cred rotated-x\n";
+    let rotate = crate::help_for(full, "cred rotate").expect("cred rotate");
+    assert_eq!(
+        rotate,
+        "credentials\n  cred rotate <slug> [--field F]\n                         replace the value\n"
+    );
+    // A command after `|` counts; a longer word that only starts the same does not.
+    assert_eq!(
+        crate::help_for(full, "cred rm").unwrap(),
+        "credentials\n  cred list | cred rm <slug>\n"
+    );
+    assert_eq!(
+        crate::help_for(full, "doctor").unwrap(),
+        "setup\n  status | doctor        what runs\n"
+    );
+    let group = crate::help_for(full, "cred").unwrap();
+    assert!(
+        group.contains("cred add") && group.contains("cred rotated-x"),
+        "{group}"
+    );
+    assert!(!group.contains("setup"), "{group}");
+    assert_eq!(crate::help_for(full, "nonsense"), None);
+    assert_eq!(crate::help_for(full, "cred rot"), None);
+}
+
+#[test]
+fn every_command_in_the_tree_has_its_own_help_lines() {
+    use clap::CommandFactory;
+    let full = crate::help_text_plain();
+    let cmd = crate::cli::Cli::command();
+    let mut missing = Vec::new();
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() || sub.get_name() == "help" {
+            continue;
+        }
+        let name = sub.get_name().to_string();
+        let leaves: Vec<String> = if sub.has_subcommands() {
+            sub.get_subcommands()
+                .filter(|s| !s.is_hide_set())
+                .map(|s| format!("{name} {}", s.get_name()))
+                .collect()
+        } else {
+            vec![name.clone()]
+        };
+        for leaf in leaves {
+            if crate::help_for(&full, &leaf).is_none() {
+                missing.push(leaf);
+            }
+        }
+    }
+    assert!(missing.is_empty(), "no help lines for: {missing:?}");
+}

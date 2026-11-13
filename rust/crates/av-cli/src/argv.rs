@@ -39,6 +39,12 @@ pub struct Prepared {
     pub argv: Vec<String>,
     /// `--json` was an exact token before `--`.
     pub json: bool,
+    /// `--help`, `-h` or `help` was given: the command words it was asked
+    /// about (`["cred", "add"]`, `["cred"]`, or empty for the whole page).
+    /// The caller prints [`crate::print_help_topic`] instead of parsing.
+    pub help_topic: Option<Vec<String>>,
+    /// `--version`, `-V` or a bare `version` command.
+    pub version: bool,
 }
 
 const GROUPS: &[(&str, &[&str])] = &[
@@ -172,6 +178,7 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
     let args = if argv.is_empty() { &[] } else { &argv[1..] };
     let mut json = false;
     let mut help = false;
+    let mut version = false;
     let mut positionals: Vec<String> = Vec::new();
     let mut flags: Vec<Flag> = Vec::new();
     let mut passthrough = false;
@@ -191,6 +198,20 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
         }
         if a == "--json" {
             json = true;
+            i += 1;
+            continue;
+        }
+        // `-h` is help, except inside `exec`'s command line once it has
+        // started (`exec ls -h` without `--` passes `-h` to `ls`).
+        if a == "-h"
+            && !(positionals.first().is_some_and(|p| p == "exec") && positionals.len() >= 2)
+        {
+            help = true;
+            i += 1;
+            continue;
+        }
+        if a == "-V" || a == "--version" {
+            version = true;
             i += 1;
             continue;
         }
@@ -225,11 +246,21 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
 
     if positionals.first().map(String::as_str) == Some("help") {
         help = true;
-        positionals.clear();
+        positionals.remove(0);
     }
-
-    let (path, rest) = resolve(&positionals)?;
+    if version || (positionals.len() == 1 && positionals[0] == "version" && !help) {
+        return Ok(Prepared {
+            argv: vec![argv0],
+            json,
+            help_topic: None,
+            version: true,
+        });
+    }
     if help {
+        // The words before any operand: `cred add <slug> -h` asks about
+        // `cred add`. Unknown words still get help (the closest section).
+        let topic: Vec<String> = positionals.iter().take(2).cloned().collect();
+        let path: Vec<&str> = resolve(&positionals).map(|(p, _)| p).unwrap_or_default();
         let mut out = vec![argv0];
         if json {
             out.push("--json".into());
@@ -240,15 +271,32 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
             out.push("scrub".into());
         }
         out.push("--help".into());
-        return Ok(Prepared { argv: out, json });
+        let topic = if path.is_empty() || path == ["mcp"] {
+            topic.into_iter().take(1).collect()
+        } else {
+            path.iter().map(|w| (*w).to_string()).collect()
+        };
+        return Ok(Prepared {
+            argv: out,
+            json,
+            help_topic: Some(topic),
+            version: false,
+        });
     }
+
+    let (path, rest) = resolve(&positionals)?;
     if path.is_empty() {
         let mut out = vec![argv0];
         if json {
             out.push("--json".into());
         }
         out.push("--help".into());
-        return Ok(Prepared { argv: out, json });
+        return Ok(Prepared {
+            argv: out,
+            json,
+            help_topic: Some(Vec::new()),
+            version: false,
+        });
     }
 
     let bools = bool_flags(&path);
@@ -323,7 +371,12 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
         }
         out.extend(trailing);
     }
-    Ok(Prepared { argv: out, json })
+    Ok(Prepared {
+        argv: out,
+        json,
+        help_topic: None,
+        version: false,
+    })
 }
 
 fn positional_budget(path: &[&str]) -> usize {

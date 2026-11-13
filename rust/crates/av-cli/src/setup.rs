@@ -159,6 +159,10 @@ pub fn run_setup_argv(argv: &[String]) -> Exit {
 }
 
 fn dispatch(argv: &[String]) -> Result<(), Die> {
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        say(&format!("agent-vault-setup {}", env!("CARGO_PKG_VERSION")));
+        return Ok(());
+    }
     let setup = Ctx {
         args: argv.to_vec(),
         dry: flag(argv, "dry-run"),

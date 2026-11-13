@@ -69,7 +69,7 @@ agent-vault - a local credential proxy for agents
 
 setup
   setup [--dev] [--print-only]         install properly (--dev skips the uid boundary)
-  upgrade                              reinstall the daemon from this checkout
+  upgrade                              reinstall the daemon from this checkout or release
   migrate [--dry-run] [--from D] [--to D]  move a JavaScript vault (vault.json) into vault.db
   daemon [--port N]                    run the daemon (gateway + control socket)
   status | doctor | profiles           what is running, and what is configured
@@ -90,7 +90,8 @@ credentials                          (the value is read from the terminal, never
                                        extra token shapes to redact from responses
   cred pin <slug> --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
                                        refuse any TLS key you did not pin
-  cred quarantine <slug> [--reason T]  stop all use at once; cred release <slug> undoes it
+  cred quarantine <slug> [--reason T] | cred release <slug>
+                                       stop all use at once, and undo it
 
 sessions and placeholders
   session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths \"/repos/**\"]
@@ -154,6 +155,7 @@ docs
                                        | safety | refused | commands
 
 --json on any command prints a machine-readable envelope.
+-h after any command shows just its usage; --version prints the version.
 ";
 
 #[test]
