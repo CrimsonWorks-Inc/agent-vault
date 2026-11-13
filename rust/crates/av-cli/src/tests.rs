@@ -526,6 +526,8 @@ fn checkout_root_refuses_the_installed_app() {
         crate::commands::is_installed_app(&via_var),
         "the SYSTEM_ROOT spelling was not the installed app"
     );
+    // Only macOS adds a second spelling below.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut starts = vec![via_var.join("bin")];
     #[cfg(target_os = "macos")]
     {

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2
 
 - **`agent-vault upgrade` just works.** At a terminal it runs the root-owned
   installer itself, through `sudo -k` (your password or Touch ID every time,
@@ -13,6 +13,8 @@
   release build.
 - The install script runs `upgrade` for an existing install, and links
   `agent-vault` and `av` to the release it unpacked.
+- The installed-app test checks the Linux install root, so the Linux CI
+  check passes again.
 
 ## 0.3.1
 
