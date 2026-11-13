@@ -778,3 +778,38 @@ file = "src/lib.rs"
 from = "                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))"
 to = "                .is_some()"
 test = "topic_help_keeps_only_the_named_commands"
+
+[[mutation]]
+name = "upgrade runs a user-owned installer as root"
+file = "src/commands.rs"
+from = "    using_root && terminal\n"
+to = "    terminal\n"
+test = "upgrade_runs_sudo_only_for_the_root_owned_installer"
+
+[[mutation]]
+name = "upgrade runs sudo without a terminal"
+file = "src/commands.rs"
+from = "    using_root && terminal\n"
+to = "    using_root\n"
+test = "upgrade_runs_sudo_only_for_the_root_owned_installer"
+
+[[mutation]]
+name = "upgrade rides a cached sudo session"
+file = "src/commands.rs"
+from = "    vec![\n        \"-k\".into(),\n        installer.as_os_str().to_owned(),"
+to = "    vec![\n        installer.as_os_str().to_owned(),"
+test = "upgrade_runs_sudo_only_for_the_root_owned_installer"
+
+[[mutation]]
+name = "the shell's checkout overrides the release that was run"
+file = "src/commands.rs"
+from = "        if !in_checkout && !is_installed_app(dir.parent().unwrap_or(&dir)) {"
+to = "        if checkout.is_err() && !in_checkout && !is_installed_app(dir.parent().unwrap_or(&dir)) {"
+test = "a_release_directory_is_an_install_source"
+
+[[mutation]]
+name = "a debug build inside a checkout is installed as a release"
+file = "src/commands.rs"
+from = "        if !in_checkout && !is_installed_app(dir.parent().unwrap_or(&dir)) {"
+to = "        if !is_installed_app(dir.parent().unwrap_or(&dir)) {"
+test = "a_release_directory_is_an_install_source"

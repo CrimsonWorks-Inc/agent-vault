@@ -518,22 +518,29 @@ fn checkout_root_refuses_the_installed_app() {
     assert_eq!(found, named);
     assert!(!crate::commands::is_installed_app(&named));
 
-    // The real installed app, both spellings. This only stats that tree.
-    let via_var = std::path::PathBuf::from("/var/db/agent-vault/app");
-    let via_private = std::path::PathBuf::from("/private/var/db/agent-vault/app");
+    // The real installed app. This only stats that tree. On macOS the
+    // root sits under /var, which is a link to /private/var, so both
+    // spellings must name it; elsewhere SYSTEM_ROOT has no second spelling.
+    let via_var = std::path::PathBuf::from(crate::SYSTEM_ROOT).join("app");
     assert!(
         crate::commands::is_installed_app(&via_var),
-        "the /var spelling was not the installed app"
+        "the SYSTEM_ROOT spelling was not the installed app"
     );
-    assert!(
-        crate::commands::is_installed_app(&via_private),
-        "the /private/var spelling was not the installed app"
-    );
-    assert_eq!(
-        crate::setup::canonical_prefix(&via_var),
-        crate::setup::canonical_prefix(&via_private)
-    );
-    for start in [via_var.join("bin"), via_private.join("bin")] {
+    let mut starts = vec![via_var.join("bin")];
+    #[cfg(target_os = "macos")]
+    {
+        let via_private = std::path::PathBuf::from("/private/var/db/agent-vault/app");
+        assert!(
+            crate::commands::is_installed_app(&via_private),
+            "the /private/var spelling was not the installed app"
+        );
+        assert_eq!(
+            crate::setup::canonical_prefix(&via_var),
+            crate::setup::canonical_prefix(&via_private)
+        );
+        starts.push(via_private.join("bin"));
+    }
+    for start in starts {
         let err = crate::commands::resolve_checkout_root(std::slice::from_ref(&start)).unwrap_err();
         let text = err.to_string();
         assert!(
@@ -2049,12 +2056,28 @@ fn a_release_directory_is_an_install_source_and_links_resolve_to_it() {
     let found = crate::commands::install_source_from(Ok(elsewhere), Some(&via_link)).unwrap();
     assert_eq!(found, real);
 
-    // Inside a checkout, the checkout wins.
+    // Run from inside a checkout, the release you ran still wins: the shell's
+    // directory does not choose what gets installed.
     let checkout = tmp.path().join("checkout");
     std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
     std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let found =
         crate::commands::install_source_from(Ok(checkout.clone()), Some(&via_link)).unwrap();
+    assert_eq!(found, real);
+
+    // A binary built in the checkout (its target/debug holds all three) is
+    // not a release: the checkout is the source, so its release build is
+    // installed, never the debug one.
+    let debug = checkout.join("rust/target/debug");
+    std::fs::create_dir_all(&debug).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        std::fs::write(debug.join(name), b"binary").unwrap();
+    }
+    let found = crate::commands::install_source_from(
+        Ok(checkout.clone()),
+        Some(&debug.join("agent-vault")),
+    )
+    .unwrap();
     assert_eq!(found, checkout);
     assert_eq!(
         crate::setup::release_dir_of(&checkout),
@@ -2220,4 +2243,35 @@ fn every_command_in_the_tree_has_its_own_help_lines() {
         }
     }
     assert!(missing.is_empty(), "no help lines for: {missing:?}");
+}
+
+#[test]
+fn upgrade_runs_sudo_only_for_the_root_owned_installer_at_a_terminal_and_always_asks() {
+    use crate::commands::{upgrade_runs_sudo, upgrade_sudo_args};
+    assert!(upgrade_runs_sudo(true, true));
+    assert!(
+        !upgrade_runs_sudo(true, false),
+        "no terminal: an agent's shell"
+    );
+    assert!(
+        !upgrade_runs_sudo(false, true),
+        "an installer you own never runs as root for you"
+    );
+    assert!(!upgrade_runs_sudo(false, false));
+    let installer = std::path::Path::new("/var/db/agent-vault/app/bin/agent-vault-setup");
+    let source = std::path::Path::new("/opt/homebrew/Cellar/agent-vault/0.3.1/bin");
+    let args: Vec<String> = upgrade_sudo_args(installer, source)
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "-k",
+            "/var/db/agent-vault/app/bin/agent-vault-setup",
+            "install",
+            "--from",
+            "/opt/homebrew/Cellar/agent-vault/0.3.1/bin"
+        ]
+    );
 }

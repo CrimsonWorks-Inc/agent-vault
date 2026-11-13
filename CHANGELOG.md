@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **`agent-vault upgrade` just works.** At a terminal it runs the root-owned
+  installer itself, through `sudo -k` (your password or Touch ID every time,
+  never a cached sudo session). Without a terminal, as in an agent's shell,
+  it still only prints the command, and a too-old installed installer is
+  still printed rather than run.
+- **Upgrade installs the release you ran.** A Homebrew or downloaded
+  `agent-vault` upgrades from its own release even when the shell is inside a
+  checkout; a binary built in a checkout still installs that checkout's
+  release build.
+- The install script runs `upgrade` for an existing install, and links
+  `agent-vault` and `av` to the release it unpacked.
+
 ## 0.3.1
 
 - **`--version`** (also `-V` and `version`) prints the version; with

@@ -13,7 +13,7 @@
 #   AGENT_VAULT_VERSION   a release tag such as v0.3.0 (default: the latest)
 #   AGENT_VAULT_HOME      where releases are unpacked (default: ~/.local/share/agent-vault)
 #   AGENT_VAULT_BIN_DIR   where `agent-vault` and `av` links go (default: ~/.local/bin)
-#   AGENT_VAULT_NO_SETUP  set to 1 to unpack only, and run setup yourself
+#   AGENT_VAULT_NO_SETUP  set to 1 to unpack only, and run setup or upgrade yourself
 
 set -eu
 
@@ -102,15 +102,18 @@ case "$(uname -s)" in
   *) system_root="/usr/libexec/agent-vault" ;;
 esac
 if [ -f "$system_root/state.json" ]; then
-  # Already installed: the root-owned installer copies the new binaries in.
-  # `upgrade` prints the exact command; nothing here runs sudo for you.
+  # Already installed: `upgrade` hands this release to the root-owned
+  # installer. At a terminal it runs it (sudo asks for your password);
+  # otherwise it prints the command.
   say ""
-  "$dest/bin/agent-vault" upgrade --print-only
-  say "Run that command to switch the service to $version."
-  exit 0
-fi
-
-if [ -r /dev/tty ]; then
+  if [ -r /dev/tty ]; then
+    "$dest/bin/agent-vault" upgrade < /dev/tty || die "upgrade did not finish; run it again with: $dest/bin/agent-vault upgrade"
+  else
+    "$dest/bin/agent-vault" upgrade --print-only
+    say "Run that command to switch the service to $version."
+    exit 0
+  fi
+elif [ -r /dev/tty ]; then
   "$dest/bin/agent-vault" setup < /dev/tty || die "setup did not finish; run it again with: $dest/bin/agent-vault setup"
 else
   say ""
@@ -118,10 +121,11 @@ else
   exit 0
 fi
 
-# Put `agent-vault` and `av` on PATH. Prefer the root-owned copy the install
-# made: an agent running as you cannot replace it.
-installed="$system_root/app/bin/agent-vault"
-[ -x "$installed" ] || installed="$dest/bin/agent-vault"
+# Put `agent-vault` and `av` on PATH, pointing at this release, so the next
+# `agent-vault upgrade` installs whatever release it belongs to. (The links
+# live in a directory you own, like anything on your PATH; the protection is
+# the root-owned service and vault, not which `av` the shell finds.)
+installed="$dest/bin/agent-vault"
 mkdir -p "$BIN_DIR"
 ln -sf "$installed" "$BIN_DIR/agent-vault"
 ln -sf "$installed" "$BIN_DIR/av"

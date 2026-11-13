@@ -114,14 +114,19 @@ pub(crate) fn install_source_from(
     checkout: Result<PathBuf, CliError>,
     exe: Option<&Path>,
 ) -> Result<PathBuf, CliError> {
+    // A release binary you chose to run (Homebrew, the install script)
+    // installs its own release, wherever the shell happens to be. A binary
+    // built inside a checkout (`rust/target/...`) is not a release: the
+    // checkout's release build is used instead, never a debug build.
+    if let Some(dir) = exe.and_then(crate::setup::release_dir_beside) {
+        let in_checkout = dir.ancestors().any(crate::setup::is_checkout);
+        if !in_checkout && !is_installed_app(dir.parent().unwrap_or(&dir)) {
+            return Ok(dir);
+        }
+    }
     if let Ok(dir) = &checkout {
         if crate::setup::is_checkout(dir) {
             return checkout;
-        }
-    }
-    if let Some(dir) = exe.and_then(crate::setup::release_dir_beside) {
-        if !is_installed_app(dir.parent().unwrap_or(&dir)) {
-            return Ok(dir);
         }
     }
     checkout
@@ -698,9 +703,58 @@ pub async fn upgrade(ctx: &Context, args: &UpgradeArgs) -> Outcome {
         );
     }
     println!();
-    println!("  Run it yourself:");
-    println!("    {}", ctx.paint("36", &cmd));
-    Ok(0)
+    // Only the root-owned installer is run for you, only at a terminal (an
+    // agent's shell has none, so it gets the command instead), and `sudo -k`
+    // asks for your password or Touch ID every time rather than riding a
+    // cached sudo session. The old-installer bootstrap is still printed.
+    let terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if !upgrade_runs_sudo(using_root, terminal) {
+        println!("  Run it yourself:");
+        println!("    {}", ctx.paint("36", &cmd));
+        return Ok(0);
+    }
+    let status = Command::new("sudo")
+        .args(upgrade_sudo_args(&installer, &checkout))
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!();
+            println!(
+                "{} {}",
+                ctx.paint("32", "upgraded"),
+                ctx.paint("2", "check it: agent-vault status")
+            );
+            Ok(0)
+        }
+        Ok(_) => Err(err_next(
+            "the installer stopped before finishing; its output above says where",
+            Exit::Failure,
+            &cmd,
+        )),
+        Err(e) => Err(err_next(
+            format!("could not run sudo: {e}"),
+            Exit::Failure,
+            &cmd,
+        )),
+    }
+}
+
+/// `upgrade` runs sudo itself only for the root-owned installer and only at
+/// a terminal; otherwise it prints the command.
+pub(crate) fn upgrade_runs_sudo(using_root: bool, terminal: bool) -> bool {
+    using_root && terminal
+}
+
+/// The arguments `upgrade` gives sudo: `-k` first, so sudo asks for the
+/// password or Touch ID every time instead of using a cached session.
+pub(crate) fn upgrade_sudo_args(installer: &Path, source: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "-k".into(),
+        installer.as_os_str().to_owned(),
+        "install".into(),
+        "--from".into(),
+        source.as_os_str().to_owned(),
+    ]
 }
 
 /// Whether an installed installer understands `--from`. The JS file is probed
