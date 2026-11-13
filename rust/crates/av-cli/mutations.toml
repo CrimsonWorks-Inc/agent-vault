@@ -757,3 +757,24 @@ to = '''        if false && crate::setup::is_checkout(dir) {
             return checkout;
         }'''
 test = "a_release_directory_is_an_install_source"
+
+[[mutation]]
+name = "-h is not help"
+file = "src/argv.rs"
+from = "        if a == \"-h\"\n            && !(positionals.first().is_some_and(|p| p == \"exec\") && positionals.len() >= 2)"
+to = "        if a == \"-h-never\"\n            && !(positionals.first().is_some_and(|p| p == \"exec\") && positionals.len() >= 2)"
+test = "dash_h_and_help_name_the_command_words"
+
+[[mutation]]
+name = "-h inside exec's command line is taken as help"
+file = "src/argv.rs"
+from = "        if a == \"-h\"\n            && !(positionals.first().is_some_and(|p| p == \"exec\") && positionals.len() >= 2)"
+to = "        if a == \"-h\"\n            && true"
+test = "dash_h_and_help_name_the_command_words"
+
+[[mutation]]
+name = "topic help matches a longer command that only starts the same"
+file = "src/lib.rs"
+from = "                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))"
+to = "                .is_some()"
+test = "topic_help_keeps_only_the_named_commands"

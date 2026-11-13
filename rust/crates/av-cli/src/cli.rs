@@ -20,8 +20,12 @@
 //!    `SCRUB_HELP`. With `--json` it is `{ok:true,data:{help}}`. Clap's
 //!    generated help is disabled (`disable_help_flag`,
 //!    `disable_help_subcommand`); `--help` is a global flag here and `help`
-//!    a command, and the runner prints the JS text. `-h` is not special in
-//!    the JS (it is a positional), and is not here either.
+//!    a command, and the runner prints the JS text. **Deliberate change from
+//!    the JS:** `-h` is help too (the JS took it as a positional), and help
+//!    after command words (`cred add -h`, `help session`) prints only those
+//!    commands' lines ([`crate::print_help_topic`]); `--version`, `-V` and a
+//!    bare `version` print the version. Inside `exec`'s command line `-h`
+//!    still belongs to the command (`exec ls -h`).
 //! 2. **Errors.** A clap parse error must become the JS failure envelope
 //!    (`{ok:false,error:{message,...}}` under `--json`, `error <message>` on
 //!    stderr otherwise) with `EXIT.USAGE`, not clap's own rendering. The

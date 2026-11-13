@@ -927,6 +927,126 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
 /// Print the top-level help (`{ok:true,data:{help}}` under `--json`). Ports
 /// `printHelp()` in `src/cli/index.js`.
 pub fn print_help(ctx: &Context) {
+    let help = help_text(ctx);
+    ctx.out(Some(&help), &json!({ "help": help }));
+}
+
+/// `agent-vault <words> -h`: the lines of the top-level page for those
+/// command words, under their section headings, or the whole page when
+/// nothing matches. `cred scrub` has its own page. Returns the exit status.
+pub fn print_help_topic(topic: &[String], json: bool) -> Exit {
+    let ctx = Context::new(json);
+    if topic.len() == 2 && topic[0] == "cred" && topic[1] == "scrub" {
+        let help = control_commands::SCRUB_HELP;
+        ctx.out(Some(help), &json!({ "help": help }));
+        return Exit::Ok;
+    }
+    let full = help_text(&ctx);
+    let mut words: Vec<&str> = topic.iter().map(String::as_str).collect();
+    while !words.is_empty() {
+        if let Some(section) = help_for(&full, &words.join(" ")) {
+            let footer = ctx.paint(
+                "2",
+                &format!("{} -h lists every command.", cli_invocation()),
+            );
+            let help = format!("{section}\n{footer}");
+            ctx.out(
+                Some(&help),
+                &json!({ "help": help, "topic": words.join(" ") }),
+            );
+            return Exit::Ok;
+        }
+        words.pop();
+    }
+    ctx.out(Some(&full), &json!({ "help": full }));
+    Exit::Ok
+}
+
+/// `agent-vault --version`.
+pub fn print_version(json: bool) -> Exit {
+    let ctx = Context::new(json);
+    let version = env!("CARGO_PKG_VERSION");
+    ctx.out(
+        Some(&format!("agent-vault {version}")),
+        &json!({ "version": version }),
+    );
+    Exit::Ok
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The entries of `full` (a two-space-indented usage line plus its deeper
+/// continuation lines) whose usage names `command`, grouped under their
+/// section headings. `None` when no entry does.
+pub(crate) fn help_for(full: &str, command: &str) -> Option<String> {
+    let names = |head: &str| -> bool {
+        let plain = strip_ansi(head);
+        plain.trim().split(" | ").any(|segment| {
+            segment
+                .strip_prefix(command)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
+    };
+    let mut out = String::new();
+    let mut heading: Option<&str> = None;
+    let mut heading_shown = false;
+    let mut keep = false;
+    let mut any = false;
+    for line in full.lines() {
+        let plain = strip_ansi(line);
+        if plain.trim().is_empty() {
+            keep = false;
+            continue;
+        }
+        let indent = plain.len() - plain.trim_start().len();
+        if indent == 0 {
+            heading = Some(line);
+            heading_shown = false;
+            keep = false;
+            continue;
+        }
+        if indent == 2 {
+            keep = heading.is_some() && names(line);
+            if keep && !heading_shown {
+                if any {
+                    out.push('\n');
+                }
+                out.push_str(heading.unwrap_or_default());
+                out.push('\n');
+                heading_shown = true;
+            }
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+            any = true;
+        }
+    }
+    any.then_some(out)
+}
+
+/// The top-level page without color, for tests.
+#[cfg(test)]
+pub(crate) fn help_text_plain() -> String {
+    help_text(&Context::new(true))
+}
+
+fn help_text(ctx: &Context) -> String {
     let b = |s: &str| ctx.paint("1", s);
     let d = |s: &str| ctx.paint("2", s);
     let help = format!(
@@ -934,7 +1054,7 @@ pub fn print_help(ctx: &Context) {
 
 {setup}
   setup [--dev] [--print-only]         install properly (--dev skips the uid boundary)
-  upgrade                              reinstall the daemon from this checkout
+  upgrade                              reinstall the daemon from this checkout or release
   migrate [--dry-run] [--from D] [--to D]  move a JavaScript vault (vault.json) into vault.db
   daemon [--port N]                    run the daemon (gateway + control socket)
   status | doctor | profiles           what is running, and what is configured
@@ -955,7 +1075,8 @@ pub fn print_help(ctx: &Context) {
                                        extra token shapes to redact from responses
   cred pin <slug> --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
                                        refuse any TLS key you did not pin
-  cred quarantine <slug> [--reason T]  stop all use at once; cred release <slug> undoes it
+  cred quarantine <slug> [--reason T] | cred release <slug>
+                                       stop all use at once, and undo it
 
 {sessions}
   session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths \"/repos/**\"]
@@ -1030,9 +1151,9 @@ pub fn print_help(ctx: &Context) {
         ui = b("ui"),
         mcp = b("mcp"),
         docs = b("docs"),
-        json_note = d("--json on any command prints a machine-readable envelope."),
+        json_note = d("--json on any command prints a machine-readable envelope.\n-h after any command shows just its usage; --version prints the version."),
     );
-    ctx.out(Some(&help), &json!({ "help": help }));
+    help
 }
 
 /// How the reader is invoking this CLI, so printed commands can be pasted
