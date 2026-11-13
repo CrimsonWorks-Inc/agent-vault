@@ -53,7 +53,7 @@ The script checks the archive against the release's `SHA256SUMS` and, when the G
 gh attestation verify agent-vault-<version>-<target>.tar.gz --repo CrimsonWorks-Inc/agent-vault
 ```
 
-Upgrading: run the install command again (or `brew upgrade agent-vault`), then the `sudo` command `agent-vault upgrade` prints. It runs the root-owned installer from your existing install, which an agent cannot edit.
+Upgrading: run the install command again, or `brew upgrade agent-vault && agent-vault upgrade`. `upgrade` hands the release it belongs to (or your checkout's build, if you run it from one) to the root-owned installer from your existing install, which an agent cannot edit. At a terminal it runs that through `sudo -k`, so it asks for your password or Touch ID every time; without a terminal (an agent's shell) it only prints the command.
 
 ## Build from source
 

@@ -63,9 +63,12 @@ def main() -> None:
 
         agent-vault setup
 
-      Upgrading later (after brew upgrade):
+      Upgrading later:
 
-        agent-vault upgrade
+        brew upgrade agent-vault && agent-vault upgrade
+
+      upgrade installs this release into the root-owned service; it asks
+      for your password (or Touch ID) each time.
     EOS
   end
 
