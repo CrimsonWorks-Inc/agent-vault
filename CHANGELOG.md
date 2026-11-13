@@ -32,6 +32,12 @@ port fixes all three and drops the Node runtime.
   the owner out; raw database errors reached `AV_INTERNAL` responses; a panic
   ended the whole daemon (now one request, audited as `daemon.handler_error`);
   migrate told the owner to delete a device key the new vault still needed.
+- **Prebuilt releases.** Tagging a version builds macOS (Apple silicon and
+  Intel) and Linux (x86_64 and arm64) archives with checksums and GitHub build
+  provenance; `install.sh` verifies both before anything runs, and a Homebrew
+  formula is generated for the tap. The installer installs from a release
+  directory as well as a checkout, and `agent-vault upgrade` from a new
+  release prints the root-owned installer with `--from` that release.
 - **The JavaScript implementation is frozen in `legacy/js`** as the reference
   the Rust tests compare against. Nothing installs or runs it, and the npm
   package is now private build tooling for the web UI.

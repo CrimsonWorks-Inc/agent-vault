@@ -1070,10 +1070,24 @@ fn checkout_from(ctx: &Ctx) -> Result<PathBuf, Die> {
             }
             dir = current.parent().map(Path::to_path_buf);
         }
+        // Not in a checkout: a release download or a Homebrew keg, where the
+        // binaries to install sit beside this one.
+        if let Some(dir) = release_dir_beside(&exe) {
+            return Ok(dir);
+        }
     }
     Err(Die::msg(
-        "could not find an agent-vault checkout. Pass --from <path to your checkout>.",
+        "could not find agent-vault to install. Pass --from <a checkout, or the directory holding the release binaries>.",
     ))
+}
+
+/// The directory holding `exe`, symlinks resolved, when it is a release
+/// directory. Homebrew puts links in its bin directory; the files to install
+/// are the ones they point at, so the printed `--from` names those.
+pub(crate) fn release_dir_beside(exe: &Path) -> Option<PathBuf> {
+    let real = exe.canonicalize().ok()?;
+    let dir = real.parent()?.to_path_buf();
+    is_release_dir(&dir).then_some(dir)
 }
 
 /// Resolve every existing prefix, so `/var` and `/private/var` compare equal
@@ -1180,7 +1194,7 @@ pub(crate) fn install_app_accepts(installer: &Path, source: &Path, app: &Path) -
     if refuses_self_install(source, app) || !installer.is_file() {
         return false;
     }
-    is_checkout(source)
+    is_install_source(source)
 }
 
 /// A source checkout of agent-vault: the Rust workspace at `rust/`. The
@@ -1191,11 +1205,33 @@ pub(crate) fn is_checkout(dir: &Path) -> bool {
     dir.join("rust/Cargo.toml").is_file() && dir.join("rust/crates/av-cli").is_dir()
 }
 
+/// A release directory: the binaries themselves, as in a release download
+/// or a Homebrew keg. Whether each is a regular file is checked when it is
+/// copied ([`require_regular_daemon`]).
+pub(crate) fn is_release_dir(dir: &Path) -> bool {
+    dir.join("agent-vault-daemon").exists() && dir.join("agent-vault-setup").exists()
+}
+
+/// Where an install can come from: a checkout or a release directory.
+pub(crate) fn is_install_source(dir: &Path) -> bool {
+    is_checkout(dir) || is_release_dir(dir)
+}
+
+/// The directory whose binaries an install copies: a checkout's
+/// `rust/target/release`, or a release directory itself.
+pub(crate) fn release_dir_of(source: &Path) -> PathBuf {
+    if is_checkout(source) {
+        source.join("rust/target/release")
+    } else {
+        source.to_path_buf()
+    }
+}
+
 fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
     let source = checkout_from(ctx)?;
-    if !is_checkout(&source) {
+    if !is_install_source(&source) {
         return Err(Die::msg(format!(
-            "{} does not look like an agent-vault checkout (no rust/Cargo.toml).",
+            "{} is neither an agent-vault checkout (no rust/Cargo.toml) nor a directory of release binaries.",
             source.display()
         )));
     }
@@ -1242,8 +1278,8 @@ fn install_app(ctx: &Ctx, state: &mut InstallState) -> Result<(), Die> {
 /// Release binaries of the `--from` checkout. The running installer may be
 /// an older binary; the files that get installed are these, not whatever
 /// sits beside `current_exe`.
-fn rust_release_dir(checkout: &Path) -> PathBuf {
-    checkout.join("rust/target/release")
+fn rust_release_dir(source: &Path) -> PathBuf {
+    release_dir_of(source)
 }
 
 /// The release directory must exist and its daemon must be a regular file.
@@ -1253,11 +1289,12 @@ fn require_release_daemon(checkout: &Path) -> Result<PathBuf, Die> {
     let dir = rust_release_dir(checkout);
     if !dir.is_dir() {
         return Err(Die::new(
-            format!(
-                "the Rust release binaries are missing at {}",
-                dir.display()
-            ),
-            "Build them with cargo build --release in the checkout, then run that checkout's installer.",
+            format!("the Rust release binaries are missing at {}", dir.display()),
+            if is_checkout(checkout) {
+                "Build them with cargo build --release in the checkout, then run that checkout's installer."
+            } else {
+                "Point --from at a checkout, or at the directory holding agent-vault, agent-vault-daemon and agent-vault-setup."
+            },
         ));
     }
     require_regular_daemon(&dir.join("agent-vault-daemon"))?;
@@ -1729,7 +1766,9 @@ fn install_recording(ctx: &Ctx) -> Result<InstallState, Die> {
     service_port(value(&ctx.args, "port"))?;
     let source = guard_install_source(ctx)?;
     require_release_daemon(&source)?;
-    warn_if_checkout_debug_installer(&source);
+    if is_checkout(&source) {
+        warn_if_checkout_debug_installer(&source);
+    }
     let enrolled = enrolled_user(ctx)?;
     say(&format!(
         "\n{}{}",

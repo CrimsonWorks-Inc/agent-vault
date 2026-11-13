@@ -446,6 +446,8 @@ fn upgrade_bootstraps_from_the_checkout_release_installer() {
     let release = checkout.join("rust/target/release/agent-vault-setup");
     std::fs::create_dir_all(release.parent().unwrap()).unwrap();
     std::fs::write(&release, b"release").unwrap();
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let debug = checkout.join("rust/target/debug/agent-vault-setup");
     std::fs::create_dir_all(debug.parent().unwrap()).unwrap();
     std::fs::write(&debug, b"debug").unwrap();
@@ -535,7 +537,7 @@ fn checkout_root_refuses_the_installed_app() {
         let err = crate::commands::resolve_checkout_root(std::slice::from_ref(&start)).unwrap_err();
         let text = err.to_string();
         assert!(
-            text.contains("run agent-vault upgrade from your checkout"),
+            text.contains("run agent-vault upgrade from your checkout, or from the new release"),
             "{start:?}: {text}"
         );
     }
@@ -577,6 +579,8 @@ fn copy_rust_bins_copies_the_checkout_release_not_the_running_binary() {
     for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
         std::fs::write(release.join(name), format!("from-checkout-{name}")).unwrap();
     }
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
     let app = tmp.path().join("app");
     crate::setup::copy_rust_bins(&checkout, &app).unwrap();
     for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
@@ -2007,4 +2011,102 @@ fn refuses_self_install_treats_var_and_private_var_as_the_same_directory() {
     let private = std::path::Path::new("/private/var/db/agent-vault/app");
     assert!(crate::setup::refuses_self_install(spelled, private));
     assert!(crate::setup::refuses_self_install(private, spelled));
+}
+
+/// A release directory (a download or a Homebrew keg): the three binaries.
+fn release_dir(root: &std::path::Path) -> std::path::PathBuf {
+    let dir = root.join("agent-vault-0.3.0/bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        std::fs::write(dir.join(name), b"binary").unwrap();
+    }
+    dir
+}
+
+#[test]
+fn a_release_directory_is_an_install_source_and_links_resolve_to_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real = release_dir(tmp.path()).canonicalize().unwrap();
+    assert!(crate::setup::is_install_source(&real));
+    assert_eq!(crate::setup::release_dir_of(&real), real);
+
+    // Homebrew's bin directory holds links into the keg; the source is the
+    // keg, whose files are regular, never the directory of links.
+    let links = tmp.path().join("homebrew/bin");
+    std::fs::create_dir_all(&links).unwrap();
+    for name in ["agent-vault", "agent-vault-daemon", "agent-vault-setup"] {
+        std::os::unix::fs::symlink(real.join(name), links.join(name)).unwrap();
+    }
+    let via_link = links.join("agent-vault");
+    assert_eq!(
+        crate::setup::release_dir_beside(&via_link),
+        Some(real.clone())
+    );
+
+    // Outside a checkout, setup and upgrade install from that keg.
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let found = crate::commands::install_source_from(Ok(elsewhere), Some(&via_link)).unwrap();
+    assert_eq!(found, real);
+
+    // Inside a checkout, the checkout wins.
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir_all(checkout.join("rust/crates/av-cli")).unwrap();
+    std::fs::write(checkout.join("rust/Cargo.toml"), "[workspace]\n").unwrap();
+    let found =
+        crate::commands::install_source_from(Ok(checkout.clone()), Some(&via_link)).unwrap();
+    assert_eq!(found, checkout);
+    assert_eq!(
+        crate::setup::release_dir_of(&checkout),
+        checkout.join("rust/target/release")
+    );
+
+    // A directory with only one of the binaries is not a release.
+    let half = tmp.path().join("half");
+    std::fs::create_dir_all(&half).unwrap();
+    std::fs::write(half.join("agent-vault"), b"binary").unwrap();
+    assert!(!crate::setup::is_install_source(&half));
+    assert_eq!(
+        crate::setup::release_dir_beside(&half.join("agent-vault")),
+        None
+    );
+}
+
+#[test]
+fn upgrade_from_a_release_directory_names_the_root_owned_installer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let release = release_dir(tmp.path()).canonicalize().unwrap();
+    let app = tmp.path().join("root/app");
+    let root_owned = app.join("bin/agent-vault-setup");
+    std::fs::create_dir_all(root_owned.parent().unwrap()).unwrap();
+    std::fs::write(&root_owned, b"#!/bin/sh\n--from\n").unwrap();
+    let (cmd, installer, using_root) =
+        crate::commands::format_upgrade_command(&root_owned, &root_owned, &release).unwrap();
+    assert!(using_root);
+    assert_eq!(installer, root_owned);
+    assert_eq!(
+        cmd,
+        format!(
+            "sudo {} install --from {}",
+            root_owned.display(),
+            release.display()
+        )
+    );
+    assert!(crate::setup::install_app_accepts(
+        &installer, &release, &app
+    ));
+
+    // An installed copy too old for --from: the release's own installer.
+    std::fs::write(&root_owned, b"old installer without the flag").unwrap();
+    let (_, installer, using_root) =
+        crate::commands::format_upgrade_command(&root_owned, &root_owned, &release).unwrap();
+    assert!(!using_root);
+    assert_eq!(installer, release.join("agent-vault-setup"));
+
+    // A release directory inside the installed app is the app itself.
+    assert!(!crate::setup::install_app_accepts(
+        &root_owned,
+        &app.join("bin"),
+        &app
+    ));
 }
