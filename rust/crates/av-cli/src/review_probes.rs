@@ -2,7 +2,7 @@
 //! input shape and pairs it with an ordinary control.
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::commands::{as_rpc, parent_env_kept};
 use crate::setup::{copy_dereference, refuses_self_install};
@@ -84,7 +84,7 @@ fn probe_self_install_control_same_spelling_is_refused() {
 fn probe_var_is_a_symlink_on_macos() {
     // The install root /var/db/agent-vault canonicalizes to /private/var/...
     assert_eq!(
-        Path::new("/var/db").canonicalize().unwrap(),
+        std::path::Path::new("/var/db").canonicalize().unwrap(),
         PathBuf::from("/private/var/db")
     );
 }
