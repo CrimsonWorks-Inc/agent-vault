@@ -43,7 +43,7 @@ curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/downl
 or with Homebrew:
 
 ```bash
-brew install crimsonworks/tap/agent-vault
+brew install crimsonworks-inc/tap/agent-vault
 agent-vault setup
 ```
 
