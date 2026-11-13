@@ -1810,7 +1810,7 @@ fn install_recording(ctx: &Ctx) -> Result<InstallState, Die> {
     ));
     say(&format!(
         "  Check it: {} {}",
-        paint("1", &format!("cat {}/vault.json", vault_dir().display())),
+        paint("1", &format!("ls {}", vault_dir().display())),
         paint("2", "should say Permission denied")
     ));
     say("");

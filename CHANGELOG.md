@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
 
 - **`--version`** (also `-V` and `version`) prints the version; with
   `--json`, `{ok:true,data:{version}}`. `agent-vault-setup` and
@@ -12,6 +12,8 @@
   still belongs to the command (`av exec ls -h`). `agent-vault-daemon -h`
   explains that it takes no arguments.
 - `cred release` has its own help line.
+- The installer's closing check is `ls` of the vault directory (it named
+  `vault.json`, which the Rust vault does not have).
 
 ## 0.3.0
 

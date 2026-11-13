@@ -1,6 +1,6 @@
 {
   "name": "agent-vault",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Build tooling for agent-vault's web UI and the conformance suite. agent-vault itself is Rust (rust/); the JavaScript implementation is frozen in legacy/js as a test reference.",
   "homepage": "https://iolitelabs.com/agent-vault",
