@@ -269,6 +269,11 @@ pub struct CredentialRecord<S = SealedV2> {
     /// SPKI pins per canonical host (F11): host -> `sha256/<b64>` list.
     #[serde(default)]
     pub pins: BTreeMap<String, Vec<String>>,
+    /// The folder the human filed it under (`clients/acme`), or none. Only
+    /// for organizing: no grant, session or placeholder reads it. New with
+    /// SQLite schema 2; no JS source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// One sealed credential field. AAD `<cred_id>|<name>|<key_version>`. Ports

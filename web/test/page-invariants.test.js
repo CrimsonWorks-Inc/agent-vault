@@ -57,8 +57,9 @@ test('no raw bidi or control characters hide in the source', () => {
 
 test('nothing the page stores in the browser can hold a token or a placeholder', () => {
   // Storage is for page conveniences only: the theme, the page size, whether
-  // notifications are on. Each write's key is one of these constants.
-  const allowed = new Set(['THEME_KEY', 'NOTIFY_KEY', 'key'])
+  // notifications are on, and the credentials page's folder and filters.
+  // Each write's key is one of these constants.
+  const allowed = new Set(['THEME_KEY', 'NOTIFY_KEY', 'key', 'VIEW_KEY'])
   for (const { f, text } of sources()) {
     if (/\.test\.jsx?$/.test(f)) continue
     assert.ok(!/sessionStorage/.test(text), `${f} uses sessionStorage`)
@@ -66,6 +67,8 @@ test('nothing the page stores in the browser can hold a token or a placeholder',
       assert.ok(allowed.has(m[1].trim()), `${f} writes storage under ${m[1].trim()}`)
     }
   }
+  const creds = read(join(SRC, 'pages/Credentials.jsx'))
+  assert.match(creds, /setItem\(VIEW_KEY, JSON\.stringify\(\{ place: placeKey\(place\), \.\.\.filters \}\)\)/, 'the credentials view stores only the folder and the filters')
   const paging = read(join(SRC, 'lib/paging.js'))
   assert.match(paging, /storage\?\.setItem\(key, String\(clampLimit\(n\)\)\)/, 'the page size is the only value stored under a caller key')
 })

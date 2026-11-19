@@ -316,7 +316,16 @@ agent-vault cred expiry gh 2027-02-28              # or: none
 agent-vault cred test gh                          # or: cred test --all
 agent-vault cred rotate gh --retire-hours 24      # hidden terminal prompt for new value
 agent-vault cred rotate gh --field token --revoke --expires 2027-02-28
+agent-vault cred move gh clients/acme             # or: none
+agent-vault cred rename-folder clients customers  # moves everything beneath it
+agent-vault cred list --folder customers
 ```
+
+Folders organize the list, in the CLI and on the UI's Credentials page, up to
+four levels deep (`a/b/c/d`; letters, digits, spaces and `- _ .`). They change
+nothing an agent can reach: no grant, session or placeholder reads a folder,
+so moving a credential is not gated by presence. Every move is in the audit log
+(`cred.folder_set`, `cred.folder_renamed`).
 
 Rotation substitutes the new value immediately. By default existing grants keep
 working; `--revoke` revokes them. Both modes deny pending and granted-but-unspent

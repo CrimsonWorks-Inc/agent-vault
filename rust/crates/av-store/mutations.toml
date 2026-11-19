@@ -1074,3 +1074,54 @@ from = '''    /// (`s.infinite === true`).
 to = '''    /// (`s.infinite === true`).
     pub infinite: bool,'''
 test = "tests::migrate::a_session_written_before_infinite"
+
+# Folders (schema 2), 2026-11-19.
+
+[[mutation]]
+name = 'a folder that only starts with the same name counts as inside it'
+file = "src/folders.rs"
+from = '''            && path.as_bytes()[folder.len()] == b'/')'''
+to = '''            )'''
+test = "folders::tests::within_means"
+
+[[mutation]]
+name = 'a folder path deeper than four levels is accepted'
+file = "src/folders.rs"
+from = '''    if parts.len() > MAX_DEPTH {'''
+to = '''    if parts.len() > MAX_DEPTH + 1 {'''
+test = "folders::tests::good_paths_pass"
+
+[[mutation]]
+name = 'a folder name may hold any character, bidi controls included'
+file = "src/folders.rs"
+from = '''            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))'''
+to = '''            .all(|ch| !ch.is_control())'''
+test = "folders::tests::good_paths_pass"
+
+[[mutation]]
+name = 'a rename that would go too deep moves the credentials before it'
+file = "src/vault.rs"
+from = '''                if let Some(why) = crate::folders::folder_problem(&next) {
+                    return Err(refuse('''
+to = '''                if let Some(why) = crate::folders::folder_problem(&next).filter(|_| moved.is_empty()) {
+                    return Err(refuse('''
+test = "tests::folders::a_rename_that_would_go_too_deep"
+
+[[mutation]]
+name = 'filing a credential where it already is records another move'
+file = "src/vault.rs"
+from = '''            if cred.folder != to {
+                let from = std::mem::replace(&mut cred.folder, to.clone());'''
+to = '''            if true {
+                let from = std::mem::replace(&mut cred.folder, to.clone());'''
+test = "tests::folders::filing_a_credential"
+
+[[mutation]]
+name = 'the migration to folders forgets the column check'
+file = "src/schema.rs"
+from = '''ALTER TABLE credentials ADD COLUMN folder TEXT
+    CHECK (folder IS NULL OR (length(folder) BETWEEN 1 AND 200
+                              AND folder NOT LIKE '/%' AND folder NOT LIKE '%/'
+                              AND instr(folder, '//') = 0));'''
+to = '''ALTER TABLE credentials ADD COLUMN folder TEXT;'''
+test = "tests::folders::the_column_refuses"

@@ -3036,3 +3036,59 @@ name = 'a read error on the watched connection is ignored, so a reset client kee
 file = "src/listen.rs"
 from = '''                std::task::Poll::Ready(Err(_)) => c.ended = true,'''
 to = '''                std::task::Poll::Ready(Err(_)) => {}'''
+
+# Credential folders on the page (schema 2), 2026-11-19.
+
+[[mutation]]
+name = 'the page counts a folder that only starts with the same name as inside it'
+file = "src/ui/list_paging.rs"
+from = '''            if !folder.is_some_and(|f| av_store::folders::is_within(f, want)) {'''
+to = '''            if !folder.is_some_and(|f| f.starts_with(want.as_str())) {'''
+test = "tests::folders::the_page_lists_a_folder"
+
+[[mutation]]
+name = 'a cursor made under one kind filter opens under another'
+file = "src/ui/list_paging.rs"
+from = '''            "status": self.status,
+            "kind": self.kind,
+        })'''
+to = '''            "status": self.status,
+        })'''
+test = "tests::folders::the_page_orders_by_folder"
+
+[[mutation]]
+name = 'the folder order puts a sibling between a folder and its subfolders'
+file = "src/ui/list_paging.rs"
+from = '''        Some(f) => Value::from(f.replace('/', "\u{1}")),'''
+to = '''        Some(f) => Value::from(f),'''
+test = "tests::folders::the_page_orders_by_folder"
+
+[[mutation]]
+name = 'never checked matches nothing'
+file = "src/ui/list_paging.rs"
+from = '''        "untested" => health
+            .and_then(|h| h.get("checked_at"))
+            .is_none_or(Value::is_null),'''
+to = '''        "untested" => false,'''
+test = "tests::folders::the_page_lists_a_folder"
+
+[[mutation]]
+name = 'the page accepts a filter it does not know'
+file = "src/ui/list_paging.rs"
+from = '''    if !CREDENTIAL_SORT_NAMES.contains(&sort.as_str()) {'''
+to = '''    if false {'''
+test = "tests::folders::the_page_refuses_a_filter"
+
+[[mutation]]
+name = 'a malformed folder reaches the store through control'
+file = "src/server/routes.rs"
+from = '''                    Some(_) => return Err(dr(C::PolicyDenied, "folder is a path like clients/acme, or null to unfile it", "folder")),'''
+to = '''                    Some(other) => Some(other.to_string()),'''
+test = "tests::folders::the_control_routes_refuse"
+
+[[mutation]]
+name = 'the credentials page filters and searches before towardPage, so q can test a withheld folder'
+file = "src/ui/server.rs"
+from = '''                let shown: Vec<Value> = toward_page(&load, 0)'''
+to = '''                let shown: Vec<Value> = load'''
+test = "tests::folders::a_folder_named_like_a_token"

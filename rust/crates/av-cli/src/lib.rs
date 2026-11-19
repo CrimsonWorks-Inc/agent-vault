@@ -168,7 +168,7 @@ pub(crate) fn load_client_state() -> Value {
 /// Every command as a human types it. Ports `COMMAND_NAMES` in
 /// `src/cli/index.js` (`Object.keys(COMMANDS)` in definition order, with the
 /// `controlCommands` keys merged after), plus `migrate`, new in the port.
-pub const COMMAND_NAMES: [&str; 68] = [
+pub const COMMAND_NAMES: [&str; 70] = [
     "setup",
     "daemon",
     "upgrade",
@@ -213,6 +213,8 @@ pub const COMMAND_NAMES: [&str; 68] = [
     "cred test",
     "cred quarantine",
     "cred release",
+    "cred move",
+    "cred rename-folder",
     "panic",
     "tripwire show",
     "tripwire on",
@@ -834,7 +836,7 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
         Command::Quickstart => commands::quickstart(ctx).await,
         Command::Cred { command } => match command {
             cli::CredCommand::Add(a) => commands::cred_add(ctx, &a).await,
-            cli::CredCommand::List => commands::cred_list(ctx).await,
+            cli::CredCommand::List(a) => commands::cred_list(ctx, &a).await,
             cli::CredCommand::Rm(a) => commands::cred_rm(ctx, &a).await,
             cli::CredCommand::Rotate(a) => control_commands::cred_rotate(ctx, &a).await,
             cli::CredCommand::Test(a) => control_commands::cred_test(ctx, &a).await,
@@ -843,6 +845,10 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
             cli::CredCommand::Pin(a) => control_commands::cred_pin(ctx, &a).await,
             cli::CredCommand::Quarantine(a) => control_commands::cred_quarantine(ctx, &a).await,
             cli::CredCommand::Release(a) => control_commands::cred_release(ctx, &a).await,
+            cli::CredCommand::Move(a) => control_commands::cred_move(ctx, &a).await,
+            cli::CredCommand::RenameFolder(a) => {
+                control_commands::cred_rename_folder(ctx, &a).await
+            }
         },
         Command::Session { command } => match command {
             cli::SessionCommand::Create(a) => commands::session_create(ctx, &a).await,
@@ -1066,7 +1072,7 @@ fn help_text(ctx: &Context) -> String {
 
 {credentials}                          {cred_note}
   cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
-  cred list | cred rm <slug>
+  cred list [--folder F] | cred rm <slug>
   cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
                                        replace the value; sessions keep working
   cred test [<slug> | --all]           run the connector's read-only probe
@@ -1077,6 +1083,8 @@ fn help_text(ctx: &Context) -> String {
                                        refuse any TLS key you did not pin
   cred quarantine <slug> [--reason T] | cred release <slug>
                                        stop all use at once, and undo it
+  cred move <slug> <folder|none>       file it under a folder like clients/acme
+  cred rename-folder <from> <to>       rename a folder and everything beneath it
 
 {sessions}
   session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths \"/repos/**\"]

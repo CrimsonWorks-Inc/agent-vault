@@ -252,3 +252,88 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
     expect(callsTo(server, 'POST', 'credentials/test')[0].body).toEqual({ slug: 'gh-work' })
   })
 })
+
+describe('Credentials: folders, filters and order', () => {
+  const TREE = {
+    total: 3, unfiled: 1,
+    folders: [
+      { path: 'clients', direct: 0, total: 2 },
+      { path: 'clients/acme', direct: 2, total: 2 },
+    ],
+    kinds: [{ kind: 'github', count: 2 }, { kind: 'http', count: 1 }],
+  }
+  const filed = CREDS.map((c, i) => (i < 2 ? { ...c, folder: 'clients/acme' } : c))
+  const routes = (extra = {}) => pagesRoutes({
+    'GET credentials': envelope(filed),
+    'GET credentials/folders': TREE,
+    'POST credentials/folder': ({ body }) => ({ slug: body.slug, ...(body.folder ? { folder: body.folder } : {}) }),
+    'POST credentials/folder/rename': ({ body }) => ({ ok: true, moved: ['gh-work'], ...body }),
+    ...extra,
+  })
+  const lastList = (server) => callsTo(server, 'GET', 'credentials').at(-1).query
+  const tree = () => screen.getByRole('navigation', { name: 'Folders' })
+
+  it('shows the folder tree with counts, and a folder asks for itself and beneath it', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
+    await loaded()
+    await waitFor(() => expect(within(tree()).getByRole('button', { name: /acme/ })).toBeTruthy())
+    expect(within(tree()).getByRole('button', { name: /All credentials\s*3/ })).toBeTruthy()
+    expect(within(tree()).getByRole('button', { name: /Unfiled\s*1/ })).toBeTruthy()
+    expect(screen.getAllByText('clients / acme').length).toBeGreaterThan(0)
+    await click(within(tree()).getByRole('button', { name: /acme/ }))
+    await waitFor(() => expect(lastList(server).folder).toBe('clients/acme'))
+    expect(lastList(server).unfiled).toBeUndefined()
+    await click(within(tree()).getByRole('button', { name: /Unfiled/ }))
+    await waitFor(() => expect(lastList(server).unfiled).toBe('1'))
+    expect(lastList(server).folder).toBeUndefined()
+  })
+
+  it('a status chip is a pressed toggle that narrows the list, and clearing puts it back', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
+    await loaded()
+    const chip = screen.getByRole('button', { name: 'Expiring' })
+    expect(chip.getAttribute('aria-pressed')).toBe('false')
+    await click(chip)
+    expect(chip.getAttribute('aria-pressed')).toBe('true')
+    await waitFor(() => expect(lastList(server).status).toBe('expiring'))
+    await click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(lastList(server).status).toBeUndefined())
+  })
+
+  it('moving one credential posts its slug and the folder, unsigned, and re-reads the tree', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
+    await loaded()
+    const before = callsTo(server, 'GET', 'credentials/folders').length
+    await click(screen.getAllByRole('button', { name: 'More actions for old-hook' })[0])
+    await click(await screen.findByRole('menuitem', { name: 'Move to folder…' }))
+    const input = within(await screen.findByRole('dialog')).getByLabelText('Folder')
+    type(input, 'infra//aws')
+    expect(await screen.findByText('Drop the leading, trailing or doubled /.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Move' }).disabled).toBe(true)
+    type(input, 'infra/aws')
+    await click(screen.getByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(callsTo(server, 'POST', 'credentials/folder').length).toBe(1))
+    const sent = callsTo(server, 'POST', 'credentials/folder')[0].body
+    expect(sent).toEqual({ slug: 'old-hook', folder: 'infra/aws' })
+    expect(callsTo(server, 'GET', 'presence/challenge')).toHaveLength(0)
+    await waitFor(() => expect(callsTo(server, 'GET', 'credentials/folders').length).toBeGreaterThan(before))
+  })
+
+  it('selecting rows moves them together', async () => {
+    const server = fakeServer(routes())
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server })
+    await loaded()
+    await click(screen.getAllByRole('checkbox', { name: 'Select gh-work' })[0])
+    await click(screen.getAllByRole('checkbox', { name: 'Select old-hook' })[0])
+    expect(screen.getByText('2 selected')).toBeTruthy()
+    await click(screen.getByRole('button', { name: 'Move to folder…' }))
+    type(within(await screen.findByRole('dialog')).getByLabelText('Folder'), 'archive')
+    await click(screen.getByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(callsTo(server, 'POST', 'credentials/folder').length).toBe(2))
+    expect(callsTo(server, 'POST', 'credentials/folder').map((c) => c.body.slug).sort()).toEqual(['gh-work', 'old-hook'])
+    await waitFor(() => expect(screen.queryByText('2 selected')).toBeNull())
+  })
+})

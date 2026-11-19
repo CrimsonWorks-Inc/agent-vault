@@ -60,10 +60,17 @@ function kindOf(status, body, code) {
   return 'http'
 }
 
-/** `path` with the given query parameters; undefined, null and '' are left out. */
+/**
+ * `path` with the given query parameters; undefined, null and '' are left
+ * out. An array is the same key once per value (`status=a&status=b`).
+ */
 export function withQuery(path, params = {}) {
   const q = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) {
+    if (Array.isArray(v)) {
+      for (const x of v) if (x !== undefined && x !== null && x !== '') q.append(k, String(x))
+      continue
+    }
     if (v === undefined || v === null || v === '') continue
     q.set(k, String(v))
   }
