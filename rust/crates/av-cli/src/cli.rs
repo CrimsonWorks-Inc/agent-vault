@@ -358,8 +358,8 @@ pub enum CredCommand {
     /// `COMMANDS['cred:add']` in `src/cli/index.js`.
     Add(CredAddArgs),
     /// List credentials. Ports `COMMANDS['cred:list']` in
-    /// `src/cli/index.js`.
-    List,
+    /// `src/cli/index.js`; `--folder` is new with folders.
+    List(CredListArgs),
     /// Delete a credential. Ports `COMMANDS['cred:rm']` in
     /// `src/cli/index.js`.
     Rm(SlugArg),
@@ -384,6 +384,38 @@ pub enum CredCommand {
     /// Undo a quarantine. Ports `'cred:release'` in
     /// `src/cli/control-commands.js`.
     Release(SlugArg),
+    /// File a credential under a folder, or `none`. New with folders; no JS
+    /// source.
+    Move(CredMoveArgs),
+    /// Rename a folder and everything beneath it. New with folders; no JS
+    /// source.
+    RenameFolder(CredRenameFolderArgs),
+}
+
+/// `cred list [--folder F]`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct CredListArgs {
+    /// Only this folder and the folders beneath it.
+    #[arg(long)]
+    pub folder: Option<String>,
+}
+
+/// `cred move <slug> <folder|none>`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct CredMoveArgs {
+    /// The credential slug.
+    pub slug: Option<String>,
+    /// A folder path like `clients/acme`, or `none` to unfile it.
+    pub folder: Option<String>,
+}
+
+/// `cred rename-folder <from> <to>`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct CredRenameFolderArgs {
+    /// The folder to rename.
+    pub from: Option<String>,
+    /// Its new path.
+    pub to: Option<String>,
 }
 
 /// A single optional `<slug>` positional (`args._[0]`).

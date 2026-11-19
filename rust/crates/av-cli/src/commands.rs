@@ -29,7 +29,7 @@ use crate::control_commands::{approval_preview_lines, clean_text};
 use crate::files::{self, FileError};
 use crate::mcp_install::{self, EntrySpec, InstallSpec};
 use crate::policy_input::{
-    self, boolean_flag, json_number, optional_number, session_input, text_flag, NumberLimits,
+    self, boolean_flag, json_number, optional_number, session_input, text_flag, usage, NumberLimits,
 };
 use crate::{
     cli_invocation, client_state_path, load_client_state, remember_created, socket_path,
@@ -1011,8 +1011,20 @@ pub async fn cred_add(ctx: &Context, args: &CredAddArgs) -> Outcome {
 }
 
 /// Ports `COMMANDS['cred:list']`.
-pub async fn cred_list(ctx: &Context) -> Outcome {
-    let creds = ctx.control("GET", "/v1/credentials", None).await?;
+pub async fn cred_list(ctx: &Context, args: &crate::cli::CredListArgs) -> Outcome {
+    let mut creds = ctx.control("GET", "/v1/credentials", None).await?;
+    if let Some(want) = args.folder.as_deref() {
+        if let Some(why) = av_store::folders::folder_problem(want) {
+            return Err(usage(format!("--folder: {why}")));
+        }
+        if let Value::Array(list) = &mut creds {
+            list.retain(|c| {
+                c.get("folder")
+                    .and_then(Value::as_str)
+                    .is_some_and(|f| av_store::folders::is_within(f, want))
+            });
+        }
+    }
     if ctx.json {
         ctx.out(None, &creds);
         return Ok(0);
@@ -1037,6 +1049,9 @@ pub async fn cred_list(ctx: &Context) -> Outcome {
             ctx.paint("2", kind),
             ctx.paint("2", host)
         );
+        if let Some(folder) = c.get("folder").and_then(Value::as_str) {
+            println!("  folder: {}", clean_text(folder));
+        }
         match c.get("expiry_warning").and_then(|v| v.as_str()) {
             Some("expired") => println!("  {}", ctx.paint("31", "expired")),
             Some("soon") => println!("  {}", ctx.paint("33", "expires soon")),

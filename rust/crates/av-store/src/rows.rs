@@ -339,6 +339,7 @@ fn cred_head(r: &Row<'_>) -> rusqlite::Result<CredentialRecord> {
         quarantine: parse_opt(r.get(7)?)?,
         scrub_patterns: parse(&r.get::<_, String>(8)?)?,
         pins: BTreeMap::new(),
+        folder: r.get(9)?,
     })
 }
 
@@ -400,7 +401,7 @@ fn cred_fill(c: &Connection, cred: &mut CredentialRecord) -> Result<()> {
 pub(crate) fn credential_by_id(c: &Connection, id: &str) -> Result<Option<CredentialRecord>> {
     let mut cred = c
         .prepare_cached(
-            "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns
+            "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns, folder
              FROM credentials WHERE id = ?1",
         )?
         .query_row([id], cred_head)
@@ -414,7 +415,7 @@ pub(crate) fn credential_by_id(c: &Connection, id: &str) -> Result<Option<Creden
 pub(crate) fn credential_by_slug(c: &Connection, slug: &str) -> Result<Option<CredentialRecord>> {
     let mut cred = c
         .prepare_cached(
-            "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns
+            "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns, folder
              FROM credentials WHERE slug = ?1",
         )?
         .query_row([slug], cred_head)
@@ -427,7 +428,7 @@ pub(crate) fn credential_by_slug(c: &Connection, slug: &str) -> Result<Option<Cr
 
 pub(crate) fn credentials_all(c: &Connection) -> Result<Vec<CredentialRecord>> {
     let mut stmt = c.prepare_cached(
-        "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns
+        "SELECT id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns, folder
          FROM credentials ORDER BY id",
     )?;
     let mut all = stmt
@@ -442,8 +443,8 @@ pub(crate) fn credentials_all(c: &Connection) -> Result<Vec<CredentialRecord>> {
 /// Insert a whole credential (fields, retired values, pins).
 pub(crate) fn credential_insert(c: &Connection, cred: &CredentialRecord) -> Result<()> {
     c.prepare_cached(
-        "INSERT INTO credentials (id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO credentials (id, slug, connector_kind, connector, created_at, expires_at, health, quarantine, scrub_patterns, folder)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?
     .execute(params![
         cred.id,
@@ -455,6 +456,7 @@ pub(crate) fn credential_insert(c: &Connection, cred: &CredentialRecord) -> Resu
         cred.health.as_ref().map(json).transpose()?,
         cred.quarantine.as_ref().map(json).transpose()?,
         json(&cred.scrub_patterns)?,
+        cred.folder,
     ])?;
     fields_write(c, cred)?;
     pins_write(c, cred)?;
@@ -464,7 +466,7 @@ pub(crate) fn credential_insert(c: &Connection, cred: &CredentialRecord) -> Resu
 /// Update the credential's own columns (not fields or pins).
 pub(crate) fn credential_update_meta(c: &Connection, cred: &CredentialRecord) -> Result<()> {
     c.prepare_cached(
-        "UPDATE credentials SET connector = ?2, expires_at = ?3, health = ?4, quarantine = ?5, scrub_patterns = ?6
+        "UPDATE credentials SET connector = ?2, expires_at = ?3, health = ?4, quarantine = ?5, scrub_patterns = ?6, folder = ?7
          WHERE id = ?1",
     )?
     .execute(params![
@@ -474,6 +476,7 @@ pub(crate) fn credential_update_meta(c: &Connection, cred: &CredentialRecord) ->
         cred.health.as_ref().map(json).transpose()?,
         cred.quarantine.as_ref().map(json).transpose()?,
         json(&cred.scrub_patterns)?,
+        cred.folder,
     ])?;
     Ok(())
 }

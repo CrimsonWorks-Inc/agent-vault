@@ -1378,14 +1378,54 @@ impl UiServer {
         let presence_only = || obj_of(&[("presence", b("presence"))]);
         match key {
             "GET status" => ok(self.control("GET", "/v1/status", None).await?),
-            "GET credentials" => ok(self
-                .listed(
-                    query,
-                    "credentials",
-                    self.control("GET", "/v1/credentials", None).await?,
-                    None,
-                    &[],
-                    json!({}),
+            "GET credentials" => {
+                let params = search_params(query);
+                let view = list_paging::credential_view_of(&params)?;
+                let load = self.control("GET", "/v1/credentials", None).await?;
+                let Some(paging) = paging_of(&params)? else {
+                    return ok(load);
+                };
+                let shown: Vec<Value> = toward_page(&load, 0)
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| view.keeps(c))
+                    .collect();
+                ok(list_paging::page_list(
+                    &shown,
+                    view.spec(),
+                    &paging,
+                    &view.filters(),
+                    &self.inner.cursors,
+                )?)
+            }
+            "GET credentials/folders" => {
+                let load = self.control("GET", "/v1/credentials", None).await?;
+                // Counts only, so nothing is searched here; the answer is
+                // withheld on its way out like every other.
+                ok(list_paging::credential_folders(
+                    load.as_array().map(Vec::as_slice).unwrap_or(&[]),
+                ))
+            }
+            "POST credentials/folder" => {
+                let folder = match body.get("folder") {
+                    Some(Value::String(f)) if !f.is_empty() => Value::String(f.clone()),
+                    _ => Value::Null,
+                };
+                ok(self
+                    .control(
+                        "POST",
+                        "/v1/credentials/folder",
+                        Some(json!({"slug": b("slug"), "folder": folder})),
+                    )
+                    .await?)
+            }
+            "POST credentials/folder/rename" => ok(self
+                .control(
+                    "POST",
+                    "/v1/credentials/folder/rename",
+                    Some(json!({"from": b("from"), "to": b("to")})),
                 )
                 .await?),
             "GET sessions" => ok(self

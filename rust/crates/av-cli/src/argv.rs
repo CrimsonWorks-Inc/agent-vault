@@ -61,6 +61,8 @@ const GROUPS: &[(&str, &[&str])] = &[
             "pin",
             "quarantine",
             "release",
+            "move",
+            "rename-folder",
         ],
     ),
     ("session", &["create", "list", "revoke", "narrow", "show"]),
@@ -382,7 +384,7 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
 fn positional_budget(path: &[&str]) -> usize {
     match path {
         ["exec"] => usize::MAX,
-        ["cred", "expiry"] => 2,
+        ["cred", "expiry"] | ["cred", "move"] | ["cred", "rename-folder"] => 2,
         ["cred", "add"]
         | ["cred", "rm"]
         | ["cred", "rotate"]

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ArrowPathIcon, BeakerIcon, LockClosedIcon, ShieldCheckIcon, TrashIcon } from '@heroicons/react/16/solid'
+import { ArrowPathIcon, BeakerIcon, FolderIcon, LockClosedIcon, ShieldCheckIcon, TrashIcon } from '@heroicons/react/16/solid'
 import { useApi, useSlowCache } from '../../hooks/useApi.js'
 import { usePresence } from '../../hooks/usePresence.js'
 import { usePrompt } from '../../hooks/usePrompt.js'
@@ -16,7 +16,7 @@ import { heldDenied } from './credentialText.js'
  * Rotate in view, Release in view while it is quarantined, the rest in a
  * menu. Each gated change is signed over exactly what is sent.
  */
-export function CredentialActions({ c, onTest, onManage, onRotate, onChanged }) {
+export function CredentialActions({ c, onTest, onManage, onRotate, onChanged, onMove }) {
   const api = useApi()
   const slow = useSlowCache()
   const presence = usePresence()
@@ -70,6 +70,7 @@ export function CredentialActions({ c, onTest, onManage, onRotate, onChanged }) 
   }
 
   const menu = [
+    ...(onMove ? [{ label: 'Move to folder…', icon: FolderIcon, onClick: () => onMove([slug], c.folder ?? '') }] : []),
     { label: 'Scrub patterns and expiry', icon: ShieldCheckIcon, onClick: () => onManage(slug) },
     ...(c.quarantine ? [] : [{ label: 'Quarantine', icon: LockClosedIcon, danger: true, onClick: quarantine }]),
     { label: 'Remove', icon: TrashIcon, danger: true, onClick: remove },

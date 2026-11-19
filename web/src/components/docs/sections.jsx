@@ -452,7 +452,7 @@ ${x} quickstart                 credential, session, and what to hand the agent
 
 ${x} cred add [slug] [--kind K] [--host H] [--expires YYYY-MM-DD]
                                store a credential (value read from the terminal)
-${x} cred list | cred rm SLUG
+${x} cred list [--folder F] | cred rm SLUG
 ${x} cred rotate SLUG [--field F] [--revoke] [--retire-hours N]
                                replace the value; sessions keep working
 ${x} cred test [SLUG | --all]   run the connector's read-only probe
@@ -460,6 +460,8 @@ ${x} cred expiry SLUG YYYY-MM-DD|none
 ${x} cred scrub SLUG [--add PATTERN [--sample TEXT] | --rm ID]
 ${x} cred pin SLUG --host H [--add sha256/...] [--rm sha256/... | --clear] [--live]
 ${x} cred quarantine SLUG [--reason T] | cred release SLUG
+${x} cred move SLUG FOLDER|none  file it under a folder like clients/acme
+${x} cred rename-folder FROM TO  rename a folder and everything beneath it
 ${x} profiles                   the built-in connector kinds and their ceilings
 
 ${x} session create --cred S[,S...] [--methods GET,POST] [--paths "/repos/**"]

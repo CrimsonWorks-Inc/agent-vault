@@ -1,4 +1,5 @@
-import { KeyIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
+import { FunnelIcon, KeyIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline'
+import { FolderIcon } from '@heroicons/react/16/solid'
 import { Badge } from '../ui/Badge.jsx'
 import { DataTable } from '../ui/DataTable.jsx'
 import { UntrustedText } from '../ui/UntrustedText.jsx'
@@ -10,8 +11,17 @@ import { CredentialActions } from './CredentialActions.jsx'
  * The stored credentials, one row each: what it is, what to notice about it,
  * and what can be done to it. A table on md and up, cards below.
  */
-export function CredentialsTable({ list, tests, onTest, onManage, onRotate, onChanged }) {
+export function CredentialsTable({ list, tests, onTest, onManage, onRotate, onChanged, onMove, selected, onSelect, narrowed = false, showFolder = true }) {
   const searching = Boolean(list.q.trim())
+  const pageSlugs = list.items.map((c) => c.slug)
+  const allOnPage = pageSlugs.length > 0 && pageSlugs.every((s) => selected?.has(s))
+  const toggleAll = () => onSelect?.(allOnPage ? new Set([...selected].filter((s) => !pageSlugs.includes(s))) : new Set([...(selected ?? []), ...pageSlugs]))
+  const toggle = (slug) => {
+    const next = new Set(selected)
+    if (next.has(slug)) next.delete(slug)
+    else next.add(slug)
+    onSelect?.(next)
+  }
   return (
     <DataTable
       caption="Stored credentials"
@@ -19,26 +29,46 @@ export function CredentialsTable({ list, tests, onTest, onManage, onRotate, onCh
       rowKey="slug"
       loading={list.loading}
       empty={searching
-        ? { icon: MagnifyingGlassIcon, title: 'Nothing matches', body: `No credential matches “${list.q.trim()}”.` }
-        : { icon: KeyIcon, title: 'No credentials yet', body: 'Add one below.' }}
+        ? { icon: MagnifyingGlassIcon, title: 'Nothing matches', body: `No credential here matches “${cleanLine(list.q.trim())}”.` }
+        : narrowed
+          ? { icon: FunnelIcon, title: 'Nothing here', body: 'No credential is in this folder with these filters.' }
+          : { icon: KeyIcon, title: 'No credentials yet', body: 'Add one below.' }}
       columns={[
-        { key: 'slug', header: 'Name', primary: true, cell: (c) => <CredentialName c={c} /> },
+        ...(onSelect ? [{
+          key: 'select',
+          className: 'w-px',
+          // On cards the header would repeat as each row's label; phones move
+          // one at a time from the row menu.
+          hideOnCard: true,
+          header: <input type="checkbox" className="size-4 accent-accent" checked={allOnPage} onChange={toggleAll} aria-label="Select every credential on this page" />,
+          cell: (c) => <input type="checkbox" className="size-4 accent-accent" checked={selected?.has(c.slug) ?? false} onChange={() => toggle(c.slug)} aria-label={`Select ${cleanLine(c.slug)}`} />,
+        }] : []),
+        { key: 'slug', header: 'Name', primary: true, cell: (c) => <CredentialName c={c} showFolder={showFolder} /> },
         { key: 'details', header: 'Details', cell: (c) => <CredentialDetails c={c} test={tests.get(c.slug)} /> },
         {
           key: 'actions', header: 'Actions', align: 'right', className: 'w-px',
-          cell: (c) => <CredentialActions c={c} onTest={onTest} onManage={onManage} onRotate={onRotate} onChanged={onChanged} />,
+          cell: (c) => <CredentialActions c={c} onTest={onTest} onManage={onManage} onRotate={onRotate} onChanged={onChanged} onMove={onMove} />,
         },
       ]}
     />
   )
 }
 
-export function CredentialName({ c }) {
+export function CredentialName({ c, showFolder = true }) {
   return (
-    <span className="flex flex-wrap items-center gap-1.5">
-      <span className="font-mono text-sm font-medium text-ink">{cleanLine(c.slug)}</span>
-      <Badge mono>{cleanLine(c.kind)}</Badge>
-      {credentialBadges(c).map((b) => <Badge key={b.text} tone={b.tone} dot>{b.text}</Badge>)}
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span className="flex flex-wrap items-center gap-1.5">
+        <span className="font-mono text-sm font-medium text-ink">{cleanLine(c.slug)}</span>
+        <Badge mono>{cleanLine(c.kind)}</Badge>
+        {credentialBadges(c).map((b) => <Badge key={b.text} tone={b.tone} dot>{b.text}</Badge>)}
+      </span>
+      {showFolder && typeof c.folder === 'string' && (
+        <span className="flex items-center gap-1 text-xs text-muted">
+          <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <span className="sr-only">Folder </span>
+          <span className="truncate font-mono">{cleanLine(c.folder).split('/').join(' / ')}</span>
+        </span>
+      )}
     </span>
   )
 }

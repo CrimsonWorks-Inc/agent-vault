@@ -81,7 +81,7 @@ guided                               (run these with no arguments)
 
 credentials                          (the value is read from the terminal, never argv)
   cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
-  cred list | cred rm <slug>
+  cred list [--folder F] | cred rm <slug>
   cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
                                        replace the value; sessions keep working
   cred test [<slug> | --all]           run the connector's read-only probe
@@ -92,6 +92,8 @@ credentials                          (the value is read from the terminal, never
                                        refuse any TLS key you did not pin
   cred quarantine <slug> [--reason T] | cred release <slug>
                                        stop all use at once, and undo it
+  cred move <slug> <folder|none>       file it under a folder like clients/acme
+  cred rename-folder <from> <to>       rename a folder and everything beneath it
 
 sessions and placeholders
   session create --cred <slug>[,<slug>...] [--methods GET,POST] [--paths \"/repos/**\"]

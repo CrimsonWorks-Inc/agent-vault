@@ -14,6 +14,7 @@ use crate::upstream::{
 };
 
 mod control;
+mod folders;
 mod gateway;
 mod guards;
 mod handler_guard;

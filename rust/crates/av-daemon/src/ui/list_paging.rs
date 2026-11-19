@@ -279,7 +279,7 @@ static LISTS: [ListSpec; 9] = [
         name: "credentials",
         key: |c, _| vec![g(c, "slug"), g(c, "id")],
         dirs: &[1, 1],
-        fields: |c| vec![g(c, "slug"), g(c, "id"), g(c, "kind"), g(c, "label")],
+        fields: credential_search_fields,
     },
     ListSpec {
         name: "sessions",
@@ -355,6 +355,254 @@ pub fn list_spec(name: &str) -> Option<&'static ListSpec> {
         _ => return None,
     };
     Some(&LISTS[i])
+}
+
+/// What `q` searches in a credential: its name, id, kind, label, folder
+/// and host.
+fn credential_search_fields(c: &Value) -> Vec<Value> {
+    vec![
+        g(c, "slug"),
+        g(c, "id"),
+        g(c, "kind"),
+        g(c, "label"),
+        g(c, "folder"),
+        c.get("connector")
+            .map(|k| g(k, "host"))
+            .unwrap_or(Value::Null),
+    ]
+}
+
+/// A folder's place in the folder order: `/` sorts below every name
+/// character, so a folder's subfolders follow it directly (`clients`,
+/// `clients/acme`, then `clients-old`). Unfiled sorts first.
+fn folder_order(c: &Value) -> Value {
+    match c.get("folder").and_then(Value::as_str) {
+        Some(f) => Value::from(f.replace('/', "\u{1}")),
+        None => Value::Null,
+    }
+}
+
+fn checked_at(c: &Value) -> Value {
+    c.get("health")
+        .map(|h| g(h, "checked_at"))
+        .unwrap_or(Value::Null)
+}
+
+/// The credential list in its other orders. Each has its own cursor name, so
+/// a cursor from one order is refused by another.
+static CREDENTIAL_SORTS: [ListSpec; 3] = [
+    ListSpec {
+        name: "credentials:folder",
+        key: |c, _| vec![folder_order(c), g(c, "slug"), g(c, "id")],
+        dirs: &[1, 1, 1],
+        fields: credential_search_fields,
+    },
+    ListSpec {
+        name: "credentials:created",
+        key: |c, _| vec![g(c, "created_at"), g(c, "id")],
+        dirs: &[-1, -1],
+        fields: credential_search_fields,
+    },
+    ListSpec {
+        name: "credentials:checked",
+        key: |c, _| vec![checked_at(c), g(c, "slug"), g(c, "id")],
+        dirs: &[-1, 1, 1],
+        fields: credential_search_fields,
+    },
+];
+
+/// The credential statuses a list can be narrowed to.
+pub const CREDENTIAL_STATUSES: [&str; 4] = ["attention", "expiring", "quarantined", "untested"];
+/// The credential list's orders.
+pub const CREDENTIAL_SORT_NAMES: [&str; 4] = ["name", "folder", "created", "checked"];
+
+/// How the credentials page narrows and orders its list. New with folders;
+/// no JS source.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialView {
+    /// This folder and everything beneath it.
+    pub folder: Option<String>,
+    /// Only credentials in no folder.
+    pub unfiled: bool,
+    /// Any of these statuses (empty: any).
+    pub status: Vec<String>,
+    /// Any of these kinds (empty: any).
+    pub kind: Vec<String>,
+    /// `name`, `folder`, `created` or `checked`.
+    pub sort: String,
+}
+
+fn bad_filter(why: String) -> PagingError {
+    PagingError::new("AV_BAD_FILTER", why)
+}
+
+/// Read `folder`, `unfiled`, `status`, `kind` and `sort` from a query.
+pub fn credential_view_of(params: &[(String, String)]) -> Result<CredentialView, PagingError> {
+    let all = |k: &str| {
+        params
+            .iter()
+            .filter(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .collect::<Vec<_>>()
+    };
+    let one = |k: &str| -> Result<Option<String>, PagingError> {
+        let v = all(k);
+        if v.len() > 1 {
+            return Err(bad_filter(format!("{k} was given more than once")));
+        }
+        Ok(v.into_iter().next())
+    };
+    let folder = one("folder")?;
+    if let Some(why) = folder
+        .as_deref()
+        .and_then(av_store::folders::folder_problem)
+    {
+        return Err(bad_filter(why));
+    }
+    let unfiled = match one("unfiled")?.as_deref() {
+        None => false,
+        Some("1") => true,
+        Some(_) => return Err(bad_filter("unfiled is 1 or absent".into())),
+    };
+    if unfiled && folder.is_some() {
+        return Err(bad_filter(
+            "ask for a folder or for unfiled, not both".into(),
+        ));
+    }
+    let mut status = all("status");
+    if let Some(bad) = status
+        .iter()
+        .find(|s| !CREDENTIAL_STATUSES.contains(&s.as_str()))
+    {
+        return Err(bad_filter(format!(
+            "status {bad} is not one of {}",
+            CREDENTIAL_STATUSES.join(", ")
+        )));
+    }
+    status.sort();
+    status.dedup();
+    let mut kind = all("kind");
+    if kind.len() > 32 || kind.iter().any(|k| k.is_empty() || k.len() > 64) {
+        return Err(bad_filter(
+            "kind is a connector kind, at most 32 of them".into(),
+        ));
+    }
+    kind.sort();
+    kind.dedup();
+    let sort = one("sort")?.unwrap_or_else(|| "name".into());
+    if !CREDENTIAL_SORT_NAMES.contains(&sort.as_str()) {
+        return Err(bad_filter(format!(
+            "sort is one of {}",
+            CREDENTIAL_SORT_NAMES.join(", ")
+        )));
+    }
+    Ok(CredentialView {
+        folder,
+        unfiled,
+        status,
+        kind,
+        sort,
+    })
+}
+
+fn has_status(c: &Value, status: &str) -> bool {
+    let health = c.get("health").filter(|h| !h.is_null());
+    match status {
+        "attention" => health
+            .and_then(|h| h.get("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "unauthorized" || s == "forbidden"),
+        "expiring" => c.get("expiry_warning").is_some_and(|w| !w.is_null()),
+        "quarantined" => c.get("quarantine").is_some_and(|q| !q.is_null()),
+        "untested" => health
+            .and_then(|h| h.get("checked_at"))
+            .is_none_or(Value::is_null),
+        _ => false,
+    }
+}
+
+impl CredentialView {
+    /// Whether a credential belongs in this view.
+    pub fn keeps(&self, c: &Value) -> bool {
+        let folder = c.get("folder").and_then(Value::as_str);
+        if self.unfiled && folder.is_some() {
+            return false;
+        }
+        if let Some(want) = &self.folder {
+            if !folder.is_some_and(|f| av_store::folders::is_within(f, want)) {
+                return false;
+            }
+        }
+        if !self.kind.is_empty()
+            && !c
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| self.kind.iter().any(|w| w == k))
+        {
+            return false;
+        }
+        self.status.is_empty() || self.status.iter().any(|s| has_status(c, s))
+    }
+
+    /// The list spec for this order.
+    pub fn spec(&self) -> &'static ListSpec {
+        match self.sort.as_str() {
+            "folder" => &CREDENTIAL_SORTS[0],
+            "created" => &CREDENTIAL_SORTS[1],
+            "checked" => &CREDENTIAL_SORTS[2],
+            _ => &LISTS[0],
+        }
+    }
+
+    /// What a cursor is bound to, beside the search.
+    pub fn filters(&self) -> Value {
+        json!({
+            "folder": self.folder,
+            "unfiled": self.unfiled,
+            "status": self.status,
+            "kind": self.kind,
+        })
+    }
+}
+
+/// The folder tree over every credential: each folder and each folder above
+/// one, with how many credentials sit directly in it and how many in it or
+/// beneath it; and the kinds in use.
+pub fn credential_folders(items: &[Value]) -> Value {
+    use std::collections::BTreeMap;
+    let mut tree: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut kinds: BTreeMap<String, u64> = BTreeMap::new();
+    let mut unfiled = 0u64;
+    for c in items {
+        if let Some(k) = c.get("kind").and_then(Value::as_str) {
+            *kinds.entry(k.to_string()).or_default() += 1;
+        }
+        let Some(f) = c.get("folder").and_then(Value::as_str) else {
+            unfiled += 1;
+            continue;
+        };
+        let mut at = String::new();
+        for part in f.split('/') {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(part);
+            tree.entry(at.clone()).or_default().1 += 1;
+        }
+        tree.entry(f.to_string()).or_default().0 += 1;
+    }
+    json!({
+        "total": items.len(),
+        "unfiled": unfiled,
+        "folders": tree
+            .into_iter()
+            .map(|(path, (direct, total))| json!({"path": path, "direct": direct, "total": total}))
+            .collect::<Vec<_>>(),
+        "kinds": kinds
+            .into_iter()
+            .map(|(kind, count)| json!({"kind": kind, "count": count}))
+            .collect::<Vec<_>>(),
+    })
 }
 
 /// Ports `AUDIT_FIELDS(r)`.

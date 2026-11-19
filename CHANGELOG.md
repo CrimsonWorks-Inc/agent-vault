@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Credential folders.** File credentials under nested folders
+  (`clients/acme`, up to four levels): `av cred move <slug> <folder|none>`,
+  `av cred rename-folder <from> <to>`, `av cred list --folder F`. Folders
+  only organize; no grant, session or placeholder reads them. Moves are not
+  gated, and each is in the audit log (`cred.folder_set`,
+  `cred.folder_renamed`).
+- **A better Credentials page.** A folder tree beside the list (a picker on
+  small screens), search across name, kind, host and folder, status filters
+  (needs attention, expiring, quarantined, never checked), a kind filter,
+  sort by name, folder, newest or last checked, and moving one credential or
+  a selection at once. The page remembers your folder and filters.
+- **Schema 2.** The vault database gains a `folder` column on first start.
+  The migration is forward-only: once this version opens a vault, 0.3.x
+  refuses to open it.
+
 ## 0.3.2
 
 - **`agent-vault upgrade` just works.** At a terminal it runs the root-owned

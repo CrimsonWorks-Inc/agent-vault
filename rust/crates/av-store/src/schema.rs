@@ -43,7 +43,7 @@
 /// The version of this SQLite schema, stored in the `schema_version` row.
 /// No JS source: the JS `SCHEMA_VERSION` in `src/store/vault.js` versions
 /// `vault.json`, which this replaces.
-pub const DB_SCHEMA_VERSION: u32 = 1;
+pub const DB_SCHEMA_VERSION: u32 = 2;
 
 /// Version 1 of the schema.
 pub const SCHEMA_SQL: &str = r#"
@@ -351,7 +351,18 @@ END;
 /// Forward-only migrations. Entry `i` moves the schema from version `i` to
 /// `i + 1` (entry 0 creates version 1 on an empty database). Append only;
 /// never edit a shipped entry. No JS source: new with SQLite.
-pub const MIGRATIONS: &[&str] = &[SCHEMA_SQL];
+pub const MIGRATIONS: &[&str] = &[SCHEMA_SQL, SCHEMA_2_FOLDERS];
+
+/// Version 2: a credential's folder (`clients/acme`), for organizing only.
+/// The daemon checks the path's shape ([`crate::folders::folder_problem`]);
+/// the column check is the backstop. No JS source: new with SQLite.
+pub const SCHEMA_2_FOLDERS: &str = r#"
+ALTER TABLE credentials ADD COLUMN folder TEXT
+    CHECK (folder IS NULL OR (length(folder) BETWEEN 1 AND 200
+                              AND folder NOT LIKE '/%' AND folder NOT LIKE '%/'
+                              AND instr(folder, '//') = 0));
+CREATE INDEX credentials_folder ON credentials (folder);
+"#;
 
 /// Every table [`SCHEMA_SQL`] creates, for tests and `migrate --dry-run`
 /// counts. No JS source: new with SQLite.

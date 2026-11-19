@@ -13,6 +13,7 @@ pub mod client_state;
 pub mod crypto;
 pub mod db;
 pub mod error;
+pub mod folders;
 pub mod ids;
 pub mod migrate;
 #[allow(unsafe_code)]
