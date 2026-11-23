@@ -385,9 +385,7 @@ pub fn run_in_terminal(script: &str) -> Result<(), String> {
                 .into(),
         );
     }
-    // AppleScript string escaping. The scripts are constants with neither
-    // character in them (a test checks), so this is a second lock on the door.
-    let quoted = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let quoted = applescript_string(script);
     let mut cmd = Command::new("/usr/bin/osascript");
     cmd.args([
         "-e",
@@ -412,6 +410,12 @@ pub fn run_in_terminal(script: &str) -> Result<(), String> {
             Err("Terminal did not open. Try again in a moment.".into())
         }
     }
+}
+
+/// The inside of an AppleScript string literal: backslash and double quote are
+/// its only special characters.
+fn applescript_string(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Open a URL in the default browser.
@@ -479,6 +483,45 @@ mod tests {
     fn the_port_is_read_from_the_link() {
         assert_eq!(ui_port("http://localhost:7412/?t=abc"), Some(7412));
         assert_eq!(ui_port("http://localhost:/?t=abc"), None);
+    }
+
+    /// AppleScript itself must read every Terminal command back unchanged.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn applescript_reads_each_terminal_command_back_exactly() {
+        use crate::model::Action;
+        let mut scripts: Vec<String> = [
+            Action::InstallInTerminal,
+            Action::PassphraseInTerminal,
+            Action::ExportInTerminal,
+            Action::RestoreInTerminal,
+            Action::Review("sr_01ABC".into()),
+            Action::Start("keys-all".into()),
+            Action::NewSession,
+            Action::AddKey,
+            Action::RotateKey("openai-api".into()),
+            Action::ReleaseKey("openai-api".into()),
+            Action::Unlock,
+        ]
+        .iter()
+        .map(|a| a.terminal_script().unwrap())
+        .collect();
+        scripts.push(r#"a "quoted" \ backslash"#.to_string());
+        for script in scripts {
+            let out = Command::new("/usr/bin/osascript")
+                .args(["-e", &format!("return \"{}\"", applescript_string(&script))])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout).trim_end_matches('\n'),
+                script
+            );
+        }
     }
 
     #[test]

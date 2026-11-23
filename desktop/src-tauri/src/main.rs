@@ -174,6 +174,9 @@ fn load_prefs(path: Option<&std::path::Path>) -> Prefs {
         if let Some(done) = v.get("welcomed").and_then(Value::as_bool) {
             prefs.welcomed = done;
         }
+        if let Some(on) = v.get("terminal").and_then(Value::as_bool) {
+            prefs.terminal = on;
+        }
     }
     prefs
 }
@@ -186,7 +189,11 @@ fn save_prefs(state: &Companion) {
         let _ = std::fs::create_dir_all(dir);
     }
     let prefs = state.prefs();
-    let body = json!({ "notifications": prefs.notifications, "welcomed": prefs.welcomed });
+    let body = json!({
+        "notifications": prefs.notifications,
+        "welcomed": prefs.welcomed,
+        "terminal": prefs.terminal,
+    });
     let _ = std::fs::write(path, format!("{body:#}\n"));
 }
 
@@ -465,6 +472,13 @@ fn act(app: &AppHandle, state: &Companion, action: &Action) -> Result<(), String
             }
             return Ok(());
         }
+        Action::ToggleTerminal => {
+            if let Ok(mut prefs) = state.prefs.lock() {
+                prefs.terminal = !prefs.terminal;
+            }
+            save_prefs(state);
+            return Ok(());
+        }
         Action::ToggleAutostart => {
             let launcher = app.autolaunch();
             let on = !launcher.is_enabled().unwrap_or(false);
@@ -481,11 +495,19 @@ fn act(app: &AppHandle, state: &Companion, action: &Action) -> Result<(), String
         }
         _ => {}
     }
-    if let Some(script) = action.terminal_script() {
+    // Where the human proves presence. The menu item already carries its
+    // route, so a click does what its label said.
+    if let Action::Terminal(_) = action {
+        let script = action
+            .terminal_script()
+            .ok_or_else(|| "That is not available right now.".to_string())?;
         return cli::run_in_terminal(&script);
     }
     if let Some(fragment) = action.ui_fragment() {
         return open_ui(state, &fragment);
+    }
+    if let Some(script) = action.terminal_script() {
+        return cli::run_in_terminal(&script);
     }
     let Some(args) = action.cli_args() else {
         return Ok(());

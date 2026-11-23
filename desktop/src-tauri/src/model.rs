@@ -77,10 +77,14 @@ pub struct Key {
 }
 
 /// What `doctor` says about the human factor. `None` means not known.
+///
+/// Whether Touch ID *approvals* are enrolled is not here: the CLI does not
+/// report it. (`doctor`'s "authenticator" is Touch ID *unlock*, a separate
+/// thing.) So the companion never guesses which way the user approves; the
+/// user says, in Settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Setup {
     pub passphrase: Option<bool>,
-    pub touch_id: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +101,15 @@ pub struct Prefs {
     pub autostart: bool,
     /// The first-run welcome has been shown.
     pub welcomed: bool,
+    /// Decide and grant in Terminal with the passphrase, even when Touch ID
+    /// approvals are set up.
+    pub terminal: bool,
+}
+
+/// Where the actions that need the human are sent: Terminal and the
+/// passphrase when the user has chosen that, the web UI and Touch ID otherwise.
+pub fn use_terminal(prefs: Prefs) -> bool {
+    prefs.terminal
 }
 
 impl Default for Prefs {
@@ -105,6 +118,7 @@ impl Default for Prefs {
             notifications: true,
             autostart: false,
             welcomed: false,
+            terminal: false,
         }
     }
 }
@@ -163,21 +177,23 @@ impl Snapshot {
 
 /// Everything a menu click can ask for.
 ///
-/// There is deliberately no variant that approves, denies, creates a session,
-/// saves a template, adds or releases a credential, or unlocks: those widen
-/// access and need the human's proof. The `…InUi` variants only open the page
-/// of the vault's web UI where that proof is given, and the two `…InTerminal`
-/// variants open Terminal on a fixed command the human then completes.
+/// The companion itself runs only the commands in `cli_args`, none of which
+/// the daemon gates. Everything that widens access (deciding a request,
+/// starting a session, adding, replacing or re-allowing a key, unlocking) is
+/// handed to one of the two places where the human proves presence: a page of
+/// the vault's web UI (Touch ID), or a Terminal window on the vault's own
+/// command (passphrase). `use_terminal` picks which.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    ReviewInUi(String),
-    StartInUi(String),
-    NewSessionInUi,
-    AddKeyInUi,
-    ReleaseKeyInUi,
+    Review(String),
+    Start(String),
+    NewSession,
+    AddKey,
+    ReleaseKey(String),
+    RotateKey(String),
     TouchIdInUi,
     OpenUi,
-    UnlockInUi,
+    Unlock,
     Revoke(String),
     StopKey(String),
     TestKeys,
@@ -190,8 +206,13 @@ pub enum Action {
     RestoreInTerminal,
     ToggleNotifications,
     ToggleAutostart,
+    ToggleTerminal,
     Refresh,
     Quit,
+    /// One of the actions above that has both routes, sent to Terminal.
+    /// The route is part of the menu item, so what its label says is what
+    /// a click does, whatever has changed since the menu was drawn.
+    Terminal(Box<Action>),
 }
 
 pub struct Confirm {
@@ -203,14 +224,15 @@ pub struct Confirm {
 impl Action {
     pub fn id(&self) -> String {
         match self {
-            Action::ReviewInUi(id) => format!("review:{id}"),
-            Action::StartInUi(name) => format!("start:{name}"),
-            Action::NewSessionInUi => "new-session".into(),
-            Action::AddKeyInUi => "new-key".into(),
-            Action::ReleaseKeyInUi => "release-key".into(),
+            Action::Review(id) => format!("review:{id}"),
+            Action::Start(name) => format!("start:{name}"),
+            Action::NewSession => "new-session".into(),
+            Action::AddKey => "new-key".into(),
+            Action::ReleaseKey(slug) => format!("release-key:{slug}"),
+            Action::RotateKey(slug) => format!("rotate-key:{slug}"),
             Action::TouchIdInUi => "touch-id".into(),
             Action::OpenUi => "open".into(),
-            Action::UnlockInUi => "unlock".into(),
+            Action::Unlock => "unlock".into(),
             Action::Revoke(sid) => format!("revoke:{sid}"),
             Action::StopKey(slug) => format!("stop-key:{slug}"),
             Action::TestKeys => "test-keys".into(),
@@ -223,21 +245,28 @@ impl Action {
             Action::RestoreInTerminal => "restore-keys".into(),
             Action::ToggleNotifications => "toggle-notifications".into(),
             Action::ToggleAutostart => "toggle-autostart".into(),
+            Action::ToggleTerminal => "toggle-terminal".into(),
             Action::Refresh => "refresh".into(),
             Action::Quit => "quit".into(),
+            Action::Terminal(inner) => format!("terminal:{}", inner.id()),
         }
     }
 
     /// The reverse of `id`. Anything that does not round-trip to a safe id is
     /// refused, so a menu id can never smuggle an odd value into a CLI call.
     pub fn parse(id: &str) -> Option<Action> {
+        if let Some(rest) = id.strip_prefix("terminal:") {
+            let inner = Action::parse(rest)?;
+            return inner
+                .has_both_routes()
+                .then(|| Action::Terminal(Box::new(inner)));
+        }
         let action = match id {
-            "new-session" => Action::NewSessionInUi,
-            "new-key" => Action::AddKeyInUi,
-            "release-key" => Action::ReleaseKeyInUi,
+            "new-session" => Action::NewSession,
+            "new-key" => Action::AddKey,
             "touch-id" => Action::TouchIdInUi,
             "open" => Action::OpenUi,
-            "unlock" => Action::UnlockInUi,
+            "unlock" => Action::Unlock,
             "test-keys" => Action::TestKeys,
             "lock" => Action::Lock,
             "panic" => Action::Panic,
@@ -247,6 +276,7 @@ impl Action {
             "restore-keys" => Action::RestoreInTerminal,
             "toggle-notifications" => Action::ToggleNotifications,
             "toggle-autostart" => Action::ToggleAutostart,
+            "toggle-terminal" => Action::ToggleTerminal,
             "refresh" => Action::Refresh,
             "quit" => Action::Quit,
             _ => {
@@ -255,10 +285,12 @@ impl Action {
                     return None;
                 }
                 match head {
-                    "review" => Action::ReviewInUi(rest.into()),
-                    "start" => Action::StartInUi(rest.into()),
+                    "review" => Action::Review(rest.into()),
+                    "start" => Action::Start(rest.into()),
                     "revoke" => Action::Revoke(rest.into()),
                     "stop-key" => Action::StopKey(rest.into()),
+                    "release-key" => Action::ReleaseKey(rest.into()),
+                    "rotate-key" => Action::RotateKey(rest.into()),
                     "connect" if AGENTS.iter().any(|(id, _)| *id == rest) => {
                         Action::Connect(rest.into())
                     }
@@ -272,15 +304,15 @@ impl Action {
     /// The web UI page to open, as a URL fragment the UI's router reads.
     pub fn ui_fragment(&self) -> Option<String> {
         match self {
-            Action::ReviewInUi(id) => Some(format!("#approvals/{}", encode_component(id))),
-            Action::StartInUi(name) => Some(format!(
+            Action::Review(id) => Some(format!("#approvals/{}", encode_component(id))),
+            Action::Start(name) => Some(format!(
                 "#sessions/{}",
                 encode_component(&format!("new:{name}"))
             )),
-            Action::NewSessionInUi => Some("#sessions/new".into()),
-            Action::AddKeyInUi => Some("#credentials".into()),
-            Action::ReleaseKeyInUi => Some("#containment".into()),
-            Action::TouchIdInUi | Action::UnlockInUi => Some("#settings".into()),
+            Action::NewSession => Some("#sessions/new".into()),
+            Action::AddKey | Action::RotateKey(_) => Some("#credentials".into()),
+            Action::ReleaseKey(_) => Some("#containment".into()),
+            Action::TouchIdInUi | Action::Unlock => Some("#settings".into()),
             Action::OpenUi => Some(String::new()),
             _ => None,
         }
@@ -309,57 +341,132 @@ impl Action {
         Some(words.into_iter().map(String::from).collect())
     }
 
-    /// A fixed command for Terminal: no part of it comes from the vault, an
-    /// agent or the menu. The human types their password and passphrase there.
+    /// The command to run in Terminal, for the steps where the human types
+    /// a password or passphrase. The text is fixed except for an id, key name
+    /// or template name, and those are only ever the plain kind (`safe_id`).
     ///
-    /// Terminal starts the user's own shell, so each program is run through
-    /// `env -i`: whatever the shell profile exports (`AGENT_VAULT_DIR`, a
-    /// different `PATH`, installer switches) does not reach it.
+    /// Terminal starts the user's own shell, whichever that is, with whatever
+    /// its profile sets up. So the shell is handed one thing to do: start
+    /// `/bin/sh` in an emptied environment on a single-quoted script. The
+    /// user's shell only expands `$HOME`, `$USER` and `$TERM`; everything else
+    /// is read by `/bin/sh`, the same way on every Mac.
+    ///
+    /// The vault keeps a short window open after a passphrase is typed, in
+    /// which it does not ask again. So a command that would decide or grant
+    /// something the moment it runs first shows what it is about and asks for
+    /// a typed answer, matched exactly.
     pub fn terminal_script(&self) -> Option<String> {
-        const ENV: &str =
-            "/usr/bin/env -i HOME=$HOME USER=$USER TERM=$TERM PATH=/usr/bin:/bin:/usr/sbin:/sbin";
-        const VAULT: &str = "/var/db/agent-vault/app/bin/agent-vault";
+        const V: &str = "/var/db/agent-vault/app/bin/agent-vault";
         const FILE: &str = "~/Desktop/agent-vault-backup.json";
-        Some(match self {
+        const CLOSE: &str = "echo; echo \"You can close this window.\"";
+        // Reads one line as typed: no trimming, no backslash handling, and an
+        // unreadable or closed input counts as no answer.
+        const ASK: &str = "answer=\"\"; IFS= read -r answer || answer=\"\"";
+        let body = match self {
             // The installer unpacks the release and prints the one privileged
             // command; `setup --print-only` prints it again on its own line, and
             // that line is what runs under sudo. Then the passphrase, at once:
             // a vault with no passphrase belongs to whoever sets the first one.
             Action::InstallInTerminal => format!(
-                "clear; echo 'Setting up agent-vault. This takes about a minute.'; echo; \
+                "echo \"Setting up agent-vault. This takes about a minute.\"; echo; \
                  /usr/bin/curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/download/install.sh \
-                 | {ENV}:/opt/homebrew/bin:/usr/local/bin /bin/sh \
-                 && echo && echo 'Enter your Mac password to finish installing.' \
-                 && {ENV} ~/.local/bin/agent-vault setup --print-only | /usr/bin/grep '^sudo ' | {ENV} /bin/sh \
-                 && echo && echo 'Now choose a passphrase. You will need it to approve what agents may do.' \
-                 && {ENV} {VAULT} passphrase set \
-                 && echo && echo 'Finished. You can close this window.' \
-                 || echo 'Setup did not finish. Choose Set up agent-vault from the menu to try again.'"
+                 | PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin /bin/sh \
+                 && echo && echo \"Enter your Mac password to finish installing.\" \
+                 && ~/.local/bin/agent-vault setup --print-only | /usr/bin/grep \"^sudo \" | /bin/sh \
+                 && echo && echo \"Now choose a passphrase. You will need it to approve what agents may do.\" \
+                 && {V} passphrase set \
+                 && echo && echo \"Finished. You can close this window.\" \
+                 || echo \"Setup did not finish. Choose Set up agent-vault from the menu to try again.\""
             ),
             Action::PassphraseInTerminal => format!(
-                "clear; echo 'Choose a passphrase for agent-vault. You will need it to approve what agents may do.'; echo; \
-                 {ENV} {VAULT} passphrase set \
-                 && echo && echo 'Finished. You can close this window.' \
-                 || echo 'The passphrase was not set. Choose it from the menu to try again.'"
+                "echo \"Choose a passphrase for agent-vault. You will need it to approve what agents may do.\"; echo; \
+                 {V} passphrase set \
+                 && echo && echo \"Finished. You can close this window.\" \
+                 || echo \"The passphrase was not set. Choose it from the menu to try again.\""
             ),
             // The vault encrypts the file under a recovery passphrase it asks
             // for, and wants fresh proof of the human before it writes one.
             Action::ExportInTerminal => format!(
-                "clear; echo 'Saving your keys to an encrypted file on your Desktop.'; \
-                 echo 'You will choose a recovery passphrase (12 or more characters). You need it to open the file on the other computer.'; echo; \
-                 {ENV} {VAULT} backup export --out {FILE} \
-                 && echo && echo 'Saved. Move agent-vault-backup.json to the other computer and bring it in there. Delete it once your keys are there.' \
-                 || echo 'No file was saved.'"
+                "echo \"Saving your keys to an encrypted file on your Desktop.\"; \
+                 echo \"You will choose a recovery passphrase (12 or more characters). You need it to open the file on the other computer.\"; echo; \
+                 {V} backup export --out {FILE} \
+                 && echo && echo \"Saved. Move agent-vault-backup.json to the other computer and bring it in there. Delete it once your keys are there.\" \
+                 || echo \"No file was saved.\""
             ),
             Action::RestoreInTerminal => format!(
-                "clear; echo 'Bringing in keys from agent-vault-backup.json on your Desktop.'; \
-                 echo 'It asks for the recovery passphrase you chose when you saved the file. Keys you already have here are left as they are.'; echo; \
-                 {ENV} {VAULT} backup restore {FILE} --on-conflict skip \
-                 && echo && echo 'Done. Check your keys in the menu, then delete the file from your Desktop.' \
-                 || echo 'Nothing was brought in. Keep the file and try again.'"
+                "echo \"Bringing in keys from agent-vault-backup.json on your Desktop.\"; \
+                 echo \"It asks for the recovery passphrase you chose when you saved the file. Keys you already have here are left as they are.\"; echo; \
+                 {V} backup restore {FILE} --on-conflict skip \
+                 && echo && echo \"Done. Check your keys in the menu, then delete the file from your Desktop.\" \
+                 || echo \"Nothing was brought in. Keep the file and try again.\""
             ),
+            // Nothing is asked unless the request could be shown.
+            Action::Review(id) if safe_id(id) => format!(
+                "echo \"An agent is waiting for your decision. This is the summary the vault has of the request.\"; \
+                 echo \"Anything the agent wrote about its reasons is its own claim, not a checked fact.\"; echo; \
+                 {V} approvals --show {id} || {{ echo; echo \"This request is no longer waiting, so there is nothing to decide.\"; {CLOSE}; exit 0; }}; \
+                 echo; echo \"The vault page (Open the vault in the menu) shows every detail of a request, if you want more than this summary.\"; \
+                 printf \"Type yes to approve, no to deny, or press Return to decide later: \"; {ASK}; \
+                 if [ \"$answer\" = yes ]; then {V} approve {id}; \
+                 elif [ \"$answer\" = no ]; then {V} deny {id}; \
+                 else echo \"Nothing was decided. The request is still waiting.\"; fi; \
+                 {CLOSE}"
+            ),
+            Action::Start(name) if safe_id(name) => format!(
+                "echo \"Starting a session lets agents use the keys below until it ends.\"; echo; \
+                 {V} template show {name} || {{ echo; echo \"That template could not be read, so no session was started.\"; {CLOSE}; exit 0; }}; \
+                 echo; printf \"Type yes to start it: \"; {ASK}; \
+                 if [ \"$answer\" = yes ]; then {V} session create --template {name} || echo \"No session was started.\"; \
+                 else echo \"No session was started.\"; fi; \
+                 {CLOSE}"
+            ),
+            Action::NewSession => format!(
+                "echo \"Choose which keys agents may use, and for how long.\"; echo; \
+                 {V} session create; {CLOSE}"
+            ),
+            Action::AddKey => format!(
+                "echo \"Add a key. When you paste the key it is not shown on screen.\"; echo; \
+                 {V} cred add; {CLOSE}"
+            ),
+            Action::RotateKey(slug) if safe_id(slug) => format!(
+                "echo \"Replace the value of {slug}. Open sessions keep working, with the new value.\"; \
+                 echo \"When you paste the new key it is not shown on screen.\"; echo; \
+                 {V} cred rotate {slug}; {CLOSE}"
+            ),
+            Action::ReleaseKey(slug) if safe_id(slug) => format!(
+                "echo \"Allow agents to use {slug} again.\"; echo; \
+                 printf \"Type yes to allow it: \"; {ASK}; \
+                 if [ \"$answer\" = yes ]; then {V} cred release {slug} || echo \"The key is still stopped.\"; \
+                 else echo \"The key is still stopped.\"; fi; \
+                 {CLOSE}"
+            ),
+            Action::Unlock => format!(
+                "echo \"Unlock agent-vault with your passphrase.\"; echo; \
+                 {V} unlock; {CLOSE}"
+            ),
+            Action::Terminal(inner) => return inner.terminal_script(),
             _ => return None,
-        })
+        };
+        debug_assert!(!body.contains('\''));
+        Some(format!(
+            "/usr/bin/env -i HOME=$HOME USER=$USER TERM=$TERM PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c 'clear; {body}'"
+        ))
+    }
+
+    /// Whether the action can go to either place where the human proves
+    /// presence: a page of the web UI, or a Terminal command.
+    pub fn has_both_routes(&self) -> bool {
+        !matches!(self, Action::Terminal(_))
+            && self.ui_fragment().is_some()
+            && self.terminal_script().is_some()
+    }
+
+    /// Whether a click on this action opens a Terminal window.
+    pub fn opens_terminal(&self) -> bool {
+        match self {
+            Action::Terminal(_) => true,
+            _ => self.ui_fragment().is_none() && self.terminal_script().is_some(),
+        }
     }
 
     /// What to ask before doing it, for the actions that take access away at once.
@@ -459,7 +566,7 @@ pub fn welcome(snap: &Snapshot) -> Option<Welcome> {
             Some(Welcome {
                 title: "agent-vault companion is running".into(),
                 body: format!("{found}\n\n{home} It shows what agents can use, tells you when one is waiting for you, and lets you stop access with a click.{next_line}"),
-                next: first.map(|(text, action)| (text.replace("… (opens Terminal)", "").trim_end_matches('…').to_string(), action)),
+                next: first.map(|(text, action)| (text.trim_end_matches('…').to_string(), action)),
             })
         }
     }
@@ -689,23 +796,19 @@ pub fn service_name(kind: &str, host: &str) -> String {
     }
 }
 
-/// `doctor`'s "human factor enrolled" line: whether it holds, and its note
-/// ("passphrase", "passphrase + authenticator").
+/// `doctor`'s "human factor enrolled" line: whether a passphrase is set.
 pub fn parse_setup(doctor: &Value) -> Setup {
-    let Some(rows) = doctor.as_array() else {
-        return Setup::default();
-    };
-    let Some(row) = rows
-        .iter()
-        .find(|r| r.get("name").and_then(Value::as_str) == Some("human factor enrolled"))
-    else {
+    let row = doctor.as_array().and_then(|rows| {
+        rows.iter()
+            .find(|r| r.get("name").and_then(Value::as_str) == Some("human factor enrolled"))
+    });
+    let Some(row) = row else {
         return Setup::default();
     };
     let ok = row.get("ok").and_then(Value::as_bool).unwrap_or(false);
     let note = row.get("note").and_then(Value::as_str).unwrap_or("");
     Setup {
         passphrase: Some(ok && note.contains("passphrase")),
-        touch_id: Some(ok && note.contains("authenticator")),
     }
 }
 
@@ -843,10 +946,7 @@ pub fn menu(snap: &Snapshot, prefs: Prefs, now: DateTime<Utc>) -> Vec<Item> {
             items.push(Item::Text(
                 "agent-vault is not set up on this computer".into(),
             ));
-            items.push(act(
-                Action::InstallInTerminal,
-                "Set up agent-vault… (opens Terminal)",
-            ));
+            items.push(act(Action::InstallInTerminal, "Set up agent-vault…"));
             items.push(Item::Text(
                 "It asks for your Mac password, then a new passphrase".into(),
             ));
@@ -875,7 +975,28 @@ pub fn menu(snap: &Snapshot, prefs: Prefs, now: DateTime<Utc>) -> Vec<Item> {
     });
     items.push(act(Action::Refresh, "Refresh"));
     items.push(act(Action::Quit, "Quit companion"));
+    mark_terminal(&mut items, use_terminal(prefs));
     items
+}
+
+/// Send the actions that have both routes to Terminal when that is how the
+/// user approves, and say so on every item that opens a Terminal window, so
+/// nothing does it by surprise.
+fn mark_terminal(items: &mut [Item], terminal: bool) {
+    for item in items {
+        match item {
+            Item::Action { action, text } => {
+                if terminal && action.has_both_routes() {
+                    *action = Action::Terminal(Box::new(action.clone()));
+                }
+                if action.opens_terminal() {
+                    text.push_str(" (opens Terminal)");
+                }
+            }
+            Item::Submenu { items, .. } => mark_terminal(items, terminal),
+            _ => {}
+        }
+    }
 }
 
 fn settings_menu(snap: &Snapshot, prefs: Prefs) -> Vec<Item> {
@@ -891,7 +1012,13 @@ fn settings_menu(snap: &Snapshot, prefs: Prefs) -> Vec<Item> {
             on: prefs.autostart,
         },
     ];
+    items.push(Item::Check {
+        action: Action::ToggleTerminal,
+        text: "Approve in Terminal with my passphrase".into(),
+        on: prefs.terminal,
+    });
     if matches!(snap.reach, Reach::Up(_)) {
+        items.push(act(Action::TouchIdInUi, "Set up Touch ID approvals…"));
         let agents = if snap.agents.is_empty() {
             vec![Item::Text(
                 "No supported agents found on this computer".into(),
@@ -921,15 +1048,10 @@ fn settings_menu(snap: &Snapshot, prefs: Prefs) -> Vec<Item> {
 pub fn setup_steps(snap: &Snapshot) -> Vec<Item> {
     let mut steps = Vec::new();
     if snap.setup.passphrase == Some(false) {
-        steps.push(act(
-            Action::PassphraseInTerminal,
-            "Set your passphrase… (opens Terminal)",
-        ));
-    } else if snap.setup.touch_id == Some(false) {
-        steps.push(act(Action::TouchIdInUi, "Turn on Touch ID approvals…"));
+        steps.push(act(Action::PassphraseInTerminal, "Set your passphrase…"));
     }
     if snap.keys.is_empty() && !snap.unread.keys {
-        steps.push(act(Action::AddKeyInUi, "Add your first key…"));
+        steps.push(act(Action::AddKey, "Add your first key…"));
     }
     if !snap.agents.is_empty() && snap.agents.iter().all(|a| !a.connected) {
         for a in &snap.agents {
@@ -981,7 +1103,7 @@ fn up_menu(items: &mut Vec<Item>, snap: &Snapshot, status: &Status, now: DateTim
                 .map(|t| format!(" ({})", ago(t, now)))
                 .unwrap_or_default();
             items.push(act(
-                Action::ReviewInUi(p.id.clone()),
+                Action::Review(p.id.clone()),
                 format!("{what}{when}: review…"),
             ));
         }
@@ -1027,12 +1149,12 @@ fn up_menu(items: &mut Vec<Item>, snap: &Snapshot, status: &Status, now: DateTim
     let mut start: Vec<Item> = snap
         .templates
         .iter()
-        .map(|t| act(Action::StartInUi(t.clone()), format!("From “{t}”…")))
+        .map(|t| act(Action::Start(t.clone()), format!("From “{t}”…")))
         .collect();
     if !start.is_empty() {
         start.push(Item::Separator);
     }
-    start.push(act(Action::NewSessionInUi, "Choose keys and limits…"));
+    start.push(act(Action::NewSession, "Choose keys and limits…"));
     items.push(Item::Submenu {
         text: "Start a session".into(),
         items: start,
@@ -1050,7 +1172,7 @@ fn up_menu(items: &mut Vec<Item>, snap: &Snapshot, status: &Status, now: DateTim
             items.push(key_item(k, snap.in_use(&k.slug)));
         }
     }
-    items.push(act(Action::AddKeyInUi, "Add a key…"));
+    items.push(act(Action::AddKey, "Add a key…"));
     if !snap.keys.is_empty() {
         items.push(act(Action::TestKeys, "Check that all keys still work"));
     }
@@ -1062,17 +1184,14 @@ fn up_menu(items: &mut Vec<Item>, snap: &Snapshot, status: &Status, now: DateTim
             Item::Text("Uses an encrypted file on your Desktop".into()),
             act(
                 Action::ExportInTerminal,
-                "Save my keys to an encrypted file… (opens Terminal)",
+                "Save my keys to an encrypted file…",
             ),
-            act(
-                Action::RestoreInTerminal,
-                "Bring in keys from that file… (opens Terminal)",
-            ),
+            act(Action::RestoreInTerminal, "Bring in keys from that file…"),
         ],
     });
     items.push(act(Action::OpenUi, "Open the vault…"));
     if status.locked {
-        items.push(act(Action::UnlockInUi, "Unlock in the vault…"));
+        items.push(act(Action::Unlock, "Unlock…"));
     } else {
         items.push(act(Action::Lock, "Lock the vault"));
     }
@@ -1106,16 +1225,17 @@ fn key_item(k: &Key, in_use: bool) -> Item {
         )
     };
     let action = if k.stopped {
-        act(
-            Action::ReleaseKeyInUi,
-            "Allow this key again… (in the vault)",
-        )
+        act(Action::ReleaseKey(k.slug.clone()), "Allow this key again…")
     } else {
         act(Action::StopKey(k.slug.clone()), "Stop all use of this key…")
     };
+    let replace = act(
+        Action::RotateKey(k.slug.clone()),
+        "Replace this key's value…",
+    );
     Item::Submenu {
         text: format!("{mark}{} · {} · {tail}", k.slug, k.service),
-        items: vec![Item::Text(detail.into()), Item::Separator, action],
+        items: vec![Item::Text(detail.into()), Item::Separator, replace, action],
     }
 }
 
@@ -1252,7 +1372,6 @@ pub(crate) mod tests {
     fn done_setup() -> Setup {
         Setup {
             passphrase: Some(true),
-            touch_id: Some(true),
         }
     }
 
@@ -1294,24 +1413,31 @@ pub(crate) mod tests {
         let mut fresh = Snapshot::only(up(true));
         fresh.setup = Setup {
             passphrase: Some(false),
-            touch_id: Some(false),
         };
         fresh.agents = vec![AgentLink {
             id: "cursor".into(),
             name: "Cursor".into(),
             connected: false,
         }];
-        [
+        let by_passphrase = Prefs {
+            terminal: true,
+            ..Prefs::default()
+        };
+        let snaps = [
             busy(),
             fresh,
             Snapshot::only(Reach::Missing(Missing::NotInstalled)),
             Snapshot::only(Reach::Missing(Missing::Untrusted("x".into()))),
             Snapshot::only(Reach::Down("x".into())),
             Snapshot::loading(),
-        ]
-        .iter()
-        .map(|s| menu(s, Prefs::default(), now()))
-        .collect()
+        ];
+        let mut menus = Vec::new();
+        for prefs in [Prefs::default(), by_passphrase] {
+            for snap in &snaps {
+                menus.push(menu(snap, prefs, now()));
+            }
+        }
+        menus
     }
 
     #[test]
@@ -1472,47 +1598,61 @@ pub(crate) mod tests {
         assert!(ran >= 5, "the test menus should exercise the commands");
     }
 
-    #[test]
-    fn terminal_commands_are_fixed_and_use_absolute_paths() {
-        let all = [
+    fn terminal_actions() -> Vec<Action> {
+        vec![
             Action::InstallInTerminal,
             Action::PassphraseInTerminal,
             Action::ExportInTerminal,
             Action::RestoreInTerminal,
-        ];
-        for a in &all {
+            Action::Review("sr_01ABC".into()),
+            Action::Start("keys-all".into()),
+            Action::NewSession,
+            Action::AddKey,
+            Action::RotateKey("openai-api".into()),
+            Action::ReleaseKey("openai-api".into()),
+            Action::Unlock,
+        ]
+    }
+
+    const SHELL_HEAD: &str = "/usr/bin/env -i HOME=$HOME USER=$USER TERM=$TERM PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c 'clear; ";
+
+    #[test]
+    fn terminal_commands_hand_the_users_shell_one_quoted_script() {
+        for a in terminal_actions() {
             let s = a.terminal_script().unwrap();
-            // The only variables are the three handed to `env -i`.
-            let bare = s
-                .replace("$HOME", "")
-                .replace("$USER", "")
-                .replace("$TERM", "");
-            assert!(
-                !bare.contains('$') && !s.contains('"') && !s.contains('\\') && !s.contains('`'),
-                "{s}"
-            );
-            // Every quoted message closes: an odd count would swallow the command.
-            assert_eq!(s.matches('\'').count() % 2, 0, "{s}");
-            // Every program runs by absolute path, in a cleared environment.
-            for word in s.split_whitespace() {
-                if word.ends_with("/agent-vault")
-                    || word.ends_with("/sh")
-                    || word.ends_with("/curl")
-                    || word.ends_with("/grep")
-                    || word.ends_with("/env")
+            // The user's shell sees: env, its arguments, and one single-quoted
+            // string. Nothing inside that string is read by the user's shell.
+            let body = s
+                .strip_prefix(SHELL_HEAD)
+                .and_then(|rest| rest.strip_suffix('\''))
+                .unwrap_or_else(|| panic!("{s}"));
+            assert!(!body.contains('\''), "{s}");
+            // No backslashes or backticks anywhere, so no escapes to get wrong,
+            // and the only variable is the typed answer, always in quotes.
+            assert!(!s.contains('\\') && !s.contains('`'), "{s}");
+            let bare = body.replace("\"$answer\"", "");
+            assert!(!bare.contains('$'), "{s}");
+            // Every program runs by absolute path.
+            for word in body.split_whitespace() {
+                if ["/agent-vault", "/sh", "/curl", "/grep"]
+                    .iter()
+                    .any(|end| word.ends_with(end))
                 {
                     assert!(word.starts_with('/') || word.starts_with("~/"), "{word}");
                 }
             }
-            assert!(s.contains("/usr/bin/env -i HOME=$HOME USER=$USER TERM=$TERM PATH=/usr/bin:/bin:/usr/sbin:/sbin"));
-            // Success and failure are told apart: no "finished" after a failure.
+        }
+        for a in &terminal_actions()[..4] {
+            // Where a command reports success, failure is told apart from it.
+            let s = a.terminal_script().unwrap();
             assert!(s.contains(" && echo") && s.contains(" || echo"), "{s}");
         }
         let install = Action::InstallInTerminal.terminal_script().unwrap();
         assert!(install.contains("/usr/bin/curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/download/install.sh"));
         // The privileged step is the one line setup prints, and nothing else it prints.
-        assert!(install
-            .contains("~/.local/bin/agent-vault setup --print-only | /usr/bin/grep '^sudo ' |"));
+        assert!(install.contains(
+            "~/.local/bin/agent-vault setup --print-only | /usr/bin/grep \"^sudo \" | /bin/sh"
+        ));
         assert!(install.contains("/var/db/agent-vault/app/bin/agent-vault passphrase set"));
         assert!(Action::ExportInTerminal
             .terminal_script()
@@ -1525,16 +1665,285 @@ pub(crate) mod tests {
         assert_eq!(Action::Lock.terminal_script(), None);
     }
 
+    /// Run a Terminal command for real, with a stand-in for the vault that
+    /// prints what it was asked to do, and the given typed answer. With
+    /// `vault_fails_on`, the stand-in fails when its first word is that one.
+    #[cfg(unix)]
+    fn dry_run(action: &Action, shell: &str, typed: &str, vault_fails_on: Option<&str>) -> String {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let helper = std::env::temp_dir().join(format!(
+            "av-companion-test-{}-{}.sh",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        // $1 is the word to fail on; the rest is what the vault was asked.
+        std::fs::write(
+            &helper,
+            "fail=$1; shift; echo RAN \"$@\"; [ \"$1\" != \"$fail\" ]\n",
+        )
+        .unwrap();
+        let stand_in = format!(
+            "/bin/sh {} {}",
+            helper.display(),
+            vault_fails_on.unwrap_or("nothing")
+        );
+        assert!(!stand_in.contains('\'') && !stand_in.contains('"'));
+        let script = action
+            .terminal_script()
+            .unwrap()
+            .replace("/var/db/agent-vault/app/bin/agent-vault", &stand_in);
+        let mut child = std::process::Command::new(shell)
+            .args(["-c", &script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(typed.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&helper);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(unix)]
+    fn shells() -> Vec<&'static str> {
+        ["/bin/sh", "/bin/zsh", "/bin/bash"]
+            .into_iter()
+            .filter(|s| std::path::Path::new(s).exists())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_exact_yes_approves_and_only_an_exact_no_denies() {
+        let review = Action::Review("sr_01ABC".into());
+        let start = Action::Start("keys-all".into());
+        let release = Action::ReleaseKey("openai-api".into());
+        for shell in shells() {
+            let out = dry_run(&review, shell, "yes\n", None);
+            assert!(
+                out.contains("RAN approvals --show sr_01ABC"),
+                "{shell}: {out}"
+            );
+            assert!(
+                out.contains("RAN approve sr_01ABC") && !out.contains("RAN deny"),
+                "{shell}: {out}"
+            );
+            let out = dry_run(&review, shell, "no\n", None);
+            assert!(
+                out.contains("RAN deny sr_01ABC") && !out.contains("RAN approve"),
+                "{shell}: {out}"
+            );
+            // Return alone, a near miss, padding, a trailing backslash, or a
+            // closed window: nothing is decided.
+            for typed in [
+                "\n",
+                "y\n",
+                "YES\n",
+                "yes please\n",
+                " yes\n",
+                "yes \n",
+                "yes\\\n",
+                "ye\\\ns\n",
+                "",
+            ] {
+                let out = dry_run(&review, shell, typed, None);
+                assert!(
+                    !out.contains("RAN approve") && !out.contains("RAN deny"),
+                    "{shell} {typed:?}: {out}"
+                );
+                assert!(
+                    out.contains("Nothing was decided."),
+                    "{shell} {typed:?}: {out}"
+                );
+            }
+
+            let out = dry_run(&start, shell, "yes\n", None);
+            assert!(
+                out.contains("RAN session create --template keys-all"),
+                "{shell}: {out}"
+            );
+            for typed in ["\n", " yes\n", ""] {
+                let out = dry_run(&start, shell, typed, None);
+                assert!(
+                    !out.contains("RAN session create") && out.contains("No session was started."),
+                    "{shell} {typed:?}: {out}"
+                );
+            }
+
+            let out = dry_run(&release, shell, "yes\n", None);
+            assert!(
+                out.contains("RAN cred release openai-api"),
+                "{shell}: {out}"
+            );
+            let out = dry_run(&release, shell, "no\n", None);
+            assert!(
+                !out.contains("RAN cred release") && out.contains("The key is still stopped."),
+                "{shell}: {out}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_is_asked_when_the_request_or_template_cannot_be_shown() {
+        for shell in shells() {
+            // The vault fails `approvals` (the request is gone): no question, no decision.
+            let out = dry_run(
+                &Action::Review("sr_01ABC".into()),
+                shell,
+                "yes\n",
+                Some("approvals"),
+            );
+            assert!(
+                out.contains("RAN approvals --show sr_01ABC"),
+                "{shell}: {out}"
+            );
+            assert!(out.contains("no longer waiting"), "{shell}: {out}");
+            assert!(
+                !out.contains("Type yes") && !out.contains("RAN approve "),
+                "{shell}: {out}"
+            );
+            let out = dry_run(
+                &Action::Start("keys-all".into()),
+                shell,
+                "yes\n",
+                Some("template"),
+            );
+            assert!(out.contains("could not be read"), "{shell}: {out}");
+            assert!(
+                !out.contains("Type yes") && !out.contains("RAN session"),
+                "{shell}: {out}"
+            );
+            // A decision the vault then refuses is not reported as made.
+            let out = dry_run(
+                &Action::Start("keys-all".into()),
+                shell,
+                "yes\n",
+                Some("session"),
+            );
+            assert!(
+                out.contains("RAN session create") && out.contains("No session was started."),
+                "{shell}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_plain_never_reaches_a_terminal_command() {
+        for bad in [
+            "x; rm -rf ~",
+            "--infinite",
+            "a b",
+            "a'b",
+            "a\"b",
+            "$(id)",
+            "",
+        ] {
+            assert_eq!(Action::Review(bad.into()).terminal_script(), None, "{bad}");
+            assert_eq!(Action::Start(bad.into()).terminal_script(), None, "{bad}");
+            assert_eq!(
+                Action::RotateKey(bad.into()).terminal_script(),
+                None,
+                "{bad}"
+            );
+            assert_eq!(
+                Action::ReleaseKey(bad.into()).terminal_script(),
+                None,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_menu_items_label_and_its_route_are_bound_together() {
+        let prefs = Prefs::default();
+        let snap = busy();
+        let m = menu(&snap, prefs, now());
+        let shown = texts(&m);
+        // By default the human's actions go to the web UI.
+        assert!(shown.contains("An agent is asking for access (2 min ago): review…\n"));
+        assert!(shown.contains("Add a key…\n"));
+        assert!(actions(&m).contains(&Action::AddKey));
+        assert!(!actions(&m).iter().any(|a| matches!(a, Action::Terminal(_))));
+        // Actions with no web page say they open Terminal either way.
+        assert!(shown.contains("Save my keys to an encrypted file… (opens Terminal)"));
+
+        let chosen = Prefs {
+            terminal: true,
+            ..prefs
+        };
+        let m = menu(&snap, chosen, now());
+        let shown = texts(&m);
+        for line in [
+            "An agent is asking for access (2 min ago): review… (opens Terminal)",
+            "Add a key… (opens Terminal)",
+            "Replace this key's value… (opens Terminal)",
+            "Allow this key again… (opens Terminal)",
+            "From “keys-all”… (opens Terminal)",
+            "Choose keys and limits… (opens Terminal)",
+        ] {
+            assert!(shown.contains(line), "{line}");
+        }
+        // Setting Touch ID up is a browser job, and things the companion does
+        // itself are not marked.
+        for line in [
+            "Set up Touch ID approvals…\n",
+            "Lock the vault\n",
+            "Stop all use of this key…\n",
+            "Open the vault…\n",
+        ] {
+            assert!(shown.contains(line), "{line}");
+        }
+        // The route is in the item itself: an item marked for Terminal is a
+        // Terminal action, and one that is not, is not. A click cannot land on
+        // the other route because a setting changed after the menu was drawn.
+        fn check(items: &[Item]) {
+            for i in items {
+                match i {
+                    Item::Action { action, text } => {
+                        assert_eq!(
+                            text.ends_with("(opens Terminal)"),
+                            action.opens_terminal(),
+                            "{text}"
+                        );
+                        assert_eq!(Action::parse(&action.id()).as_ref(), Some(action), "{text}");
+                    }
+                    Item::Submenu { items, .. } => check(items),
+                    _ => {}
+                }
+            }
+        }
+        for m in all_menus() {
+            check(&m);
+        }
+        let wrapped = Action::Terminal(Box::new(Action::AddKey));
+        assert!(wrapped.opens_terminal() && wrapped.ui_fragment().is_none());
+        assert_eq!(wrapped.terminal_script(), Action::AddKey.terminal_script());
+        // Only an action with both routes can be wrapped.
+        assert_eq!(Action::parse("terminal:lock"), None);
+        assert_eq!(Action::parse("terminal:open"), None);
+        assert_eq!(Action::parse("terminal:terminal:new-key"), None);
+        assert_eq!(Action::parse("terminal:review:--x"), None);
+
+        let mut locked = snap.clone();
+        locked.reach = up(true);
+        assert!(texts(&menu(&locked, chosen, now())).contains("Unlock… (opens Terminal)"));
+        assert!(texts(&menu(&locked, prefs, now())).contains("Unlock…\n"));
+    }
+
     /// The shells Terminal is likely to start must parse each command as written.
     #[cfg(unix)]
     #[test]
     fn terminal_commands_parse_in_sh_and_zsh() {
-        for a in [
-            Action::InstallInTerminal,
-            Action::PassphraseInTerminal,
-            Action::ExportInTerminal,
-            Action::RestoreInTerminal,
-        ] {
+        for a in terminal_actions() {
             let script = a.terminal_script().unwrap();
             for shell in ["/bin/sh", "/bin/zsh", "/bin/bash"] {
                 if !std::path::Path::new(shell).exists() {
@@ -1591,7 +2000,8 @@ pub(crate) mod tests {
             !a.contains(&Action::StopKey("hf".into())),
             "a stopped key is not stopped again"
         );
-        assert!(a.contains(&Action::ReleaseKeyInUi));
+        assert!(a.contains(&Action::ReleaseKey("hf".into())));
+        assert!(a.contains(&Action::RotateKey("openai-api".into())));
     }
 
     #[test]
@@ -1599,7 +2009,6 @@ pub(crate) mod tests {
         let mut snap = Snapshot::only(up(false));
         snap.setup = Setup {
             passphrase: Some(false),
-            touch_id: Some(false),
         };
         snap.agents = vec![AgentLink {
             id: "codex".into(),
@@ -1610,12 +2019,10 @@ pub(crate) mod tests {
             actions(&setup_steps(&snap)),
             [
                 Action::PassphraseInTerminal,
-                Action::AddKeyInUi,
+                Action::AddKey,
                 Action::Connect("codex".into())
             ]
         );
-        snap.setup.passphrase = Some(true);
-        assert_eq!(actions(&setup_steps(&snap))[0], Action::TouchIdInUi);
         assert!(
             setup_steps(&busy()).is_empty(),
             "a finished setup shows no checklist"
@@ -1630,25 +2037,23 @@ pub(crate) mod tests {
     fn setup_is_read_from_doctor() {
         let d =
             |ok: bool, note: &str| json!([{"name":"human factor enrolled","ok":ok,"note":note}]);
+        // "authenticator" there is Touch ID unlock, which says nothing about approvals.
         assert_eq!(
             parse_setup(&d(true, "passphrase + authenticator")),
             Setup {
-                passphrase: Some(true),
-                touch_id: Some(true)
+                passphrase: Some(true)
             }
         );
         assert_eq!(
             parse_setup(&d(true, "passphrase")),
             Setup {
-                passphrase: Some(true),
-                touch_id: Some(false)
+                passphrase: Some(true)
             }
         );
         assert_eq!(
             parse_setup(&d(false, "none")),
             Setup {
-                passphrase: Some(false),
-                touch_id: Some(false)
+                passphrase: Some(false)
             }
         );
         assert_eq!(parse_setup(&json!([])), Setup::default());
@@ -1679,43 +2084,39 @@ pub(crate) mod tests {
         assert!(w.next.is_none(), "nothing left to set up");
         let mut fresh = Snapshot::only(up(false));
         fresh.setup = Setup {
-            passphrase: Some(true),
-            touch_id: Some(false),
+            passphrase: Some(false),
         };
         let w = welcome(&fresh).unwrap();
         assert!(w.body.contains("no keys yet"));
         let (label, action) = w.next.unwrap();
-        assert_eq!(action, Action::TouchIdInUi);
-        assert_eq!(label, "Turn on Touch ID approvals");
+        assert_eq!(action, Action::PassphraseInTerminal);
+        assert_eq!(label, "Set your passphrase");
         assert!(welcome(&Snapshot::loading()).is_none());
     }
 
     #[test]
     fn locked_vault_offers_unlock_in_the_ui_not_lock() {
         let a = actions(&menu(&Snapshot::only(up(true)), Prefs::default(), now()));
-        assert!(a.contains(&Action::UnlockInUi));
+        assert!(a.contains(&Action::Unlock));
         assert!(!a.contains(&Action::Lock));
         let a = actions(&menu(&Snapshot::only(up(false)), Prefs::default(), now()));
         assert!(a.contains(&Action::Lock));
-        assert!(!a.contains(&Action::UnlockInUi));
+        assert!(!a.contains(&Action::Unlock));
     }
 
     #[test]
     fn ui_fragments_match_the_web_routers_format() {
         assert_eq!(
-            Action::ReviewInUi("sr_01ABC".into()).ui_fragment().unwrap(),
+            Action::Review("sr_01ABC".into()).ui_fragment().unwrap(),
             "#approvals/sr_01ABC"
         );
         // formatHash('sessions', `new:${name}`) in web/src/lib/router.js
         assert_eq!(
-            Action::StartInUi("keys-all".into()).ui_fragment().unwrap(),
+            Action::Start("keys-all".into()).ui_fragment().unwrap(),
             "#sessions/new%3Akeys-all"
         );
-        assert_eq!(
-            Action::NewSessionInUi.ui_fragment().unwrap(),
-            "#sessions/new"
-        );
-        assert_eq!(Action::AddKeyInUi.ui_fragment().unwrap(), "#credentials");
+        assert_eq!(Action::NewSession.ui_fragment().unwrap(), "#sessions/new");
+        assert_eq!(Action::AddKey.ui_fragment().unwrap(), "#credentials");
         assert_eq!(Action::OpenUi.ui_fragment().unwrap(), "");
         assert_eq!(Action::Panic.ui_fragment(), None);
     }
@@ -1762,6 +2163,7 @@ pub(crate) mod tests {
                 notifications: false,
                 autostart: true,
                 welcomed: true,
+                terminal: false,
             },
             now(),
         );
@@ -1808,6 +2210,7 @@ pub(crate) mod tests {
             [
                 Action::ToggleNotifications,
                 Action::ToggleAutostart,
+                Action::ToggleTerminal,
                 Action::Refresh,
                 Action::Quit
             ]

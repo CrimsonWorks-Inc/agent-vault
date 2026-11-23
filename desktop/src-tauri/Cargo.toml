@@ -1,6 +1,6 @@
 [package]
 name = "agent-vault-companion"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Menu bar companion for agent-vault: status, alerts and one-click narrowing actions"

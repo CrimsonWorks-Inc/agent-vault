@@ -1,6 +1,6 @@
 # Desktop companion: design note
 
-Status: prototype, version 0.2, on branch `desktop-companion`. macOS first; the code compiles for Windows and Linux, but only macOS has been run.
+Status: prototype, version 0.3, on branch `desktop-companion`. macOS first; the code compiles for Windows and Linux, but only macOS has been run.
 
 ## Why
 
@@ -14,7 +14,18 @@ The original spec asked for a native shell rather than a web page, to stay off t
 
 **The companion is a doorbell, a signpost and a set of brakes. It never grants anything.**
 
-It runs as the user's account, which is the same account every local agent runs as. Anything the companion can do without a human present, an agent can do too: by talking to the same socket, by running the same CLI, or by driving the companion's own menu with accessibility automation. So the companion is given no power the CLI does not already give an unproven caller, and every action that widens access still goes through the daemon's existing presence gate (the passphrase, or the WebAuthn signature the web UI collects).
+It runs as the user's account, which is the same account every local agent runs as. Anything the companion can do without a human present, an agent can do too: by talking to the same socket, by running the same CLI, or by driving the companion's own menu with accessibility automation. So the companion is given no power the CLI does not already give an unproven caller, and every action that widens access still goes through the daemon's existing presence gate.
+
+That gate has two doors, and the companion only ever shows the user to one of them:
+
+- **The web UI**, where a change is confirmed with Touch ID (a WebAuthn signature the daemon verifies).
+- **Terminal**, on the vault's own command, where a change is confirmed with the passphrase.
+
+The user chooses between them with one setting, "Approve in Terminal with my passphrase". It is off by default, so the web UI is used. A Mac with no fingerprint reader in reach (a closed laptop on a dock, a desktop without a Touch ID keyboard, a browser that will not use the reader) is fully usable with it on.
+
+The companion does not guess which the user should use, because it cannot tell: the CLI does not report whether Touch ID approvals are enrolled. (`doctor`'s "passphrase + authenticator" refers to Touch ID *unlock*, a separate setting.) A `doctor` line for approval enrollment would let the companion pick the right door on its own.
+
+Every menu item that opens Terminal says so, and the route is part of the item: a click goes where the label said, whatever has changed since the menu was drawn.
 
 ## What it does
 
@@ -22,28 +33,29 @@ It runs as the user's account, which is the same account every local agent runs 
 |---|---|---|
 | First run | Says where the icon is and what it found; if no vault is installed, offers to set one up | — |
 | Set up the vault | Opens Terminal on the official installer, then `passphrase set` | Mac password and a new passphrase, typed in Terminal |
-| Setup checklist | Lists what is left: passphrase, Touch ID approvals, a first key, connecting an agent | Depends on the step |
+| Setup checklist | Lists what is left: passphrase, a first key, connecting an agent | Depends on the step |
 | Status | Version, locked or unlocked | — |
 | Waiting | Count beside the icon; one row per pending request (kind and age only); a notification | — |
-| Review a request | Opens the web UI on that request (`#approvals/<id>`) | WebAuthn, in the UI |
+| Review a request | Web UI: opens that request (`#approvals/<id>`). Terminal: `approvals --show <id>`, then a typed `yes` or `no` runs `approve` or `deny` | WebAuthn in the UI, or the passphrase in Terminal |
 | Sessions | Each open session: its keys, when it ends, and one sentence on what agents may do | — |
-| Start a session | Opens the web UI on the new-session form, blank or from a template | WebAuthn, in the UI |
+| Start a session | Web UI: the new-session form, blank or from a template. Terminal: `template show <name>`, then a typed yes runs `session create --template`; or the `session create` wizard | WebAuthn in the UI, or the passphrase in Terminal |
 | Revoke a session | `session revoke <sid>`, after a confirmation dialog | None (narrows access) |
 | Keys | Each stored key: service, last health check, whether a session is using it, whether it is stopped | — |
-| Add a key | Opens the web UI's Credentials page | WebAuthn, in the UI |
+| Add a key, replace a key's value | Web UI: the Credentials page. Terminal: `cred add`, `cred rotate <slug>` | WebAuthn in the UI, or the passphrase in Terminal |
 | Check keys | `cred test --all`: the vault calls each key's own service once | None (the daemon does not gate it) |
 | Stop a key | `cred quarantine <slug>`, after a confirmation dialog | None (narrows access) |
-| Allow a stopped key again | Opens the web UI's Containment page | WebAuthn, in the UI |
+| Allow a stopped key again | Web UI: the Containment page. Terminal: a typed yes runs `cred release <slug>` | WebAuthn in the UI, or the passphrase in Terminal |
 | Connect an agent | `mcp install --agent <id> --scope user`: writes the vault into that agent's own config | None (grants no access; the agent still needs a session) |
 | Move keys to another computer | Opens Terminal on `backup export` or `backup restore`, with a fixed file on the Desktop | Passphrase and a recovery passphrase, typed in Terminal |
-| Open the vault / unlock | Opens the web UI | WebAuthn or passphrase, in the UI |
+| Open the vault | Opens the web UI | — |
+| Unlock | Web UI: Settings. Terminal: `unlock` | Touch ID unlock in the UI, or the passphrase in Terminal |
 | Lock, Panic | `lock`; `panic` after a confirmation dialog | None (narrows access) |
 | Notifications | A request waiting; a session ending within ten minutes; a session ended; the vault locked; the daemon unreachable or back; a key failing its check or being stopped | — |
-| Settings | Notifications on or off; start at login | — |
+| Settings | Notifications on or off; start at login; approve in Terminal with the passphrase; set up Touch ID approvals (opens the web UI) | — |
 
 ### What it deliberately does not do
 
-- **No approve, deny, session create, template save, credential add or release, or unlock.** Each widens access or decides on a held request, so each needs presence. The companion opens the page or the Terminal command where the human proves it. A unit test holds the companion's own commands to an allowlist.
+- **It runs no approve, deny, session create, template save, credential add, rotate or release, or unlock itself.** Each widens access or decides on a held request, so each needs presence. The companion opens the page, or the Terminal window, where the human proves it and the vault's own gate decides. A unit test holds the commands the companion runs directly to an allowlist.
 - **No passphrase handling.** The companion never asks for, sees or stores the vault passphrase, the Mac password or a recovery passphrase. Those are typed into Terminal or the web UI.
 - **No agent-written text.** A pending item's `claim` (the agent's stated reason) could be crafted to mislead ("routine refresh, approve"). The companion shows only the kind and the age of each request, and notifications say only that something happened. Session labels, key names and template names are shown, cleaned of control and bidirectional characters and shortened.
 - **No secrets.** The companion never receives a credential, a placeholder or a session token; the CLI's JSON output contains none.
@@ -59,7 +71,13 @@ Through the CLI's `--json` output rather than linking the daemon's crates. The J
 
 **Values on a command line.** Ids, key names and template names from the vault are passed on only if they are plain (`[A-Za-z0-9_][A-Za-z0-9_.-]*`), so none can be read as a flag. Agent ids come from a fixed list.
 
-**Terminal commands.** Four fixed strings, compiled in, with nothing from the vault, an agent or the menu in them. They reach Terminal as an AppleScript string through `osascript`, never through a script file another process could rewrite first. macOS asks once whether the companion may control Terminal.
+**Terminal commands.** Each is a fixed string, compiled in. The only parts that vary are a request id, a key name or a template name, and those are inserted only when plain (see above); nothing an agent wrote reaches a command.
+
+Terminal starts the user's own shell, whichever that is, with whatever its profile sets up. So that shell is handed exactly one thing: `/usr/bin/env -i … /bin/sh -c '<script>'`. It expands `$HOME`, `$USER` and `$TERM` and nothing else; the script inside the single quotes is read only by `/bin/sh`, in an emptied environment, the same way on every Mac. The scripts contain no single quote, backslash or backtick, and every program runs by absolute path. The command reaches Terminal as an AppleScript string through `osascript`, never through a script file another process could rewrite first; a test has AppleScript read each one back unchanged. macOS asks once whether the companion may control Terminal.
+
+**The typed answer.** After a passphrase is typed, the daemon does not ask for it again for a few minutes. A Terminal command that approved a request the moment it ran would, inside that window, approve on a single menu click. So the commands that decide or grant in one step (`approve`, `deny`, `session create --template`, `cred release`) first show what is being decided and wait for a typed answer. The line is read as typed (`IFS= read -r`) and compared exactly: only `yes` approves and only `no` denies. A near miss, padding, an unreadable input or a closed window decides nothing, and nothing is asked at all if the request or template could not be shown. Tests run these commands in sh, bash and zsh with each kind of answer.
+
+`cred add`, `cred rotate`, the `session create` wizard and `unlock` are not gated this way: each needs the human to type something of its own before anything changes.
 
 **Refresh.** On every `watch` event, and every 15 seconds as a backstop.
 
@@ -88,6 +106,11 @@ A design that fits: each device has its own key pair; the vault's contents are e
 - **Setting up from the companion trusts the same things as `curl | sh`.** The install command is the one the README gives. As the README says of any first install, it should run when no agent is active on the machine: the installer unpacks into a folder the user owns before the privileged step.
 - **The backup file sits on the Desktop until the user deletes it.** It is encrypted under the recovery passphrase, and the vault refuses to overwrite an existing file or follow a symlink there. The companion reminds the user to delete it but does not do so.
 - **Typed secrets can be phished.** A passphrase typed into Terminal can be captured by a look-alike window, exactly as with the CLI alone. The companion does not add this risk and cannot remove it.
+- **Terminal runs the user's shell first.** `env -i` keeps the shell's exported variables away from the vault's commands, but a shell profile an agent has rewritten can still interfere with the window itself. That is true of every use of the CLI, and it is why Touch ID approvals, where they work, are the stronger of the two doors.
+- **Inside the presence window the passphrase is not asked for again.** The typed answer keeps a click from deciding anything, but it is a guard against accidents, not proof of a human: anything that can type into the user's Terminal can already run the vault's commands.
+- **Terminal shows the summary, not every detail.** A request is shown as `approvals --show` prints it, which for a session request is a one-line summary of what is asked. The web UI shows the full proposal, and the Terminal text says so.
+- **A template is shown, then used by name.** Between `template show` and `session create --template`, the template could be saved again. Saving one needs presence, so only something already inside the presence window could do it, and that something could start a session directly. `session create` prints the template version it used.
+- **`unlock` on a vault with no passphrase asks nothing.** That is the vault's behaviour; the checklist puts "Set your passphrase" first for that reason.
 - **Borrowed touch.** The platform's Touch ID dialog says who is asking, not what for. The companion makes approving easier to reach, so an agent that triggers a request at the moment the user expected a different one has one more chance of borrowing a touch. The web UI's operation display and the audit log remain the defence.
 - **Menu automation.** An agent with macOS accessibility permission could click the companion's menu. Every command it would reach is one the agent could already run.
 - **Not signed.** Without an Apple Developer ID signature and notarization, macOS blocks a downloaded copy of the app, and may suppress its notifications. The badge beside the icon works regardless. Signing needs the project's Apple credentials as repository secrets.
