@@ -9,7 +9,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::model::Missing;
+
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// `cred test --all` calls every key's service in turn.
+pub const SLOW: Duration = Duration::from_secs(90);
 
 /// The root-owned CLI the vault's installer puts in place. The companion
 /// never looks the CLI up on PATH: an agent can put a fake `agent-vault`
@@ -18,7 +22,9 @@ fn install_path() -> Option<PathBuf> {
     if cfg!(target_os = "macos") {
         Some(PathBuf::from("/var/db/agent-vault/app/bin/agent-vault"))
     } else if cfg!(target_os = "linux") {
-        Some(PathBuf::from("/usr/libexec/agent-vault/app/bin/agent-vault"))
+        Some(PathBuf::from(
+            "/usr/libexec/agent-vault/app/bin/agent-vault",
+        ))
     } else {
         None
     }
@@ -30,16 +36,16 @@ pub struct Cli {
 }
 
 impl Cli {
-    pub fn locate() -> Result<Cli, String> {
+    pub fn locate() -> Result<Cli, Missing> {
         let Some(path) = install_path() else {
-            return Err("agent-vault does not run on this operating system yet".into());
+            return Err(Missing::Unsupported);
         };
         if !path.exists() {
-            return Err("run `agent-vault setup` to install it".into());
+            return Err(Missing::NotInstalled);
         }
-        check_root_owned(&path)?;
+        check_root_owned(&path).map_err(Missing::Untrusted)?;
         if let Some(dir) = path.parent() {
-            check_root_owned(dir)?;
+            check_root_owned(dir).map_err(Missing::Untrusted)?;
         }
         Ok(Cli { path })
     }
@@ -57,6 +63,10 @@ impl Cli {
 
     /// Run one command to completion and return the envelope's `data`.
     pub fn run(&self, args: &[&str]) -> Result<Value, String> {
+        self.run_within(args, TIMEOUT)
+    }
+
+    pub fn run_within(&self, args: &[&str], limit: Duration) -> Result<Value, String> {
         let mut child = self
             .command(args)
             .spawn()
@@ -67,7 +77,7 @@ impl Cli {
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None) if started.elapsed() > TIMEOUT => {
+                Ok(None) if started.elapsed() > limit => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(format!("agent-vault {} timed out", args.join(" ")));
@@ -78,9 +88,13 @@ impl Cli {
         }
         let stdout = out.join().unwrap_or_default();
         let stderr = err.join().unwrap_or_default();
-        parse_envelope(&stdout).or_else(|e| {
+        parse_envelope(&stdout).map_err(|e| {
             let stderr = stderr.trim();
-            Err(if stderr.is_empty() { e } else { first_line(stderr) })
+            if stderr.is_empty() {
+                e
+            } else {
+                first_line(stderr)
+            }
         })
     }
 
@@ -128,7 +142,8 @@ impl Cli {
                     .unwrap_or_default();
                 let checked = checked_ui_url(url)
                     .ok_or_else(|| {
-                        envelope_error(&v).unwrap_or_else(|| "the vault UI gave an unexpected link".into())
+                        envelope_error(&v)
+                            .unwrap_or_else(|| "the vault UI gave an unexpected link".into())
                     })
                     .and_then(|url| {
                         only_listener(ui_port(&url).unwrap_or_default(), child.id()).map(|()| url)
@@ -147,7 +162,11 @@ impl Cli {
                 let _ = child.wait();
                 let why = stderr.join().unwrap_or_default();
                 let why = first_line(why.trim());
-                Err(if why.is_empty() { "the vault UI did not start".into() } else { why })
+                Err(if why.is_empty() {
+                    "the vault UI did not start".into()
+                } else {
+                    why
+                })
             }
         }
     }
@@ -310,7 +329,12 @@ fn drain<R: Read + Send + 'static>(r: Option<R>) -> thread::JoinHandle<String> {
 }
 
 fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or_default().chars().take(200).collect()
+    s.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 fn envelope_error(v: &Value) -> Option<String> {
@@ -351,12 +375,53 @@ pub fn checked_ui_url(url: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+/// Open Terminal on a fixed command, for the steps where the human has to type
+/// a password or passphrase. The command goes to Terminal as an AppleScript
+/// string, never through a file another process could rewrite first.
+pub fn run_in_terminal(script: &str) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "This step needs a terminal, which the companion can only open on macOS for now."
+                .into(),
+        );
+    }
+    // AppleScript string escaping. The scripts are constants with neither
+    // character in them (a test checks), so this is a second lock on the door.
+    let quoted = script.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut cmd = Command::new("/usr/bin/osascript");
+    cmd.args([
+        "-e",
+        "tell application \"Terminal\" to activate",
+        "-e",
+        &format!("tell application \"Terminal\" to do script \"{quoted}\""),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    clean_env(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("could not open Terminal: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let why = String::from_utf8_lossy(&out.stderr);
+        if why.contains("-1743") || why.to_lowercase().contains("not authorized") {
+            Err("macOS blocked the companion from opening Terminal. Allow it under System Settings → Privacy & Security → Automation, then try again.".into())
+        } else {
+            Err("Terminal did not open. Try again in a moment.".into())
+        }
+    }
+}
+
 /// Open a URL in the default browser.
 pub fn open_in_browser(url: &str) -> Result<(), String> {
     let result = if cfg!(target_os = "macos") {
         Command::new("/usr/bin/open").arg(url).status()
     } else if cfg!(target_os = "windows") {
-        Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).status()
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .status()
     } else {
         Command::new("/usr/bin/xdg-open").arg(url).status()
     };
@@ -373,9 +438,15 @@ mod tests {
 
     #[test]
     fn envelopes_yield_data_or_the_error_message() {
-        assert_eq!(parse_envelope(r#"{"ok":true,"data":[1]}"#).unwrap(), serde_json::json!([1]));
         assert_eq!(
-            parse_envelope(r#"{"ok":false,"error":{"code":"AV_LOCKED","message":"the vault is locked"}}"#).unwrap_err(),
+            parse_envelope(r#"{"ok":true,"data":[1]}"#).unwrap(),
+            serde_json::json!([1])
+        );
+        assert_eq!(
+            parse_envelope(
+                r#"{"ok":false,"error":{"code":"AV_LOCKED","message":"the vault is locked"}}"#
+            )
+            .unwrap_err(),
             "the vault is locked"
         );
         assert!(parse_envelope("not json").is_err());
@@ -398,7 +469,10 @@ mod tests {
         assert_eq!(j.push("{"), None);
         assert_eq!(j.push(r#"  "ok": true"#), None);
         assert_eq!(j.push("}"), Some(serde_json::json!({"ok": true})));
-        assert_eq!(j.push(r#"{"ok":true,"data":{"event":"pending"}}"#).unwrap()["data"]["event"], "pending");
+        assert_eq!(
+            j.push(r#"{"ok":true,"data":{"event":"pending"}}"#).unwrap()["data"]["event"],
+            "pending"
+        );
     }
 
     #[test]

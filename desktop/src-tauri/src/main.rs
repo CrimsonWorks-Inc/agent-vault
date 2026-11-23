@@ -2,15 +2,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 //! agent-vault companion: a menu bar icon that shows what the vault has open,
-//! says when something is waiting, and puts the actions that only *narrow*
-//! access one click away. Anything that widens access opens the vault's own
-//! web UI, where the human proves presence. See docs/desktop-companion.md.
+//! says when something needs the user, and puts the everyday actions one click
+//! away. It never grants access itself: anything that widens what an agent may
+//! do opens the vault's own web UI, where the human proves presence.
+//! See docs/desktop-companion.md.
 
 mod cli;
 mod model;
+mod notices;
 
-use std::collections::HashSet;
 use std::io::BufReader;
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -18,25 +20,28 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::image::Image;
-use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_notification::NotificationExt;
 
-use model::{Action, Item, Reach, Snapshot};
+use model::{Action, AgentLink, Item, Missing, Prefs, Reach, Snapshot};
+use notices::Memo;
 
 const TRAY_ID: &str = "agent-vault";
 const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
 const REFRESH_EVERY: Duration = Duration::from_secs(15);
 
 struct Companion {
-    cli: Result<cli::Cli, String>,
     refresh: Mutex<mpsc::Sender<()>>,
     snapshot: Mutex<Snapshot>,
-    seen: Mutex<Option<HashSet<String>>>,
+    prefs: Mutex<Prefs>,
+    prefs_path: Option<PathBuf>,
+    memo: Mutex<Memo>,
     ui: Mutex<Option<Child>>,
     watch: Mutex<Option<Child>>,
     stopping: AtomicBool,
@@ -47,6 +52,17 @@ impl Companion {
         if let Ok(tx) = self.refresh.lock() {
             let _ = tx.send(());
         }
+    }
+
+    fn prefs(&self) -> Prefs {
+        self.prefs.lock().map(|p| *p).unwrap_or_default()
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        self.snapshot
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| Snapshot::loading())
     }
 
     fn shutdown(&self) {
@@ -65,15 +81,28 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            let prefs_path = app
+                .path()
+                .app_config_dir()
+                .ok()
+                .map(|d| d.join("settings.json"));
+            let mut prefs = load_prefs(prefs_path.as_deref());
+            prefs.autostart = app.autolaunch().is_enabled().unwrap_or(false);
+
             let state = Arc::new(Companion {
-                cli: cli::Cli::locate(),
                 refresh: Mutex::new(tx),
                 snapshot: Mutex::new(Snapshot::loading()),
-                seen: Mutex::new(None),
+                prefs: Mutex::new(prefs),
+                prefs_path,
+                memo: Mutex::new(Memo::default()),
                 ui: Mutex::new(None),
                 watch: Mutex::new(None),
                 stopping: AtomicBool::new(false),
@@ -81,7 +110,10 @@ fn main() {
             app.manage(state.clone());
 
             let handle = app.handle().clone();
-            let first = render(&handle, &model::menu(&Snapshot::loading(), Utc::now()))?;
+            let first = render(
+                &handle,
+                &model::menu(&Snapshot::loading(), prefs, Utc::now()),
+            )?;
             TrayIconBuilder::with_id(TRAY_ID)
                 .icon(Image::from_bytes(TRAY_ICON)?)
                 .icon_as_template(true)
@@ -92,10 +124,8 @@ fn main() {
 
             #[cfg(unix)]
             spawn_signal_handler(handle.clone(), state.clone());
-            spawn_refresher(handle.clone(), state.clone(), rx);
-            if state.cli.is_ok() {
-                spawn_watcher(handle, state.clone());
-            }
+            spawn_refresher(handle, state.clone(), rx);
+            spawn_watcher(state.clone());
             state.poke();
             Ok(())
         })
@@ -130,12 +160,42 @@ fn spawn_signal_handler(app: AppHandle, state: Arc<Companion>) {
     });
 }
 
+// ---- settings --------------------------------------------------------------
+
+fn load_prefs(path: Option<&std::path::Path>) -> Prefs {
+    let mut prefs = Prefs::default();
+    let read = path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    if let Some(v) = read {
+        if let Some(on) = v.get("notifications").and_then(Value::as_bool) {
+            prefs.notifications = on;
+        }
+        if let Some(done) = v.get("welcomed").and_then(Value::as_bool) {
+            prefs.welcomed = done;
+        }
+    }
+    prefs
+}
+
+fn save_prefs(state: &Companion) {
+    let Some(path) = &state.prefs_path else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let prefs = state.prefs();
+    let body = json!({ "notifications": prefs.notifications, "welcomed": prefs.welcomed });
+    let _ = std::fs::write(path, format!("{body:#}\n"));
+}
+
 // ---- keeping the menu current --------------------------------------------
 
-fn gather(cli: &Result<cli::Cli, String>) -> Snapshot {
-    let cli = match cli {
+fn gather() -> Snapshot {
+    let cli = match cli::Cli::locate() {
         Ok(cli) => cli,
-        Err(why) => return Snapshot::only(Reach::Missing(why.clone())),
+        Err(why) => return Snapshot::only(Reach::Missing(why)),
     };
     let status = match cli.run(&["status"]) {
         Ok(v) => match model::parse_status(&v) {
@@ -158,7 +218,45 @@ fn gather(cli: &Result<cli::Cli, String>) -> Snapshot {
         Ok(v) => snap.templates = model::parse_templates(&v),
         Err(_) => snap.unread.templates = true,
     }
+    match cli.run(&["cred", "list"]) {
+        Ok(v) => snap.keys = model::parse_keys(&v),
+        Err(_) => snap.unread.keys = true,
+    }
+    if let Ok(v) = cli.run(&["doctor"]) {
+        snap.setup = model::parse_setup(&v);
+    }
+    snap.agents = agents(&cli);
     snap
+}
+
+/// Agents found on this computer, and whether the vault is already written
+/// into each one's config. `mcp install --print` reports that without writing.
+fn agents(cli: &cli::Cli) -> Vec<AgentLink> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let marker = |id: &str| match id {
+        "claude-code" => ".claude",
+        "codex" => ".codex",
+        "cursor" => ".cursor",
+        _ => ".gemini",
+    };
+    model::AGENTS
+        .iter()
+        .filter(|(id, _)| home.join(marker(id)).is_dir())
+        .filter_map(|(id, name)| {
+            let v = cli
+                .run(&[
+                    "mcp", "install", "--agent", id, "--scope", "user", "--print",
+                ])
+                .ok()?;
+            Some(AgentLink {
+                id: (*id).into(),
+                name: (*name).into(),
+                connected: model::parse_connected(&v)?,
+            })
+        })
+        .collect()
 }
 
 fn spawn_refresher(app: AppHandle, state: Arc<Companion>, rx: mpsc::Receiver<()>) {
@@ -171,40 +269,69 @@ fn spawn_refresher(app: AppHandle, state: Arc<Companion>, rx: mpsc::Receiver<()>
         if state.stopping.load(Ordering::SeqCst) {
             return;
         }
-        let snap = gather(&state.cli);
-        announce_new(&app, &state, &snap);
+        let snap = gather();
+        let before = state.snapshot();
+        let said = match state.memo.lock() {
+            Ok(mut memo) => notices::notices(&before, &snap, Utc::now(), &mut memo),
+            Err(_) => Vec::new(),
+        };
+        for notice in said {
+            tell(&app, &state, &notice.text());
+        }
         if let Ok(mut s) = state.snapshot.lock() {
             *s = snap.clone();
         }
+        welcome_once(&app, &state, &snap);
+        let prefs = state.prefs();
         let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || show(&app2, &snap));
+        let _ = app.run_on_main_thread(move || show(&app2, &snap, prefs));
     });
 }
 
-/// A notification when something new is waiting. It says only that, never
-/// what the agent wrote: the same rule as the daemon's minimal webhook.
-fn announce_new(app: &AppHandle, state: &Companion, snap: &Snapshot) {
-    let Reach::Up(_) = snap.reach else { return };
-    let now: HashSet<String> = snap.pending.iter().map(|p| p.id.clone()).collect();
-    let Ok(mut seen) = state.seen.lock() else { return };
-    let fresh = match seen.as_ref() {
-        Some(before) => now.difference(before).count(),
-        None => now.len(), // first look: mention anything already waiting
-    };
-    *seen = Some(now);
-    if fresh > 0 {
-        let body = if fresh == 1 {
-            "Something is waiting for your approval.".to_string()
-        } else {
-            format!("{fresh} things are waiting for your approval.")
-        };
-        notify(app, &body);
+/// The first time the companion ever runs, say where it lives and what it
+/// found, and offer the one next step (setting the vault up, if it is missing).
+fn welcome_once(app: &AppHandle, state: &Arc<Companion>, snap: &Snapshot) {
+    if state.prefs().welcomed {
+        return;
     }
+    let Some(welcome) = model::welcome(snap) else {
+        return;
+    };
+    if let Ok(mut prefs) = state.prefs.lock() {
+        prefs.welcomed = true;
+    }
+    save_prefs(state);
+    let (app, state) = (app.clone(), state.clone());
+    thread::spawn(move || {
+        let dialog = app
+            .dialog()
+            .message(&welcome.body)
+            .title(&welcome.title)
+            .kind(MessageDialogKind::Info);
+        match welcome.next {
+            Some((label, action)) => {
+                let go = dialog
+                    .buttons(MessageDialogButtons::OkCancelCustom(label, "Later".into()))
+                    .blocking_show();
+                if go {
+                    if let Err(why) = act(&app, &state, &action) {
+                        alert(&app, MessageDialogKind::Error, "That did not work", &why);
+                    }
+                    state.poke();
+                }
+            }
+            None => {
+                dialog.blocking_show();
+            }
+        }
+    });
 }
 
-fn show(app: &AppHandle, snap: &Snapshot) {
-    let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    if let Ok(menu) = render(app, &model::menu(snap, Utc::now())) {
+fn show(app: &AppHandle, snap: &Snapshot, prefs: Prefs) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    if let Ok(menu) = render(app, &model::menu(snap, prefs, Utc::now())) {
         let _ = tray.set_menu(Some(menu));
     }
     let _ = tray.set_title(model::tray_title(snap));
@@ -229,6 +356,14 @@ fn build(app: &AppHandle, item: &Item) -> tauri::Result<Box<dyn IsMenuItem<Wry>>
             true,
             None::<&str>,
         )?),
+        Item::Check { action, text, on } => Box::new(CheckMenuItem::with_id(
+            app,
+            action.id(),
+            text,
+            true,
+            *on,
+            None::<&str>,
+        )?),
         Item::Separator => Box::new(PredefinedMenuItem::separator(app)?),
         Item::Submenu { text, items } => {
             let sub = Submenu::new(app, text, true)?;
@@ -242,12 +377,11 @@ fn build(app: &AppHandle, item: &Item) -> tauri::Result<Box<dyn IsMenuItem<Wry>>
 
 /// Wakes the refresher the moment the daemon reports a new request, so the
 /// badge does not wait for the next 15-second tick.
-fn spawn_watcher(app: AppHandle, state: Arc<Companion>) {
+fn spawn_watcher(state: Arc<Companion>) {
     thread::spawn(move || {
-        let _ = &app;
         while !state.stopping.load(Ordering::SeqCst) {
-            let Ok(cli) = &state.cli else { return };
-            if let Ok(mut child) = cli.watch() {
+            // Looked up each time: the vault may be installed while we run.
+            if let Some(mut child) = cli::Cli::locate().ok().and_then(|cli| cli.watch().ok()) {
                 let stdout = child.stdout.take();
                 if let Ok(mut slot) = state.watch.lock() {
                     *slot = Some(child);
@@ -262,7 +396,9 @@ fn spawn_watcher(app: AppHandle, state: Arc<Companion>) {
                     let mut json = cli::JsonLines::default();
                     while let Ok(Some(line)) = cli::read_line_capped(&mut reader, cli::LINE_CAP) {
                         let Some(v) = json.push(&line) else { continue };
-                        if v.get("data").and_then(|d| d.get("event")).and_then(Value::as_str)
+                        if v.get("data")
+                            .and_then(|d| d.get("event"))
+                            .and_then(Value::as_str)
                             == Some("pending")
                         {
                             state.poke();
@@ -274,7 +410,7 @@ fn spawn_watcher(app: AppHandle, state: Arc<Companion>) {
                     let _ = child.wait();
                 }
             }
-            // Locked or down: try again shortly.
+            // Not installed, locked or down: try again shortly.
             for _ in 0..10 {
                 if state.stopping.load(Ordering::SeqCst) {
                     return;
@@ -288,7 +424,9 @@ fn spawn_watcher(app: AppHandle, state: Arc<Companion>) {
 // ---- menu clicks ----------------------------------------------------------
 
 fn on_menu(app: &AppHandle, id: &str) {
-    let Some(action) = Action::parse(id) else { return };
+    let Some(action) = Action::parse(id) else {
+        return;
+    };
     let state = app.state::<Arc<Companion>>().inner().clone();
     if action == Action::Quit {
         state.shutdown();
@@ -302,63 +440,112 @@ fn on_menu(app: &AppHandle, id: &str) {
     // Everything else may block (a CLI call, a dialog): never on the UI thread.
     let app = app.clone();
     thread::spawn(move || {
-        let result = act(&app, &state, &action);
-        if let Err(why) = result {
-            notify(&app, &why);
+        if let Err(why) = act(&app, &state, &action) {
+            alert(&app, MessageDialogKind::Error, "That did not work", &why);
         }
         state.poke();
     });
 }
 
 fn act(app: &AppHandle, state: &Companion, action: &Action) -> Result<(), String> {
+    match action {
+        Action::ToggleNotifications => {
+            let on = {
+                let mut prefs = state.prefs.lock().map_err(|_| "busy".to_string())?;
+                prefs.notifications = !prefs.notifications;
+                prefs.notifications
+            };
+            save_prefs(state);
+            if on {
+                tell(
+                    app,
+                    state,
+                    "Notifications are on. This is what they look like.",
+                );
+            }
+            return Ok(());
+        }
+        Action::ToggleAutostart => {
+            let launcher = app.autolaunch();
+            let on = !launcher.is_enabled().unwrap_or(false);
+            let done = if on {
+                launcher.enable()
+            } else {
+                launcher.disable()
+            };
+            done.map_err(|e| format!("Could not change the login setting: {e}"))?;
+            if let Ok(mut prefs) = state.prefs.lock() {
+                prefs.autostart = on;
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    if let Some(script) = action.terminal_script() {
+        return cli::run_in_terminal(&script);
+    }
     if let Some(fragment) = action.ui_fragment() {
         return open_ui(state, &fragment);
     }
-    let cli = state.cli.as_ref().map_err(Clone::clone)?;
-    match action {
-        Action::Revoke(sid) => {
-            let label = state
-                .snapshot
-                .lock()
-                .ok()
-                .and_then(|s| s.session(sid).map(|s| s.label.clone()))
-                .unwrap_or_else(|| sid.clone());
-            if confirm(
-                app,
-                "Revoke this session?",
-                &format!("“{label}” ends now. Any agent using it loses access straight away."),
-                "Revoke",
-            ) {
-                cli.run(&["session", "revoke", sid])?;
-                notify(app, &format!("Revoked “{label}”."));
-            }
-            Ok(())
+    let Some(args) = action.cli_args() else {
+        return Ok(());
+    };
+    let snap = state.snapshot();
+    if let Some(ask) = action.confirm(&snap) {
+        if !confirm(app, &ask) {
+            return Ok(());
         }
-        Action::Lock => {
-            cli.run(&["lock"])?;
-            notify(app, "The vault is locked. Unlock it in the vault when you need it again.");
-            Ok(())
-        }
-        Action::Panic => {
-            if confirm(
-                app,
-                "Revoke everything?",
-                "Every session ends and every waiting request is denied. Agents lose all access until you open a new session.",
-                "Revoke everything",
-            ) {
-                cli.run(&["panic", "--reason", "panic from the menu bar companion"])?;
-                notify(app, "Every session is revoked and everything waiting was denied.");
-            }
-            Ok(())
-        }
-        _ => Ok(()),
     }
+    let cli =
+        cli::Cli::locate().map_err(|_| "agent-vault is not available right now.".to_string())?;
+    let ending: Vec<String> = match action {
+        Action::Revoke(sid) => vec![sid.clone()],
+        Action::Panic => snap.sessions.iter().map(|s| s.id.clone()).collect(),
+        _ => Vec::new(),
+    };
+    if let Ok(mut memo) = state.memo.lock() {
+        memo.ended_by_user(ending.iter().cloned());
+    }
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let limit = if *action == Action::TestKeys {
+        cli::SLOW
+    } else {
+        Duration::from_secs(20)
+    };
+    let reply = match cli.run_within(&argv, limit) {
+        Ok(reply) => reply,
+        Err(why) => {
+            if let Ok(mut memo) = state.memo.lock() {
+                memo.not_ended(&ending);
+            }
+            return Err(why);
+        }
+    };
+    if *action == Action::TestKeys {
+        // From this run's own results, never from the stored health, which
+        // can be older than the check the user just asked for.
+        let report = match model::parse_key_test(&reply) {
+            Some(results) => model::key_report(&results),
+            None => "The check ran, but its results could not be read. Open the vault to see them."
+                .into(),
+        };
+        alert(app, MessageDialogKind::Info, "Key check", &report);
+    } else if let Some(text) = action.done(&snap) {
+        tell(app, state, &text);
+    }
+    Ok(())
 }
 
 /// Open the vault's web UI on one page. Each link works once, so a fresh UI
 /// process is started each time and the previous one is stopped.
 fn open_ui(state: &Companion, fragment: &str) -> Result<(), String> {
-    let cli = state.cli.as_ref().map_err(Clone::clone)?;
+    let cli = cli::Cli::locate().map_err(|why| match why {
+        Missing::NotInstalled => "agent-vault is not set up on this computer yet.".to_string(),
+        Missing::Unsupported => {
+            "agent-vault does not run on this operating system yet.".to_string()
+        }
+        Missing::Untrusted(why) => why,
+    })?;
     // Hold the lock only to swap processes, never while waiting on the UI or
     // the browser, so Quit is never stuck behind a slow start.
     let old = state.ui.lock().ok().and_then(|mut slot| slot.take());
@@ -368,7 +555,7 @@ fn open_ui(state: &Companion, fragment: &str) -> Result<(), String> {
     }
     let (mut child, url) = cli.ui().map_err(|why| {
         if why.contains("in use") {
-            "The vault UI is already open from a terminal. Use that browser tab, or stop it and try again.".to_string()
+            "The vault is already open from a terminal. Use that browser tab, or close it and try again.".to_string()
         } else {
             why
         }
@@ -388,16 +575,33 @@ fn open_ui(state: &Companion, fragment: &str) -> Result<(), String> {
     cli::open_in_browser(&format!("{url}{fragment}"))
 }
 
-fn confirm(app: &AppHandle, title: &str, body: &str, ok: &str) -> bool {
+fn confirm(app: &AppHandle, ask: &model::Confirm) -> bool {
     app.dialog()
-        .message(body)
-        .title(title)
+        .message(&ask.body)
+        .title(&ask.title)
         .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(ok.into(), "Cancel".into()))
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            ask.ok.clone(),
+            "Cancel".into(),
+        ))
         .blocking_show()
 }
 
-fn notify(app: &AppHandle, body: &str) {
+/// A dialog, for results and errors the user must not miss whatever their
+/// notification settings are.
+fn alert(app: &AppHandle, kind: MessageDialogKind, title: &str, body: &str) {
+    app.dialog()
+        .message(body)
+        .title(title)
+        .kind(kind)
+        .blocking_show();
+}
+
+/// A notification, when the user has them on.
+fn tell(app: &AppHandle, state: &Companion, body: &str) {
+    if !state.prefs().notifications {
+        return;
+    }
     let _ = app
         .notification()
         .builder()
