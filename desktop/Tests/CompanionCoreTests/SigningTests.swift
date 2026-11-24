@@ -77,6 +77,44 @@ import Testing
         #expect(!SignedRequest.removeTouchId.matches(j(#"{"op":"companion.enroll"}"#)))
     }
 
+    @Test func aSessionMadeHereIsPlain() {
+        #expect(SignedRequest.create(creds: ["openai"], hours: 8, readOnly: true).args
+            == ["session", "create", "--cred", "openai", "--ttl", "8", "--label", "companion session", "--methods", "GET"])
+        #expect(SignedRequest.create(creds: ["openai", "gh"], hours: 24, readOnly: false).args
+            == ["session", "create", "--cred", "openai,gh", "--ttl", "24", "--label", "companion session"])
+        #expect(SignedRequest.create(creds: [], hours: 8, readOnly: true).args == nil, "at least one key")
+        #expect(SignedRequest.create(creds: ["a", "a"], hours: 8, readOnly: true).args == nil, "each key once")
+        #expect(SignedRequest.create(creds: ["a"], hours: 0, readOnly: true).args == nil)
+        #expect(SignedRequest.create(creds: ["a"], hours: 9999, readOnly: true).args == nil, "only the offered lengths")
+        for bad in ["--all", "a,b", "a b", "", "-x", ".hidden"] {
+            #expect(SignedRequest.create(creds: ["ok", bad], hours: 8, readOnly: true).args == nil, "\(bad)")
+        }
+        #expect(!SignedRequest.create(creds: ["a"], hours: 8, readOnly: true).takesValue)
+        #expect(SignedRequest.create(creds: ["openai", "gh"], hours: 1, readOnly: true).reason
+            == "let agents use “openai” and 1 more for 1 hour, read only")
+    }
+
+    /// A session is signed only when the vault bound exactly the keys, length
+    /// and limits chosen: one extra limit (an expiry that never comes, writes
+    /// without approval) is not what the user chose.
+    @Test func aSessionIsSignedOnlyWhole() {
+        let one = SignedRequest.create(creds: ["demo"], hours: 8, readOnly: true)
+        #expect(one.matches(j(#"{"op":"session.create","cred":"demo","label":"companion session","ttl_hours":8,"methods":["GET"]}"#)))
+        #expect(!one.matches(j(#"{"op":"session.create","cred":"demo","label":"companion session","ttl_hours":8}"#)), "writes")
+        #expect(!one.matches(j(#"{"op":"session.create","cred":"demo","label":"companion session","ttl_hours":24,"methods":["GET"]}"#)))
+        #expect(!one.matches(j(#"{"op":"session.create","cred":"demo","label":"companion session","ttl_hours":8,"methods":["GET"],"infinite":true}"#)))
+        #expect(!one.matches(j(#"{"op":"session.create","cred":"demo","label":"companion session","ttl_hours":8,"methods":["GET"],"approval":"auto"}"#)))
+        #expect(!one.matches(j(#"{"op":"session.create","cred":"other","label":"companion session","ttl_hours":8,"methods":["GET"]}"#)))
+        #expect(!one.matches(j(#"{"op":"cred.add","cred":"demo","label":"companion session","ttl_hours":8,"methods":["GET"]}"#)))
+        let two = SignedRequest.create(creds: ["demo", "other"], hours: 24, readOnly: false)
+        #expect(two.matches(j(#"{"op":"session.create","grants":[{"cred":"demo"},{"cred":"other"}],"label":"companion session","ttl_hours":24}"#)))
+        #expect(!two.matches(j(#"{"op":"session.create","grants":[{"cred":"demo"},{"cred":"other"},{"cred":"third"}],"label":"companion session","ttl_hours":24}"#)))
+        #expect(!two.matches(j(#"{"op":"session.create","grants":[{"cred":"demo","approval":"auto"},{"cred":"other"}],"label":"companion session","ttl_hours":24}"#)))
+        let twoRead = SignedRequest.create(creds: ["demo", "other"], hours: 1, readOnly: true)
+        #expect(twoRead.matches(j(#"{"op":"session.create","grants":[{"cred":"demo","methods":["GET"]},{"cred":"other","methods":["GET"]}],"label":"companion session","ttl_hours":1}"#)))
+        #expect(!SignedRequest.create(creds: [], hours: 8, readOnly: true).matches(j(#"{"op":"session.create","grants":[],"label":"companion session","ttl_hours":8,"methods":["GET"]}"#)))
+    }
+
     @Test func aChallengeIsReadOnlyWhenWhole() throws {
         let raw = Data(repeating: 7, count: 32)
         let good = j(#"{"challengeId":"c1","challenge":"\#(base64url(raw))","operation":{"op":"cred.release","slug":"a"}}"#)
@@ -113,6 +151,13 @@ import Testing
         #expect(!script.contains("\\") && !script.contains("`"))
         for sh in shells {
             #expect(shell(sh, ["-n", "-c", script]).status == 0, "\(sh)")
+        }
+        // A locked vault is unlocked first, in the same window; enrolling runs only if that worked.
+        let locked = try #require(Action.enrollTouchIdInTerminal(key, "Mac", unlockFirst: true).terminalScript)
+        #expect(locked.contains("/var/db/agent-vault/app/bin/agent-vault unlock && echo && /var/db/agent-vault/app/bin/agent-vault companion enroll \(key)"))
+        #expect(!script.contains(" unlock"))
+        for sh in shells {
+            #expect(shell(sh, ["-n", "-c", locked]).status == 0, "\(sh)")
         }
         // A label that is not plain, or a key that is not, is never put in a command.
         #expect(Action.enrollTouchIdInTerminal(key, "Eric's Mac").terminalScript == nil)

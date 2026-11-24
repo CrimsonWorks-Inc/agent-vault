@@ -109,6 +109,32 @@ if (skip) {
       assert.ok(!JSON.stringify(done).includes(value))
     })
 
+    test('a session made in the island is bound whole', async () => {
+      // Two keys, added as the island adds one (demo is stopped by now).
+      for (const slug of ['one', 'two']) {
+        const value = `conformance-${slug}-value-0123456789`
+        const add = ['cred', 'add', slug, '--kind', 'github']
+        const asked = ok(await runCli(w, [...add, '--companion-challenge', '--json'], { input: `${value}\n` }), 'add challenge')
+        const addProof = JSON.stringify({ challengeId: asked.challengeId, companionSignature: key.sign(asked.challenge) })
+        ok(await runCli(w, [...add, '--presence-stdin', '--json'], { input: `${addProof}\n${value}\n` }), 'add')
+      }
+      // The commands and operations the companion builds (SignedRequest.create
+      // and sessionOperation in desktop/Sources/CompanionCore/Signing.swift):
+      // it signs only an operation equal to the one it expects.
+      const label = ['--label', 'companion session']
+      const one = ok(await runCli(w, ['session', 'create', '--cred', 'one', '--ttl', '8', ...label, '--methods', 'GET', '--companion-challenge', '--json']), 'one key')
+      assert.deepEqual(one.operation, { op: 'session.create', cred: 'one', label: 'companion session', ttl_hours: 8, methods: ['GET'] })
+      const args = ['session', 'create', '--cred', 'one,two', '--ttl', '24', ...label]
+      const two = ok(await runCli(w, [...args, '--companion-challenge', '--json']), 'two keys')
+      assert.deepEqual(two.operation, { op: 'session.create', grants: [{ cred: 'one' }, { cred: 'two' }], label: 'companion session', ttl_hours: 24 })
+
+      const proof = JSON.stringify({ challengeId: two.challengeId, companionSignature: key.sign(two.challenge) })
+      const made = ok(await runCli(w, [...args, '--presence-stdin', '--json'], { input: `${proof}\n` }), 'start')
+      assert.equal(typeof made.session_id, 'string')
+      const listed = await w.control('GET', '/v1/sessions')
+      assert.equal(listed.json.find((s) => s.id === made.session_id)?.label, 'companion session')
+    })
+
     test('the companion modes refuse what they are not for', async () => {
       // A command that would change something before any presence check.
       const lock = refused(await runCli(w, ['lock', '--companion-challenge', '--json']), 'lock')

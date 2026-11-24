@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+- **Start a session in the island.** Pick keys, 1, 8 or 24 hours, and read
+  only or read and write (each write waits for you), then Touch ID. Before,
+  the island could start a session only from a saved template and sent
+  everything else to the vault page.
+- **Touch ID setup from where you are.** Until Touch ID in the island is set
+  up, Start a session, Add a key and Replace open a "Set up Touch ID" step,
+  not the vault page; buttons that leave the island offer the same. Setting
+  it up on a locked vault unlocks it first, in the same Terminal window.
+
 ## 0.5.0
 
 - **The companion, native and on the island.** A macOS app in Swift

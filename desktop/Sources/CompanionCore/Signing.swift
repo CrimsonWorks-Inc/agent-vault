@@ -99,6 +99,9 @@ public enum SignedRequest: Equatable {
     case approve(id: String)
     case deny(id: String)
     case start(template: String)
+    /// A session made here: these keys, for this many hours, read only or
+    /// with each write waiting for the user's approval (the vault's default).
+    case create(creds: [String], hours: Int, readOnly: Bool)
     case release(slug: String)
     case rotate(slug: String)
     case add(slug: String, kind: String, host: String?)
@@ -111,6 +114,9 @@ public enum SignedRequest: Equatable {
         case .approve(let id) where safeId(id): return ["approve", id]
         case .deny(let id) where safeId(id): return ["deny", id]
         case .start(let name) where safeId(name): return ["session", "create", "--template", name]
+        case .create(let creds, let hours, let readOnly) where plainSession(creds, hours):
+            return ["session", "create", "--cred", creds.joined(separator: ","), "--ttl", String(hours),
+                    "--label", islandSessionLabel] + (readOnly ? ["--methods", "GET"] : [])
         case .release(let slug) where safeId(slug): return ["cred", "release", slug]
         case .rotate(let slug) where safeId(slug): return ["cred", "rotate", slug]
         case .add(let slug, let kind, let host) where safeId(slug) && keyKinds.contains(where: { $0.kind == kind }):
@@ -146,6 +152,10 @@ public enum SignedRequest: Equatable {
                 && (op == "approval.deny" || (op == "session_request.decide" && operation["granted"]?.bool == false))
         case .start(let name):
             return op == "session.create" && operation["template"]?.string == name
+        case .create(let creds, let hours, let readOnly):
+            // The whole operation, not a few fields: a session can carry many
+            // limits, and any one the user did not choose must not be signed.
+            return plainSession(creds, hours) && operation == sessionOperation(creds, hours, readOnly)
         case .release(let slug):
             return op == "cred.release" && operation["slug"]?.string == slug
         case .rotate(let slug):
@@ -166,6 +176,8 @@ public enum SignedRequest: Equatable {
         case .approve: return "approve the agent's request shown in the island"
         case .deny: return "deny the agent's request shown in the island"
         case .start(let name): return "start a session from “\(cleanText(name, 40))”"
+        case .create(let creds, let hours, let readOnly):
+            return "let agents use \(keysPhrase(creds)) for \(hoursPhrase(hours))\(readOnly ? ", read only" : "")"
         case .release(let slug): return "let agents use “\(cleanText(slug, 40))” again"
         case .rotate(let slug): return "replace the value of “\(cleanText(slug, 40))”"
         case .add(let slug, _, _): return "add the key “\(cleanText(slug, 40))”"
@@ -179,12 +191,56 @@ public enum SignedRequest: Equatable {
         case .approve: return "Approved."
         case .deny: return "Denied."
         case .start(let name): return "Started a session from “\(cleanText(name, 40))”."
+        case .create(let creds, let hours, _): return "Agents can use \(keysPhrase(creds)) for \(hoursPhrase(hours))."
         case .release(let slug): return "Agents can use “\(cleanText(slug, 40))” again."
         case .rotate(let slug): return "Replaced the value of “\(cleanText(slug, 40))”."
         case .add(let slug, _, _): return "Added “\(cleanText(slug, 40))”."
         case .removeTouchId: return "Touch ID in the companion is off."
         }
     }
+}
+
+/// The label a session started in the island carries.
+public let islandSessionLabel = "companion session"
+
+/// The lengths the island offers for a new session, in hours.
+public let sessionHours = [1, 8, 24]
+
+/// Keys and a length the island will put in a command: at least one key,
+/// each plain and named once, and one of the offered lengths.
+func plainSession(_ creds: [String], _ hours: Int) -> Bool {
+    !creds.isEmpty && creds.allSatisfy(safeId) && Set(creds).count == creds.count && sessionHours.contains(hours)
+}
+
+/// The operation the vault binds to `session create --cred … --ttl … --label
+/// … [--methods GET]`: the CLI's request body with `op`. One key is the
+/// body's `cred`; several are each a grant.
+func sessionOperation(_ creds: [String], _ hours: Int, _ readOnly: Bool) -> JSON {
+    let limits: [String: JSON] = readOnly ? ["methods": .array([.string("GET")])] : [:]
+    var op: [String: JSON] = [
+        "op": .string("session.create"),
+        "label": .string(islandSessionLabel),
+        "ttl_hours": .number(Double(hours)),
+    ]
+    if creds.count == 1 {
+        op["cred"] = .string(creds[0])
+        op.merge(limits) { a, _ in a }
+    } else {
+        op["grants"] = .array(creds.map { .object(["cred": .string($0)].merging(limits) { a, _ in a }) })
+    }
+    return .object(op)
+}
+
+func keysPhrase(_ creds: [String]) -> String {
+    switch creds.count {
+    case 0: return "no keys"
+    case 1: return "“\(cleanText(creds[0], 40))”"
+    default: return "“\(cleanText(creds[0], 40))” and \(creds.count - 1) more"
+    }
+}
+
+func hoursPhrase(_ hours: Int) -> String {
+    hours == 1 ? "1 hour" : "\(hours) hours"
 }
 
 /// A challenge as the CLI prints it, checked: the id and the 32-byte

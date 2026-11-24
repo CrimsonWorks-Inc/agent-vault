@@ -387,6 +387,12 @@ final class Companion: ObservableObject {
         case handoff(Action)
     }
 
+    /// Whether one Terminal step (the passphrase, once) would let the island
+    /// do changes with Touch ID: this Mac can, and has not been set up yet.
+    var touchIdCanBeSetUp: Bool {
+        touchId == .notSetUp || touchId == .otherKey
+    }
+
     func route(_ signed: SignedRequest?, otherwise fallback: Action) -> Route {
         if touchId == .ready, let signed, signed.args != nil {
             return .touchId(signed)
@@ -551,7 +557,9 @@ final class Companion: ObservableObject {
         do {
             let spki = try Enclave.ensureKey()
             let label = plainLabel(Host.current().localizedName ?? "Mac")
-            perform(.enrollTouchIdInTerminal(base64url(spki), label))
+            var locked = false
+            if case .up(let status) = snapshot.reach { locked = status.locked }
+            perform(.enrollTouchIdInTerminal(base64url(spki), label, unlockFirst: locked))
         } catch {
             say("The Secure Enclave key could not be made: \(error.localizedDescription)", failed: true)
         }
