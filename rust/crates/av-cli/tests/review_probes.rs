@@ -4,6 +4,28 @@ use assert_cmd::cargo::cargo_bin;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
+/// Runs a command, retrying while the OS reports the executable busy
+/// (ETXTBSY). A binary a test has just copied can still be open for a moment
+/// in a child that another test thread is forking, until that child execs.
+trait OutputRetrying {
+    fn output_retrying(&mut self) -> std::io::Result<std::process::Output>;
+}
+
+impl OutputRetrying for Command {
+    fn output_retrying(&mut self) -> std::io::Result<std::process::Output> {
+        let mut tries = 0;
+        loop {
+            match self.output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 #[test]
 fn probe_migrate_refuses_a_foreign_vault_db_instead_of_calling_it_done() {
     let tmp = tempfile::tempdir().unwrap();
@@ -221,7 +243,7 @@ fn probe_installed_setup_with_from_outside_app_is_not_a_self_install() {
         .args(["install", "--dry-run", "--from"])
         .arg(&checkout)
         .env("AGENT_VAULT_SETUP_DRY_ROOT", &root)
-        .output()
+        .output_retrying()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -248,7 +270,7 @@ fn probe_installed_setup_without_from_is_refused() {
     let out = Command::new(&installed)
         .args(["install", "--dry-run"])
         .env("AGENT_VAULT_SETUP_DRY_ROOT", &root)
-        .output()
+        .output_retrying()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -269,7 +291,7 @@ fn probe_from_that_names_the_installed_app() {
             .args(["install", "--dry-run", "--from"])
             .arg(&app)
             .env("AGENT_VAULT_SETUP_DRY_ROOT", &root)
-            .output()
+            .output_retrying()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -339,7 +361,7 @@ fn probe_debug_installer_warns_it_is_not_the_release_binary() {
         .args(["install", "--dry-run", "--from"])
         .arg(&checkout)
         .env_remove("AGENT_VAULT_SETUP_DRY_ROOT")
-        .output()
+        .output_retrying()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
