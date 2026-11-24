@@ -251,7 +251,7 @@ pub enum Command {
     /// `src/cli/index.js`.
     Lock,
     /// Resume. Ports `COMMANDS.unlock` in `src/cli/index.js`.
-    Unlock,
+    Unlock(UnlockArgs),
     /// Touch ID in the companion: its Secure Enclave key as a presence
     /// factor. New in the port; no JS source.
     Companion {
@@ -344,6 +344,15 @@ pub struct UpgradeArgs {
     /// Print the command instead of running it.
     #[arg(long = "print-only")]
     pub print_only: bool,
+}
+
+/// `unlock [--companion]`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct UnlockArgs {
+    /// Unlock with the secret the companion's Secure Enclave derives after
+    /// Touch ID, read from stdin, in place of the passphrase.
+    #[arg(long)]
+    pub companion: bool,
 }
 
 /// `daemon [--port N] [--passphrase]`. Ports the flags read by
@@ -1062,8 +1071,11 @@ pub enum CompanionCommand {
     Enroll(CompanionEnrollArgs),
     /// Whether a companion key is enrolled, and which.
     Status,
-    /// Remove it (fresh presence).
+    /// Remove it, and Touch ID unlock with it (fresh presence).
     Remove,
+    /// Turn on Touch ID unlock: the secret the companion's Secure Enclave
+    /// derives after Touch ID, read from stdin (fresh presence).
+    EnableUnlock,
 }
 
 /// `companion enroll <public-key> [--label T]`.

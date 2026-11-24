@@ -30,6 +30,7 @@ final class IslandModel: ObservableObject {
         case start
         case template(String)
         case newSession
+        case unlock
         case addKey
         case replaceKey(String)
         case settings
@@ -44,6 +45,7 @@ final class IslandModel: ObservableObject {
             case .start: return "Start a session"
             case .template: return "Start a session"
             case .newSession: return "Start a session"
+            case .unlock: return "Unlock"
             case .addKey: return "Add a key"
             case .replaceKey: return "Replace a key's value"
             case .settings: return "Settings"

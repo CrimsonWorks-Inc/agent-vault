@@ -95,7 +95,10 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("backup", &["export", "inspect", "restore"]),
     ("tripwire", &["show", "on", "off", "set"]),
     ("notify", &["set", "show", "off", "test"]),
-    ("companion", &["enroll", "status", "remove"]),
+    (
+        "companion",
+        &["enroll", "status", "remove", "enable-unlock"],
+    ),
 ];
 
 const COMMANDS: &[&str] = &[
@@ -137,6 +140,7 @@ fn bool_flags(path: &[&str]) -> &'static [&'static str] {
         ["setup"] => &["dev", "print-only", "passphrase"],
         ["upgrade"] => &["print-only"],
         ["daemon"] => &["passphrase"],
+        ["unlock"] => &["companion"],
         ["cred", "rotate"] => &["revoke"],
         ["cred", "test"] => &["all"],
         ["cred", "pin"] => &["clear", "live"],

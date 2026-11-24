@@ -15,6 +15,10 @@ final class Companion: ObservableObject {
     }
     /// Whether the island can approve with Touch ID right now.
     @Published private(set) var touchId: TouchId = .unavailable
+    /// Whether the island can unlock the vault with Touch ID: approvals are
+    /// set up here, the vault holds this Mac's unlock wrap, and the key to
+    /// open it is here.
+    @Published private(set) var touchIdUnlock = false
     /// The last thing the island has to say: a result or why something failed.
     @Published var banner: Banner?
     /// What the island is waiting on (the vault, or Touch ID), if anything.
@@ -89,6 +93,7 @@ final class Companion: ObservableObject {
         self.now = now
         touchId = CompanionCore.touchId(snap.enrollment, localKeyId: Enclave.keyId, available: Enclave.available,
                                         vaultTooOld: snap.companionUnsupported)
+        touchIdUnlock = touchId == .ready && snap.enrollment?.unlock == true && Enclave.hasUnlockKey
         redraw()
         for notice in said {
             tell(notice.text(placement))
@@ -230,6 +235,9 @@ final class Companion: ObservableObject {
 
     func perform(_ action: Action) {
         switch action {
+        case .unlock where touchIdUnlock:
+            unlockWithTouchId()
+            return
         case .quit:
             NSApp.terminate(nil)
             return
@@ -574,7 +582,120 @@ final class Companion: ObservableObject {
             return
         }
         runSigned(.removeTouchId) { ok in
-            if ok { Enclave.remove() }
+            if ok {
+                Enclave.remove()
+                Enclave.removeUnlockKey()
+            }
+        }
+    }
+
+    // MARK: Unlocking
+
+    /// Whether the vault would take Touch ID unlock from this Mac now: the
+    /// island approves with Touch ID here, and unlock is not on yet.
+    var canTurnOnTouchIdUnlock: Bool {
+        touchId == .ready && !touchIdUnlock
+    }
+
+    /// Unlock with Touch ID: the Secure Enclave repeats its key agreement
+    /// after the fingerprint, and the secret goes to the CLI on stdin.
+    func unlockWithTouchId(done: ((Bool) -> Void)? = nil) {
+        guard working == nil else { return }
+        guard case .success(let cli) = CLI.locate() else {
+            return say("agent-vault is not available right now.", failed: true)
+        }
+        working = Companion.touchStage
+        awaitingTouch = true
+        actionQueue.async { [weak self] in
+            let outcome: Result<Void, Failure>
+            switch Enclave.unlockSecretNow(reason: "unlock agent-vault") {
+            case .success(let secret):
+                DispatchQueue.main.async {
+                    self?.working = "Unlocking…"
+                    self?.awaitingTouch = false
+                }
+                switch cli.run(["unlock", "--companion"], input: secret + "\n") {
+                case .success: outcome = .success(())
+                case .failure(let e): outcome = .failure(e)
+                }
+            case .failure(.cancelled): outcome = .failure(Failure("Cancelled. The vault is still locked."))
+            case .failure(.noKey): outcome = .failure(Failure("Touch ID unlock is not set up on this Mac."))
+            case .failure(.failed(let why)): outcome = .failure(Failure("Touch ID did not unlock: \(why)"))
+            }
+            DispatchQueue.main.async { self?.finishUnlock(outcome, done: done) }
+        }
+    }
+
+    /// Unlock with the passphrase typed in the island. It goes to the CLI on
+    /// stdin, never in a command line, and is not kept.
+    func unlockWithPassphrase(_ passphrase: String, done: ((Bool) -> Void)? = nil) {
+        guard working == nil, !passphrase.isEmpty else { return }
+        guard case .success(let cli) = CLI.locate() else {
+            return say("agent-vault is not available right now.", failed: true)
+        }
+        working = "Unlocking…"
+        let line = passphrase + "\n"
+        actionQueue.async { [weak self] in
+            let outcome: Result<Void, Failure>
+            switch cli.run(["unlock"], input: line) {
+            case .success: outcome = .success(())
+            case .failure(let e): outcome = .failure(e)
+            }
+            DispatchQueue.main.async { self?.finishUnlock(outcome, done: done) }
+        }
+    }
+
+    private func finishUnlock(_ outcome: Result<Void, Failure>, done: ((Bool) -> Void)?) {
+        working = nil
+        awaitingTouch = false
+        switch outcome {
+        case .success:
+            say("Unlocked.", failed: false)
+            done?(true)
+        case .failure(let why):
+            say(why.message, failed: true)
+            done?(false)
+        }
+        poke()
+    }
+
+    /// Turn on Touch ID unlock: a new unlock key and its secret (Touch ID
+    /// once), then the vault's challenge for that exact secret, signed
+    /// (Touch ID again). If the vault does not take it, the key is deleted.
+    func turnOnTouchIdUnlock(done: ((Bool) -> Void)? = nil) {
+        guard working == nil, canTurnOnTouchIdUnlock else { return }
+        working = Companion.touchStage
+        awaitingTouch = true
+        actionQueue.async { [weak self] in
+            let made = Enclave.newUnlockSecret(reason: "set up unlocking agent-vault with Touch ID")
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.working = nil
+                self.awaitingTouch = false
+                switch made {
+                case .success(let secret):
+                    guard plainUnlockSecret(secret) else {
+                        Enclave.removeUnlockKey()
+                        self.say("The Secure Enclave's secret was not the expected shape, so nothing was changed.", failed: true)
+                        done?(false)
+                        return
+                    }
+                    self.runSigned(.enableUnlock(digest: unlockSecretDigest(secret)), value: secret) { ok in
+                        if !ok { Enclave.removeUnlockKey() }
+                        done?(ok)
+                    }
+                case .failure(.cancelled):
+                    Enclave.removeUnlockKey()
+                    self.say("Cancelled. Touch ID unlock is still off.", failed: true)
+                    done?(false)
+                case .failure(let why):
+                    Enclave.removeUnlockKey()
+                    let text: String
+                    if case .failed(let reason) = why { text = reason } else { text = "no key" }
+                    self.say("The Secure Enclave could not make the unlock key: \(text)", failed: true)
+                    done?(false)
+                }
+            }
         }
     }
 

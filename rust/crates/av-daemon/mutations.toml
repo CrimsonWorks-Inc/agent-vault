@@ -3182,3 +3182,34 @@ from = '''    let mut params = json!({"id": id, "granted": granted});'''
 to = '''    let _ = granted;
     let mut params = json!({"id": id});'''
 test = "tests::companion"
+
+# Touch ID unlock in the companion: its route, 2026-11-24.
+
+[[mutation]]
+name = 'touch ID unlock in the companion is set up without fresh presence'
+file = "src/server/routes.rs"
+from = '''                self.require_fresh("companion unlock enrollment", op?.unwrap_or(Value::Null), presence).await?;'''
+to = '''                let _ = (op, presence);'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the companion unlock route takes a secret of any shape'
+file = "src/server/routes.rs"
+from = '''                if !crate::companion::plain_unlock_secret(&secret) {'''
+to = '''                if secret.is_empty() {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion unlock secret may be longer than 32 bytes'
+file = "src/companion.rs"
+from = '''        .is_ok_and(|raw| raw.len() == 32)'''
+to = '''        .is_ok_and(|raw| raw.len() >= 32)'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'turning on touch ID unlock needs no human'
+file = "src/server.rs"
+from = '''            "POST /v1/presence/companion/unlock" => of("companion.unlock_enroll", input),
+'''
+to = ''''''
+test = "tests::companion"

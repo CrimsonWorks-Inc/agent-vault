@@ -27,7 +27,10 @@ fn v1_database_with_a_credential() -> rusqlite::Connection {
 fn a_v1_database_gains_folders_and_keeps_its_credentials_unfiled() {
     let c = v1_database_with_a_credential();
     crate::db::migrate(&c).unwrap();
-    assert_eq!(crate::db::schema_version(&c).unwrap(), 2);
+    assert_eq!(
+        crate::db::schema_version(&c).unwrap(),
+        crate::schema::DB_SCHEMA_VERSION
+    );
     let (slug, folder): (String, Option<String>) = c
         .query_row("SELECT slug, folder FROM credentials", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -36,7 +39,10 @@ fn a_v1_database_gains_folders_and_keeps_its_credentials_unfiled() {
     assert_eq!((slug.as_str(), folder), ("demo", None));
     // Running it again is a no-op, not a second ALTER.
     crate::db::migrate(&c).unwrap();
-    assert_eq!(crate::db::schema_version(&c).unwrap(), 2);
+    assert_eq!(
+        crate::db::schema_version(&c).unwrap(),
+        crate::schema::DB_SCHEMA_VERSION
+    );
 }
 
 #[test]

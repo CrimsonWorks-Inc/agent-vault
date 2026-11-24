@@ -1155,3 +1155,55 @@ file = "src/vault.rs"
 from = '''                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_')) =>'''
 to = '''                    .all(|_| true) =>'''
 test = "tests::companion"
+
+# Touch ID unlock in the companion: its wrap in the store, 2026-11-24.
+
+[[mutation]]
+name = 'touch ID unlock is tied to a companion key the vault does not trust'
+file = "src/vault.rs"
+from = '''        if self.companion_key()?.map(|k| k.key_id).as_deref() != Some(key_id) {'''
+to = '''        if self.companion_key()?.is_none() {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a new companion key keeps the old key unlock wrap'
+file = "src/vault.rs"
+from = '''            if !same_key {
+                drop_companion_unlock(t)?;
+            }'''
+to = '''            let _ = same_key;'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'removing the companion key keeps its unlock wrap'
+file = "src/vault.rs"
+from = '''            let had = rows::kv_get(t.c, COMPANION_KEY)?;
+            drop_companion_unlock(t)?;'''
+to = '''            let had = rows::kv_get(t.c, COMPANION_KEY)?;'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the passphrase can go while touch ID unlock in the companion is on'
+file = "src/vault.rs"
+from = '''        matches!(
+            w.class,
+            FactorClass::WebauthnPrf | FactorClass::CompanionPrf
+        )'''
+to = '''        w.class == FactorClass::WebauthnPrf'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the companion unlock wrap is stored as the browser one'
+file = "src/vault.rs"
+from = '''            let class = if matches!(material, WrapMaterial::Prf(_)) {'''
+to = '''            let class = if true {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'schema version 3 loses the wraps it rebuilds'
+file = "src/schema.rs"
+from = '''INSERT INTO vmk_wraps_3 (class, salt, kdf, sealed, credential_id, created_at)
+    SELECT class, salt, kdf, sealed, credential_id, created_at FROM vmk_wraps;
+'''
+to = ''''''
+test = "db::tests::version_3_makes_room_for_the_companion_unlock_and_keeps_every_wrap"

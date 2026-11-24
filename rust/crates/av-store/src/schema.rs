@@ -43,7 +43,7 @@
 /// The version of this SQLite schema, stored in the `schema_version` row.
 /// No JS source: the JS `SCHEMA_VERSION` in `src/store/vault.js` versions
 /// `vault.json`, which this replaces.
-pub const DB_SCHEMA_VERSION: u32 = 2;
+pub const DB_SCHEMA_VERSION: u32 = 3;
 
 /// Version 1 of the schema.
 pub const SCHEMA_SQL: &str = r#"
@@ -351,7 +351,7 @@ END;
 /// Forward-only migrations. Entry `i` moves the schema from version `i` to
 /// `i + 1` (entry 0 creates version 1 on an empty database). Append only;
 /// never edit a shipped entry. No JS source: new with SQLite.
-pub const MIGRATIONS: &[&str] = &[SCHEMA_SQL, SCHEMA_2_FOLDERS];
+pub const MIGRATIONS: &[&str] = &[SCHEMA_SQL, SCHEMA_2_FOLDERS, SCHEMA_3_COMPANION_UNLOCK];
 
 /// Version 2: a credential's folder (`clients/acme`), for organizing only.
 /// The daemon checks the path's shape ([`crate::folders::folder_problem`]);
@@ -362,6 +362,28 @@ ALTER TABLE credentials ADD COLUMN folder TEXT
                               AND folder NOT LIKE '/%' AND folder NOT LIKE '%/'
                               AND instr(folder, '//') = 0));
 CREATE INDEX credentials_folder ON credentials (folder);
+"#;
+
+/// Version 3: a `companion-prf` wrap, the companion's Touch ID unlock, whose
+/// `credential_id` is the companion key's id. SQLite cannot change a CHECK in
+/// place, so the table is rebuilt with the same rows. No JS source: new with
+/// the companion.
+pub const SCHEMA_3_COMPANION_UNLOCK: &str = r#"
+CREATE TABLE vmk_wraps_3 (
+    class      TEXT PRIMARY KEY NOT NULL
+               CHECK (class IN ('none', 'passphrase', 'webauthn-prf', 'companion-prf')),
+    salt       TEXT,                          -- base64, passphrase only
+    kdf        TEXT CHECK (kdf IS NULL OR json_valid(kdf)),  -- Argon2id params
+    sealed     TEXT NOT NULL CHECK (json_valid(sealed)),     -- v2 envelope
+    credential_id TEXT,                       -- the PRF wraps only
+    created_at TEXT NOT NULL,
+    CHECK ((class = 'passphrase') = (salt IS NOT NULL AND kdf IS NOT NULL)),
+    CHECK ((class IN ('webauthn-prf', 'companion-prf')) = (credential_id IS NOT NULL))
+) STRICT, WITHOUT ROWID;
+INSERT INTO vmk_wraps_3 (class, salt, kdf, sealed, credential_id, created_at)
+    SELECT class, salt, kdf, sealed, credential_id, created_at FROM vmk_wraps;
+DROP TABLE vmk_wraps;
+ALTER TABLE vmk_wraps_3 RENAME TO vmk_wraps;
 "#;
 
 /// Every table [`SCHEMA_SQL`] creates, for tests and `migrate --dry-run`

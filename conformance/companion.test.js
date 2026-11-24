@@ -4,7 +4,7 @@
 // A software P-256 key stands in for the Secure Enclave.
 import { describe, test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { rustSkipReason, implName, openWorld, runCli, seed, leaksSecret } from './lib/harness.js'
 
 const skip = rustSkipReason() || (implName() === 'js' ? 'the companion factor is new in the Rust daemon' : null)
@@ -146,6 +146,46 @@ if (skip) {
       refused(await runCli(w, ['cred', 'release', 'demo', '--presence-stdin', '--json'], { input: `${piped}\n` }), 'passphrase on stdin')
       refused(await runCli(w, ['cred', 'release', 'demo', '--presence-stdin', '--companion-challenge', '--json']), 'both modes')
       assert.ok((await credential(w, 'demo')).quarantine)
+    })
+
+    test('Touch ID unlock: set up with a signed proof, opens the vault, goes with the key', async () => {
+      // The secret the Secure Enclave derives after Touch ID; random here.
+      const secret = randomBytes(32).toString('base64url')
+      const enable = ['companion', 'enable-unlock']
+      const issued = ok(await runCli(w, [...enable, '--companion-challenge', '--json'], { input: `${secret}\n` }), 'challenge')
+      assert.equal(issued.operation.op, 'companion.unlock_enroll')
+      assert.equal(issued.operation.prf_secret_sha256, createHash('sha256').update(secret).digest('hex'), 'bound by digest')
+      assert.ok(!JSON.stringify(issued).includes(secret))
+      // A secret that is not 32 bytes is refused before any proof is spent.
+      refused(await runCli(w, [...enable, '--presence-stdin', '--json'], {
+        input: `${JSON.stringify({ challengeId: issued.challengeId, companionSignature: key.sign(issued.challenge) })}\nshort\n`,
+      }), 'short secret')
+      const again = ok(await runCli(w, [...enable, '--companion-challenge', '--json'], { input: `${secret}\n` }), 'challenge')
+      const proof = JSON.stringify({ challengeId: again.challengeId, companionSignature: key.sign(again.challenge) })
+      ok(await runCli(w, [...enable, '--presence-stdin', '--json'], { input: `${proof}\n${secret}\n` }), 'enable')
+      assert.equal(ok(await runCli(w, ['companion', 'status', '--json']), 'status').unlock, true)
+
+      ok(await runCli(w, ['lock', '--json']), 'lock')
+      const state = await w.control('GET', '/v1/lockstate')
+      assert.equal(state.json.locked, true)
+      assert.equal(state.json.has_companion_unlock, true, 'readable while locked')
+      assert.equal(ok(await runCli(w, ['companion', 'status', '--json']), 'status locked').unlock, true)
+
+      const wrong = randomBytes(32).toString('base64url')
+      refused(await runCli(w, ['unlock', '--companion', '--json'], { input: `${wrong}\n` }), 'another secret')
+      assert.equal((await w.control('GET', '/v1/lockstate')).json.locked, true)
+      ok(await runCli(w, ['unlock', '--companion', '--json'], { input: `${secret}\n` }), 'unlock')
+      assert.equal((await w.control('GET', '/v1/lockstate')).json.locked, false)
+
+      // Removing the companion key removes its unlock: the secret opens nothing.
+      const rm = ok(await runCli(w, ['companion', 'remove', '--companion-challenge', '--json']), 'remove challenge')
+      const rmProof = JSON.stringify({ challengeId: rm.challengeId, companionSignature: key.sign(rm.challenge) })
+      ok(await runCli(w, ['companion', 'remove', '--presence-stdin', '--json'], { input: `${rmProof}\n` }), 'remove')
+      assert.equal((await w.control('GET', '/v1/lockstate')).json.has_companion_unlock, false)
+      ok(await runCli(w, ['lock', '--json']), 'lock')
+      refused(await runCli(w, ['unlock', '--companion', '--json'], { input: `${secret}\n` }), 'removed')
+      ok(await runCli(w, ['unlock', '--json'], { input: `${PASSPHRASE}\n` }), 'passphrase')
+      assert.equal((await w.control('GET', '/v1/lockstate')).json.locked, false)
     })
   })
 }

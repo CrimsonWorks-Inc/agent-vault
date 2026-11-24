@@ -2553,6 +2553,29 @@ pub async fn companion_status(ctx: &Context) -> Outcome {
     Ok(0)
 }
 
+/// `companion enable-unlock`: turn on Touch ID unlock with the secret the
+/// companion's Secure Enclave derives, read from stdin (fresh presence: the
+/// companion signs it with Touch ID).
+pub async fn companion_enable_unlock(ctx: &Context) -> Outcome {
+    let secret = ctx.read_secret("companion unlock secret: ")?;
+    let r = ctx
+        .control_with_presence(
+            "POST",
+            "/v1/presence/companion/unlock",
+            Some(&json!({"prf_secret": secret.expose_secret()})),
+        )
+        .await?;
+    output(
+        ctx,
+        &r,
+        &format!(
+            "{} Touch ID unlock in the companion",
+            ctx.paint("32", "turned on")
+        ),
+    );
+    Ok(0)
+}
+
 /// `companion remove`: stop accepting the companion's key (fresh presence).
 pub async fn companion_remove(ctx: &Context) -> Outcome {
     let r = ctx

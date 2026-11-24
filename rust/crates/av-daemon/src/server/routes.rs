@@ -561,8 +561,8 @@ impl Daemon {
                 self.shared
                     .run(|core| -> R<Value> {
                         Ok(match core.vault.companion_key().v()? {
-                            Some(k) => json!({"enrolled": true, "key_id": k.key_id, "label": k.label, "enrolled_at": k.enrolled_at}),
-                            None => json!({"enrolled": false}),
+                            Some(k) => json!({"enrolled": true, "key_id": k.key_id, "label": k.label, "enrolled_at": k.enrolled_at, "unlock": core.vault.has_companion_unlock().v()?}),
+                            None => json!({"enrolled": false, "unlock": false}),
                         })
                     })
                     .await??,
@@ -598,6 +598,35 @@ impl Daemon {
                     })
                     .await??;
                 Ok((200, json!({"ok": true, "replaced": replaced, "key_id": key.map(|k| k.key_id)})))
+            }
+            // Touch ID unlock in the companion: the vault key wrapped under a
+            // secret only the enrolled companion key's Secure Enclave derives,
+            // after Touch ID. Set up with fresh presence (the companion signs
+            // it), never while locked, and never without the passphrase to
+            // recover with. Removing or replacing the companion key drops it.
+            "POST /v1/presence/companion/unlock" => {
+                let secret = field(&input, "prf_secret")?.and_then(Value::as_str).unwrap_or("").to_string();
+                if !crate::companion::plain_unlock_secret(&secret) {
+                    return Err(d(C::PolicyDenied, "prf_secret must be 32 bytes, base64url without padding"));
+                }
+                let key_id = self
+                    .shared
+                    .run(move |core| -> R<String> {
+                        if core.vault.locked() {
+                            return Err(d(C::Locked, "unlock the vault first"));
+                        }
+                        core.vault.require_recovery_factor().v()?;
+                        match core.vault.companion_key().v()? {
+                            Some(k) => Ok(k.key_id),
+                            None => Err(dr(C::PresenceRequired, "Touch ID is not set up in the companion", "companion_not_enrolled")),
+                        }
+                    })
+                    .await??;
+                self.require_fresh("companion unlock enrollment", op?.unwrap_or(Value::Null), presence).await?;
+                self.shared
+                    .run(move |core| core.vault.add_companion_unlock(&key_id, &av_core::secret::SecretBytes::from(secret.into_bytes())).v())
+                    .await??;
+                Ok((200, json!({"ok": true, "enrolled": true})))
             }
             // A single-use challenge bound to the operation the daemon itself
             // derives from the request the companion is about to send.
@@ -772,7 +801,8 @@ impl Daemon {
                     .run(|core| -> R<Value> {
                         let has_p = core.vault.has_passphrase().v()?;
                         let has_t = core.vault.has_webauthn_unlock().v()?;
-                        Ok(json!({"locked": core.vault.locked(), "factors": core.vault.factors().v()?, "has_passphrase": has_p, "has_touchid": has_t, "needs_secret": has_p || has_t}))
+                        let has_c = core.vault.has_companion_unlock().v()?;
+                        Ok(json!({"locked": core.vault.locked(), "factors": core.vault.factors().v()?, "has_passphrase": has_p, "has_touchid": has_t, "has_companion_unlock": has_c, "needs_secret": has_p || has_t || has_c}))
                     })
                     .await??,
             )),

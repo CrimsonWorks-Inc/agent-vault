@@ -25,6 +25,16 @@ pub fn signed_message(challenge: &[u8; 32]) -> Vec<u8> {
 /// Whether `signature` (base64url, unpadded, of a DER ECDSA signature) is
 /// the enrolled key's (`spki`, canonical base64 DER) over `challenge`.
 /// Anything malformed is simply not a valid signature.
+/// Whether `secret` is the shape of the companion's unlock secret: 32
+/// bytes, base64url without padding (43 characters). The wrap is made over
+/// the text itself, as the browser's PRF secret is, since `/v1/unlock`
+/// takes either one as `prf_secret`.
+pub fn plain_unlock_secret(secret: &str) -> bool {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(secret)
+        .is_ok_and(|raw| raw.len() == 32)
+}
+
 pub fn verify(spki: &str, challenge: &[u8; 32], signature: &str) -> bool {
     use p256::ecdsa::signature::Verifier;
     use p256::pkcs8::DecodePublicKey;

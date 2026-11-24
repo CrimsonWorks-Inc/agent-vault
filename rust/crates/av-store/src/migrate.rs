@@ -474,7 +474,7 @@ pub fn migrate(
                 let p = passphrase.ok_or(MigrateError::PassphraseRequired)?;
                 wraps.push(new_wrap(&legacy.device_key, &vmk, Some(p))?);
             }
-            FactorClass::WebauthnPrf => dropped.push(Dropped {
+            FactorClass::WebauthnPrf | FactorClass::CompanionPrf => dropped.push(Dropped {
                 what: "webauthn-prf unlock wrap".into(),
                 why: "a Touch ID unlock is sealed under a secret only the authenticator can produce, so it cannot be re-wrapped; the passphrase is kept".into(),
                 next: "agent-vault ui".into(),
