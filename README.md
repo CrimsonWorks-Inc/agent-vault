@@ -53,7 +53,14 @@ The script checks the archive against the release's `SHA256SUMS` and, when the G
 gh attestation verify agent-vault-<version>-<target>.tar.gz --repo CrimsonWorks-Inc/agent-vault
 ```
 
-Upgrading: run the install command again, or `brew upgrade agent-vault && agent-vault upgrade`. `upgrade` hands the release it belongs to (or your checkout's build, if you run it from one) to the root-owned installer from your existing install, which an agent cannot edit. At a terminal it runs that through `sudo -k`, so it asks for your password or Touch ID every time; without a terminal (an agent's shell) it only prints the command.
+On a Mac, the companion app (it lives in the notch, or the menu bar) installs from the CLI:
+
+```bash
+agent-vault companion install    # this version's app, checked, then opened
+agent-vault companion open       # open it again later
+```
+
+Upgrading: run the install command again, or `brew upgrade agent-vault && agent-vault upgrade`, then `agent-vault companion upgrade` for the app. `upgrade` hands the release it belongs to (or your checkout's build, if you run it from one) to the root-owned installer from your existing install, which an agent cannot edit. At a terminal it runs that through `sudo -k`, so it asks for your password or Touch ID every time; without a terminal (an agent's shell) it only prints the command.
 
 ## Build from source
 

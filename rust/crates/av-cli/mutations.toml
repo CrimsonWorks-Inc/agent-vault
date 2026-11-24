@@ -839,3 +839,105 @@ from = '''    PRESENCE.with(|c| c.set(PresenceMode::Asked));
 '''
 to = ''''''
 test = "tests::the_companion_modes_are_read_from_exact_tokens"
+
+[[mutation]]
+name = "companion install takes a .dmg whose checksum does not match"
+file = "src/companion_app.rs"
+from = '    if av_core::canon::sha256(bytes) != expected {'
+to = '    if av_core::canon::sha256(bytes) != expected && false {'
+test = "companion_app::tests::a_download_is_installed_only_if_its_checksum_is_listed_for_it"
+
+[[mutation]]
+name = "companion install reads another file's line in SHA256SUMS"
+file = "src/companion_app.rs"
+from = "        if file.strip_prefix('*').unwrap_or(file) != name {"
+to = "        if !file.ends_with(name) {"
+test = "companion_app::tests::sha256sums_gives_the_digest_of_exactly_that_file"
+
+[[mutation]]
+name = "companion install takes a .dmg listed twice in SHA256SUMS"
+file = "src/companion_app.rs"
+from = '        if found.is_some() || !plain {'
+to = '        if !plain {'
+test = "companion_app::tests::sha256sums_gives_the_digest_of_exactly_that_file"
+
+[[mutation]]
+name = "companion install takes an app with another bundle id"
+file = "src/companion_app.rs"
+from = '    if info.id != BUNDLE_ID {'
+to = '    if info.id.is_empty() {'
+test = "companion_app::tests::only_the_companion_at_this_version_is_installed"
+
+[[mutation]]
+name = "companion install takes an app of another version"
+file = "src/companion_app.rs"
+from = '    if info.version != version {'
+to = '    if info.version.is_empty() {'
+test = "companion_app::tests::only_the_companion_at_this_version_is_installed"
+
+[[mutation]]
+name = "companion upgrade replaces a newer app with an older one"
+file = "src/companion_app.rs"
+from = '        (Some(a), Some(b)) => a > b,'
+to = '        (Some(_), Some(_)) => false,'
+test = "companion_app::tests::upgrade_never_goes_back_a_version"
+
+[[mutation]]
+name = "a failed companion swap loses the installed app"
+file = "src/companion_app.rs"
+from = '        let _ = fs::rename(&old, dest);'
+to = ''
+test = "companion_app::tests::a_failed_swap_puts_the_installed_copy_back"
+
+[[mutation]]
+name = "companion install quits a companion running from another path"
+file = "src/companion_app.rs"
+from = '        if r"\.^$|?*+()[]{}".contains(c) {'
+to = '        if false {'
+test = "companion_app::tests::only_the_copy_being_replaced_is_quit"
+
+[[mutation]]
+name = "companion install skips the checksum"
+file = "src/companion_app.rs"
+from = '    check_download(&read_capped(dmg, MAX_DMG)?, sums_text, &name)?;'
+to = '    let _ = (read_capped(dmg, MAX_DMG)?, sums_text);'
+test = "companion_app::tests::a_dmg_is_installed_only_once_every_check_passes"
+
+[[mutation]]
+name = "companion install ignores a failed provenance check"
+file = "src/companion_app.rs"
+from = '    if built_here == Some(false) {'
+to = '    if built_here == Some(false) && false {'
+test = "companion_app::tests::a_dmg_is_installed_only_once_every_check_passes"
+
+[[mutation]]
+name = "companion install skips the app's id and version"
+file = "src/companion_app.rs"
+from = '    check_app(&info, VERSION)?;'
+to = '    let _ = &info;'
+test = "companion_app::tests::a_dmg_is_installed_only_once_every_check_passes"
+
+[[mutation]]
+name = "companion install skips the app's code signature"
+file = "src/companion_app.rs"
+from = '''    if !run_quiet(
+        "/usr/bin/codesign",'''
+to = '''    if false && !run_quiet(
+        "/usr/bin/codesign",'''
+test = "companion_app::tests::a_dmg_is_installed_only_once_every_check_passes"
+
+[[mutation]]
+name = "companion install keeps a copy macOS will not open"
+file = "src/companion_app.rs"
+from = '        Some(v) if v == ours && !marked => Plan::Keep,'
+to = '        Some(v) if v == ours => Plan::Keep,'
+test = "companion_app::tests::a_copy_macos_would_block_is_replaced_but_never_with_an_older_one"
+
+[[mutation]]
+name = "companion install does not see the quarantine mark"
+file = "src/companion_app.rs"
+from = '''            "-p".as_ref(),
+            "com.apple.quarantine".as_ref(),'''
+to = '''            "-p".as_ref(),
+            "com.apple.quarantine-not".as_ref(),'''
+test = "companion_app::tests::the_quarantine_mark_is_seen"

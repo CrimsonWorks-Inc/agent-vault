@@ -144,10 +144,30 @@ A design that fits: each device has its own key pair; the vault's contents are e
 - **`unlock` on a vault with no passphrase asks nothing.** That is the vault's behaviour; the checklist puts "Set your passphrase" first for that reason.
 - **Borrowed touch.** The platform's Touch ID dialog says who is asking, not what for. The companion makes approving easier to reach, so an agent that triggers a request at the moment the user expected a different one has one more chance of borrowing a touch. The web UI's operation display and the audit log remain the defence.
 - **Automation.** An agent with macOS accessibility permission could click the island or the menu. Every command it would reach is one the agent could already run.
-- **Not signed for download.** The CI build is signed ad hoc. Without an Apple Developer ID signature and notarization, macOS blocks a downloaded copy of the app, and may suppress its notifications; the island works regardless. A local `scripts/bundle.sh` build signs with the developer's own Apple Development certificate. Signing for download needs the project's Apple credentials as repository secrets.
+- **Not signed for download.** The CI build is signed ad hoc. Without an Apple Developer ID signature and notarization, macOS blocks a copy downloaded by a browser or the Homebrew cask, and may suppress its notifications; the island works regardless. `agent-vault companion install` installs a checked copy that macOS opens (see *Installing*). A local `scripts/bundle.sh` build signs with the developer's own Apple Development certificate. Signing for download needs the project's Apple credentials as repository secrets.
 - **macOS only.** The 0.3 prototype compiled for Linux and Windows but had only been run on macOS; the native app is macOS only. A Linux tray companion would be its own small app over the same CLI rules.
 - **The key's handle is a file the user's account can read.** Using it still takes the enrolled fingerprint, but a process running as the user could ask the Secure Enclave to sign with it, for a challenge of its own, and hope the user touches the sensor: the borrowed-touch risk of any platform authenticator. macOS's prompt names the process that asks, so a prompt that does not say "agent-vault companion" should be refused. Keeping the key in the data-protection keychain under the companion's own access group would stop other processes from using it at all; that needs a provisioning profile, so it waits for Developer ID signing.
 - **Touch ID in the island needs a vault that knows it.** An older installed vault has no `companion` command; the island says so and uses the web UI or Terminal.
+
+## Installing
+
+```bash
+agent-vault companion install    # this CLI's version of the app, checked, then opened
+agent-vault companion upgrade    # after upgrading the CLI: replace the app, reopen it
+agent-vault companion open       # open the installed app
+```
+
+`install` and `upgrade` download the `.dmg` from the GitHub release the CLI belongs to, so the app and the CLI are the same version. They take it with the system's curl (`/usr/bin/curl`, HTTPS only, ignoring `~/.curlrc`) and check it before anything is replaced:
+
+- **The checksum.** The `.dmg` must match the one line of the release's `SHA256SUMS` that names it. A name listed twice, or a digest of another shape, is refused.
+- **Build provenance**, when the GitHub CLI is installed: `gh attestation verify` must say the release workflow built it. Without `gh` this step is skipped, and the command says so.
+- **The app itself**, copied out of the read-only mounted `.dmg`: its bundle id is the companion's, its version is the CLI's, and its code signature verifies.
+
+Only then does the new copy replace the installed one, in one rename beside it, so a failure at any step leaves the installed app as it was. A companion running from that copy is asked to quit first (SIGTERM, which it handles by quitting cleanly) and is opened again afterwards. `upgrade` never replaces a newer app with an older one.
+
+The app goes over the installed copy if there is one, in `/Applications` or `~/Applications`. Otherwise it goes in `/Applications` if this account can write there (an administrator's can), and in `~/Applications` if not. Nothing runs as root.
+
+**Why this opens without macOS's warning.** Gatekeeper checks an app on its first launch only if it carries the quarantine mark that browsers, and Homebrew's cask, put on what they download. curl puts none on the `.dmg`, so the copy installed here opens like an app built on this Mac. The checks above are what vouch for it instead, the same ones `install.sh` makes for the CLI's archive. A copy that does carry the mark (say, the cask's) is replaced by `install` or `upgrade` even at the same version, since macOS will not open it until the app is notarized; see *Known gaps*.
 
 ## Building
 

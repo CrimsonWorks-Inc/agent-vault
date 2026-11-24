@@ -97,7 +97,15 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("notify", &["set", "show", "off", "test"]),
     (
         "companion",
-        &["enroll", "status", "remove", "enable-unlock"],
+        &[
+            "enroll",
+            "status",
+            "remove",
+            "enable-unlock",
+            "install",
+            "upgrade",
+            "open",
+        ],
     ),
 ];
 
@@ -141,6 +149,7 @@ fn bool_flags(path: &[&str]) -> &'static [&'static str] {
         ["upgrade"] => &["print-only"],
         ["daemon"] => &["passphrase"],
         ["unlock"] => &["companion"],
+        ["companion", "install"] | ["companion", "upgrade"] => &["no-open"],
         ["cred", "rotate"] => &["revoke"],
         ["cred", "test"] => &["all"],
         ["cred", "pin"] => &["clear", "live"],

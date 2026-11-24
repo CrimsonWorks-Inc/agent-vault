@@ -130,6 +130,9 @@ approvals, audit, listeners
   tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
+  companion install | companion upgrade [--no-open]
+                                       the macOS companion app, for this version
+  companion open                       open the installed app
   companion status | companion remove  Touch ID in the companion app
   companion enroll <key> [--label T]   (the companion runs this for you)
   companion enable-unlock              (this too)

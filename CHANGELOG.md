@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.3
+
+- **`companion install`, `companion upgrade`, `companion open`.** The CLI
+  installs the macOS companion app of its own version: it downloads the
+  release's `.dmg`, checks it against `SHA256SUMS` (and its build
+  provenance, when `gh` is installed), checks the app's id, version and
+  code signature, then puts it in `/Applications` (or `~/Applications`)
+  in one rename and opens it. `upgrade` quits a running companion first and
+  reopens it, and never installs an older app over a newer one. A copy
+  installed this way opens without macOS's "cannot be checked" dialog; a
+  copy macOS marked as downloaded (the cask's) is replaced with one that
+  does.
+
 ## 0.5.2
 
 - **Unlock in the island.** Unlock opens a screen in the island instead of
