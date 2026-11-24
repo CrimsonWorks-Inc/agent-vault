@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - **The companion, native and on the island.** A macOS app in Swift
   (`desktop/`) that lives around the notch: closed, it is the notch with the
