@@ -317,7 +317,12 @@ fn withheld_key(k: &str) -> bool {
 }
 
 fn withheld_text(s: &str) -> String {
-    let re = av_core::jsre::compile(r"avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").expect("token");
+    // Compiled once: toward_page calls this for every string in an answer,
+    // and a complete list of ten thousand sessions holds a great many.
+    static TOKEN: std::sync::OnceLock<av_core::jsre::Regex> = std::sync::OnceLock::new();
+    let re = TOKEN.get_or_init(|| {
+        av_core::jsre::compile(r"avs1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+").expect("token")
+    });
     let out = re.replace_all(s, "«token»").into_owned();
     let mut out2 = out.clone();
     for p in av_core::placeholder::find_all(&out).into_iter().rev() {

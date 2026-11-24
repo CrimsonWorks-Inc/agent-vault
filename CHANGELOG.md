@@ -16,6 +16,11 @@
 - **Schema 2.** The vault database gains a `folder` column on first start.
   The migration is forward-only: once this version opens a vault, 0.3.x
   refuses to open it.
+- **Faster pages on large vaults.** The UI server compiled the pattern that
+  withholds tokens once for every string in an answer; it now compiles it
+  once. A page of a ten-thousand-session list is about eight times faster.
+- **`url` 2.5.9** (RUSTSEC-2026-0592, a stack overflow in `Url::origin()`
+  on nested `blob:` URLs). agent-vault never calls `Url::origin()`.
 
 ## 0.3.2
 
