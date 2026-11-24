@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - **Credential folders.** File credentials under nested folders
   (`clients/acme`, up to four levels): `av cred move <slug> <folder|none>`,
