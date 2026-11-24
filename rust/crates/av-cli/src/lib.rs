@@ -17,6 +17,7 @@
 pub mod argv;
 pub mod cli;
 pub mod commands;
+pub mod companion_app;
 pub mod control_commands;
 pub mod files;
 pub(crate) mod http_client;
@@ -168,7 +169,7 @@ pub(crate) fn load_client_state() -> Value {
 /// Every command as a human types it. Ports `COMMAND_NAMES` in
 /// `src/cli/index.js` (`Object.keys(COMMANDS)` in definition order, with the
 /// `controlCommands` keys merged after), plus `migrate`, new in the port.
-pub const COMMAND_NAMES: [&str; 74] = [
+pub const COMMAND_NAMES: [&str; 77] = [
     "setup",
     "daemon",
     "upgrade",
@@ -205,6 +206,9 @@ pub const COMMAND_NAMES: [&str; 74] = [
     "companion status",
     "companion remove",
     "companion enable-unlock",
+    "companion install",
+    "companion upgrade",
+    "companion open",
     "lock",
     "unlock",
     "profiles",
@@ -1015,6 +1019,9 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
             cli::CompanionCommand::EnableUnlock => {
                 control_commands::companion_enable_unlock(ctx).await
             }
+            cli::CompanionCommand::Install(a) => companion_app::install(ctx, false, a.no_open),
+            cli::CompanionCommand::Upgrade(a) => companion_app::install(ctx, true, a.no_open),
+            cli::CompanionCommand::Open => companion_app::open(ctx),
         },
         Command::Passphrase { command } => match command {
             cli::PassphraseCommand::Set => commands::passphrase_set(ctx).await,
@@ -1247,6 +1254,9 @@ fn help_text(ctx: &Context) -> String {
   tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
+  companion install | companion upgrade [--no-open]
+                                       the macOS companion app, for this version
+  companion open                       open the installed app
   companion status | companion remove  Touch ID in the companion app
   companion enroll <key> [--label T]   (the companion runs this for you)
   companion enable-unlock              (this too)

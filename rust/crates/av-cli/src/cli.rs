@@ -1076,6 +1076,20 @@ pub enum CompanionCommand {
     /// Turn on Touch ID unlock: the secret the companion's Secure Enclave
     /// derives after Touch ID, read from stdin (fresh presence).
     EnableUnlock,
+    /// Install the macOS app from this CLI's release, checked, and open it.
+    Install(CompanionInstallArgs),
+    /// Replace an installed app with this CLI's release, and reopen it.
+    Upgrade(CompanionInstallArgs),
+    /// Open the installed app.
+    Open,
+}
+
+/// `companion install [--no-open]`, `companion upgrade [--no-open]`.
+#[derive(Debug, Clone, Args)]
+pub struct CompanionInstallArgs {
+    /// Leave the app closed afterwards (a running one is reopened anyway).
+    #[arg(long = "no-open")]
+    pub no_open: bool,
 }
 
 /// `companion enroll <public-key> [--label T]`.

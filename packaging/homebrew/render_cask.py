@@ -47,9 +47,14 @@ def main() -> None:
     bar, on a screen without one). If agent-vault is not set up yet, run
     `agent-vault setup` once, or let the companion offer it.
 
+    The app is not notarized yet, so macOS will not open this copy. Replace
+    it with a checked copy that opens (after each upgrade, too):
+
+      agent-vault companion install
+
     Upgrading later, the app and the vault together:
 
-      brew upgrade && agent-vault upgrade
+      brew upgrade && agent-vault upgrade && agent-vault companion upgrade
   EOS
 end''')
 
