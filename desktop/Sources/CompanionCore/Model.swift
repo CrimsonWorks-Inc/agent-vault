@@ -238,7 +238,9 @@ public indirect enum Action: Equatable, Hashable {
     /// Set up Touch ID in the companion: enrol this Mac's Secure Enclave key,
     /// with the passphrase typed in Terminal. The public key (base64url) and
     /// a plain label for this Mac.
-    case enrollTouchIdInTerminal(String, String)
+    /// `unlockFirst` when the vault is locked: enrolling needs it unlocked,
+    /// so the same Terminal window unlocks it first.
+    case enrollTouchIdInTerminal(String, String, unlockFirst: Bool = false)
     case connect(String)
     case lock
     case panic
@@ -402,9 +404,10 @@ public indirect enum Action: Equatable, Hashable {
             ].joined(separator: " ")
         case .unlock:
             body = "echo \"Unlock agent-vault with your passphrase.\"; echo; \(v) unlock; \(close)"
-        case .enrollTouchIdInTerminal(let key, let label) where plainKey(key) && plainLabel(label) == label:
+        case .enrollTouchIdInTerminal(let key, let label, let unlockFirst) where plainKey(key) && plainLabel(label) == label:
             body = [
                 "echo \"Set up Touch ID in the agent-vault companion. Confirm it with your passphrase.\"; echo;",
+                unlockFirst ? "echo \"The vault is locked, so first unlock it.\"; \(v) unlock && echo &&" : "",
                 "\(v) companion enroll \(key) --label \"\(label)\"",
                 "&& echo && echo \"Done. You can approve in the companion with Touch ID now.\"",
                 "|| echo \"Touch ID was not set up. Try again from the companion.\";",

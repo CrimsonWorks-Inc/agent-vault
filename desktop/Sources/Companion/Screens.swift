@@ -18,6 +18,7 @@ struct Screens: View {
         case .key(let slug): KeyScreen(slug: slug, companion: companion, actions: actions)
         case .start: StartScreen(companion: companion, actions: actions)
         case .template(let name): TemplateScreen(name: name, companion: companion, actions: actions)
+        case .newSession: NewSessionScreen(companion: companion, actions: actions)
         case .addKey: AddKeyScreen(companion: companion, actions: actions)
         case .replaceKey(let slug): ReplaceKeyScreen(slug: slug, companion: companion, actions: actions)
         case .settings: SettingsScreen(companion: companion, actions: actions)
@@ -52,7 +53,11 @@ struct HumanButton: View {
                              symbol: action.opensTerminal ? "terminal" : "safari", tint: tint, filled: false) {
                     companion.perform(action)
                 }
-                if signed != nil, let why = whyElsewhere {
+                if signed != nil && companion.touchIdCanBeSetUp {
+                    Row(symbol: "touchid", text: "Set up Touch ID to do this here…", tint: Tint.accent, chevron: false) {
+                        companion.setUpTouchId()
+                    }
+                } else if signed != nil, let why = whyElsewhere {
                     Text(why).font(.system(size: 10.5)).foregroundStyle(Tint.quiet).padding(.horizontal, 4)
                 }
             }
@@ -163,7 +168,7 @@ struct HomeScreen: View {
     }
 
     private func addKey() {
-        if companion.touchId == .ready {
+        if companion.touchId == .ready || companion.touchIdCanBeSetUp {
             actions.push(.addKey)
         } else {
             companion.perform(prefsRoute(.addKey))
@@ -289,7 +294,7 @@ struct KeyScreen: View {
                              filled: false, disabled: checking) {
                     companion.checkKey(k.slug)
                 }
-                if companion.touchId == .ready {
+                if companion.touchId == .ready || companion.touchIdCanBeSetUp {
                     ActionButton(title: "Replace value…", symbol: "arrow.triangle.2.circlepath", filled: false) {
                         actions.push(.replaceKey(k.slug))
                     }
@@ -323,7 +328,96 @@ struct StartScreen: View {
                 Row(symbol: "doc.text", text: name) { actions.push(.template(name)) }
             }
         }
-        HumanButton(companion: companion, title: "Choose keys and limits", signed: nil, fallback: .newSession)
+        if companion.touchId == .ready || companion.touchIdCanBeSetUp {
+            Row(symbol: "slider.horizontal.3", text: "Choose keys and how long") { actions.push(.newSession) }
+        } else {
+            HumanButton(companion: companion, title: "Choose keys and limits", signed: nil, fallback: .newSession)
+        }
+    }
+}
+
+/// A session made here: which keys, for how long, and whether agents may
+/// write (each write then waits for the user, the vault's default). Finer
+/// limits (paths, budgets, rates) are in the vault page.
+struct NewSessionScreen: View {
+    @ObservedObject var companion: Companion
+    let actions: IslandActions
+    @State private var chosen: Set<String> = []
+    @State private var hours = 8
+    @State private var readOnly = true
+
+    var body: some View {
+        if companion.touchId != .ready {
+            TouchIdFirst(companion: companion, fallback: companion.prefs.terminal && Action.newSession.hasBothRoutes ? .terminal(.newSession) : .newSession)
+        } else {
+            let keys = companion.snapshot.keys.filter { !$0.stopped }
+            let creds = keys.map(\.slug).filter { chosen.contains($0) }
+            let request = SignedRequest.create(creds: creds, hours: hours, readOnly: readOnly)
+            Card(title: keys.isEmpty ? "No keys to share yet" : "Keys agents may use") {
+                ForEach(keys, id: \.slug) { k in
+                    let on = chosen.contains(k.slug)
+                    Row(symbol: on ? "checkmark.circle.fill" : "circle", text: k.slug, detail: k.service,
+                        tint: on ? Tint.good : nil, chevron: false) {
+                        if on { chosen.remove(k.slug) } else { chosen.insert(k.slug) }
+                    }
+                }
+            }
+            Card {
+                Field(label: "For") {
+                    Picker("", selection: $hours) {
+                        ForEach(sessionHours, id: \.self) { h in Text(h == 1 ? "1 hour" : "\(h) hours").tag(h) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                Field(label: "Agents") {
+                    Picker("", selection: $readOnly) {
+                        Text("Read only").tag(true)
+                        Text("Read and write").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                Note(text: readOnly
+                     ? "Agents can only read: GET requests, nothing that changes anything."
+                     : "Agents can read, and each change they try waits for your approval here.")
+            }
+            ActionButton(title: "Start with Touch ID", symbol: "touchid", tint: Tint.good,
+                         disabled: request.args == nil || companion.working != nil) {
+                companion.runSigned(request) { ok in
+                    if ok { actions.home() }
+                }
+            }
+            Row(symbol: "safari", text: "Paths, budgets and other limits are in the vault", chevron: false) {
+                companion.perform(.newSession)
+            }
+        }
+    }
+}
+
+/// In place of a form that needs Touch ID, before it is set up: set it up
+/// now (once, with the passphrase in Terminal), or do this one elsewhere.
+struct TouchIdFirst: View {
+    @ObservedObject var companion: Companion
+    let fallback: Action
+
+    var body: some View {
+        var locked = false
+        if case .up(let status) = companion.snapshot.reach { locked = status.locked }
+        return Group {
+            Card(title: "Set up Touch ID to do this here") {
+                Note(text: "Touch ID in the island takes one step, once: a Terminal window asks for your passphrase"
+                     + (locked ? ", and unlocks the vault first." : "."))
+                Row(symbol: "touchid", text: "Set up Touch ID… (opens Terminal)", tint: Tint.accent, chevron: false) {
+                    companion.setUpTouchId()
+                }
+            }
+            Row(symbol: fallback.opensTerminal ? "terminal" : "safari",
+                text: fallback.opensTerminal ? "Or do it in Terminal this time" : "Or do it in the vault page this time",
+                chevron: false) {
+                companion.perform(fallback)
+            }
+        }
     }
 }
 
@@ -372,6 +466,14 @@ struct AddKeyScreen: View {
     @State private var value = ""
 
     var body: some View {
+        if companion.touchId != .ready {
+            TouchIdFirst(companion: companion, fallback: companion.prefs.terminal && Action.addKey.hasBothRoutes ? .terminal(.addKey) : .addKey)
+        } else {
+            form
+        }
+    }
+
+    @ViewBuilder private var form: some View {
         let request = SignedRequest.add(slug: slug, kind: kind, host: kind == "http" ? host : nil)
         Card {
             Field(label: "Name") {
@@ -411,6 +513,15 @@ struct ReplaceKeyScreen: View {
     @State private var value = ""
 
     var body: some View {
+        if companion.touchId != .ready {
+            let rotate = Action.rotateKey(slug)
+            TouchIdFirst(companion: companion, fallback: companion.prefs.terminal && rotate.hasBothRoutes ? .terminal(rotate) : rotate)
+        } else {
+            form
+        }
+    }
+
+    @ViewBuilder private var form: some View {
         Card {
             Text("New value for \(slug)").font(.system(size: 13, weight: .semibold)).padding(.horizontal, 8).padding(.top, 4)
             Field(label: "Value") {
