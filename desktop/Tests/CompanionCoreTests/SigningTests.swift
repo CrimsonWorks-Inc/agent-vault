@@ -115,6 +115,49 @@ import Testing
         #expect(!SignedRequest.create(creds: [], hours: 8, readOnly: true).matches(j(#"{"op":"session.create","grants":[],"label":"companion session","ttl_hours":8,"methods":["GET"]}"#)))
     }
 
+    /// The unlock secret is the same each time the same two keys agree, and
+    /// another key gives another; it has the shape the vault takes.
+    @Test func theUnlockSecretComesFromTheKeyAgreementOnly() throws {
+        let enclave = P256.KeyAgreement.PrivateKey()
+        let peer = P256.KeyAgreement.PrivateKey()
+        let made = unlockSecret(agreement: try enclave.sharedSecretFromKeyAgreement(with: peer.publicKey))
+        let again = unlockSecret(agreement: try enclave.sharedSecretFromKeyAgreement(with: peer.publicKey))
+        let otherSide = unlockSecret(agreement: try peer.sharedSecretFromKeyAgreement(with: enclave.publicKey))
+        #expect(made == again && made == otherSide)
+        #expect(plainUnlockSecret(made))
+        let other = P256.KeyAgreement.PrivateKey()
+        #expect(unlockSecret(agreement: try other.sharedSecretFromKeyAgreement(with: peer.publicKey)) != made)
+        for bad in ["", made + "=", String(made.dropLast()), String(repeating: "*", count: 43), made + "A"] {
+            #expect(!plainUnlockSecret(bad), "\(bad)")
+        }
+        // The vault binds the secret's text by SHA-256, hex.
+        #expect(unlockSecretDigest("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    /// Turning on Touch ID unlock is signed only for exactly this secret.
+    @Test func touchIdUnlockIsSignedForThisSecretOnly() {
+        let digest = unlockSecretDigest("secret-one")
+        let request = SignedRequest.enableUnlock(digest: digest)
+        #expect(request.args == ["companion", "enable-unlock"])
+        #expect(request.takesValue)
+        #expect(request.matches(.object(["op": .string("companion.unlock_enroll"), "prf_secret_sha256": .string(digest)])))
+        #expect(!request.matches(.object(["op": .string("companion.unlock_enroll"),
+                                          "prf_secret_sha256": .string(unlockSecretDigest("secret-two"))])), "another secret")
+        #expect(!request.matches(.object(["op": .string("companion.unlock_enroll")])))
+        #expect(!request.matches(.object(["op": .string("companion.unlock_enroll"), "prf_secret_sha256": .string(digest),
+                                          "extra": .bool(true)])), "nothing along")
+        #expect(!request.matches(.object(["op": .string("companion.enroll"), "prf_secret_sha256": .string(digest)])))
+        for bad in ["", "abc", String(digest.dropLast()), digest.uppercased(), "--all"] {
+            #expect(SignedRequest.enableUnlock(digest: bad).args == nil, "\(bad)")
+            #expect(!SignedRequest.enableUnlock(digest: bad).matches(.object(["op": .string("companion.unlock_enroll"),
+                                                                             "prf_secret_sha256": .string(bad)])))
+        }
+        // The vault says whether unlock is on; a key that is not enrolled has none.
+        #expect(parseEnrollment(j(#"{"enrolled":true,"key_id":"abc","unlock":true}"#))?.unlock == true)
+        #expect(parseEnrollment(j(#"{"enrolled":true,"key_id":"abc"}"#))?.unlock == false, "an older vault does not say")
+        #expect(parseEnrollment(j(#"{"enrolled":false,"unlock":true}"#))?.unlock == false)
+    }
+
     @Test func aChallengeIsReadOnlyWhenWhole() throws {
         let raw = Data(repeating: 7, count: 32)
         let good = j(#"{"challengeId":"c1","challenge":"\#(base64url(raw))","operation":{"op":"cred.release","slug":"a"}}"#)

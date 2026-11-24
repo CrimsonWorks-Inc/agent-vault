@@ -1101,6 +1101,7 @@ impl Daemon {
                 }
             }
             "POST /v1/presence" => of("presence.enroll", input),
+            "POST /v1/presence/companion/unlock" => of("companion.unlock_enroll", input),
             "POST /v1/presence/companion" => {
                 if input.get("action").and_then(Value::as_str) == Some("remove") {
                     of("companion.remove", &json!({}))

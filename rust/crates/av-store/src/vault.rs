@@ -443,11 +443,12 @@ pub fn assert_factor_invariant(prev: &FactorState, next: &FactorState) -> Result
             .iter()
             .any(|w| w.class == FactorClass::Passphrase)
     };
-    if next
-        .vmk_wraps
-        .iter()
-        .any(|w| w.class == FactorClass::WebauthnPrf)
-        && !has_passphrase(next)
+    if next.vmk_wraps.iter().any(|w| {
+        matches!(
+            w.class,
+            FactorClass::WebauthnPrf | FactorClass::CompanionPrf
+        )
+    }) && !has_passphrase(next)
     {
         if !has_passphrase(prev) {
             return Err(recovery_refusal());
@@ -457,7 +458,7 @@ pub fn assert_factor_invariant(prev: &FactorState, next: &FactorState) -> Result
             "remove Touch ID unlock first; the passphrase is its recovery factor",
             DenyExtra {
                 rule: Some("last_factor".into()),
-                hint: Some("Touch ID unlock needs the passphrase to recover the vault if the authenticator is lost. Turn off Touch ID unlock in the web UI first (agent-vault ui), then remove the passphrase.".into()),
+                hint: Some("Touch ID unlock needs the passphrase to recover the vault if the authenticator is lost. Turn off Touch ID unlock first (in the web UI, agent-vault ui, or Touch ID in the companion's settings), then remove the passphrase.".into()),
                 next: Some("agent-vault ui".into()),
                 ..Default::default()
             },
@@ -1397,6 +1398,7 @@ enum WrapMaterial<'a> {
     None,
     Passphrase(&'a SecretString),
     Prf(&'a [u8]),
+    CompanionPrf(&'a [u8]),
 }
 
 /// The VMK sealed under the KEK for `class`. Ports `#wrapVmk` in
@@ -1416,18 +1418,18 @@ fn wrap_vmk(device_key: &Key32, vmk: &Key32, material: WrapMaterial<'_>) -> Resu
                 Some(params),
             )
         }
-        WrapMaterial::Prf(secret) => {
+        WrapMaterial::Prf(secret) | WrapMaterial::CompanionPrf(secret) => {
             if secret.len() < 32 {
                 return Err(Error::Invariant(
                     "webauthn PRF secret must be 32 bytes".into(),
                 ));
             }
-            (
-                FactorClass::WebauthnPrf,
-                Zeroizing::new(secret.to_vec()),
-                None,
-                None,
-            )
+            let class = if matches!(material, WrapMaterial::Prf(_)) {
+                FactorClass::WebauthnPrf
+            } else {
+                FactorClass::CompanionPrf
+            };
+            (class, Zeroizing::new(secret.to_vec()), None, None)
         }
     };
     let kek = crypto::derive_kek(device_key, &factor_key);
@@ -1463,6 +1465,7 @@ pub(crate) fn class_name(c: FactorClass) -> &'static str {
         FactorClass::None => "none",
         FactorClass::Passphrase => "passphrase",
         FactorClass::WebauthnPrf => "webauthn-prf",
+        FactorClass::CompanionPrf => "companion-prf",
     }
 }
 
@@ -1483,7 +1486,10 @@ fn factor_key_for(wrap: &VmkWrap, material: &UnlockMaterial) -> Result<Option<Ze
             let k = crypto::passphrase_factor(p, &salt, &params)?;
             Ok(Some(Zeroizing::new(k.expose().to_vec())))
         }
-        FactorClass::WebauthnPrf => {
+        // The class is in each wrap's AAD, so a secret opens only a wrap of
+        // its own class: the browser's PRF output never opens the
+        // companion's wrap, nor the reverse.
+        FactorClass::WebauthnPrf | FactorClass::CompanionPrf => {
             let Some(s) = material.prf_secret.as_ref() else {
                 return Ok(None);
             };
@@ -1987,6 +1993,26 @@ fn commit_factors(
     rows::factors_replace(t.c, &factors)?;
     t.checkpoint = true;
     Ok(())
+}
+
+/// Remove the companion's unlock wrap, if any, in `t`; records
+/// `presence.factor_removed`. The passphrase it needs stays, so a wrap
+/// always remains.
+fn drop_companion_unlock(t: &mut Tx<'_>) -> Result<bool> {
+    let wraps = rows::wraps_get(t.c)?;
+    if !wraps.iter().any(|w| w.class == FactorClass::CompanionPrf) {
+        return Ok(false);
+    }
+    let next: Vec<VmkWrap> = wraps
+        .into_iter()
+        .filter(|w| w.class != FactorClass::CompanionPrf)
+        .collect();
+    commit_factors(t, Some(next), None)?;
+    t.audit_required(
+        "presence.factor_removed",
+        json!({ "class": "companion-prf" }),
+    )?;
+    Ok(true)
 }
 
 /// Ports `assertSessionLive` over a transaction.
@@ -2588,7 +2614,7 @@ impl Vault {
                     Error::Invariant("the passphrase factor needs a passphrase".into())
                 })?)
             }
-            FactorClass::WebauthnPrf => return Err(recovery_refusal()),
+            FactorClass::WebauthnPrf | FactorClass::CompanionPrf => return Err(recovery_refusal()),
         };
         let wrap = wrap_vmk(&device_key, &vmk, material)?;
         let conn = crate::db::open(&dir.join(VAULT_DB_FILE))?;
@@ -2905,7 +2931,16 @@ impl Vault {
         self.vmk_key()?;
         let record = companion_key_record(input)?;
         self.run(|t| {
-            let replaced = rows::kv_get(t.c, COMPANION_KEY)?.is_some();
+            let previous = rows::kv_get(t.c, COMPANION_KEY)?;
+            let replaced = previous.is_some();
+            let same_key = previous
+                .as_ref()
+                .and_then(|v| v.get("keyId"))
+                .and_then(Value::as_str)
+                == Some(record.key_id.as_str());
+            if !same_key {
+                drop_companion_unlock(t)?;
+            }
             rows::kv_set(t.c, COMPANION_KEY, &serde_json::to_value(&record)?)?;
             t.audit_required(
                 "presence.factor_added",
@@ -2944,6 +2979,7 @@ impl Vault {
         self.vmk_key()?;
         self.run(|t| {
             let had = rows::kv_get(t.c, COMPANION_KEY)?;
+            drop_companion_unlock(t)?;
             if !rows::kv_delete(t.c, COMPANION_KEY)? {
                 return Ok(false);
             }
@@ -2959,6 +2995,50 @@ impl Vault {
             t.checkpoint = true;
             Ok(true)
         })
+    }
+
+    /// Add or replace the companion's Touch ID unlock: a wrap of the VMK
+    /// under `secret`, which the enrolled companion key's Secure Enclave
+    /// derives after Touch ID. Needs the vault unlocked, the passphrase (its
+    /// recovery), and `key_id` to be the enrolled companion key; records
+    /// `presence.factor_added` with class `companion-prf`.
+    pub fn add_companion_unlock(&mut self, key_id: &str, secret: &SecretBytes) -> Result<()> {
+        let vmk = self.vmk_key()?;
+        if self.companion_key()?.map(|k| k.key_id).as_deref() != Some(key_id) {
+            return Err(plain(
+                ErrorCode::PolicyDenied,
+                "Touch ID unlock belongs to the companion key the vault trusts; set that up first",
+            ));
+        }
+        let device_key = read_device_key(&self.dir)?;
+        let mut wrap = wrap_vmk(
+            &device_key,
+            &vmk,
+            WrapMaterial::CompanionPrf(secret.expose_secret()),
+        )?;
+        wrap.credential_id = Some(key_id.to_string());
+        let mut next: Vec<VmkWrap> = self
+            .read(rows::wraps_get)?
+            .into_iter()
+            .filter(|w| w.class != FactorClass::CompanionPrf && w.class != FactorClass::None)
+            .collect();
+        next.push(wrap);
+        self.run(|t| {
+            commit_factors(t, Some(next), None)?;
+            t.audit_required(
+                "presence.factor_added",
+                json!({ "class": "companion-prf", "key_id": key_id }),
+            )
+        })
+    }
+
+    /// Whether the companion's Touch ID unlock is set up. Readable locked:
+    /// the companion asks before it offers Touch ID to unlock.
+    pub fn has_companion_unlock(&self) -> Result<bool> {
+        Ok(self
+            .read(rows::wraps_get)?
+            .iter()
+            .any(|w| w.class == FactorClass::CompanionPrf))
     }
 
     /// Store an authenticator's newer signature counter. No JS method:

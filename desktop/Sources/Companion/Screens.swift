@@ -19,6 +19,7 @@ struct Screens: View {
         case .start: StartScreen(companion: companion, actions: actions)
         case .template(let name): TemplateScreen(name: name, companion: companion, actions: actions)
         case .newSession: NewSessionScreen(companion: companion, actions: actions)
+        case .unlock: UnlockScreen(companion: companion, actions: actions)
         case .addKey: AddKeyScreen(companion: companion, actions: actions)
         case .replaceKey(let slug): ReplaceKeyScreen(slug: slug, companion: companion, actions: actions)
         case .settings: SettingsScreen(companion: companion, actions: actions)
@@ -157,7 +158,17 @@ struct HomeScreen: View {
         HStack(spacing: 6) {
             Pill(title: "Open the vault", symbol: "safari") { companion.perform(.openUi) }
             if status.locked {
-                Pill(title: "Unlock", symbol: "lock.open") { companion.perform(prefsRoute(.unlock)) }
+                Pill(title: "Unlock", symbol: companion.touchIdUnlock ? "touchid" : "lock.open") {
+                    // Touch ID first, where it is on; the passphrase screen
+                    // if it is not, or if the fingerprint did not do it.
+                    if companion.touchIdUnlock {
+                        companion.unlockWithTouchId { ok in
+                            if !ok { actions.push(.unlock) }
+                        }
+                    } else {
+                        actions.push(.unlock)
+                    }
+                }
             } else {
                 Pill(title: "Lock", symbol: "lock") { companion.runConfirmed(.lock) }
             }
@@ -395,6 +406,62 @@ struct NewSessionScreen: View {
     }
 }
 
+/// Unlock in the island: Touch ID where it is on, else the passphrase, typed
+/// here and sent to the CLI on stdin. Once the vault is open, an offer to
+/// unlock with Touch ID next time.
+struct UnlockScreen: View {
+    @ObservedObject var companion: Companion
+    let actions: IslandActions
+    @State private var passphrase = ""
+    @State private var offer = false
+
+    var body: some View {
+        if offer {
+            Card(title: "Unlocked") {
+                Note(text: "Unlock with Touch ID next time? The Secure Enclave keeps a key that opens the vault only after your fingerprint. Your passphrase still works, and stays the way back in if this Mac is lost. Setting it up asks for your fingerprint twice.", tint: .white)
+            }
+            HStack(spacing: 8) {
+                ActionButton(title: "Use Touch ID", symbol: "touchid", tint: Tint.good,
+                             disabled: companion.working != nil) {
+                    companion.turnOnTouchIdUnlock { _ in actions.home() }
+                }
+                ActionButton(title: "Not now", symbol: "xmark", filled: false) { actions.home() }
+            }
+        } else {
+            Card {
+                if companion.touchIdUnlock {
+                    ActionButton(title: "Unlock with Touch ID", symbol: "touchid", tint: Tint.good,
+                                 disabled: companion.working != nil) {
+                        companion.unlockWithTouchId { ok in if ok { actions.home() } }
+                    }
+                }
+                Field(label: "Passphrase") {
+                    SecureField("your vault passphrase", text: $passphrase)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(unlock)
+                }
+                Note(text: "It goes straight to the vault. The companion never shows, keeps or logs it.")
+            }
+            ActionButton(title: "Unlock", symbol: "lock.open", tint: Tint.good,
+                         disabled: passphrase.isEmpty || companion.working != nil, action: unlock)
+        }
+    }
+
+    private func unlock() {
+        guard !passphrase.isEmpty else { return }
+        let typed = passphrase
+        passphrase = ""
+        companion.unlockWithPassphrase(typed) { ok in
+            guard ok else { return }
+            if companion.canTurnOnTouchIdUnlock {
+                offer = true
+            } else {
+                actions.home()
+            }
+        }
+    }
+}
+
 /// In place of a form that needs Touch ID, before it is set up: set it up
 /// now (once, with the passphrase in Terminal), or do this one elsewhere.
 struct TouchIdFirst: View {
@@ -566,6 +633,17 @@ struct SettingsScreen: View {
             switch companion.touchId {
             case .ready:
                 Note(text: "On. Approvals, new sessions and key changes are confirmed here with your fingerprint.", tint: .white)
+                if companion.touchIdUnlock {
+                    Note(text: "Unlocking with Touch ID is on too.", tint: .white)
+                } else if companion.snapshot.reach.isUp {
+                    Row(symbol: "lock.open", text: "Unlock with Touch ID too…", tint: Tint.accent, chevron: false) {
+                        if case .up(let status) = companion.snapshot.reach, status.locked {
+                            companion.say("Unlock the vault first; then Touch ID can be set up to unlock it.", failed: true)
+                        } else {
+                            companion.turnOnTouchIdUnlock()
+                        }
+                    }
+                }
                 Row(symbol: "touchid", text: "Turn off Touch ID in the island", chevron: false) { companion.turnOffTouchId() }
             case .notSetUp:
                 Note(text: "Approve here with your fingerprint instead of in the vault page or Terminal. Setting it up asks for your passphrase once, in Terminal.")

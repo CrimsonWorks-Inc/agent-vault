@@ -48,6 +48,7 @@ fn class_str(c: FactorClass) -> &'static str {
         FactorClass::None => "none",
         FactorClass::Passphrase => "passphrase",
         FactorClass::WebauthnPrf => "webauthn-prf",
+        FactorClass::CompanionPrf => "companion-prf",
     }
 }
 

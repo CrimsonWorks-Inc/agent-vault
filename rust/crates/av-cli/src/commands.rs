@@ -3681,7 +3681,7 @@ pub async fn lock(ctx: &Context) -> Outcome {
 }
 
 /// Ports `COMMANDS.unlock`.
-pub async fn unlock(ctx: &Context) -> Outcome {
+pub async fn unlock(ctx: &Context, args: &crate::cli::UnlockArgs) -> Outcome {
     let mut locked_state = json!({ "locked": true, "needs_secret": false });
     match ctx.control("GET", "/v1/lockstate", None).await {
         Ok(state) => locked_state = state,
@@ -3695,12 +3695,20 @@ pub async fn unlock(ctx: &Context) -> Outcome {
         );
         return Ok(0);
     }
-    let passphrase = if locked_state.get("needs_secret").and_then(|v| v.as_bool()) == Some(true) {
-        Some(ctx.read_secret("passphrase: ")?)
+    let body = if args.companion {
+        // The companion's Touch ID unlock: the secret its Secure Enclave
+        // derived, on stdin. It opens only the companion's own wrap.
+        let secret = ctx.read_secret("companion unlock secret: ")?;
+        json!({ "prf_secret": secret.expose_secret() })
     } else {
-        None
+        let passphrase = if locked_state.get("needs_secret").and_then(|v| v.as_bool()) == Some(true)
+        {
+            Some(ctx.read_secret("passphrase: ")?)
+        } else {
+            None
+        };
+        json!({ "passphrase": passphrase.as_ref().map(|p| p.expose_secret()) })
     };
-    let body = json!({ "passphrase": passphrase.as_ref().map(|p| p.expose_secret()) });
     ctx.control("POST", "/v1/unlock", Some(&body)).await?;
     if ctx.json {
         ctx.out(None, &json!({ "locked": false }));

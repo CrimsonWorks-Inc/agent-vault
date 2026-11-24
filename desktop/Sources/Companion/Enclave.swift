@@ -71,6 +71,96 @@ enum Enclave {
         case failed(String)
     }
 
+    // MARK: Touch ID unlock
+
+    /// A second Secure Enclave key, for key agreement, beside a public key
+    /// whose private half was thrown away once used. The agreement between
+    /// the two, which only this Secure Enclave can repeat and only after
+    /// Touch ID, gives the unlock secret. Neither file is secret: the handle
+    /// works only in this Mac's Secure Enclave, and the public key alone
+    /// gives nothing.
+    private static var unlockFile: URL {
+        file.deletingLastPathComponent().appendingPathComponent("unlock-key")
+    }
+
+    private static var peerFile: URL {
+        file.deletingLastPathComponent().appendingPathComponent("unlock-peer")
+    }
+
+    /// Whether this Mac holds an unlock key (the vault decides whether it
+    /// still opens anything).
+    static var hasUnlockKey: Bool {
+        guard let handle = try? Data(contentsOf: unlockFile),
+              let peer = try? Data(contentsOf: peerFile),
+              (try? P256.KeyAgreement.PublicKey(x963Representation: peer)) != nil
+        else { return false }
+        return (try? SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: handle)) != nil
+    }
+
+    /// Make a new unlock key and return its secret, after Touch ID. Replaces
+    /// any unlock key made before. Blocks; never on the main thread.
+    static func newUnlockSecret(reason: String) -> Result<String, SignError> {
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            [.privateKeyUsage, .biometryCurrentSet], &error
+        ) else {
+            return .failure(.failed(error.map { "\($0.takeRetainedValue())" } ?? "no access control"))
+        }
+        let context = LAContext()
+        context.localizedReason = reason
+        return attempt {
+            let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access, authenticationContext: context)
+            let peer = P256.KeyAgreement.PrivateKey()
+            let secret = unlockSecret(agreement: try key.sharedSecretFromKeyAgreement(with: peer.publicKey))
+            let dir = file.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            for (data, url) in [(key.dataRepresentation, unlockFile), (peer.publicKey.x963Representation, peerFile)] {
+                try data.write(to: url, options: [.atomic])
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+            return secret
+        }
+    }
+
+    /// The unlock secret again, after Touch ID. Blocks; never on the main
+    /// thread.
+    static func unlockSecretNow(reason: String) -> Result<String, SignError> {
+        guard let handle = try? Data(contentsOf: unlockFile),
+              let peerData = try? Data(contentsOf: peerFile),
+              let peer = try? P256.KeyAgreement.PublicKey(x963Representation: peerData)
+        else { return .failure(.noKey) }
+        let context = LAContext()
+        context.localizedReason = reason
+        return attempt {
+            let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: handle, authenticationContext: context)
+            return unlockSecret(agreement: try key.sharedSecretFromKeyAgreement(with: peer))
+        }
+    }
+
+    /// Forget the unlock key made here.
+    static func removeUnlockKey() {
+        try? FileManager.default.removeItem(at: unlockFile)
+        try? FileManager.default.removeItem(at: peerFile)
+    }
+
+    /// Run a Secure Enclave operation, telling a cancelled prompt from a
+    /// failure.
+    private static func attempt<T>(_ body: () throws -> T) -> Result<T, SignError> {
+        do {
+            return .success(try body())
+        } catch let error as LAError where [.userCancel, .appCancel, .systemCancel, .userFallback].contains(error.code) {
+            return .failure(.cancelled)
+        } catch {
+            let ns = error as NSError
+            if ns.domain == NSOSStatusErrorDomain && ns.code == Int(errSecUserCanceled) {
+                return .failure(.cancelled)
+            }
+            return .failure(.failed(error.localizedDescription))
+        }
+    }
+
     /// Sign `message` after Touch ID. macOS shows the prompt, with `reason`
     /// as what the companion is trying to do. Blocks until the human answers,
     /// so never call it on the main thread.

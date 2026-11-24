@@ -35,6 +35,11 @@ pub enum FactorClass {
     /// its recovery.
     #[serde(rename = "webauthn-prf")]
     WebauthnPrf,
+    /// A secret the companion's Secure Enclave derives only after Touch ID
+    /// (an ECDH agreement it alone can repeat). Like `webauthn-prf`, never
+    /// on its own: the passphrase is its recovery.
+    #[serde(rename = "companion-prf")]
+    CompanionPrf,
 }
 
 /// One VMK wrap: the VMK sealed under a KEK derived from the device key and

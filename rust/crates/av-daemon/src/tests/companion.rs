@@ -133,7 +133,7 @@ async fn enrolment_needs_a_passphrase_first_and_fresh_presence() {
         "{v}"
     );
     let (_, v) = w.control("GET", "/v1/presence/companion", json!({})).await;
-    assert_eq!(v, json!({"enrolled": false}));
+    assert_eq!(v, json!({"enrolled": false, "unlock": false}));
 
     let (s, v) = enrol(&w, &e).await;
     assert_eq!(s, 200, "{v}");
@@ -386,4 +386,103 @@ async fn a_session_request_is_decided_with_a_signature_bound_to_its_verdict() {
     // Nothing waiting any more, so no challenge for it either.
     let (s, v) = challenge(&w, "POST /v1/session-requests/decide", &approve).await;
     assert_eq!((s, v["code"].as_str()), (404, Some("AV_NOT_FOUND")), "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn touch_id_unlock_is_set_up_with_fresh_presence_for_the_enrolled_key_only() {
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
+    let route = "/v1/presence/companion/unlock";
+    // No companion key: nothing to tie the unlock to.
+    let w = with_passphrase().await;
+    let (s, v) = w
+        .control(
+            "POST",
+            route,
+            json!({"prf_secret": secret, "presence": {"passphrase": PASS}}),
+        )
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (401, Some("companion_not_enrolled")),
+        "{v}"
+    );
+
+    let (w, e) = enrolled().await;
+    // Not 32 bytes of base64url: refused before any proof is looked at.
+    let long = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 33]);
+    for bad in [
+        "",
+        "short",
+        "AAAA",
+        &format!("{secret}="),
+        &secret[..42],
+        &long,
+    ] {
+        let (s, v) = w
+            .control(
+                "POST",
+                route,
+                json!({"prf_secret": bad, "presence": {"passphrase": PASS}}),
+            )
+            .await;
+        assert_eq!(
+            (s, v["code"].as_str()),
+            (403, Some("AV_POLICY_DENIED")),
+            "{bad}: {v}"
+        );
+    }
+    // No proof, or only a confirmation window: fresh presence is needed.
+    w.control("POST", "/v1/presence/window", json!({"passphrase": PASS}))
+        .await;
+    let (s, v) = w
+        .control("POST", route, json!({"prf_secret": secret}))
+        .await;
+    assert_eq!(
+        (s, v["rule"].as_str()),
+        (401, Some("fresh_presence")),
+        "{v}"
+    );
+    let (_, v) = w.control("GET", "/v1/lockstate", json!({})).await;
+    assert_eq!(v["has_companion_unlock"], false);
+
+    // Signed by the companion, for exactly this secret.
+    let body = json!({"prf_secret": secret});
+    let (s, ch) = challenge(&w, &format!("POST {route}"), &body).await;
+    assert_eq!(s, 200, "{ch}");
+    assert_eq!(ch["operation"]["op"], "companion.unlock_enroll");
+    assert!(
+        ch["operation"].get("prf_secret").is_none(),
+        "bound by digest only"
+    );
+    let mut b = body;
+    b["presence"] = json!({
+        "challengeId": ch["challengeId"],
+        "companionSignature": e.sign(ch["challenge"].as_str().unwrap()),
+    });
+    let (s, v) = w.control("POST", route, b).await;
+    assert_eq!(s, 200, "{v}");
+    let (_, v) = w.control("GET", "/v1/presence/companion", json!({})).await;
+    assert_eq!(v["unlock"], true);
+
+    // It opens a locked vault; another secret does not.
+    let (s, _) = w.control("POST", "/v1/lock", json!({})).await;
+    assert_eq!(s, 200);
+    let (_, v) = w.control("GET", "/v1/lockstate", json!({})).await;
+    assert_eq!(
+        (v["locked"].as_bool(), v["has_companion_unlock"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let other = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([8u8; 32]);
+    let (s, _) = w
+        .control("POST", "/v1/unlock", json!({"prf_secret": other}))
+        .await;
+    assert_ne!(s, 200);
+    let (s, v) = w
+        .control("POST", "/v1/unlock", json!({"prf_secret": secret}))
+        .await;
+    assert_eq!(
+        (s, v["factor"].as_str()),
+        (200, Some("companion-prf")),
+        "{v}"
+    );
 }

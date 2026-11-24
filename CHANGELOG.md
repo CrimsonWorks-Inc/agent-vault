@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.2
+
+- **Unlock in the island.** Unlock opens a screen in the island instead of
+  the vault page: Touch ID where Touch ID unlock is on, otherwise the
+  passphrase typed in the island (sent to the CLI on stdin, never kept).
+  After a passphrase unlock, the island offers to turn on Touch ID unlock.
+- **Touch ID unlock in the companion.** A new unlock factor: a key-agreement
+  key in the Mac's Secure Enclave derives a secret only after Touch ID, and
+  the vault keeps a wrap of its key under that secret (class
+  `companion-prf`), beside the passphrase's and the browser's. It is turned
+  on with a Touch ID-signed request bound to the secret's digest
+  (`companion enable-unlock`), needs the passphrase as its recovery, and
+  goes with the companion key when that is replaced or removed.
+  `unlock --companion` reads the secret from stdin.
+- **Schema version 3.** The vault database's wrap table accepts the new
+  class. The migration runs on first start and keeps every existing wrap; a
+  vault opened by 0.5.2 cannot be opened by an older release.
+
 ## 0.5.1
 
 - **Start a session in the island.** Pick keys, 1, 8 or 24 hours, and read

@@ -228,6 +228,61 @@ mod tests {
     }
 
     #[test]
+    fn version_3_makes_room_for_the_companion_unlock_and_keeps_every_wrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open(dir.path().join("v2.db")).unwrap();
+        for sql in &MIGRATIONS[..2] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO schema_version (id, version, migrated_at) VALUES (1, 2, 'then');
+             INSERT INTO vmk_wraps (class, salt, kdf, sealed, credential_id, created_at)
+               VALUES ('passphrase', 'c2FsdA==', '{\"m\":1}', '{\"v\":2,\"c\":\"p\"}', NULL, 't1'),
+                      ('webauthn-prf', NULL, NULL, '{\"v\":2,\"c\":\"w\"}', 'cred', 't2');",
+        )
+        .unwrap();
+        let companion = |id: Option<&str>| {
+            conn.execute(
+                "INSERT INTO vmk_wraps (class, sealed, credential_id, created_at)
+                 VALUES ('companion-prf', '{\"v\":2}', ?1, 't3')",
+                [id],
+            )
+        };
+        assert!(
+            companion(Some("key")).is_err(),
+            "version 2 has no such class"
+        );
+        let wraps = || -> Vec<String> {
+            let mut st = conn
+                .prepare(
+                    "SELECT json_array(class, salt, kdf, sealed, credential_id, created_at)
+                     FROM vmk_wraps ORDER BY class",
+                )
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let before = wraps();
+        assert_eq!(before.len(), 2);
+        migrate(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 3);
+        assert_eq!(wraps(), before, "every wrap, byte for byte");
+        // The companion's wrap names its key, as the browser's names its
+        // credential; no other class carries one.
+        assert!(companion(None).is_err());
+        companion(Some("key")).unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO vmk_wraps (class, sealed, credential_id, created_at)
+                 VALUES ('none', '{\"v\":2}', 'key', 't4')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
     fn a_newer_schema_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(DB_FILE);

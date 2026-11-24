@@ -168,7 +168,7 @@ pub(crate) fn load_client_state() -> Value {
 /// Every command as a human types it. Ports `COMMAND_NAMES` in
 /// `src/cli/index.js` (`Object.keys(COMMANDS)` in definition order, with the
 /// `controlCommands` keys merged after), plus `migrate`, new in the port.
-pub const COMMAND_NAMES: [&str; 73] = [
+pub const COMMAND_NAMES: [&str; 74] = [
     "setup",
     "daemon",
     "upgrade",
@@ -204,6 +204,7 @@ pub const COMMAND_NAMES: [&str; 73] = [
     "companion enroll",
     "companion status",
     "companion remove",
+    "companion enable-unlock",
     "lock",
     "unlock",
     "profiles",
@@ -1006,11 +1007,14 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
             cli::TripwireCommand::Set(a) => control_commands::tripwire_set(ctx, &a).await,
         },
         Command::Lock => commands::lock(ctx).await,
-        Command::Unlock => commands::unlock(ctx).await,
+        Command::Unlock(a) => commands::unlock(ctx, &a).await,
         Command::Companion { command } => match command {
             cli::CompanionCommand::Enroll(a) => control_commands::companion_enroll(ctx, &a).await,
             cli::CompanionCommand::Status => control_commands::companion_status(ctx).await,
             cli::CompanionCommand::Remove => control_commands::companion_remove(ctx).await,
+            cli::CompanionCommand::EnableUnlock => {
+                control_commands::companion_enable_unlock(ctx).await
+            }
         },
         Command::Passphrase { command } => match command {
             cli::PassphraseCommand::Set => commands::passphrase_set(ctx).await,
@@ -1245,6 +1249,7 @@ fn help_text(ctx: &Context) -> String {
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
   companion status | companion remove  Touch ID in the companion app
   companion enroll <key> [--label T]   (the companion runs this for you)
+  companion enable-unlock              (this too)
   audit tail [--limit N] | audit verify [--witness F]
   audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
   report [--since 7d] [--markdown]     access review across every session

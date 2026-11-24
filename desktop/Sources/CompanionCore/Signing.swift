@@ -15,16 +15,21 @@ import Foundation
 public struct Enrollment: Equatable {
     public var enrolled: Bool
     public var keyId: String?
+    /// Whether Touch ID unlock is on: the vault holds a wrap only this
+    /// key's Mac can open (an older vault does not say, so it is off).
+    public var unlock: Bool
 
-    public init(enrolled: Bool, keyId: String?) {
+    public init(enrolled: Bool, keyId: String?, unlock: Bool = false) {
         self.enrolled = enrolled
         self.keyId = keyId
+        self.unlock = unlock
     }
 }
 
 public func parseEnrollment(_ data: JSON) -> Enrollment? {
     guard let enrolled = data["enrolled"]?.bool else { return nil }
-    return Enrollment(enrolled: enrolled, keyId: enrolled ? data["key_id"]?.string : nil)
+    return Enrollment(enrolled: enrolled, keyId: enrolled ? data["key_id"]?.string : nil,
+                      unlock: enrolled && data["unlock"]?.bool == true)
 }
 
 /// Whether the island can approve with Touch ID right now.
@@ -106,6 +111,9 @@ public enum SignedRequest: Equatable {
     case rotate(slug: String)
     case add(slug: String, kind: String, host: String?)
     case removeTouchId
+    /// Turn on Touch ID unlock with the secret the Secure Enclave derived,
+    /// named here by its SHA-256 (hex); the secret goes on stdin.
+    case enableUnlock(digest: String)
 
     /// The CLI command, without `--json` or the companion mode flag. `nil`
     /// when a value is not the plain kind, so nothing odd reaches the CLI.
@@ -126,6 +134,7 @@ public enum SignedRequest: Equatable {
             }
             return ["cred", "add", slug, "--kind", kind]
         case .removeTouchId: return ["companion", "remove"]
+        case .enableUnlock(let digest) where plainDigest(digest): return ["companion", "enable-unlock"]
         default: return nil
         }
     }
@@ -133,7 +142,7 @@ public enum SignedRequest: Equatable {
     /// Whether a key's value follows the proof on stdin.
     public var takesValue: Bool {
         switch self {
-        case .rotate, .add: return true
+        case .rotate, .add, .enableUnlock: return true
         default: return false
         }
     }
@@ -165,6 +174,10 @@ public enum SignedRequest: Equatable {
                 && operation["value_sha256"]?.string != nil
         case .removeTouchId:
             return op == "companion.remove"
+        case .enableUnlock(let digest):
+            // The whole operation: this secret, and nothing else along.
+            return plainDigest(digest)
+                && operation == .object(["op": .string("companion.unlock_enroll"), "prf_secret_sha256": .string(digest)])
         }
     }
 
@@ -182,6 +195,7 @@ public enum SignedRequest: Equatable {
         case .rotate(let slug): return "replace the value of “\(cleanText(slug, 40))”"
         case .add(let slug, _, _): return "add the key “\(cleanText(slug, 40))”"
         case .removeTouchId: return "stop using Touch ID in the companion"
+        case .enableUnlock: return "unlock the vault with Touch ID from now on"
         }
     }
 
@@ -196,8 +210,38 @@ public enum SignedRequest: Equatable {
         case .rotate(let slug): return "Replaced the value of “\(cleanText(slug, 40))”."
         case .add(let slug, _, _): return "Added “\(cleanText(slug, 40))”."
         case .removeTouchId: return "Touch ID in the companion is off."
+        case .enableUnlock: return "Touch ID unlocks the vault from now on."
         }
     }
+}
+
+// MARK: Touch ID unlock
+
+/// The unlock secret from a key agreement between the Secure Enclave's
+/// unlock key and the public key kept beside it: HKDF-SHA256 to 32 bytes,
+/// as base64url. Only that Secure Enclave, after Touch ID, can repeat the
+/// agreement; the vault keeps a wrap of its key under this secret.
+public func unlockSecret(agreement: SharedSecret) -> String {
+    let key = agreement.hkdfDerivedSymmetricKey(
+        using: SHA256.self, salt: Data("agent-vault companion unlock v1".utf8),
+        sharedInfo: Data(), outputByteCount: 32)
+    return key.withUnsafeBytes { base64url(Data($0)) }
+}
+
+/// Whether `secret` is an unlock secret's shape: 32 bytes as unpadded
+/// base64url, which is what the vault takes.
+public func plainUnlockSecret(_ secret: String) -> Bool {
+    secret.utf8.count == 43 && fromBase64url(secret)?.count == 32
+}
+
+/// The SHA-256 (lowercase hex) of the secret's text: how the vault binds it
+/// in the operation the companion signs (`prf_secret_sha256`).
+public func unlockSecretDigest(_ secret: String) -> String {
+    SHA256.hash(data: Data(secret.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+func plainDigest(_ s: String) -> Bool {
+    s.utf8.count == 64 && s.utf8.allSatisfy { (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
 }
 
 /// The label a session started in the island carries.
