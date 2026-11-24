@@ -826,6 +826,27 @@ impl Daemon {
                     .await??;
                 Ok((200, v))
             }
+            "POST /v1/credentials/folder" => {
+                // Folders only organize, so this is not gated; the change is
+                // audited as cred.folder_set.
+                let folder = input.get("folder").cloned();
+                let folder = match folder {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(f)) => Some(f),
+                    Some(_) => return Err(dr(C::PolicyDenied, "folder is a path like clients/acme, or null to unfile it", "folder")),
+                };
+                let slug = input.get("slug").map(js_string).unwrap_or_else(|| "undefined".into());
+                Ok((200, self.shared.run(move |core| core.vault.set_credential_folder(&slug, folder.as_deref()).v().map(|c| json!(c))).await??))
+            }
+            "POST /v1/credentials/folder/rename" => {
+                let text = |k: &str| match input.get(k) {
+                    Some(Value::String(s)) => Ok(s.clone()),
+                    _ => Err(dr(C::PolicyDenied, format!("{k} is a folder path like clients/acme"), "folder")),
+                };
+                let (from, to) = (text("from")?, text("to")?);
+                let moved = self.shared.run(move |core| core.vault.rename_folder(&from, &to).v()).await??;
+                Ok((200, json!({"ok": true, "moved": moved})))
+            }
             "POST /v1/credentials/release" => {
                 let presence = field(&input, "presence")?.cloned();
                 self.require_human("cred release", op?, presence).await?;

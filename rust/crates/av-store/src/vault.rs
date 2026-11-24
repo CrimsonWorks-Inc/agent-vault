@@ -623,6 +623,9 @@ pub struct PublicCredential {
     pub probe_path: Option<String>,
     /// ISO creation time.
     pub created_at: String,
+    /// Its folder (`clients/acme`), absent when unfiled. Organizing only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 /// A field as [`PublicCredential`] shows it. Ports the `fields` entries of
@@ -1816,6 +1819,7 @@ fn seal_credential(
         quarantine: None,
         scrub_patterns: Vec::new(),
         pins: BTreeMap::new(),
+        folder: None,
     })
 }
 
@@ -1853,6 +1857,7 @@ fn public_of(cred: &CredentialRecord, now: i64) -> PublicCredential {
             .ok()
             .and_then(|p| p.probe.as_ref().map(|pr| pr.path.to_string())),
         created_at: cred.created_at.clone(),
+        folder: cred.folder.clone(),
     }
 }
 
@@ -3114,6 +3119,81 @@ impl Vault {
                 json!({ "credential_slug": cred.slug, "expires_at": expires }),
             )?;
             Ok(public_of(&cred, t.now))
+        })
+    }
+
+    /// File a credential under a folder, or none to unfile it; records
+    /// `cred.folder_set` when it changes. Ungated: folders only organize.
+    /// No JS source: new with SQLite schema 2.
+    pub fn set_credential_folder(
+        &mut self,
+        slug: &str,
+        folder: Option<&str>,
+    ) -> Result<PublicCredential> {
+        if let Some(why) = folder.and_then(crate::folders::folder_problem) {
+            return Err(refuse(ErrorCode::PolicyDenied, why, "folder"));
+        }
+        self.run(|t| {
+            t.require_unlocked()?;
+            let mut cred = find_cred(t.c, slug)?;
+            let to = folder.map(str::to_string);
+            if cred.folder != to {
+                let from = std::mem::replace(&mut cred.folder, to.clone());
+                rows::credential_update_meta(t.c, &cred)?;
+                t.audit_required(
+                    "cred.folder_set",
+                    json!({ "credential_slug": cred.slug, "from": from, "to": to }),
+                )?;
+            }
+            Ok(public_of(&cred, t.now))
+        })
+    }
+
+    /// Rename a folder: every credential in it or beneath it moves under
+    /// `to`, all or none; records one `cred.folder_renamed` naming them.
+    /// Returns the slugs moved. No JS source: new with SQLite schema 2.
+    pub fn rename_folder(&mut self, from: &str, to: &str) -> Result<Vec<String>> {
+        for path in [from, to] {
+            if let Some(why) = crate::folders::folder_problem(path) {
+                return Err(refuse(ErrorCode::PolicyDenied, why, "folder"));
+            }
+        }
+        self.run(|t| {
+            t.require_unlocked()?;
+            let mut moved = Vec::new();
+            for mut cred in rows::credentials_all(t.c)? {
+                let Some(next) = cred
+                    .folder
+                    .as_deref()
+                    .and_then(|f| crate::folders::renamed(f, from, to))
+                else {
+                    continue;
+                };
+                if let Some(why) = crate::folders::folder_problem(&next) {
+                    return Err(refuse(
+                        ErrorCode::PolicyDenied,
+                        format!("{} would move to {next}: {why}", cred.slug),
+                        "folder",
+                    ));
+                }
+                cred.folder = Some(next);
+                rows::credential_update_meta(t.c, &cred)?;
+                moved.push(cred.slug.clone());
+            }
+            if moved.is_empty() {
+                return Err(plain(
+                    ErrorCode::NotFound,
+                    format!("no credential is in folder {from}"),
+                ));
+            }
+            moved.sort();
+            if from != to {
+                t.audit_required(
+                    "cred.folder_renamed",
+                    json!({ "from": from, "to": to, "credential_slugs": moved }),
+                )?;
+            }
+            Ok(moved)
         })
     }
 

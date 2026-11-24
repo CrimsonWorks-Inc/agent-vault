@@ -535,6 +535,7 @@ pub fn migrate(
             quarantine: c.quarantine.clone(),
             scrub_patterns: c.scrub_patterns.clone(),
             pins: c.pins.clone(),
+            folder: None,
         });
     }
     let notify = match &doc.kv.notify {

@@ -16,9 +16,10 @@ use av_store::client_state::{self, state_dir};
 
 use crate::cli::{
     AuditExportArgs, AuditVerifyArgs, AuditWitnessArgs, BackupExportArgs, BackupFileArg,
-    BackupRestoreArgs, CredExpiryArgs, CredPinArgs, CredQuarantineArgs, CredRotateArgs,
-    CredScrubArgs, CredTestArgs, NameArg, NotifySetArgs, PanicArgs, PreflightArgs, ReportArgs,
-    SessionNarrowArgs, SessionShowArgs, SlugArg, TemplateSaveArgs, TripwireSetArgs,
+    BackupRestoreArgs, CredExpiryArgs, CredMoveArgs, CredPinArgs, CredQuarantineArgs,
+    CredRenameFolderArgs, CredRotateArgs, CredScrubArgs, CredTestArgs, NameArg, NotifySetArgs,
+    PanicArgs, PreflightArgs, ReportArgs, SessionNarrowArgs, SessionShowArgs, SlugArg,
+    TemplateSaveArgs, TripwireSetArgs,
 };
 use crate::files::{self, FileError};
 use crate::policy_input::{
@@ -590,6 +591,62 @@ pub async fn cred_release(ctx: &Context, args: &SlugArg) -> Outcome {
             "{} {}",
             ctx.paint("32", "released"),
             js_interp(r.get("slug"))
+        ),
+    );
+    Ok(0)
+}
+
+/// `cred move <slug> <folder|none>`. New with folders; no JS source.
+pub async fn cred_move(ctx: &Context, args: &CredMoveArgs) -> Outcome {
+    let slug = text_flag(args.slug.as_deref(), "credential")?;
+    let folder = text_flag(
+        args.folder.as_deref(),
+        "folder (a path like clients/acme, or none)",
+    )?;
+    let folder = if folder == "none" {
+        Value::Null
+    } else {
+        Value::from(folder)
+    };
+    let body = json!({ "slug": slug, "folder": folder });
+    let r = ctx
+        .control("POST", "/v1/credentials/folder", Some(&body))
+        .await?;
+    let line = match r.get("folder").and_then(Value::as_str) {
+        Some(f) => format!(
+            "{} {}  {}",
+            ctx.paint("32", "moved"),
+            js_interp(r.get("slug")),
+            clean_text(f)
+        ),
+        None => format!(
+            "{} {}  no folder",
+            ctx.paint("32", "moved"),
+            js_interp(r.get("slug"))
+        ),
+    };
+    output(ctx, &r, &line);
+    Ok(0)
+}
+
+/// `cred rename-folder <from> <to>`. New with folders; no JS source.
+pub async fn cred_rename_folder(ctx: &Context, args: &CredRenameFolderArgs) -> Outcome {
+    let from = text_flag(args.from.as_deref(), "folder to rename")?;
+    let to = text_flag(args.to.as_deref(), "new folder path")?;
+    let body = json!({ "from": from, "to": to });
+    let r = ctx
+        .control("POST", "/v1/credentials/folder/rename", Some(&body))
+        .await?;
+    let n = r.get("moved").and_then(Value::as_array).map_or(0, Vec::len);
+    output(
+        ctx,
+        &r,
+        &format!(
+            "{} {} → {}  {n} credential{}",
+            ctx.paint("32", "renamed"),
+            clean_text(from),
+            clean_text(to),
+            if n == 1 { "" } else { "s" }
         ),
     );
     Ok(0)
