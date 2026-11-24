@@ -149,7 +149,10 @@ jobs:
   # the Apple secrets are set (ad hoc otherwise, and macOS then asks the user
   # to allow it the first time it opens).
   companion:
-    runs-on: macos-15
+    # The universal (arm64 + x86_64) build needs Xcode 26: Xcode 16's build
+    # system refuses the package's Swift language mode for multi-arch builds.
+    # Same image as the companion CI workflow.
+    runs-on: macos-26
     permissions:
       contents: read
       id-token: write
