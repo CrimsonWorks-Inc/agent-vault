@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **The companion, native and on the island.** A macOS app in Swift
+  (`desktop/`) that lives around the notch: closed, it is the notch with the
+  vault's mark and whatever needs you (requests waiting, a lock, a session
+  ending, a warning); open, it shows what is waiting, open sessions and keys,
+  with a screen for each. On a screen without a notch it is a menu bar icon.
+  It replaces the Tauri prototype (0.3), whose rules and tests carried over.
+- **Touch ID in the companion.** A new presence factor: a P-256 key in the
+  Mac's Secure Enclave that signs only after Touch ID. Enrol it once with
+  your passphrase (`av companion enroll`, which the companion runs for you in
+  Terminal); then approving and denying requests, starting a session from a
+  template, adding a key, replacing a key's value and allowing a stopped key
+  again are confirmed in the island with your fingerprint. Each signature
+  answers a single-use challenge the daemon mints for that exact request, as
+  a WebAuthn assertion does; it never opens a confirmation window, and it is
+  not a way to open the vault. `av companion status | remove`. The audit log
+  records it as `presence.factor_added`, `presence.verified` and
+  `presence.factor_removed` with class `companion-secure-enclave`.
+- The CLI's `--companion-challenge` and `--presence-stdin` are how the
+  companion drives a widening command: the first prints a challenge for the
+  exact request and sends nothing that changes anything; the second sends it
+  with the signed proof on stdin's first line (and a key's value on the next).
+
 ## 0.4.0
 
 - **Credential folders.** File credentials under nested folders

@@ -6,6 +6,8 @@ curl -fsSL https://github.com/CrimsonWorks-Inc/agent-vault/releases/latest/downl
 
 or with Homebrew: `brew install crimsonworks-inc/tap/agent-vault`, then `agent-vault setup`.
 
+The companion app (it lives in the notch, or the menu bar): `brew install --cask crimsonworks-inc/tap/agent-vault-companion`, or the `.dmg` below. It installs the CLI too.
+
 Each archive is listed in `SHA256SUMS` and has build provenance from this repository's release workflow:
 
 ```sh

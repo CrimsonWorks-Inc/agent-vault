@@ -130,6 +130,8 @@ approvals, audit, listeners
   tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
+  companion status | companion remove  Touch ID in the companion app
+  companion enroll <key> [--label T]   (the companion runs this for you)
   audit tail [--limit N] | audit verify [--witness F]
   audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
   report [--since 7d] [--markdown]     access review across every session

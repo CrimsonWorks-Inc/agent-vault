@@ -16,10 +16,10 @@ use av_store::client_state::{self, state_dir};
 
 use crate::cli::{
     AuditExportArgs, AuditVerifyArgs, AuditWitnessArgs, BackupExportArgs, BackupFileArg,
-    BackupRestoreArgs, CredExpiryArgs, CredMoveArgs, CredPinArgs, CredQuarantineArgs,
-    CredRenameFolderArgs, CredRotateArgs, CredScrubArgs, CredTestArgs, NameArg, NotifySetArgs,
-    PanicArgs, PreflightArgs, ReportArgs, SessionNarrowArgs, SessionShowArgs, SlugArg,
-    TemplateSaveArgs, TripwireSetArgs,
+    BackupRestoreArgs, CompanionEnrollArgs, CredExpiryArgs, CredMoveArgs, CredPinArgs,
+    CredQuarantineArgs, CredRenameFolderArgs, CredRotateArgs, CredScrubArgs, CredTestArgs, NameArg,
+    NotifySetArgs, PanicArgs, PreflightArgs, ReportArgs, SessionNarrowArgs, SessionShowArgs,
+    SlugArg, TemplateSaveArgs, TripwireSetArgs,
 };
 use crate::files::{self, FileError};
 use crate::policy_input::{
@@ -2493,4 +2493,84 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     out
+}
+
+// -------------------------------------------------------------- companion
+
+/// `companion enroll <public-key> [--label T]`: enrol the companion's Secure
+/// Enclave key as a presence factor. The companion opens Terminal on this,
+/// so the passphrase is typed here and never reaches the companion. New with
+/// the native companion; no JS source.
+pub async fn companion_enroll(ctx: &Context, args: &CompanionEnrollArgs) -> Outcome {
+    use base64::Engine as _;
+    let given = text_flag(args.public_key.as_deref(), "public key")?;
+    let der = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(given.trim_end_matches('='))
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(given))
+        .map_err(|_| usage("the public key is not base64"))?;
+    let mut body = Map::new();
+    body.insert(
+        "publicKeySpki".into(),
+        Value::from(base64::engine::general_purpose::STANDARD.encode(der)),
+    );
+    if let Some(label) = &args.label {
+        body.insert("label".into(), Value::from(label.clone()));
+    }
+    let r = ctx
+        .control_with_presence("POST", "/v1/presence/companion", Some(&Value::Object(body)))
+        .await?;
+    let verb = if r.get("replaced") == Some(&Value::Bool(true)) {
+        "replaced"
+    } else {
+        "set up"
+    };
+    output(
+        ctx,
+        &r,
+        &format!(
+            "{} Touch ID in the companion (key {})",
+            ctx.paint("32", verb),
+            js_interp(r.get("key_id"))
+        ),
+    );
+    Ok(0)
+}
+
+/// `companion status`: whether a companion key is enrolled, and which.
+pub async fn companion_status(ctx: &Context) -> Outcome {
+    let r = ctx.control("GET", "/v1/presence/companion", None).await?;
+    let human = if r.get("enrolled") == Some(&Value::Bool(true)) {
+        format!(
+            "Touch ID in the companion: set up on {} (key {}, since {})",
+            js_interp(r.get("label")),
+            js_interp(r.get("key_id")),
+            js_interp(r.get("enrolled_at"))
+        )
+    } else {
+        "Touch ID in the companion: not set up".to_string()
+    };
+    output(ctx, &r, &human);
+    Ok(0)
+}
+
+/// `companion remove`: stop accepting the companion's key (fresh presence).
+pub async fn companion_remove(ctx: &Context) -> Outcome {
+    let r = ctx
+        .control_with_presence(
+            "POST",
+            "/v1/presence/companion",
+            Some(&json!({"action": "remove"})),
+        )
+        .await?;
+    let removed = r.get("removed") == Some(&Value::Bool(true));
+    output(
+        ctx,
+        &r,
+        if removed {
+            "removed Touch ID in the companion"
+        } else {
+            "Touch ID in the companion was not set up"
+        },
+    );
+    Ok(0)
 }

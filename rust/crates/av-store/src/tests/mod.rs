@@ -9,6 +9,7 @@ mod helpers;
 mod activity;
 mod audit_witness;
 mod backup;
+mod companion;
 mod factors;
 mod folders;
 mod gaps;

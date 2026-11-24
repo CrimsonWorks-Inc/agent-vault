@@ -307,6 +307,9 @@ struct OpChallenge {
     challenge: [u8; 32],
     operation: Value,
     expires: i64,
+    /// Minted for the companion's Secure Enclave key, not for WebAuthn.
+    /// Each kind of proof only ever answers a challenge minted for it.
+    companion: bool,
 }
 
 /// The daemon's in-memory state. Ports the instance fields of `Daemon`.
@@ -479,7 +482,7 @@ impl Core {
             .iter()
             .position(|(k, _)| *k == cid)
             .map(|i| self.dm.op_challenges.remove(i).1);
-        let Some(pending) = pending.filter(|p| p.expires >= now_ms()) else {
+        let Some(pending) = pending.filter(|p| p.expires >= now_ms() && !p.companion) else {
             return Ok(false);
         };
         if webauthn::canonical_operation(&pending.operation)
@@ -518,6 +521,57 @@ impl Core {
         }
     }
 
+    /// A companion presence proof: `challengeId` names a challenge minted for
+    /// the companion and for this exact operation (used once, whatever the
+    /// outcome), and `companionSignature` is the enrolled companion key's
+    /// signature over it. `false` for anything else, with the reason audited.
+    fn dm_verify_companion(&mut self, operation: &Value, presence: &Value) -> R<bool> {
+        let Some(signature) = presence.get("companionSignature").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(cid) = presence
+            .get("challengeId")
+            .filter(|v| crate::util::truthy(v))
+        else {
+            return Ok(false);
+        };
+        let cid = js_string(cid);
+        let pending = self
+            .dm
+            .op_challenges
+            .iter()
+            .position(|(k, _)| *k == cid)
+            .map(|i| self.dm.op_challenges.remove(i).1);
+        let Some(pending) = pending.filter(|p| p.expires >= now_ms() && p.companion) else {
+            self.audit_opt(
+                "presence.denied",
+                json!({"reason": "companion_challenge_unknown"}),
+            );
+            return Ok(false);
+        };
+        if webauthn::canonical_operation(&pending.operation)
+            != webauthn::canonical_operation(operation)
+        {
+            self.audit_opt("presence.denied", json!({"reason": "operation_mismatch"}));
+            return Ok(false);
+        }
+        let Some(enrolled) = self.vault.companion_key().v()? else {
+            self.audit_opt(
+                "presence.denied",
+                json!({"reason": "companion_not_enrolled"}),
+            );
+            return Ok(false);
+        };
+        if !crate::companion::verify(&enrolled.public_key_spki, &pending.challenge, signature) {
+            self.audit_opt(
+                "presence.denied",
+                json!({"reason": "companion_signature", "key_id": enrolled.key_id}),
+            );
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// `#requireHumanForWidening(op, operation, presence)`.
     fn dm_require_human(
         &mut self,
@@ -530,7 +584,15 @@ impl Core {
             return Ok(());
         }
         if let (Some(p), Some(o)) = (presence.filter(|p| crate::util::truthy(p)), operation) {
-            if self.dm_verify_op_assertion(o, p)? {
+            if p.get("companionSignature").is_some() {
+                if self.dm_verify_companion(o, p)? {
+                    self.audit_opt(
+                        "presence.verified",
+                        json!({"op": op, "factor": "companion-secure-enclave"}),
+                    );
+                    return Ok(());
+                }
+            } else if self.dm_verify_op_assertion(o, p)? {
                 self.audit_opt(
                     "presence.verified",
                     json!({"op": op, "factor": "webauthn-platform"}),
@@ -565,7 +627,15 @@ impl Core {
         presence: Option<&Value>,
     ) -> R<Fresh> {
         let p = presence.cloned().unwrap_or(Value::Null);
-        if p.get("challengeId").is_some_and(crate::util::truthy)
+        if p.get("companionSignature").is_some() {
+            if self.dm_verify_companion(operation, &p)? {
+                self.audit_opt(
+                    "presence.verified",
+                    json!({"op": op, "factor": "companion-secure-enclave", "fresh": true}),
+                );
+                return Ok(Fresh::Done);
+            }
+        } else if p.get("challengeId").is_some_and(crate::util::truthy)
             && self.dm_verify_op_assertion(operation, &p)?
         {
             self.audit_opt(
@@ -1031,6 +1101,13 @@ impl Daemon {
                 }
             }
             "POST /v1/presence" => of("presence.enroll", input),
+            "POST /v1/presence/companion" => {
+                if input.get("action").and_then(Value::as_str) == Some("remove") {
+                    of("companion.remove", &json!({}))
+                } else {
+                    of("companion.enroll", input)
+                }
+            }
             "POST /v1/ui/origins" => of("ui.origin_add", input),
             "POST /v1/credentials/rotate" => of("cred.rotate", input),
             "POST /v1/credentials/scrub" => of("cred.scrub_add", input),

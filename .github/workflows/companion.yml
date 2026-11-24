@@ -1,0 +1,51 @@
+# The companion (desktop/): a native macOS app in Swift. Build with warnings
+# as errors, test, then build a universal app and a .dmg that people can
+# download from the run. The companion is its own Swift package: it links none
+# of the daemon's crates.
+#
+# The .dmg is signed ad hoc, not with a Developer ID, and not notarized, so
+# macOS blocks it when it is downloaded with a browser. Signing needs the same
+# Apple secrets release.yml describes; until they are set, this build is for
+# testing.
+
+name: companion
+
+on:
+  push:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/companion.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/companion.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+      - name: Build the app and the installer
+        run: UNIVERSAL=1 DMG=1 SIGN_IDENTITY=- scripts/bundle.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-vault-companion-macos
+          path: desktop/build/agent-vault-companion.dmg
+          if-no-files-found: error

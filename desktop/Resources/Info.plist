@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>agent-vault-companion</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.iolitelabs.agentvault.companion</string>
+  <key>CFBundleName</key>
+  <string>agent-vault companion</string>
+  <key>CFBundleDisplayName</key>
+  <string>agent-vault companion</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.4.0</string>
+  <key>CFBundleVersion</key>
+  <string>4</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
+  <!-- No Dock icon and no app menu: the island (or the menu bar icon) is the app. -->
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>The companion opens Terminal on agent-vault's own commands, for the steps where you type your passphrase.</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>Apache-2.0</string>
+</dict>
+</plist>

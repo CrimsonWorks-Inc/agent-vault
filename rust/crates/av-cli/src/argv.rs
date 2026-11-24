@@ -3,7 +3,7 @@
 //! refuse them). A boolean flag with a value is a usage error here, before
 //! clap turns it into a positional.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use av_core::errors::Exit;
 
@@ -12,6 +12,25 @@ use crate::CliError;
 
 thread_local! {
     static BARE_TRUE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static PRESENCE: Cell<PresenceMode> = const { Cell::new(PresenceMode::Asked) };
+}
+
+/// How a widening command proves presence. `Asked` is the usual flow: at a
+/// terminal, the CLI asks for the passphrase. The other two are how the
+/// companion uses its Secure Enclave key, and are not in the help:
+/// `--companion-challenge` prints a challenge for the exact request the
+/// command would send and sends nothing that changes anything;
+/// `--presence-stdin` sends that request with the proof on stdin's first line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceMode {
+    Asked,
+    Challenge,
+    Stdin,
+}
+
+/// The presence mode this invocation was given.
+pub fn presence_mode() -> PresenceMode {
+    PRESENCE.with(|c| c.get())
 }
 
 /// Whether `parseArgs` stored boolean `true` for this flag (no value). The
@@ -76,6 +95,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("backup", &["export", "inspect", "restore"]),
     ("tripwire", &["show", "on", "off", "set"]),
     ("notify", &["set", "show", "off", "test"]),
+    ("companion", &["enroll", "status", "remove"]),
 ];
 
 const COMMANDS: &[&str] = &[
@@ -172,6 +192,7 @@ struct Flag {
 /// bridge, boolean values refused).
 pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
     BARE_TRUE.with(|c| c.borrow_mut().clear());
+    PRESENCE.with(|c| c.set(PresenceMode::Asked));
     set_extra_flags(&[]);
     let argv0 = argv
         .first()
@@ -200,6 +221,21 @@ pub fn prepare(argv: &[String]) -> Result<Prepared, CliError> {
         }
         if a == "--json" {
             json = true;
+            i += 1;
+            continue;
+        }
+        if a == "--companion-challenge" || a == "--presence-stdin" {
+            let mode = if a == "--presence-stdin" {
+                PresenceMode::Stdin
+            } else {
+                PresenceMode::Challenge
+            };
+            if presence_mode() != PresenceMode::Asked && presence_mode() != mode {
+                return Err(usage(
+                    "--companion-challenge and --presence-stdin do not go together",
+                ));
+            }
+            PRESENCE.with(|c| c.set(mode));
             i += 1;
             continue;
         }
@@ -408,7 +444,8 @@ fn positional_budget(path: &[&str]) -> usize {
         | ["listen", "add"]
         | ["listen", "rm"]
         | ["docs"]
-        | ["mcp", "install"] => 1,
+        | ["mcp", "install"]
+        | ["companion", "enroll"] => 1,
         _ => 0,
     }
 }
@@ -433,6 +470,7 @@ fn resolve(positionals: &[String]) -> Result<(Vec<&'static str>, Vec<String>), C
                     "backup" => vec!["backup", *sub],
                     "tripwire" => vec!["tripwire", *sub],
                     "notify" => vec!["notify", *sub],
+                    "companion" => vec!["companion", *sub],
                     _ => vec![*sub],
                 };
                 return Ok((path, positionals[2..].to_vec()));

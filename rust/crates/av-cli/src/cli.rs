@@ -252,6 +252,13 @@ pub enum Command {
     Lock,
     /// Resume. Ports `COMMANDS.unlock` in `src/cli/index.js`.
     Unlock,
+    /// Touch ID in the companion: its Secure Enclave key as a presence
+    /// factor. New in the port; no JS source.
+    Companion {
+        /// The `companion` subcommand.
+        #[command(subcommand)]
+        command: CompanionCommand,
+    },
     /// Make the lock cryptographic, or undo it. Ports the `passphrase:*`
     /// handlers in `src/cli/index.js`.
     Passphrase {
@@ -1046,6 +1053,27 @@ pub struct TripwireSetArgs {
     /// Denial rule-name prefix.
     #[arg(long = "rule-prefix")]
     pub rule_prefix: Option<String>,
+}
+
+/// `companion ...`: the companion's Secure Enclave key.
+#[derive(Debug, Clone, Subcommand)]
+pub enum CompanionCommand {
+    /// Enrol the companion's public key (fresh presence: the passphrase).
+    Enroll(CompanionEnrollArgs),
+    /// Whether a companion key is enrolled, and which.
+    Status,
+    /// Remove it (fresh presence).
+    Remove,
+}
+
+/// `companion enroll <public-key> [--label T]`.
+#[derive(Debug, Clone, Args)]
+pub struct CompanionEnrollArgs {
+    /// The key's DER SPKI, base64url or base64, as the companion prints it.
+    pub public_key: Option<String>,
+    /// A short name for this Mac.
+    #[arg(long)]
+    pub label: Option<String>,
 }
 
 /// `passphrase ...`. Ports the `passphrase:*` keys of `COMMANDS`.

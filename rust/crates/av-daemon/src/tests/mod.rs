@@ -13,6 +13,7 @@ use crate::upstream::{
     Body, BoxFuture, Upstream, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 
+mod companion;
 mod control;
 mod folders;
 mod gateway;

@@ -1463,12 +1463,12 @@ to = '''                    if false && core.vault.presence_key().v()?.is_some()
 name = 'the shared window can change presence factors'
 file = "src/server.rs"
 from = '''        let p = presence.cloned().unwrap_or(Value::Null);
-        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+        if p.get("companionSignature").is_some() {'''
 to = '''        if now_ms() < self.dm.presence_grace_until {
             return Ok(Fresh::Done);
         }
         let p = presence.cloned().unwrap_or(Value::Null);
-        if p.get("challengeId").is_some_and(crate::util::truthy)'''
+        if p.get("companionSignature").is_some() {'''
 
 [[mutation]]
 name = 'what the window admits is not recorded'
@@ -3092,3 +3092,93 @@ file = "src/ui/server.rs"
 from = '''                let shown: Vec<Value> = toward_page(&load, 0)'''
 to = '''                let shown: Vec<Value> = load'''
 test = "tests::folders::a_folder_named_like_a_token"
+
+# Touch ID in the companion (its Secure Enclave key as a presence factor),
+# 2026-11-23.
+
+[[mutation]]
+name = 'a companion challenge can be answered twice'
+file = "src/server.rs"
+from = '''            .map(|i| self.dm.op_challenges.remove(i).1);
+        let Some(pending) = pending.filter(|p| p.expires >= now_ms() && p.companion) else {'''
+to = '''            .map(|i| self.dm.op_challenges[i].1.clone());
+        let Some(pending) = pending.filter(|p| p.expires >= now_ms() && p.companion) else {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a challenge minted for WebAuthn can be answered with the companion key'
+file = "src/server.rs"
+from = '''pending.filter(|p| p.expires >= now_ms() && p.companion)'''
+to = '''pending.filter(|p| p.expires >= now_ms())'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a challenge minted for the companion can be answered with a WebAuthn assertion'
+file = "src/server.rs"
+from = '''pending.filter(|p| p.expires >= now_ms() && !p.companion)'''
+to = '''pending.filter(|p| p.expires >= now_ms())'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion signature for one request admits another'
+file = "src/server.rs"
+from = '''        if webauthn::canonical_operation(&pending.operation)
+            != webauthn::canonical_operation(operation)
+        {
+            self.audit_opt("presence.denied", json!({"reason": "operation_mismatch"}));
+            return Ok(false);
+        }
+        let Some(enrolled) = self.vault.companion_key().v()? else {'''
+to = '''        let Some(enrolled) = self.vault.companion_key().v()? else {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'any companion signature is accepted'
+file = "src/server.rs"
+from = '''if !crate::companion::verify(&enrolled.public_key_spki, &pending.challenge, signature) {'''
+to = '''if false && !crate::companion::verify(&enrolled.public_key_spki, &pending.challenge, signature) {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the companion signs the bare challenge, with no prefix to set it apart'
+file = "src/companion.rs"
+from = '''    m.extend_from_slice(SIGNED_PREFIX);
+'''
+to = ''''''
+test = "companion::tests"
+
+[[mutation]]
+name = 'the companion key is enrolled with no passphrase to fall back on'
+file = "src/server/routes.rs"
+from = '''if !remove && !core.vault.has_passphrase().v()? {'''
+to = '''if false && !remove && !core.vault.has_passphrase().v()? {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'enrolling the companion key rides a confirmation window'
+file = "src/server/routes.rs"
+from = '''self.require_fresh(if remove { "companion removal" } else { "companion enrollment" }, op?.unwrap_or(Value::Null), presence).await?;'''
+to = '''self.require_human(if remove { "companion removal" } else { "companion enrollment" }, op?, presence).await?;'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion challenge is minted for a request that needs no human'
+file = "src/server/routes.rs"
+from = '''let Some(operation) = derived else {'''
+to = '''let Some(operation) = derived.or(Some(json!({}))) else {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion challenge is minted with no companion key enrolled'
+file = "src/server/routes.rs"
+from = '''if core.vault.companion_key().v()?.is_none() {'''
+to = '''if false && core.vault.companion_key().v()?.is_none() {'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a signature on a session request does not bind the verdict'
+file = "src/server/routes.rs"
+from = '''    let mut params = json!({"id": id, "granted": granted});'''
+to = '''    let _ = granted;
+    let mut params = json!({"id": id});'''
+test = "tests::companion"

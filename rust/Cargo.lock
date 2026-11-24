@@ -178,6 +178,7 @@ dependencies = [
  "av-core",
  "av-daemon",
  "av-store",
+ "base64",
  "clap",
  "libc",
  "rpassword",

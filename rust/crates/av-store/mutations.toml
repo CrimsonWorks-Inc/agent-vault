@@ -1125,3 +1125,33 @@ from = '''ALTER TABLE credentials ADD COLUMN folder TEXT
                               AND instr(folder, '//') = 0));'''
 to = '''ALTER TABLE credentials ADD COLUMN folder TEXT;'''
 test = "tests::folders::the_column_refuses"
+
+# Touch ID in the companion: its key in the store, 2026-11-23.
+
+[[mutation]]
+name = 'a companion key that is not a P-256 key is enrolled'
+file = "src/vault.rs"
+from = '''        return Err(companion_refusal("publicKeySpki is not a P-256 public key"));'''
+to = '''        let _ = "publicKeySpki is not a P-256 public key";'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the caller chooses the companion key id'
+file = "src/vault.rs"
+from = '''        key_id: companion_key_id(&der),'''
+to = '''        key_id: obj.get("keyId").and_then(Value::as_str).map_or_else(|| companion_key_id(&der), str::to_string),'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion key row that does not match its own key still counts'
+file = "src/vault.rs"
+from = '''            p256::PublicKey::from_public_key_der(&der).is_ok() && companion_key_id(&der) == k.key_id'''
+to = '''            !der.is_empty()'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a companion key label may hold any character'
+file = "src/vault.rs"
+from = '''                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_')) =>'''
+to = '''                    .all(|_| true) =>'''
+test = "tests::companion"

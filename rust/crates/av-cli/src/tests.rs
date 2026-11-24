@@ -2277,3 +2277,115 @@ fn upgrade_runs_sudo_only_for_the_root_owned_installer_at_a_terminal_and_always_
         ]
     );
 }
+
+/// The companion's proof on stdin is exactly its two fields: never a
+/// passphrase, never extra fields riding along into the request.
+#[test]
+fn the_companion_proof_on_stdin_is_exactly_two_strings() {
+    let good = r#"{"challengeId":"abc","companionSignature":"MEUCIQ"}"#;
+    assert_eq!(
+        crate::companion_presence_of(good),
+        Some(serde_json::json!({"challengeId": "abc", "companionSignature": "MEUCIQ"}))
+    );
+    for bad in [
+        "",
+        "not json",
+        "[]",
+        r#"{"passphrase":"hunter2"}"#,
+        r#"{"challengeId":"abc"}"#,
+        r#"{"challengeId":"abc","companionSignature":""}"#,
+        r#"{"challengeId":"abc","companionSignature":7}"#,
+        r#"{"challengeId":"abc","companionSignature":"x","passphrase":"hunter2"}"#,
+    ] {
+        assert_eq!(crate::companion_presence_of(bad), None, "{bad}");
+    }
+}
+
+/// `--companion-challenge` and `--presence-stdin` are recorded, never passed
+/// on to clap, and do not go together.
+#[test]
+fn the_companion_modes_are_read_from_exact_tokens() {
+    use crate::argv::{presence_mode, PresenceMode};
+    let argv = |words: &[&str]| -> Vec<String> {
+        std::iter::once("agent-vault")
+            .chain(words.iter().copied())
+            .map(String::from)
+            .collect()
+    };
+    let p = crate::prepare(&argv(&[
+        "approve",
+        "sr_1",
+        "--companion-challenge",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(presence_mode(), PresenceMode::Challenge);
+    assert!(
+        !p.argv.iter().any(|a| a.contains("companion")),
+        "{:?}",
+        p.argv
+    );
+    crate::prepare(&argv(&["approve", "sr_1", "--presence-stdin"])).unwrap();
+    assert_eq!(presence_mode(), PresenceMode::Stdin);
+    crate::prepare(&argv(&["approve", "sr_1"])).unwrap();
+    assert_eq!(
+        presence_mode(),
+        PresenceMode::Asked,
+        "each run starts from the usual flow"
+    );
+    assert!(crate::prepare(&argv(&[
+        "approve",
+        "sr_1",
+        "--presence-stdin",
+        "--companion-challenge"
+    ]))
+    .is_err());
+    let p = crate::prepare(&argv(&["companion", "enroll", "MFkw", "--label", "Mac"])).unwrap();
+    assert!(
+        p.argv.iter().any(|a| a == "companion") && p.argv.iter().any(|a| a == "enroll"),
+        "{:?}",
+        p.argv
+    );
+}
+
+/// With `--companion-challenge`, the only call that may leave the CLI is a
+/// read or the challenge itself: a command that would change something
+/// before reaching a presence check sends nothing.
+#[test]
+fn challenge_mode_sends_nothing_that_changes_anything() {
+    let argv: Vec<String> = ["agent-vault", "lock", "--companion-challenge"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    crate::prepare(&argv).unwrap();
+    let ctx = crate::Context {
+        json: true,
+        socket: std::path::PathBuf::from("/nonexistent/agent-vault/control.sock"),
+        color: false,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (method, path) in [("POST", "/v1/lock"), ("DELETE", "/v1/credentials?slug=x")] {
+        let refused = rt.block_on(ctx.control(method, path, None)).unwrap_err();
+        assert!(
+            refused.message.contains("nothing was sent"),
+            "{method} {path}: {}",
+            refused.message
+        );
+    }
+    // A read, and the challenge itself, go through (here to no daemon at all).
+    for (method, path) in [
+        ("GET", "/v1/status"),
+        ("POST", "/v1/presence/companion/challenge"),
+    ] {
+        let e = rt.block_on(ctx.control(method, path, None)).unwrap_err();
+        assert!(
+            e.message.contains("not running"),
+            "{method} {path}: {}",
+            e.message
+        );
+    }
+    crate::prepare(&argv[..2]).unwrap();
+}

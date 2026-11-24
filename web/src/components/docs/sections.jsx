@@ -502,6 +502,7 @@ ${x} report [--since 7d] [--markdown]
 ${x} backup export --out F | backup inspect F | backup restore F [--on-conflict skip|rename|fail]
 ${x} lock | unlock
 ${x} passphrase set | passphrase remove
+${x} companion status | companion remove
 ${x} listen add ID --address HOST:PORT | listen list | listen rm ID
 ${x} ui                         open this page`
 }
