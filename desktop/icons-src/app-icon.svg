@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="agent-vault">
+  <defs>
+    <linearGradient id="avg" x1="10" y1="4" x2="54" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C8BFF"/><stop offset="0.55" stop-color="#5468FF"/><stop offset="1" stop-color="#3B2FB8"/>
+    </linearGradient>
+  </defs>
+  <path d="M26.80,6.00 Q32.00,3.00 37.20,6.00 L51.92,14.50 Q57.11,17.50 57.11,23.50 L57.11,40.50 Q57.11,46.50 51.92,49.50 L37.20,58.00 Q32.00,61.00 26.80,58.00 L12.08,49.50 Q6.89,46.50 6.89,40.50 L6.89,23.50 Q6.89,17.50 12.08,14.50Z" fill="url(#avg)"/>
+  <circle cx="32" cy="32" r="14.2" fill="none" stroke="#FFFFFF" stroke-opacity="0.9" stroke-width="2"/>
+  <g stroke="#FFFFFF" stroke-opacity="0.75" stroke-width="1.6" stroke-linecap="round"><line x1="32.00" y1="14.80" x2="32.00" y2="11.80"/><line x1="41.10" y1="16.24" x2="42.10" y2="14.51"/><line x1="47.76" y1="22.90" x2="49.49" y2="21.90"/><line x1="49.20" y1="32.00" x2="52.20" y2="32.00"/><line x1="47.76" y1="41.10" x2="49.49" y2="42.10"/><line x1="41.10" y1="47.76" x2="42.10" y2="49.49"/><line x1="32.00" y1="49.20" x2="32.00" y2="52.20"/><line x1="22.90" y1="47.76" x2="21.90" y2="49.49"/><line x1="16.24" y1="41.10" x2="14.51" y2="42.10"/><line x1="14.80" y1="32.00" x2="11.80" y2="32.00"/><line x1="16.24" y1="22.90" x2="14.51" y2="21.90"/><line x1="22.90" y1="16.24" x2="21.90" y2="14.51"/></g>
+  <g fill="#FFFFFF"><circle cx="32" cy="28.6" r="4.6"/><path d="M29.4 31.4 L27.9 40.6 Q27.7 42 29.1 42 L34.9 42 Q36.3 42 36.1 40.6 L34.6 31.4 Z"/></g>
+</svg>
