@@ -92,6 +92,27 @@ pub struct PresenceKey {
     pub enrolled_at: String,
 }
 
+/// The companion's presence key (`kv.companion_key`): a P-256 public key
+/// whose private half lives in one Mac's Secure Enclave and signs only after
+/// Touch ID. A signature from it over a challenge minted for one exact
+/// operation proves presence for that operation, as a WebAuthn assertion
+/// does. It is not a way to open the vault and not a recovery factor, and it
+/// is never exported: the private key cannot leave that Mac.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompanionKey {
+    /// Base64url of the first 12 bytes of SHA-256 of the DER SPKI.
+    #[serde(rename = "keyId")]
+    pub key_id: String,
+    /// Base64 DER SPKI of a P-256 public key.
+    #[serde(rename = "publicKeySpki")]
+    pub public_key_spki: String,
+    /// A short name for the Mac it lives on.
+    pub label: String,
+    /// ISO time of enrolment.
+    #[serde(rename = "enrolledAt")]
+    pub enrolled_at: String,
+}
+
 /// The factor state the invariant is checked on: `{ vmk_wraps, webauthn }`.
 /// Ports the `prev`/`next` argument shape of `assertFactorInvariant` in
 /// `src/store/vault.js`.

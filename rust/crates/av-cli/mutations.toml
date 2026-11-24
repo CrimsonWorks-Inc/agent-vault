@@ -813,3 +813,29 @@ file = "src/commands.rs"
 from = "        if !in_checkout && !is_installed_app(dir.parent().unwrap_or(&dir)) {"
 to = "        if !is_installed_app(dir.parent().unwrap_or(&dir)) {"
 test = "a_release_directory_is_an_install_source"
+
+# Touch ID in the companion: the CLI's two companion modes, 2026-11-23.
+
+[[mutation]]
+name = 'the companion proof on stdin may carry a passphrase or other fields along'
+file = "src/lib.rs"
+from = '''    (map.len() == 2 && plain("challengeId") && plain("companionSignature"))'''
+to = '''    (plain("challengeId") && plain("companionSignature"))'''
+test = "tests::the_companion_proof_on_stdin_is_exactly_two_strings"
+
+[[mutation]]
+name = 'challenge mode sends a request that changes something'
+file = "src/lib.rs"
+from = '''        if argv::presence_mode() == argv::PresenceMode::Challenge
+            && method != "GET"'''
+to = '''        if argv::presence_mode() == argv::PresenceMode::Challenge
+            && method == "NEVER"'''
+test = "tests::challenge_mode_sends_nothing_that_changes_anything"
+
+[[mutation]]
+name = 'the companion modes start a run where the last one left off'
+file = "src/argv.rs"
+from = '''    PRESENCE.with(|c| c.set(PresenceMode::Asked));
+'''
+to = ''''''
+test = "tests::the_companion_modes_are_read_from_exact_tokens"

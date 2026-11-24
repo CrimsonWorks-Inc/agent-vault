@@ -1,11 +1,12 @@
-# The menu bar companion (desktop/). Format, lint with warnings as errors,
-# test, then build a universal macOS app and a .dmg that people can download
-# from the run. The companion is its own Cargo workspace: it links none of the
-# daemon's crates and does not use the toolchain pinned in rust/.
+# The companion (desktop/): a native macOS app in Swift. Build with warnings
+# as errors, test, then build a universal app and a .dmg that people can
+# download from the run. The companion is its own Swift package: it links none
+# of the daemon's crates.
 #
-# The .dmg is not signed with a Developer ID or notarized, so macOS blocks it
-# when it is downloaded with a browser. Signing needs the same Apple secrets
-# release.yml describes; until they are set, this build is for testing.
+# The .dmg is signed ad hoc, not with a Developer ID, and not notarized, so
+# macOS blocks it when it is downloaded with a browser. Signing needs the same
+# Apple secrets release.yml describes; until they are set, this build is for
+# testing.
 
 name: companion
 
@@ -22,11 +23,6 @@ on:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: '0'
-  RUST_BACKTRACE: '1'
-
 jobs:
   macos:
     runs-on: macos-latest
@@ -37,36 +33,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+        run: swift --version && xcodebuild -version
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install the Tauri CLI
-        run: npm ci
-
-      - name: Format
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-
-      - name: Lint
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Build
+        run: swift build -Xswiftc -warnings-as-errors
 
       - name: Test
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+        run: swift test
 
       - name: Build the app and the installer
-        run: npx tauri build --target universal-apple-darwin --bundles app,dmg
+        run: UNIVERSAL=1 DMG=1 SIGN_IDENTITY=- scripts/bundle.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: agent-vault-companion-macos
-          path: desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          path: desktop/build/agent-vault-companion.dmg
           if-no-files-found: error

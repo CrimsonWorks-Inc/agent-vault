@@ -101,6 +101,12 @@ pub(crate) fn kv_set(c: &Connection, key: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn kv_delete(c: &Connection, key: &str) -> Result<bool> {
+    Ok(c.prepare_cached("DELETE FROM kv WHERE key = ?1")?
+        .execute([key])?
+        > 0)
+}
+
 pub(crate) fn kv_bool(c: &Connection, key: &str) -> Result<bool> {
     Ok(kv_get(c, key)?.is_some_and(|v| v == Value::Bool(true)))
 }

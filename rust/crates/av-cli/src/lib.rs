@@ -168,7 +168,7 @@ pub(crate) fn load_client_state() -> Value {
 /// Every command as a human types it. Ports `COMMAND_NAMES` in
 /// `src/cli/index.js` (`Object.keys(COMMANDS)` in definition order, with the
 /// `controlCommands` keys merged after), plus `migrate`, new in the port.
-pub const COMMAND_NAMES: [&str; 70] = [
+pub const COMMAND_NAMES: [&str; 73] = [
     "setup",
     "daemon",
     "upgrade",
@@ -201,6 +201,9 @@ pub const COMMAND_NAMES: [&str; 70] = [
     "docs",
     "passphrase set",
     "passphrase remove",
+    "companion enroll",
+    "companion status",
+    "companion remove",
     "lock",
     "unlock",
     "profiles",
@@ -240,6 +243,52 @@ pub const COMMAND_NAMES: [&str; 70] = [
     "preflight",
     "migrate",
 ];
+
+/// The control route the companion asks for a challenge on.
+const COMPANION_CHALLENGE: &str = "/v1/presence/companion/challenge";
+/// Where a challenge rides in the [`CliError`] that ends the command early.
+const CHALLENGE_ISSUED: &str = "companion_challenge";
+
+thread_local! {
+    static COMPANION_PRESENCE: std::cell::RefCell<Option<Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The companion's proof, from the first line of stdin: exactly
+/// `{"challengeId": "...", "companionSignature": "..."}`. Nothing else is
+/// accepted there, so this is never a way to pipe in a passphrase.
+fn read_companion_presence() -> Result<(), CliError> {
+    let Some(presence) = companion_presence_of(&read_piped_line()) else {
+        return Err(CliError {
+            message: "--presence-stdin expects one line: {\"challengeId\": ..., \"companionSignature\": ...}".into(),
+            exit: Exit::Usage,
+            next: None,
+            problem: None,
+            skew: false,
+        });
+    };
+    COMPANION_PRESENCE.with(|c| *c.borrow_mut() = Some(presence));
+    Ok(())
+}
+
+/// The companion's proof in one line of text, or `None` for anything that
+/// is not exactly the two non-empty strings it is made of.
+pub(crate) fn companion_presence_of(line: &str) -> Option<Value> {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(line) else {
+        return None;
+    };
+    let plain = |k: &str| {
+        map.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+    };
+    (map.len() == 2 && plain("challengeId") && plain("companionSignature"))
+        .then_some(Value::Object(map))
+}
+
+/// The proof, once: a second widening call in the same command has none.
+fn take_companion_presence() -> Option<Value> {
+    COMPANION_PRESENCE.with(|c| c.borrow_mut().take())
+}
 
 /// A command failure, carrying what the failure envelope needs. Ports the
 /// `Error` objects the JS throws with `{ exit, next, problem, skew }`
@@ -311,6 +360,12 @@ impl Context {
     /// `problem.detail` unless this is version skew. `next` is
     /// `problem.next.cli[0]`, or a string `next`, or the error's own.
     pub fn fail(&self, err: &CliError) -> Exit {
+        if err.exit == Exit::Ok {
+            if let Some(issued) = err.problem.as_ref().and_then(|p| p.get(CHALLENGE_ISSUED)) {
+                self.out(Some("challenge issued; nothing was sent"), issued);
+                return Exit::Ok;
+            }
+        }
         let message = if err.skew {
             err.message.clone()
         } else if let Some(detail) = err
@@ -359,6 +414,18 @@ impl Context {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
+        if argv::presence_mode() == argv::PresenceMode::Challenge
+            && method != "GET"
+            && path != COMPANION_CHALLENGE
+        {
+            return Err(CliError {
+                message: "--companion-challenge only asks for a challenge; this command would have changed something first, so nothing was sent".into(),
+                exit: Exit::Usage,
+                next: None,
+                problem: None,
+                skew: false,
+            });
+        }
         if !self.socket.exists() {
             return Err(CliError {
                 message: "the daemon is not running".into(),
@@ -439,6 +506,49 @@ impl Context {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
+        match argv::presence_mode() {
+            argv::PresenceMode::Asked => {}
+            // The companion asks for a challenge bound to exactly this
+            // request, which the daemon derives the operation from itself.
+            argv::PresenceMode::Challenge => {
+                let (route_path, query) = path.split_once('?').unwrap_or((path, ""));
+                let request = json!({
+                    "route": format!("{method} {route_path}"),
+                    "query": query,
+                    "body": body.cloned().unwrap_or_else(|| json!({})),
+                });
+                let issued = self
+                    .control("POST", COMPANION_CHALLENGE, Some(&request))
+                    .await?;
+                let mut problem = Map::new();
+                problem.insert(CHALLENGE_ISSUED.into(), issued);
+                return Err(CliError {
+                    message: "challenge issued".into(),
+                    exit: Exit::Ok,
+                    next: None,
+                    problem: Some(Box::new(Value::Object(problem))),
+                    skew: false,
+                });
+            }
+            // Then sends it once with the signed proof, and never falls back
+            // to asking for a passphrase.
+            argv::PresenceMode::Stdin => {
+                let Some(presence) = take_companion_presence() else {
+                    return Err(CliError {
+                        message: "--presence-stdin: the proof on stdin was already used".into(),
+                        exit: Exit::Usage,
+                        next: None,
+                        problem: None,
+                        skew: false,
+                    });
+                };
+                let mut with = body.cloned().unwrap_or_else(|| json!({}));
+                if let Value::Object(map) = &mut with {
+                    map.insert("presence".into(), presence);
+                }
+                return self.control(method, path, Some(&with)).await;
+            }
+        }
         let err = match self.control(method, path, body).await {
             Ok(v) => return Ok(v),
             Err(e) => e,
@@ -792,6 +902,13 @@ pub fn run(cli: Cli) -> i32 {
 
 async fn run_async(cli: Cli) -> i32 {
     let ctx = Context::new(cli.json);
+    // Read before the command runs, so a key value piped after it is read
+    // where the command asks for it.
+    if argv::presence_mode() == argv::PresenceMode::Stdin {
+        if let Err(err) = read_companion_presence() {
+            return ctx.fail(&err).code();
+        }
+    }
     if cli.help {
         if let Some(cli::Command::Cred {
             command: cli::CredCommand::Scrub(_),
@@ -890,6 +1007,11 @@ async fn dispatch(ctx: &Context, command: cli::Command) -> Outcome {
         },
         Command::Lock => commands::lock(ctx).await,
         Command::Unlock => commands::unlock(ctx).await,
+        Command::Companion { command } => match command {
+            cli::CompanionCommand::Enroll(a) => control_commands::companion_enroll(ctx, &a).await,
+            cli::CompanionCommand::Status => control_commands::companion_status(ctx).await,
+            cli::CompanionCommand::Remove => control_commands::companion_remove(ctx).await,
+        },
         Command::Passphrase { command } => match command {
             cli::PassphraseCommand::Set => commands::passphrase_set(ctx).await,
             cli::PassphraseCommand::Remove => commands::passphrase_remove(ctx).await,
@@ -1121,6 +1243,8 @@ fn help_text(ctx: &Context) -> String {
   tripwire show | tripwire on | tripwire off | tripwire set --rule ID ...
   lock | unlock                        stop and resume every proxied request
   passphrase set | passphrase remove   make the lock cryptographic (or undo it)
+  companion status | companion remove  Touch ID in the companion app
+  companion enroll <key> [--label T]   (the companion runs this for you)
   audit tail [--limit N] | audit verify [--witness F]
   audit export [--since-seq N] [--out F] [--follow] | audit witness [--out F]
   report [--since 7d] [--markdown]     access review across every session

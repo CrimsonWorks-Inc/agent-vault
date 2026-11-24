@@ -32,8 +32,8 @@ use crate::error::{CryptoError, Error, Result};
 use crate::ids;
 use crate::mlock::LockedKey;
 use crate::model::{
-    dead_reason, CredentialField, CredentialRecord, FactorClass, FactorState, GrantCounters,
-    GrantRecord, GrantRuntime, GrantState, HealthRecord, HealthSource, HealthStatus,
+    dead_reason, CompanionKey, CredentialField, CredentialRecord, FactorClass, FactorState,
+    GrantCounters, GrantRecord, GrantRuntime, GrantState, HealthRecord, HealthSource, HealthStatus,
     ListenerRecord, ListenerTls, NotifyDetail, NotifyRecord, PlaceholderRow, PlaceholderState,
     PresenceFactor, PresenceKey, QuarantineBy, QuarantineRecord, RetiredValue, ScrubPattern,
     SessionRecord, SessionRequestRecord, SessionState, Settings, TemplateRecord, VmkWrap,
@@ -314,6 +314,79 @@ fn usable_presence_key(k: &PresenceKey) -> bool {
     serde_json::to_value(k)
         .ok()
         .is_some_and(|v| presence_key_record(&v).is_ok())
+}
+
+/// The kv key the companion's presence key is kept under.
+const COMPANION_KEY: &str = "companion_key";
+
+fn companion_refusal(why: &str) -> Error {
+    deny(
+        ErrorCode::PolicyDenied,
+        format!("not a usable companion key: {why}"),
+        DenyExtra {
+            rule: Some("companion_key".into()),
+            hint: Some(
+                "Nothing was changed. Set up Touch ID again from the companion's settings.".into(),
+            ),
+            ..Default::default()
+        },
+    )
+    .into()
+}
+
+/// The id a companion key is known by: base64url of the first 12 bytes of
+/// SHA-256 of its DER SPKI, so the companion can tell whether the key the
+/// vault holds is the one in its own Secure Enclave.
+pub fn companion_key_id(spki_der: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(spki_der);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12])
+}
+
+/// A companion key as the vault stores it, or a refusal (AV_POLICY_DENIED,
+/// rule `companion_key`): `publicKeySpki` a canonical base64 DER SPKI that
+/// parses as a P-256 key, and an optional `label` of 1 to 40 letters, digits,
+/// spaces, dots, dashes or underscores (by default "agent-vault companion").
+/// The id is derived from the key, never taken from the input.
+pub fn companion_key_record(input: &Value) -> Result<CompanionKey> {
+    use p256::pkcs8::DecodePublicKey as _;
+    let Value::Object(obj) = input else {
+        return Err(companion_refusal("no key was given"));
+    };
+    let spki = match obj.get("publicKeySpki") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        _ => return Err(companion_refusal("publicKeySpki is missing")),
+    };
+    let Some(der) = crypto::b64_strict(&spki) else {
+        return Err(companion_refusal("publicKeySpki is not base64"));
+    };
+    let p256_key = p256::PublicKey::from_public_key_der(&der);
+    if p256_key.is_err() {
+        return Err(companion_refusal("publicKeySpki is not a P-256 public key"));
+    }
+    let label = match obj.get("label") {
+        None | Some(Value::Null) => "agent-vault companion".to_string(),
+        Some(Value::String(s))
+            if (1..=40).contains(&s.chars().count())
+                && s.trim() == s
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '-' | '_')) =>
+        {
+            s.clone()
+        }
+        _ => {
+            return Err(companion_refusal(
+                "label must be 1 to 40 letters, digits, spaces, dots, dashes or underscores",
+            ))
+        }
+    };
+    Ok(CompanionKey {
+        key_id: companion_key_id(&der),
+        public_key_spki: spki,
+        label,
+        enrolled_at: util::now_iso(),
+    })
 }
 
 /// The human factors a factor state holds (`passphrase`, `authenticator`).
@@ -2822,6 +2895,70 @@ impl Vault {
     /// `src/daemon/server.js`.
     pub fn presence_key(&self) -> Result<Option<PresenceKey>> {
         self.read(rows::webauthn_get)
+    }
+
+    /// Enrol or replace the companion's presence key, validated completely
+    /// first (see [`companion_key_record`]); records `presence.factor_added`
+    /// with class `companion-secure-enclave`. Needs the vault unlocked.
+    /// Returns whether one was replaced.
+    pub fn set_companion_key(&mut self, input: &Value) -> Result<bool> {
+        self.vmk_key()?;
+        let record = companion_key_record(input)?;
+        self.run(|t| {
+            let replaced = rows::kv_get(t.c, COMPANION_KEY)?.is_some();
+            rows::kv_set(t.c, COMPANION_KEY, &serde_json::to_value(&record)?)?;
+            t.audit_required(
+                "presence.factor_added",
+                json!({
+                    "class": "companion-secure-enclave",
+                    "key_id": record.key_id,
+                    "label": record.label,
+                    "replaced_existing": replaced,
+                }),
+            )?;
+            t.checkpoint = true;
+            Ok(replaced)
+        })
+    }
+
+    /// The companion's presence key, if one is enrolled and still parses as
+    /// a P-256 key. A row that does not is treated as no key at all, so it
+    /// can never verify anything.
+    pub fn companion_key(&self) -> Result<Option<CompanionKey>> {
+        let Some(v) = self.read(|c| rows::kv_get(c, COMPANION_KEY))? else {
+            return Ok(None);
+        };
+        let Ok(k) = serde_json::from_value::<CompanionKey>(v) else {
+            return Ok(None);
+        };
+        let usable = crypto::b64_strict(&k.public_key_spki).is_some_and(|der| {
+            use p256::pkcs8::DecodePublicKey as _;
+            p256::PublicKey::from_public_key_der(&der).is_ok() && companion_key_id(&der) == k.key_id
+        });
+        Ok(usable.then_some(k))
+    }
+
+    /// Remove the companion's presence key; records `presence.factor_removed`.
+    /// Needs the vault unlocked. Returns whether there was one.
+    pub fn remove_companion_key(&mut self) -> Result<bool> {
+        self.vmk_key()?;
+        self.run(|t| {
+            let had = rows::kv_get(t.c, COMPANION_KEY)?;
+            if !rows::kv_delete(t.c, COMPANION_KEY)? {
+                return Ok(false);
+            }
+            let key_id = had
+                .as_ref()
+                .and_then(|v| v.get("keyId"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            t.audit_required(
+                "presence.factor_removed",
+                json!({ "class": "companion-secure-enclave", "key_id": key_id }),
+            )?;
+            t.checkpoint = true;
+            Ok(true)
+        })
     }
 
     /// Store an authenticator's newer signature counter. No JS method:

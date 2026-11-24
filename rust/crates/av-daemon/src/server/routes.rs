@@ -200,6 +200,21 @@ fn audit_rows(core: &mut Core, query: &str) -> R<Value> {
     }
 }
 
+/// The operation a decision on a session request binds to: the request's
+/// id, the verdict, and any overrides. The decide route and the companion's
+/// challenge both derive it here, so a signature covers exactly what runs.
+fn session_decision_operation(id: &str, input: &Value) -> R<Value> {
+    let ov = overrides_of(input.get("overrides").unwrap_or(&json!({})));
+    let granted = input["granted"] == Value::Bool(true);
+    let mut params = json!({"id": id, "granted": granted});
+    if let Value::Object(m) = &ov {
+        for (k, v) in m {
+            params[k] = v.clone();
+        }
+    }
+    crate::util::operation_for("session_request.decide", &params)
+}
+
 fn whole_session_fields(s: &av_store::model::SessionRecord) -> Value {
     json!({"id": s.id, "label": s.label, "expires_at": s.expires_at, "infinite": s.infinite})
 }
@@ -318,13 +333,7 @@ impl Daemon {
                         let ov = overrides_of(i2.get("overrides").unwrap_or(&json!({})));
                         let final_ = merge(&record.proposal, &ov);
                         let granted = i2["granted"] == Value::Bool(true);
-                        let mut params = json!({"id": record.id, "granted": granted});
-                        if let Value::Object(m) = &ov {
-                            for (k, v) in m {
-                                params[k] = v.clone();
-                            }
-                        }
-                        let operation = crate::util::operation_for("session_request.decide", &params)?;
+                        let operation = session_decision_operation(&record.id, &i2)?;
                         let elevated = if granted { elevation_of(&final_) } else { Vec::new() };
                         Ok((record, final_, elevated, operation))
                     })
@@ -546,6 +555,93 @@ impl Daemon {
             }
             "PATCH /v1/presence" => Err(dr(C::PolicyDenied, "the signature counter is not settable; the daemon maintains it from assertions it verifies itself", "counter_not_settable")),
 
+            // The companion's Secure Enclave key: see crate::companion.
+            "GET /v1/presence/companion" => Ok((
+                200,
+                self.shared
+                    .run(|core| -> R<Value> {
+                        Ok(match core.vault.companion_key().v()? {
+                            Some(k) => json!({"enrolled": true, "key_id": k.key_id, "label": k.label, "enrolled_at": k.enrolled_at}),
+                            None => json!({"enrolled": false}),
+                        })
+                    })
+                    .await??,
+            )),
+            "POST /v1/presence/companion" => {
+                let remove = field(&input, "action")?.and_then(Value::as_str) == Some("remove");
+                self.shared
+                    .run(move |core| -> R<()> {
+                        if core.vault.locked() {
+                            return Err(d(C::Locked, "unlock the vault first"));
+                        }
+                        // As with an authenticator: the passphrase comes first, so
+                        // whoever enrols a key cannot lock everyone else out.
+                        if !remove && !core.vault.has_passphrase().v()? {
+                            return Err(dr(C::PolicyDenied, "set a passphrase before setting up Touch ID in the companion", "factor_order")
+                                .hinted("agent-vault passphrase set")
+                                .next(Value::from("agent-vault passphrase set")));
+                        }
+                        Ok(())
+                    })
+                    .await??;
+                self.require_fresh(if remove { "companion removal" } else { "companion enrollment" }, op?.unwrap_or(Value::Null), presence).await?;
+                if remove {
+                    let removed = self.shared.run(|core| core.vault.remove_companion_key().v()).await??;
+                    return Ok((200, json!({"ok": true, "removed": removed})));
+                }
+                let rec = without_proof(&input);
+                let (replaced, key) = self
+                    .shared
+                    .run(move |core| -> R<(bool, Option<av_store::model::CompanionKey>)> {
+                        let replaced = core.vault.set_companion_key(&rec).v()?;
+                        Ok((replaced, core.vault.companion_key().v()?))
+                    })
+                    .await??;
+                Ok((200, json!({"ok": true, "replaced": replaced, "key_id": key.map(|k| k.key_id)})))
+            }
+            // A single-use challenge bound to the operation the daemon itself
+            // derives from the request the companion is about to send.
+            "POST /v1/presence/companion/challenge" => {
+                let target = field(&input, "route")?.and_then(Value::as_str).unwrap_or("").to_string();
+                let target_query = field(&input, "query")?.and_then(Value::as_str).unwrap_or("").to_string();
+                let body = field(&input, "body")?.cloned().unwrap_or(json!({}));
+                let v = self
+                    .shared
+                    .run(move |core| -> R<Value> {
+                        if core.vault.companion_key().v()?.is_none() {
+                            return Err(dr(C::PresenceRequired, "Touch ID is not set up in the companion", "companion_not_enrolled"));
+                        }
+                        // A session request's decision is bound in its own route, not
+                        // by widening_operation; derive it the same way here.
+                        let derived = if target == "POST /v1/session-requests/decide" {
+                            let id = body.get("id").map(js_string).unwrap_or_else(|| "undefined".into());
+                            match core.sr_get(&id) {
+                                Some(record) if record.state == "pending" => Some(session_decision_operation(&record.id, &body)?),
+                                _ => return Err(d(C::NotFound, format!("no session request {id} is waiting"))),
+                            }
+                        } else {
+                            Daemon::widening_operation(&target, &target_query, &body)?
+                        };
+                        let Some(operation) = derived else {
+                            return Err(dr(C::PolicyDenied, "that request does not need a human, so there is nothing to sign", "not_widening"));
+                        };
+                        if crate::util::js_stringify(&operation).encode_utf16().count() > MAX_OPERATION_BYTES {
+                            return Err(d(C::PolicyDenied, "that operation description is too large to sign"));
+                        }
+                        let challenge = av_core::operation::challenge_for_operation(&crate::util::random_bytes::<32>(), &operation);
+                        let id = crate::util::random_b64url(12);
+                        let now = now_ms();
+                        core.dm.op_challenges.retain(|(_, c)| c.expires >= now);
+                        while core.dm.op_challenges.len() >= MAX_OPEN_CHALLENGES {
+                            core.dm.op_challenges.remove(0);
+                        }
+                        core.dm.op_challenges.push((id.clone(), OpChallenge { challenge, operation: operation.clone(), expires: now + 60_000, companion: true }));
+                        Ok(json!({"challengeId": id, "challenge": webauthn::b64url(&challenge), "operation": operation}))
+                    })
+                    .await??;
+                Ok((200, v))
+            }
+
             "POST /v1/lock" => {
                 self.shared
                     .run(|core| -> R<()> {
@@ -637,7 +733,7 @@ impl Daemon {
                         while core.dm.op_challenges.len() >= MAX_OPEN_CHALLENGES {
                             core.dm.op_challenges.remove(0);
                         }
-                        core.dm.op_challenges.push((id.clone(), OpChallenge { challenge, operation, expires: now + 60_000 }));
+                        core.dm.op_challenges.push((id.clone(), OpChallenge { challenge, operation, expires: now + 60_000, companion: false }));
                         Ok(json!({"challengeId": id, "challenge": webauthn::b64url(&challenge), "allowCredentials": [{"id": enrolled.credential_id, "type": "public-key"}], "rpId": "localhost"}))
                     })
                     .await??;

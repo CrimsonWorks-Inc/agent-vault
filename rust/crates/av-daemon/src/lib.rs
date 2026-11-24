@@ -6,6 +6,7 @@
 //! wraps the socket peer-credential calls; nothing else may opt out.
 #![deny(unsafe_code)]
 
+pub mod companion;
 pub mod connectors;
 pub mod decode;
 pub mod err;

@@ -1,6 +1,7 @@
 # Release: push a tag like v0.3.0 and this builds agent-vault for macOS and
-# Linux, attaches the archives and SHA256SUMS to a GitHub release, and records
-# build provenance for each archive.
+# Linux, and the companion app for macOS, attaches the archives, the app's
+# .dmg and SHA256SUMS to a GitHub release, and records build provenance for
+# each of them.
 #
 # Users verify an archive before they ever run it as root:
 #   shasum -a 256 -c SHA256SUMS --ignore-missing
@@ -11,7 +12,8 @@
 #     APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY ("Developer ID
 #     Application: ..."), APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD.
 #   Homebrew tap update: HOMEBREW_TAP_TOKEN (a token that can push to
-#     CrimsonWorks-Inc/homebrew-tap).
+#     CrimsonWorks-Inc/homebrew-tap). It writes the agent-vault formula and
+#     the agent-vault-companion cask.
 
 name: release
 
@@ -143,8 +145,88 @@ jobs:
           path: ${{ steps.archive.outputs.path }}
           if-no-files-found: error
 
+  # The companion: a universal macOS app in a .dmg, signed and notarized when
+  # the Apple secrets are set (ad hoc otherwise, and macOS then asks the user
+  # to allow it the first time it opens).
+  companion:
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Version
+        id: version
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "dmg=agent-vault-companion-${tag#v}.dmg" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        working-directory: desktop
+        run: swift test
+
+      - name: Signing identity (when configured)
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_pass="$(openssl rand -hex 16)"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_pass" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_pass" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_pass" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+
+      - name: Build the app and the .dmg
+        working-directory: desktop
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DMG_NAME: ${{ steps.version.outputs.dmg }}
+          SIGN_IDENTITY: ${{ env.HAS_APPLE_CERT == 'true' && secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          TIMESTAMP: ${{ env.HAS_APPLE_CERT == 'true' && '1' || '0' }}
+        run: UNIVERSAL=1 DMG=1 scripts/bundle.sh
+
+      - name: Notarize (when configured)
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="desktop/build/${{ steps.version.outputs.dmg }}"
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$dmg"
+
+      - name: Build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: desktop/build/${{ steps.version.outputs.dmg }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.dmg }}
+          path: desktop/build/${{ steps.version.outputs.dmg }}
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, companion]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,7 +243,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz *.dmg > SHA256SUMS
           cat SHA256SUMS
       - name: Publish
         id: publish
@@ -171,9 +253,9 @@ jobs:
           tag="${{ inputs.tag || github.ref_name }}"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/*.tar.gz dist/SHA256SUMS packaging/install.sh --clobber
+            gh release upload "$tag" dist/*.tar.gz dist/*.dmg dist/SHA256SUMS packaging/install.sh --clobber
           else
-            gh release create "$tag" dist/*.tar.gz dist/SHA256SUMS packaging/install.sh \
+            gh release create "$tag" dist/*.tar.gz dist/*.dmg dist/SHA256SUMS packaging/install.sh \
               --title "agent-vault $tag" --notes-file packaging/RELEASE_NOTES.md --verify-tag
           fi
 
@@ -197,12 +279,14 @@ jobs:
           fi
           gh release download "v$VERSION" --pattern SHA256SUMS --dir sums
           python3 packaging/homebrew/render.py "$VERSION" sums/SHA256SUMS > agent-vault.rb
+          python3 packaging/homebrew/render_cask.py "$VERSION" sums/SHA256SUMS > agent-vault-companion.rb
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/CrimsonWorks-Inc/homebrew-tap.git" tap
-          mkdir -p tap/Formula
+          mkdir -p tap/Formula tap/Casks
           cp agent-vault.rb tap/Formula/agent-vault.rb
+          cp agent-vault-companion.rb tap/Casks/agent-vault-companion.rb
           cd tap
           git config user.name "agent-vault release"
           git config user.email "noreply@github.com"
-          git add Formula/agent-vault.rb
+          git add Formula/agent-vault.rb Casks/agent-vault-companion.rb
           git commit -m "agent-vault $VERSION"
           git push
