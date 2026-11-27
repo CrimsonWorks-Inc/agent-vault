@@ -99,7 +99,9 @@ describe('Audit (parity with the old page, paged through the whole log)', () => 
     const server = fakeServer(routes({ 'GET audit': { __status: 500, body: { error: 'internal error' } } }))
     renderWith(<Audit />, { server, vault: { refresh: () => { checked++ } } })
     expect(await screen.findByText('Could not read the audit log.')).toBeTruthy()
-    expect(checked).toBeGreaterThan(0)
+    // The page re-checks the lock in an effect after the error renders, so the
+    // text can be on screen a moment before the check has run.
+    await waitFor(() => expect(checked).toBeGreaterThan(0))
   })
 
   it('a failed head read is said, with Try again; it never reads as an empty log', async () => {
