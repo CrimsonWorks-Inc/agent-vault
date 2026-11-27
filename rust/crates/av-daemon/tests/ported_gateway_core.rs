@@ -7193,9 +7193,10 @@ async fn preflight_bad_location_denials_do_not_trip_and_eleventh_call_is_throttl
     ordinary.clean(&response).await;
 }
 
-#[tokio::test]
-async fn real_health_write_contention_preserves_executed_response_consumption_and_audit() {
-    let f = Fixture::new(&["header:x-key"]).await;
+/// One executed 401 whose response-side SQLite writes meet a real writer
+/// holding the lock. Returns whether the lock actually kept the health write
+/// out; when it did not, the run proved nothing and the caller retries.
+async fn health_contended_401(f: &Fixture) -> bool {
     f.reply(401, "application/json", "{}".into());
     let gate = Arc::new(tokio::sync::Notify::new());
     *f.up.gate.lock().unwrap() = Some(gate.clone());
@@ -7209,14 +7210,15 @@ async fn real_health_write_contention_preserves_executed_response_consumption_an
     }).await.unwrap();
     // Consume and charge have finished before send; only response-side work
     // competes with this real SQLite writer. RAII also releases on panic.
-    assert_eq!(grant_counters(&f).await, (1, vec![1]));
+    assert_eq!(grant_counters(f).await, (1, vec![1]));
     let lock = ported_common::TempWriteLock::acquire(f._dir.path());
     gate.notify_one();
     // The health write starts at T, gives up on the lock after SQLite's 5 s
     // busy timeout, and the audit write after it must not give up too, so the
     // release must land in (T+5, T+10). 9.5 s tolerates the response side
-    // starting up to ~4 s late on a loaded runner; 6 s tolerated only ~1 s
-    // and flaked on macOS CI. `request` keeps being polled while we wait.
+    // starting up to ~4.5 s late; a loaded macOS runner can be later still,
+    // and then the health write simply gets the lock (see the caller).
+    // `request` keeps being polled while we wait.
     let response = tokio::select! {
         response=&mut request=>{drop(lock);response},
         _=tokio::time::sleep(std::time::Duration::from_millis(9500))=>{
@@ -7230,22 +7232,20 @@ async fn real_health_write_contention_preserves_executed_response_consumption_an
         response.error
     );
     assert_eq!(response.body, b"{}");
-    assert_eq!(grant_counters(&f).await, (1, vec![1]));
-    f.shared
+    assert_eq!(grant_counters(f).await, (1, vec![1]));
+    let blocked = f
+        .shared
         .run(|core| {
-            assert!(
-                core.vault
-                    .find_credential("demo")
-                    .unwrap()
-                    .unwrap()
-                    .health
-                    .is_none(),
-                "fixture must actually prevent the health write"
-            )
+            core.vault
+                .find_credential("demo")
+                .unwrap()
+                .unwrap()
+                .health
+                .is_none()
         })
         .await
         .unwrap();
-    let rows = audit_records(&f).await;
+    let rows = audit_records(f).await;
     assert_eq!(
         rows.iter()
             .filter(|r| r["kind"] == "request.allowed" && r["req"]["status"] == 401)
@@ -7253,6 +7253,25 @@ async fn real_health_write_contention_preserves_executed_response_consumption_an
         1
     );
     f.clean(&response).await;
+    blocked
+}
+
+#[tokio::test]
+async fn real_health_write_contention_preserves_executed_response_consumption_and_audit() {
+    // The response and audit checks run on every try; only a try whose health
+    // write got the lock (the response side started too late) is retried.
+    let mut contended = None;
+    for _ in 0..4 {
+        let f = Fixture::new(&["header:x-key"]).await;
+        if health_contended_401(&f).await {
+            contended = Some(f);
+            break;
+        }
+    }
+    let f = contended.expect(
+        "fixture must actually prevent the health write: \
+         the response side started too late on all four tries",
+    );
     *f.up.gate.lock().unwrap() = None;
     let control = f.get().await;
     assert_eq!(control.status, 401);
