@@ -23,6 +23,7 @@ import { PageHeader } from '../components/ui/PageHeader.jsx'
 import { Pagination } from '../components/ui/Pagination.jsx'
 import { SearchInput } from '../components/ui/SearchInput.jsx'
 import { BulkBar } from '../components/approvals/BulkBar.jsx'
+import { bulkable } from '../components/approvals/decide.js'
 import { PendingCard, PickBox } from '../components/approvals/PendingCard.jsx'
 
 export const APPROVALS_POLL_MS = 5000
@@ -50,6 +51,19 @@ export function Approvals({ rest = '' }) {
     })
   }, [items])
 
+  // A key typed for a proposal that is no longer listed (it expired, or was
+  // answered elsewhere) is dropped, not kept in the page.
+  useEffect(() => {
+    setDrafts((cur) => {
+      const present = new Set(items.map((i) => i.id))
+      const stale = Object.keys(cur).filter((id) => !present.has(id) && cur[id] && 'value' in cur[id])
+      if (!stale.length) return cur
+      const next = { ...cur }
+      for (const id of stale) delete next[id]
+      return next
+    })
+  }, [items])
+
   // Scroll the deep-linked item into view once, when it first shows; the
   // five-second refresh must not pull the page back to it after that.
   const scrolledTo = useRef('')
@@ -62,15 +76,17 @@ export function Approvals({ rest = '' }) {
     el.scrollIntoView?.({ block: 'center' })
   }, [focus, items])
 
-  const picked = useMemo(() => items.filter((i) => selected.has(i.id)), [items, selected])
+  // A proposed key needs its own decision, with its own key: never ticked.
+  const tickable = useMemo(() => items.filter(bulkable), [items])
+  const picked = useMemo(() => tickable.filter((i) => selected.has(i.id)), [tickable, selected])
   const pick = useCallback((id, on) => setSelected((cur) => {
     const next = new Set(cur)
     if (on) next.add(id)
     else next.delete(id)
     return next
   }), [])
-  const allOnPage = items.length > 0 && items.every((i) => selected.has(i.id))
-  const pickAll = (on) => setSelected(on ? new Set(items.map((i) => i.id)) : new Set())
+  const allOnPage = tickable.length > 0 && tickable.every((i) => selected.has(i.id))
+  const pickAll = (on) => setSelected(on ? new Set(tickable.map((i) => i.id)) : new Set())
 
   const setDraft = useCallback((id, draft) => setDrafts((cur) => ({ ...cur, [id]: draft })), [])
   const decided = useCallback((item) => {
@@ -137,12 +153,14 @@ export function Approvals({ rest = '' }) {
                 key: 'select',
                 header: (
                   <label className="inline-flex items-center gap-2 normal-case tracking-normal">
-                    <input type="checkbox" className="size-4 accent-accent" checked={allOnPage} onChange={(e) => pickAll(e.target.checked)} aria-label="Select every item on this page" disabled={!items.length} />
+                    <input type="checkbox" className="size-4 accent-accent" checked={allOnPage} onChange={(e) => pickAll(e.target.checked)} aria-label="Select every item on this page" disabled={!tickable.length} />
                   </label>
                 ),
                 hideOnCard: true,
                 className: 'w-10 align-top',
-                cell: (item) => <PickBox item={item} checked={selected.has(item.id)} onChange={(on) => pick(item.id, on)} className="mt-0.5 [&>span]:sr-only" />,
+                cell: (item) => (bulkable(item)
+                  ? <PickBox item={item} checked={selected.has(item.id)} onChange={(on) => pick(item.id, on)} className="mt-0.5 [&>span]:sr-only" />
+                  : null),
               },
               {
                 key: 'decision',

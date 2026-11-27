@@ -616,3 +616,24 @@ file = "src/jsre.rs"
 from = "} else if !bracket\n            && c == '('"
 to = "} else if false && !bracket\n            && c == '('"
 test = "js_dot_classes_and_flag_refusals"
+
+[[mutation]]
+name = 'a key shape is found in the middle of a word'
+file = "src/scrub.rs"
+from = '''            .any(|m| p.name == "private-key" || boundary(text, m.start()));'''
+to = '''            .any(|m| p.name == "private-key" || m.start() < usize::MAX);'''
+test = "key_shapes_are_found_only_where_a_token_can_begin"
+
+[[mutation]]
+name = 'a header site may name a header with a space in it'
+file = "src/sites.rs"
+from = '''                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));'''
+to = '''                .all(|b| b.is_ascii_alphanumeric() || b" !#$%&'*+-.^_`|~".contains(&b));'''
+test = "a_site_names_a_real_header"
+
+[[mutation]]
+name = 'someone choosing where a key goes may pick a framing header'
+file = "src/sites.rs"
+from = '''    (site.kind == SiteKind::Header && FRAMING_HEADERS.contains(&name))'''
+to = '''    (site.kind == SiteKind::Header && FRAMING_HEADERS.is_empty())'''
+test = "a_site_names_a_real_header"

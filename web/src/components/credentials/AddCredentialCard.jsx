@@ -7,7 +7,7 @@ import { Field } from '../ui/Field.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
 import { Input } from '../ui/Input.jsx'
 import { Select } from '../ui/Select.jsx'
-import { KINDS } from './credentialText.js'
+import { headerProblem, KEY_PLACES, KINDS } from './credentialText.js'
 
 /**
  * Store a credential. The value is write-only: it is held in this form's
@@ -23,10 +23,20 @@ export function AddCredentialCard({ onAdded }) {
   const [slug, setSlug] = useState('')
   const [kind, setKind] = useState('github')
   const [host, setHost] = useState('')
+  const [place, setPlace] = useState(KEY_PLACES[0].value)
+  const [header, setHeader] = useState('')
   const [value, setValue] = useState('')
   useEffect(() => () => setValue(''), [])
 
-  const body = () => ({ slug: slug.trim(), kind, value, host: host.trim() || undefined })
+  // Where the key goes, for a generic credential; a known kind's profile decides.
+  const sites = () => {
+    if (kind !== 'http') return undefined
+    if (place !== 'other') return [place]
+    const problem = headerProblem(header)
+    if (problem) throw new Error(problem)
+    return [`header:${header.trim().toLowerCase()}`]
+  }
+  const body = () => ({ slug: slug.trim(), kind, value, host: host.trim() || undefined, sites: sites() })
   const operation = () => {
     const b = body()
     if (!b.slug || !b.value) throw new Error('A name and a value are both required')
@@ -45,6 +55,16 @@ export function AddCredentialCard({ onAdded }) {
         <Field label="Host" hint="Generic (http) credentials only.">
           <Input mono placeholder="api.example.com" autoComplete="off" value={host} onChange={(e) => setHost(e.target.value)} />
         </Field>
+        {kind === 'http' && (
+          <Field label="Where the key goes" hint="The service's docs say which header it reads the key from.">
+            <Select value={place} onChange={setPlace} options={KEY_PLACES} />
+          </Field>
+        )}
+        {kind === 'http' && place === 'other' && (
+          <Field label="Header name" hint="Exactly as the service names it.">
+            <Input mono placeholder="xi-api-key" autoComplete="off" value={header} onChange={(e) => setHeader(e.target.value)} />
+          </Field>
+        )}
         <Field label="Value" className="sm:col-span-2 lg:col-span-3">
           <Input
             type="password"

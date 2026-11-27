@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.6.0
+
+- **Agents propose credentials; you bring the key.** A new MCP tool,
+  `vault_propose_credential`, lets an agent describe a credential that does
+  not exist yet (its name, its kind, and for a generic `http` credential the
+  host and where the key goes), never the key itself. It needs no session.
+  The proposal waits under Approvals in the CLI, the web UI and the island,
+  and is finished in two steps: check the hosts the key could be sent to,
+  then type the key and save it, confirmed with Touch ID or your
+  passphrase. The agent polls with the id and secret it was given, then
+  asks for a session on the new credential as usual.
+- **Where the key can go is never widened.** The hosts shown are the
+  credential's host ceiling, exactly as the gateway enforces it. A known
+  provider's kind (GitHub, Slack, Anthropic, OpenAI, Gemini) takes no other
+  host, and a generic credential must name one plain DNS name (no scheme,
+  path, IP address or single label). A proposal only ever adds a new name.
+- **A key never rides in a proposal.** One that carries a field named like a
+  key, or any text shaped like one, is refused before anything is kept.
+  When the human saves the key, the approval must carry exactly the hosts
+  shown, and a key whose own shape names a provider (an Anthropic, OpenAI,
+  GitHub, Slack or Google key) is refused for a host that is not that
+  provider's. The key is bound into the presence proof by its digest
+  (`cred_proposal.approve`, `value_sha256`).
+- **An agent waits for your answer and carries on by itself.** Asking for a
+  session, proposing a credential or having a write held used to end with
+  "poll later", so the agent stopped and you had to tell it to continue.
+  `vault_request_session`, `vault_propose_credential` and
+  `vault_approval_status` now take `wait_seconds` (at most 50): the call is
+  held open and returns the moment you approve or deny it, wherever you do,
+  and an agent still waiting calls again. The MCP instructions and each
+  reply tell the agent to wait rather than end its turn. 50 seconds stays
+  under Claude Code's 60-second limit on one HTTP request and its move of a
+  long call to the background after two minutes. A poll with the wrong
+  secret never waits.
+- **A key goes in whatever header the service names.** Some APIs read their
+  key from their own header (ElevenLabs: `xi-api-key`), and there was no way
+  to say so: the `cred add` wizard offered five fixed places, and the flags,
+  the web UI and the companion none. `cred add --site header:xi-api-key`
+  (or any site), an "Another header" choice in the wizard, a "Where the key
+  goes" field in the web UI and a Header field in the island now do. A site
+  that could never be used (a header name with a space, an unknown kind) is
+  refused when the credential is stored instead of failing when the key is
+  first used, and nobody is offered a header that frames the request
+  (`host`, `content-length`, `content-type`, `transfer-encoding`,
+  `connection`).
+- Proposals are kept across a restart, expire after 30 minutes unanswered,
+  are denied by `panic`, and are never part of a bulk decision.
+  `agent-vault approve cp_…` asks for the host confirmation and the key at a
+  terminal; the island finishes one with Touch ID.
+
 ## 0.5.3
 
 - **`companion install`, `companion upgrade`, `companion open`.** The CLI

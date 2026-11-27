@@ -13,6 +13,24 @@ export const KINDS = [
   { value: 'http', label: 'http (generic)' },
 ]
 
+/** Where a generic credential's key can go, the common ones first; `other` asks for a header name. */
+export const KEY_PLACES = [
+  { value: 'header:authorization:Bearer', label: 'Authorization: Bearer <key>' },
+  { value: 'header:x-api-key', label: 'X-API-Key: <key>' },
+  { value: 'other', label: 'Another header…' },
+]
+
+/** Headers that frame the request, which a key never goes in (as FRAMING_HEADERS in av-core). */
+const FRAMING = ['host', 'content-length', 'content-type', 'transfer-encoding', 'connection']
+
+/** Why a typed header name cannot hold a key, or null (the vault checks again). */
+export function headerProblem(name) {
+  const n = String(name ?? '').trim().toLowerCase()
+  if (!/^[a-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(n)) return 'A header name is letters, digits and dashes, such as xi-api-key.'
+  if (FRAMING.includes(n)) return `A key cannot go in the ${n} header.`
+  return null
+}
+
 /** Badges for what a human should notice (F10, F16): `[{ tone, text }]`. */
 export function credentialBadges(c) {
   const out = []

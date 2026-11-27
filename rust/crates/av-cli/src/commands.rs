@@ -952,6 +952,16 @@ pub async fn cred_add(ctx: &Context, args: &CredAddArgs) -> Outcome {
     } else {
         None
     };
+    // Checked before the value is asked for, so nobody types a key twice.
+    if let Some(site) = &args.site {
+        if let Some(problem) = av_core::sites::chosen_site_problem(site) {
+            return Err(err_next(
+                format!("--site: {problem}"),
+                Exit::Usage,
+                "agent-vault cred add <slug> --host api.example.com --site header:x-api-key",
+            ));
+        }
+    }
     let value = ctx.read_secret(&format!("value for {slug} (not echoed): "))?;
     if value.expose_secret().is_empty() {
         return Err(err("no value given", Exit::Usage));
@@ -967,6 +977,9 @@ pub async fn cred_add(ctx: &Context, args: &CredAddArgs) -> Outcome {
     }
     if let Some(scheme) = &args.scheme {
         body.insert("scheme".into(), Value::from(scheme.clone()));
+    }
+    if let Some(site) = &args.site {
+        body.insert("sites".into(), json!([site]));
     }
     body.insert(
         "value".into(),
@@ -2363,16 +2376,22 @@ pub async fn approvals(ctx: &Context, args: &ApprovalsArgs) -> Outcome {
         .iter()
         .filter(|p| args.show.as_ref().is_none_or(|id| p.id == *id))
     {
-        let label = if item.kind == PendingKind::Session {
-            "session requested"
-        } else {
-            "pending"
+        let label = match item.kind {
+            PendingKind::Session => "session requested",
+            PendingKind::Credential => "key requested",
+            PendingKind::Request => "pending",
         };
         println!("{} {}", ctx.paint("33", label), item.id);
         println!(
             "  {}",
             ctx.paint("1", &clean_text(&show_value(&item.headline)))
         );
+        if let Some(hosts) = &item.hosts {
+            println!(
+                "  the key will be sent only to: {}",
+                ctx.paint("1", &clean_text(&hosts.join(", ")))
+            );
+        }
         if let Some(claim) = &item.claim {
             println!(
                 "  {}",
@@ -2402,7 +2421,9 @@ pub async fn approvals(ctx: &Context, args: &ApprovalsArgs) -> Outcome {
                     .join(" ")
             )
         };
-        let owner = if item.owner_settable.is_empty() {
+        let owner = if item.kind == PendingKind::Credential {
+            "   (you check the host, then type the key)"
+        } else if item.owner_settable.is_empty() {
             ""
         } else {
             " [--approval MODE] [--infinite]"
@@ -2425,7 +2446,11 @@ pub async fn approvals(ctx: &Context, args: &ApprovalsArgs) -> Outcome {
 async fn load_pending(ctx: &Context) -> Result<Vec<av_store::pending::PendingItem>, CliError> {
     let mut rows = Vec::new();
     for source in pending::SOURCES {
-        let value = ctx.control("GET", source.path, None).await?;
+        // A daemon older than credential proposals has no such list.
+        let value = match ctx.control("GET", source.path, None).await {
+            Err(_) if source.kind == PendingKind::Credential => json!([]),
+            other => other?,
+        };
         let list = if let Some(items) = value.as_array() {
             items.clone()
         } else {
@@ -2452,6 +2477,20 @@ pub async fn approve(ctx: &Context, args: &ApproveArgs) -> Outcome {
         )),
         &r,
     );
+    if let Some(slug) = r.pointer("/credential/slug").and_then(|v| v.as_str()) {
+        if !ctx.json {
+            println!(
+                "{}",
+                ctx.paint(
+                    "2",
+                    &format!(
+                        "  saved {}; an agent still needs a session to use it",
+                        clean_text(slug)
+                    )
+                )
+            );
+        }
+    }
     if r.get("collected").is_some() && !ctx.json {
         let sid = r
             .pointer("/collected/session_id")
@@ -2550,6 +2589,9 @@ pub(crate) async fn decide(
             }
         }
     }
+    if granted && item.kind == PendingKind::Credential {
+        return approve_credential(ctx, &item).await;
+    }
     let map = overrides.as_ref().and_then(|v| v.as_object());
     let call = pending::decision(&item, granted, map.filter(|m| !m.is_empty()));
     let answered = ctx
@@ -2576,7 +2618,83 @@ fn kind_name(kind: PendingKind) -> &'static str {
     match kind {
         PendingKind::Request => "request",
         PendingKind::Session => "session",
+        PendingKind::Credential => "credential proposal",
     }
+}
+
+/// Approve a credential an agent proposed: first the hosts the key would be
+/// sent to, confirmed with a typed `yes`, then the key, typed and not
+/// echoed. The companion confirms the hosts in the island and sends the key
+/// on stdin, so in its modes nothing is asked here.
+async fn approve_credential(
+    ctx: &Context,
+    item: &av_store::pending::PendingItem,
+) -> Result<Value, CliError> {
+    let hosts = item.hosts.clone().unwrap_or_default();
+    if hosts.is_empty() {
+        return Err(err(
+            "that proposal names no host, so there is nothing to confirm",
+            Exit::Failure,
+        ));
+    }
+    let slug = item
+        .proposal
+        .as_ref()
+        .and_then(|p| p.get("slug"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    if matches!(
+        crate::argv::presence_mode(),
+        crate::argv::PresenceMode::Asked
+    ) {
+        if ctx.json || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return Err(err_next(
+                "approving a proposed key needs a terminal, to check the host and type the key",
+                Exit::Usage,
+                format!("agent-vault approve {}", item.id),
+            ));
+        }
+        println!(
+            "{}",
+            ctx.paint("1", &clean_text(&show_value(&item.headline)))
+        );
+        if let Some(claim) = &item.claim {
+            println!(
+                "{}",
+                ctx.paint(
+                    "2",
+                    &format!("claimed by the agent (unverified): {}", clean_text(claim))
+                )
+            );
+        }
+        println!();
+        println!("1. This key will be sent only to:");
+        for h in &hosts {
+            println!("     {}", ctx.paint("1", &clean_text(h)));
+        }
+        let answer = ctx.ask("   Is that where this key belongs? Type yes to continue: ")?;
+        if answer.trim_end_matches(['\r', '\n']) != "yes" {
+            return Err(err(
+                "nothing was saved; the proposal is still waiting",
+                Exit::Failure,
+            ));
+        }
+        println!("2. Enter the key. It is not shown as you type or paste it.");
+    }
+    let value = ctx.read_secret(&format!("   key for {} (not echoed): ", clean_text(&slug)))?;
+    if value.expose_secret().trim().is_empty() {
+        return Err(err(
+            "no key given; nothing was saved and the proposal is still waiting",
+            Exit::Usage,
+        ));
+    }
+    let body = json!({
+        "id": item.id, "granted": true, "hosts": hosts,
+        "value": value.expose_secret().to_string(),
+    });
+    ctx.control_with_presence("POST", &item.decide.path, Some(&body))
+        .await
 }
 
 /// Ports `COMMANDS['audit:tail']`.

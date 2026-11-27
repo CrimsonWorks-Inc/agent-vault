@@ -80,7 +80,7 @@ guided                               (run these with no arguments)
   session create                       walks you through scoping a session
 
 credentials                          (the value is read from the terminal, never argv)
-  cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
+  cred add <slug> --kind <kind> [--host H] [--site S] [--expires YYYY-MM-DD]
   cred list [--folder F] | cred rm <slug>
   cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
                                        replace the value; sessions keep working

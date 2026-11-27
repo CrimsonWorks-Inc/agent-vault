@@ -389,6 +389,50 @@ async fn a_session_request_is_decided_with_a_signature_bound_to_its_verdict() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_proposed_credential_is_finished_with_a_signature_over_its_key_and_hosts() {
+    let (w, e) = enrolled().await;
+    let (record, _) = w
+        .shared
+        .run(|c| c.cp_propose(&json!({"slug": "linear", "host": "api.linear.app"})))
+        .await
+        .unwrap()
+        .unwrap();
+    let approve = json!({"id": record.id, "granted": true, "hosts": ["api.linear.app"], "value": "test-key-one-fake"});
+    let (s, ch) = challenge(&w, "POST /v1/cred-proposals/decide", &approve).await;
+    assert_eq!(s, 200, "{ch}");
+    assert_eq!(ch["operation"]["op"], "cred_proposal.approve");
+    assert_eq!(ch["operation"]["hosts"], json!(["api.linear.app"]));
+    // The key is bound by its digest; it is never in what gets signed.
+    assert!(ch["operation"].get("value").is_none());
+    assert_eq!(
+        ch["operation"]["value_sha256"],
+        av_core::canon::sha256(b"test-key-one-fake")
+    );
+    let proof = json!({"challengeId": ch["challengeId"], "companionSignature": e.sign(ch["challenge"].as_str().unwrap())});
+    // Signed for one key, sent with another: refused, nothing saved.
+    let mut other = approve.clone();
+    other["value"] = "test-key-two-fake".into();
+    other["presence"] = proof.clone();
+    let (s, _) = w.control("POST", "/v1/cred-proposals/decide", other).await;
+    assert_eq!(s, 401);
+    // No presence at all: refused.
+    let (s, v) = w
+        .control("POST", "/v1/cred-proposals/decide", approve.clone())
+        .await;
+    assert_eq!(
+        (s, v["code"].as_str()),
+        (401, Some("AV_PRESENCE_REQUIRED")),
+        "{v}"
+    );
+    // Signed and sent as signed: the credential is made.
+    let (_, ch) = challenge(&w, "POST /v1/cred-proposals/decide", &approve).await;
+    let mut b = approve.clone();
+    b["presence"] = json!({"challengeId": ch["challengeId"], "companionSignature": e.sign(ch["challenge"].as_str().unwrap())});
+    let (s, v) = w.control("POST", "/v1/cred-proposals/decide", b).await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("approved")), "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn touch_id_unlock_is_set_up_with_fresh_presence_for_the_enrolled_key_only() {
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9u8; 32]);
     let route = "/v1/presence/companion/unlock";

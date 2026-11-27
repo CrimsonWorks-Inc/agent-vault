@@ -65,6 +65,7 @@ export function readNarrowing(typed) {
  * Throws (before any signature is asked for) when the narrowing does not parse.
  */
 export async function decisionCall(item, granted, draft, { operationFor, api }) {
+  if (item.kind === 'credential') return credentialCall(item, granted, draft, { operationFor, api })
   const narrowing = readNarrowing(typedNarrowing(item, draft, granted))
   if (narrowing.error) throw new Error(narrowing.error)
   const { overrides } = narrowing
@@ -81,6 +82,41 @@ export async function decisionCall(item, granted, draft, { operationFor, api }) 
     operation: await operationFor(granted ? 'approval.approve' : 'approval.deny', { id, granted }),
     send: (proof) => api.post('approvals', { id, granted, presence: proof }),
   }
+}
+
+/**
+ * A credential an agent proposed. Approving takes two things from the human,
+ * in order: that they confirmed the hosts the key would be sent to, and the
+ * key they typed. The signature binds the hosts exactly as shown and the key
+ * by its digest (cred_proposal.approve, value_sha256); a denial carries
+ * neither.
+ *
+ * `draft` is `{ hostsConfirmed: boolean, value: string }`.
+ */
+export async function credentialCall(item, granted, draft = {}, { operationFor, api }) {
+  const id = item.id
+  if (!granted) {
+    return {
+      operation: await operationFor('cred_proposal.deny', { id, granted }),
+      send: (proof) => api.post('cred-proposals/decide', { id, granted, presence: proof }),
+    }
+  }
+  const hosts = [...(item.hosts || [])]
+  if (!hosts.length) throw new Error('This proposal names no host, so there is nothing to confirm.')
+  if (draft.hostsConfirmed !== true) throw new Error('Confirm the host first.')
+  // Trimmed, as the CLI reads it: a pasted key often carries a newline.
+  const value = String(draft.value ?? '').trim()
+  if (!value) throw new Error('Type the key first.')
+  const body = { id, granted, hosts, value }
+  return {
+    operation: await operationFor('cred_proposal.approve', body),
+    send: (proof) => api.post('cred-proposals/decide', { ...body, presence: proof }),
+  }
+}
+
+/** Whether an item can be ticked for a bulk decision: a proposed key needs its own. */
+export function bulkable(item) {
+  return item?.kind === 'request' || item?.kind === 'session'
 }
 
 /**

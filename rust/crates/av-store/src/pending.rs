@@ -13,6 +13,10 @@ pub enum PendingKind {
     Request,
     /// A session request (hours of access).
     Session,
+    /// A credential an agent proposed: the human checks where the key will
+    /// be sent, then types the key. No JS kind: new with credential
+    /// proposals.
+    Credential,
 }
 
 /// Where one kind of decision is listed. Ports the entries of `SOURCES` in
@@ -25,8 +29,9 @@ pub struct PendingSource {
     pub path: &'static str,
 }
 
-/// Where to look. Ports `SOURCES` in `src/pending.js`.
-pub const SOURCES: [PendingSource; 2] = [
+/// Where to look. Ports `SOURCES` in `src/pending.js`, plus credential
+/// proposals.
+pub const SOURCES: [PendingSource; 3] = [
     PendingSource {
         kind: PendingKind::Request,
         path: "/v1/approvals",
@@ -35,7 +40,15 @@ pub const SOURCES: [PendingSource; 2] = [
         kind: PendingKind::Session,
         path: "/v1/session-requests",
     },
+    PendingSource {
+        kind: PendingKind::Credential,
+        path: "/v1/cred-proposals",
+    },
 ];
+
+/// The caution shown on a credential proposal.
+pub const CREDENTIAL_CAUTION: &str =
+    "You type the key yourself. It is only ever sent to the hosts shown.";
 
 /// The dimensions a human may narrow on a session request. Ports the
 /// `narrowable` list in `describe` in `src/pending.js`.
@@ -106,6 +119,10 @@ pub struct PendingItem {
     /// Scrubbed preview (request items; null allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<Value>,
+    /// Every host the proposed key could be sent to (credential items): what
+    /// the human confirms before typing the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
     /// Where to answer.
     pub decide: DecideRoute,
 }
@@ -138,6 +155,7 @@ pub fn describe(kind: PendingKind, raw: &Value) -> PendingItem {
             }),
             grant_id: None,
             preview: None,
+            hosts: None,
             decide: DecideRoute {
                 path: "/v1/session-requests/decide".into(),
                 id_field: "id".into(),
@@ -155,8 +173,42 @@ pub fn describe(kind: PendingKind, raw: &Value) -> PendingItem {
             proposal: None,
             grant_id: Some(text("grant_id")),
             preview: Some(get("preview")),
+            hosts: None,
             decide: DecideRoute {
                 path: "/v1/approvals".into(),
+                id_field: "id".into(),
+            },
+        },
+        PendingKind::Credential => PendingItem {
+            id: raw.get("id").map(js_string).unwrap_or_default(),
+            kind,
+            headline: get("summary"),
+            claim: text("agent_reason_untrusted"),
+            created_at: get("created_at"),
+            caution: Some(CREDENTIAL_CAUTION.to_string()),
+            narrowable: Vec::new(),
+            owner_settable: Vec::new(),
+            proposal: Some(match raw.get("proposal") {
+                Some(v) if truthy(v) => v.clone(),
+                _ => Value::Object(Map::new()),
+            }),
+            grant_id: None,
+            preview: None,
+            // Only plain strings: a host the human cannot read is not one
+            // they confirmed.
+            hosts: Some(
+                raw.get("hosts")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            ),
+            decide: DecideRoute {
+                path: "/v1/cred-proposals/decide".into(),
                 id_field: "id".into(),
             },
         },

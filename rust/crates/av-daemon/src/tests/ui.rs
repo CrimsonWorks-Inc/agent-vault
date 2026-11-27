@@ -325,6 +325,57 @@ async fn paging_refuses_a_bad_limit_or_cursor() {
     assert!(r.json()["next_cursor"].is_string());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_credential_proposal_reaches_the_page_and_is_decided_only_with_a_signature() {
+    let mut u = Ui::start().await;
+    u.claim().await;
+    let (record, _) =
+        u._w.shared
+            .run(|c| c.cp_propose(&json!({"slug": "linear", "host": "api.linear.app"})))
+            .await
+            .unwrap()
+            .unwrap();
+    let r = u.api("GET", "pending", json!({})).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let item = r.json()[0].clone();
+    assert_eq!(item["kind"], "credential");
+    assert_eq!(item["hosts"], json!(["api.linear.app"]));
+    assert_eq!(item["decide"]["path"], "/v1/cred-proposals/decide");
+    // The page signs exactly what the daemon will bind: the key by digest,
+    // the hosts it confirmed, nothing it did not send along.
+    let body = json!({"id": record.id, "granted": true, "hosts": ["api.linear.app"], "value": "test-key-fake", "extra": 1, "presence": {}});
+    let op = UiServer::operation_of("POST cred-proposals/decide", "", &body).unwrap();
+    let forwarded = json!({"id": record.id, "granted": true, "hosts": ["api.linear.app"], "value": "test-key-fake"});
+    assert_eq!(
+        op,
+        crate::util::operation_for("cred_proposal.approve", &forwarded).unwrap()
+    );
+    assert!(op.get("value").is_none() && op.get("extra").is_none());
+    let deny = UiServer::operation_of(
+        "POST cred-proposals/decide",
+        "",
+        &json!({"id": record.id, "granted": false, "value": "x"}),
+    )
+    .unwrap();
+    assert_eq!(
+        deny,
+        json!({"op": "cred_proposal.deny", "id": record.id, "granted": false})
+    );
+    // Unsigned: refused, and nothing is made.
+    let r = u.api("POST", "cred-proposals/decide", forwarded).await;
+    assert_eq!(r.status, 412, "{}", r.body);
+    let r = u
+        .api(
+            "POST",
+            "cred-proposals/decide",
+            json!({"id": record.id, "granted": "yes"}),
+        )
+        .await;
+    assert_eq!(r.status, 403);
+    let (_, creds) = u._w.control("GET", "/v1/credentials", json!({})).await;
+    assert!(!creds.to_string().contains("linear"));
+}
+
 #[test]
 fn a_dist_that_is_a_symlink_or_missing_its_index_is_refused() {
     let d = tempfile::tempdir().unwrap();

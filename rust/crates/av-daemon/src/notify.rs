@@ -33,8 +33,8 @@ pub const MAX_PAYLOAD_BYTES: usize = 2048;
 pub const MAX_IDS: usize = 10;
 /// Longest headline sent. Ports `MAX_HEADLINE`.
 pub const MAX_HEADLINE: usize = 200;
-/// Item kinds the stream carries. Ports `KINDS`.
-pub const KINDS: [&str; 2] = ["request", "session"];
+/// Item kinds the stream carries. Ports `KINDS`, plus credential proposals.
+pub const KINDS: [&str; 3] = ["request", "session", "credential"];
 
 /// `cleanHeadline(text)`.
 pub fn clean_headline(text: &str) -> String {

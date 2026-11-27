@@ -28,14 +28,16 @@ pub const IDLE_EXIT_MS: u64 = 30 * 60_000;
 /// The page's Content-Security-Policy. Ports `STRICT_CSP`; frozen.
 pub const STRICT_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
 
-/// Calls that need a WebAuthn assertion over the operation. Ports `GATED`.
-pub const GATED: [&str; 21] = [
+/// Calls that need a WebAuthn assertion over the operation. Ports `GATED`,
+/// plus credential proposals.
+pub const GATED: [&str; 22] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "DELETE sessions",
     "POST approvals",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST lock",
     "POST touchid/enroll",
@@ -52,12 +54,14 @@ pub const GATED: [&str; 21] = [
     "DELETE credentials/pins",
     "POST presence/rotate",
 ];
-/// Gated calls the daemon checks again itself. Ports `DAEMON_VERIFIED`.
-pub const DAEMON_VERIFIED: [&str; 14] = [
+/// Gated calls the daemon checks again itself. Ports `DAEMON_VERIFIED`, plus
+/// credential proposals.
+pub const DAEMON_VERIFIED: [&str; 15] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST credentials/rotate",
     "POST credentials/scrub",
@@ -1012,6 +1016,15 @@ impl UiServer {
                 }
                 of("session_request.decide", &Value::Object(m))
             }
+            // Over exactly what is forwarded, so the daemon binds the same.
+            "POST cred-proposals/decide" => of(
+                if body.get("granted") == Some(&Value::Bool(true)) {
+                    "cred_proposal.approve"
+                } else {
+                    "cred_proposal.deny"
+                },
+                &cred_decision(body, false),
+            ),
             "POST lock" => of("vault.lock", &json!({})),
             "POST touchid/enroll" => {
                 let mut m = Map::new();
@@ -1288,7 +1301,9 @@ impl UiServer {
             }
             _ => {}
         }
-        if (key == "POST approvals" || key == "POST session-requests/decide")
+        if (key == "POST approvals"
+            || key == "POST session-requests/decide"
+            || key == "POST cred-proposals/decide")
             && !body.get("granted").is_some_and(Value::is_boolean)
         {
             return Err(UiErr::new(403, "the verdict must be true or false")
@@ -1782,6 +1797,13 @@ impl UiServer {
                 answered["recorded"] = recorded;
                 ok(answered)
             }
+            "POST cred-proposals/decide" => ok(self
+                .control(
+                    "POST",
+                    "/v1/cred-proposals/decide",
+                    Some(cred_decision(&body, true)),
+                )
+                .await?),
             "POST lock" => ok(self.control("POST", "/v1/lock", Some(json!({}))).await?),
             "POST unlock" => {
                 let p = b("passphrase")
@@ -1933,6 +1955,29 @@ impl UiServer {
             "total": null,
         }))
     }
+}
+
+/// The decision on a credential proposal as the daemon is sent it: the id,
+/// the verdict, and for an approval the hosts confirmed and the key typed.
+/// The operation the page signs is over the same fields, without presence.
+fn cred_decision(body: &Value, with_presence: bool) -> Value {
+    let b = |k: &str| body.get(k).cloned();
+    let granted = body.get("granted") == Some(&Value::Bool(true));
+    let mut out = obj_of(&[("id", b("id")), ("granted", b("granted"))]);
+    if granted {
+        out = obj_of(&[
+            ("id", b("id")),
+            ("granted", b("granted")),
+            ("hosts", b("hosts")),
+            ("value", b("value")),
+        ]);
+    }
+    if with_presence {
+        if let Some(p) = b("presence") {
+            out["presence"] = p;
+        }
+    }
+    out
 }
 
 /// `{k: v}` for every pair whose value is present (the JS literal drops

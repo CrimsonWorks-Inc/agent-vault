@@ -1621,6 +1621,7 @@ impl Core {
         a.state = if granted { "granted" } else { "denied" }.into();
         a.decided_at = Some(iso_now());
         let view = a.view();
+        self.decided();
         self.audit(
             if granted {
                 "approval.granted"
@@ -1695,6 +1696,9 @@ impl Core {
             }
             count += 1;
         }
+        if count > 0 {
+            self.decided();
+        }
         Ok(count)
     }
 
@@ -1733,6 +1737,9 @@ impl Core {
                 Value::Null
             }
         };
+        // Nothing a panic leaves waiting can be finished: a proposal would
+        // add a key the moment someone typed it.
+        self.cp_deny_all("panic");
         let reason_text = match &reason {
             Some(r) => {
                 let safe = self.pl_safe_message(r, None);

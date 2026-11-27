@@ -1204,7 +1204,7 @@ fn help_text(ctx: &Context) -> String {
   session create                       walks you through scoping a session
 
 {credentials}                          {cred_note}
-  cred add <slug> --kind <kind> [--host H] [--expires YYYY-MM-DD]
+  cred add <slug> --kind <kind> [--host H] [--site S] [--expires YYYY-MM-DD]
   cred list [--folder F] | cred rm <slug>
   cred rotate <slug> [--field F] [--revoke] [--retire-hours N]
                                        replace the value; sessions keep working

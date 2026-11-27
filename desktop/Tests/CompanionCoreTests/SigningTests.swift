@@ -94,6 +94,46 @@ import Testing
             == "let agents use “openai” and 1 more for 1 hour, read only")
     }
 
+    /// Another service's key can go in the header it names; the signature
+    /// covers the host and that header, so neither can be swapped.
+    @Test func anotherServicesKeyGoesInTheHeaderItNames() {
+        let eleven = SignedRequest.add(slug: "eleven", kind: "http", host: "api.elevenlabs.io", header: "xi-api-key")
+        #expect(eleven.args == ["cred", "add", "eleven", "--kind", "http", "--host", "api.elevenlabs.io", "--site", "header:xi-api-key"])
+        #expect(eleven.matches(j(#"{"op":"cred.add","slug":"eleven","kind":"http","host":"api.elevenlabs.io","sites":["header:xi-api-key"],"value_sha256":"00"}"#)))
+        #expect(!eleven.matches(j(#"{"op":"cred.add","slug":"eleven","kind":"http","host":"api.elevenlabs.io","value_sha256":"00"}"#)), "the header must be bound")
+        #expect(!eleven.matches(j(#"{"op":"cred.add","slug":"eleven","kind":"http","host":"evil.example","sites":["header:xi-api-key"],"value_sha256":"00"}"#)), "another host")
+        #expect(!eleven.matches(j(#"{"op":"cred.add","slug":"eleven","kind":"http","host":"api.elevenlabs.io","sites":["header:x-other"],"value_sha256":"00"}"#)))
+        let bearer = SignedRequest.add(slug: "hf", kind: "http", host: "huggingface.co")
+        #expect(bearer.matches(j(#"{"op":"cred.add","slug":"hf","kind":"http","host":"huggingface.co","value_sha256":"00"}"#)))
+        #expect(!bearer.matches(j(#"{"op":"cred.add","slug":"hf","kind":"http","host":"huggingface.co","sites":["query:key"],"value_sha256":"00"}"#)), "no site the user did not choose")
+        for bad in ["xi api key", "Host", "host", "content-length", "-x", "", "x\u{202e}y"] {
+            #expect(SignedRequest.add(slug: "e", kind: "http", host: "api.example.com", header: bad).args == nil, "\(bad)")
+        }
+        #expect(SignedRequest.add(slug: "gh", kind: "github", host: nil, header: "x-key").args == nil, "a known kind's profile decides")
+    }
+
+    /// A key an agent proposed is signed only for that proposal, exactly the
+    /// hosts the user confirmed, and a key bound by its digest.
+    @Test func aProposedKeyIsSignedOnlyForTheHostsConfirmed() {
+        let digest = String(repeating: "ab", count: 32)
+        let finish = SignedRequest.finish(id: "cp_1", slug: "linear", hosts: ["api.linear.app"])
+        #expect(finish.args == ["approve", "cp_1"])
+        #expect(finish.takesValue)
+        #expect(finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true,"hosts":["api.linear.app"],"value_sha256":"\#(digest)"}"#)))
+        #expect(!finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true,"hosts":["api.linear.app","evil.example"],"value_sha256":"\#(digest)"}"#)), "another host along")
+        #expect(!finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true,"hosts":["evil.example"],"value_sha256":"\#(digest)"}"#)))
+        #expect(!finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_2","granted":true,"hosts":["api.linear.app"],"value_sha256":"\#(digest)"}"#)), "another proposal")
+        #expect(!finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true,"hosts":["api.linear.app"]}"#)), "the key must be bound")
+        #expect(!finish.matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true,"hosts":["api.linear.app"],"value_sha256":"\#(digest)","kind":"github"}"#)), "nothing else along")
+        #expect(!finish.matches(j(#"{"op":"cred.add","id":"cp_1","granted":true,"hosts":["api.linear.app"],"value_sha256":"\#(digest)"}"#)))
+        #expect(!SignedRequest.approve(id: "cp_1").matches(j(#"{"op":"cred_proposal.approve","id":"cp_1","granted":true}"#)), "a plain approve never finishes a key")
+        #expect(SignedRequest.deny(id: "cp_1").matches(j(#"{"op":"cred_proposal.deny","id":"cp_1","granted":false}"#)))
+        #expect(SignedRequest.finish(id: "cp_1", slug: "linear", hosts: []).args == nil, "nothing to confirm")
+        #expect(SignedRequest.finish(id: "cp_1", slug: "linear", hosts: ["a b"]).args == nil)
+        #expect(SignedRequest.finish(id: "cp 1", slug: "linear", hosts: ["api.linear.app"]).args == nil)
+        #expect(finish.reason == "save the key “linear”, sent only to api.linear.app")
+    }
+
     /// A session is signed only when the vault bound exactly the keys, length
     /// and limits chosen: one extra limit (an expiry that never comes, writes
     /// without approval) is not what the user chose.

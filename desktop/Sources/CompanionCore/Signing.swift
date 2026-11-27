@@ -99,6 +99,17 @@ public func plainHost(_ s: String) -> Bool {
     }
 }
 
+/// A header name the island will pass on: lowercase letters, digits and
+/// dashes, at most 64, never one that frames the request (as av-core's
+/// `chosen_site_problem`, stricter).
+public func plainHeader(_ s: String) -> Bool {
+    let framing: Set<String> = ["host", "content-length", "content-type", "transfer-encoding", "connection"]
+    guard !s.isEmpty, s.count <= 64, !s.hasPrefix("-"), !framing.contains(s) else { return false }
+    return s.unicodeScalars.allSatisfy { c in
+        (c.value >= 0x30 && c.value <= 0x39) || (c.value >= 0x61 && c.value <= 0x7A) || c == "-"
+    }
+}
+
 /// Something the island does with Touch ID.
 public enum SignedRequest: Equatable {
     case approve(id: String)
@@ -109,7 +120,12 @@ public enum SignedRequest: Equatable {
     case create(creds: [String], hours: Int, readOnly: Bool)
     case release(slug: String)
     case rotate(slug: String)
-    case add(slug: String, kind: String, host: String?)
+    /// `header`: for another service, the header its key goes in, when that is
+    /// not `Authorization: Bearer`.
+    case add(slug: String, kind: String, host: String?, header: String? = nil)
+    /// Finish a key an agent proposed: the user confirmed these hosts and
+    /// typed the key, which follows the proof on stdin.
+    case finish(id: String, slug: String, hosts: [String])
     case removeTouchId
     /// Turn on Touch ID unlock with the secret the Secure Enclave derived,
     /// named here by its SHA-256 (hex); the secret goes on stdin.
@@ -127,12 +143,17 @@ public enum SignedRequest: Equatable {
                     "--label", islandSessionLabel] + (readOnly ? ["--methods", "GET"] : [])
         case .release(let slug) where safeId(slug): return ["cred", "release", slug]
         case .rotate(let slug) where safeId(slug): return ["cred", "rotate", slug]
-        case .add(let slug, let kind, let host) where safeId(slug) && keyKinds.contains(where: { $0.kind == kind }):
+        case .add(let slug, let kind, let host, let header) where safeId(slug) && keyKinds.contains(where: { $0.kind == kind }):
             if kind == "http" {
                 guard let host, plainHost(host) else { return nil }
-                return ["cred", "add", slug, "--kind", kind, "--host", host]
+                let base = ["cred", "add", slug, "--kind", kind, "--host", host]
+                guard let header else { return base }
+                guard plainHeader(header) else { return nil }
+                return base + ["--site", "header:\(header)"]
             }
-            return ["cred", "add", slug, "--kind", kind]
+            return header == nil ? ["cred", "add", slug, "--kind", kind] : nil
+        case .finish(let id, let slug, let hosts) where safeId(id) && safeId(slug) && !hosts.isEmpty && hosts.allSatisfy(plainHost):
+            return ["approve", id]
         case .removeTouchId: return ["companion", "remove"]
         case .enableUnlock(let digest) where plainDigest(digest): return ["companion", "enable-unlock"]
         default: return nil
@@ -142,7 +163,7 @@ public enum SignedRequest: Equatable {
     /// Whether a key's value follows the proof on stdin.
     public var takesValue: Bool {
         switch self {
-        case .rotate, .add, .enableUnlock: return true
+        case .rotate, .add, .finish, .enableUnlock: return true
         default: return false
         }
     }
@@ -158,7 +179,16 @@ public enum SignedRequest: Equatable {
                 && (op == "approval.approve" || (op == "session_request.decide" && operation["granted"]?.bool == true))
         case .deny(let id):
             return operation["id"]?.string == id
-                && (op == "approval.deny" || (op == "session_request.decide" && operation["granted"]?.bool == false))
+                && (op == "approval.deny"
+                    || (op == "session_request.decide" && operation["granted"]?.bool == false)
+                    || (op == "cred_proposal.deny" && operation["granted"]?.bool == false))
+        case .finish(let id, _, let hosts):
+            // The whole operation: this proposal, exactly the hosts the user
+            // confirmed, and a key bound by its digest. Nothing else along.
+            guard case .object(let o) = operation, let digest = o["value_sha256"]?.string, plainDigest(digest) else { return false }
+            return Set(o.keys) == ["op", "id", "granted", "hosts", "value_sha256"]
+                && op == "cred_proposal.approve" && o["id"]?.string == id && o["granted"]?.bool == true
+                && o["hosts"] == .array(hosts.map { .string($0) })
         case .start(let name):
             return op == "session.create" && operation["template"]?.string == name
         case .create(let creds, let hours, let readOnly):
@@ -169,9 +199,13 @@ public enum SignedRequest: Equatable {
             return op == "cred.release" && operation["slug"]?.string == slug
         case .rotate(let slug):
             return op == "cred.rotate" && operation["slug"]?.string == slug && operation["value_sha256"]?.string != nil
-        case .add(let slug, let kind, _):
+        case .add(let slug, let kind, let host, let header):
+            // Where the key goes, too: this host, and this header or the kind's own.
+            let sites: JSON? = header.map { .array([.string("header:\($0)")]) }
             return op == "cred.add" && operation["slug"]?.string == slug && operation["kind"]?.string == kind
                 && operation["value_sha256"]?.string != nil
+                && operation["host"]?.string == (kind == "http" ? host : nil)
+                && operation["sites"] == sites
         case .removeTouchId:
             return op == "companion.remove"
         case .enableUnlock(let digest):
@@ -193,7 +227,9 @@ public enum SignedRequest: Equatable {
             return "let agents use \(keysPhrase(creds)) for \(hoursPhrase(hours))\(readOnly ? ", read only" : "")"
         case .release(let slug): return "let agents use “\(cleanText(slug, 40))” again"
         case .rotate(let slug): return "replace the value of “\(cleanText(slug, 40))”"
-        case .add(let slug, _, _): return "add the key “\(cleanText(slug, 40))”"
+        case .add(let slug, _, _, _): return "add the key “\(cleanText(slug, 40))”"
+        case .finish(_, let slug, let hosts):
+            return "save the key “\(cleanText(slug, 40))”, sent only to \(cleanText(hosts.joined(separator: ", "), 80))"
         case .removeTouchId: return "stop using Touch ID in the companion"
         case .enableUnlock: return "unlock the vault with Touch ID from now on"
         }
@@ -208,7 +244,8 @@ public enum SignedRequest: Equatable {
         case .create(let creds, let hours, _): return "Agents can use \(keysPhrase(creds)) for \(hoursPhrase(hours))."
         case .release(let slug): return "Agents can use “\(cleanText(slug, 40))” again."
         case .rotate(let slug): return "Replaced the value of “\(cleanText(slug, 40))”."
-        case .add(let slug, _, _): return "Added “\(cleanText(slug, 40))”."
+        case .add(let slug, _, _, _): return "Added “\(cleanText(slug, 40))”."
+        case .finish(_, let slug, _): return "Saved “\(cleanText(slug, 40))”."
         case .removeTouchId: return "Touch ID in the companion is off."
         case .enableUnlock: return "Touch ID unlocks the vault from now on."
         }

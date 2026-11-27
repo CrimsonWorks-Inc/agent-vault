@@ -30,6 +30,8 @@ pub const SERVER_NAME: &str = "agent-vault";
 pub const MAX_MCP_SESSIONS: usize = 256;
 /// The server instructions sent on `initialize` (frozen text).
 pub const INSTRUCTIONS: &str = "Credentials are placeholders, never real secrets. Never ask the user for a real secret. \
+To add a credential that does not exist yet, call vault_propose_credential: the user types the key in the vault, not in the chat. \
+After asking a human for something (a session, a credential, a held write), keep working in the same turn: poll with wait_seconds, which returns the moment they answer. \
 Prefer vault_http for API calls; use vault_get_placeholder only for tools that must run natively. \
 Put a placeholder only where the usage field says. A placeholder anywhere else is refused. \
 On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry. \
@@ -48,6 +50,41 @@ pub const REQUEST_ARGS: [&str; 10] = [
     "template",
     "reason",
 ];
+/// The longest one tool call waits for a human, in seconds: under Claude
+/// Code's 60-second limit on one HTTP request and its two-minute move of a
+/// long call to the background, so a wait never outlives the call. An agent
+/// still waiting calls again.
+pub const MAX_WAIT_SECONDS: u64 = 50;
+/// What a poll says while nobody has answered.
+const STILL_WAITING: &str = "a human has not answered yet. To keep waiting instead of ending your turn, poll again with wait_seconds; or carry on without it.";
+/// How a just-opened question says to wait for its answer.
+const WAIT_AGAIN: &str = "Wait for the answer instead of ending your turn: call";
+
+/// How long a call asked to wait: `wait_seconds`, at most
+/// [`MAX_WAIT_SECONDS`]; nothing for anything else.
+pub fn wait_of(args: &Value) -> std::time::Duration {
+    let secs = args
+        .get("wait_seconds")
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map_or(0.0, |n| n.min(MAX_WAIT_SECONDS as f64));
+    std::time::Duration::from_millis((secs * 1000.0) as u64)
+}
+
+/// After a wait on a question just opened: the answer, naming the request,
+/// or the opening reply again when there is none yet (it carries the poll
+/// secret).
+fn answered_or(opened: Value, answered: Value) -> Value {
+    if answered.get("state").and_then(Value::as_str) == Some("pending") {
+        return opened;
+    }
+    let mut out = answered;
+    if let Some(id) = opened.get("request_id") {
+        out["request_id"] = id.clone();
+    }
+    out
+}
+
 /// Largest tool-call body `vault_http` returns, in characters.
 pub const MAX_TOOL_BODY: usize = 256 * 1024;
 
@@ -75,10 +112,21 @@ pub fn tools() -> Value {
             "routes": {"type": "array", "description": "optional: method-bound routes, each a set of methods allowed only on these paths", "items": {"type": "object", "properties": {"methods": {"type": "array", "items": {"type": "string"}}, "paths": {"type": "array", "items": {"type": "string"}}}, "required": ["methods", "paths"]}},
             "template": {"type": "string", "description": "a template name the human saved; they see the template, not a policy to read"},
             "poll_id": {"type": "string", "description": "an id from an earlier call: check whether it has been answered"},
-            "poll_secret": {"type": "string", "description": "the poll_secret that earlier call returned; only the asker can poll"}
+            "poll_secret": {"type": "string", "description": "the poll_secret that earlier call returned; only the asker can poll"}, "wait_seconds": {"type": "number", "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"}
         }, "required": ["reason"]}},
+        {"name": "vault_propose_credential", "description": "Propose a credential that does not exist yet, for a human to finish. Describe it but never the key: the human checks the hosts the key will be sent to, then types the key themselves. Never ask them to paste a key into the chat. Poll the returned id until they answer; then ask for a session on it with vault_request_session.", "inputSchema": {"type": "object", "properties": {
+            "slug": {"type": "string", "description": "the new credential's name: [a-z0-9-], 1-24 characters"},
+            "kind": {"type": "string", "enum": ["github", "slack", "anthropic", "openai", "google-genai", "http"], "description": "a provider the vault knows (its hosts are fixed), or http for any other API"},
+            "host": {"type": "string", "description": "for kind http only: the exact API host, such as api.example.com"},
+            "field": {"type": "string", "description": "optional: the field name (default: the kind's own, or token)"},
+            "sites": {"type": "array", "items": {"type": "string"}, "description": "for kind http only: where the key goes, such as header:authorization:Bearer (the default) or header:x-api-key"},
+            "expires_at": {"type": "string", "description": "optional: when the key stops working, YYYY-MM-DD"},
+            "reason": {"type": "string", "description": "why you need it; shown to the human as an unverified claim"},
+            "poll_id": {"type": "string", "description": "an id from an earlier call: check whether it has been answered"},
+            "poll_secret": {"type": "string", "description": "the poll_secret that earlier call returned; only the proposer can poll"}, "wait_seconds": {"type": "number", "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"}
+        }}},
         {"name": "vault_approval_status", "description": "Whether a human has answered a held request. The 202 from a held write names this tool and the id to pass.", "inputSchema": {"type": "object", "properties": {
-            "approval_id": {"type": "string", "description": "the approval_id from the 202"}
+            "approval_id": {"type": "string", "description": "the approval_id from the 202"}, "wait_seconds": {"type": "number", "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"}
         }, "required": ["approval_id"]}},
         {"name": "vault_http", "description": "Make an HTTP request through the vault. The credential is injected by the daemon; you never handle it.", "inputSchema": {"type": "object", "properties": {
             "cred": {"type": "string"}, "method": {"type": "string"}, "path": {"type": "string"}, "query": {"type": "string"},
@@ -412,6 +460,7 @@ impl McpServer {
                 Ok(text(v))
             }
             "vault_request_session" => self.request_session(args).await,
+            "vault_propose_credential" => self.propose_credential(args).await,
             "vault_get_placeholder" => {
                 let Some(s) = session else {
                     return self.needs_session(token, listener.as_ref()).await;
@@ -465,6 +514,12 @@ impl McpServer {
                     .get("approval_id")
                     .map(js_string)
                     .unwrap_or_else(|| "undefined".into());
+                let held = id.clone();
+                self.wait_while(wait_of(&args), move |c| {
+                    c.pl_approval_status(&held)
+                        .is_some_and(|s| s["state"] == "pending")
+                })
+                .await?;
                 match self.pipeline.approval_status(id.clone()).await {
                     Some(s) => Ok(text(s)),
                     None => Ok(text(
@@ -565,50 +620,116 @@ impl McpServer {
         }
     }
 
+    /// Wait up to `wait` while `pending` says a human has not answered,
+    /// waking on every decision the vault records, and every two seconds for
+    /// an answer that comes another way (an expiry).
+    async fn wait_while<F>(&self, wait: std::time::Duration, pending: F) -> R<()>
+    where
+        F: Fn(&mut crate::state::Core) -> bool + Clone + Send + 'static,
+    {
+        if wait.is_zero() {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + wait;
+        // Subscribed before the first look, so no answer slips in between.
+        let mut rx = self.shared.run(|c| c.decisions.subscribe()).await?;
+        loop {
+            let still = pending.clone();
+            if !self.shared.run(move |c| still(c)).await? {
+                return Ok(());
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            let tick = (deadline - now).min(std::time::Duration::from_secs(2));
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep(tick).await;
+                    }
+                }
+                _ = tokio::time::sleep(tick) => {}
+            }
+        }
+    }
+
+    /// A session request's answer, for the agent that asked (collecting an
+    /// approved session hands it over once).
+    async fn poll_session_request(&self, poll: String, secret: Option<String>) -> R<Value> {
+        self.shared
+            .run(move |core| -> R<Value> {
+                let Some(record) = core.sr_get(&poll) else {
+                    return Ok(json!({"error": format!("no session request {poll}")}));
+                };
+                if !record.may_collect(secret.as_deref()) {
+                    return Ok(json!({"error": "poll_secret does not match this request; only the agent that asked can poll it"}));
+                }
+                if record.state == "pending" {
+                    return Ok(json!({"state": "pending", "detail": STILL_WAITING}));
+                }
+                if record.state == "denied" {
+                    return Ok(json!({"state": "denied", "detail": "a human declined; do not ask again for the same thing"}));
+                }
+                if record.result.is_none() {
+                    if record.state == "collected" {
+                        return Ok(json!({"state": "approved", "detail": "a human approved this and your session is already active — the bridge found it. Call vault_status to see it, and use the tools normally."}));
+                    }
+                    return Ok(json!({"state": record.state, "detail": "the answer is no longer available; ask again"}));
+                }
+                let result = core.sr.find_mut(&record.id).and_then(|r| {
+                    r.state = "collected".into();
+                    r.result.take()
+                });
+                core.sr_save();
+                core.audit_opt("session_request.collected", json!({"request_id": record.id, "via": "mcp"}));
+                let mut out = json!({"state": "approved", "detail": "a human approved this, possibly narrower than you asked. Use what you were given."});
+                if let Some(Value::Object(m)) = result {
+                    for (k, v) in m {
+                        out[&k] = v;
+                    }
+                }
+                Ok(out)
+            })
+            .await?
+    }
+
+    /// Wait for the agent's own session request: only with its secret.
+    async fn wait_for_session_request(
+        &self,
+        id: &str,
+        secret: Option<String>,
+        wait: std::time::Duration,
+    ) -> R<()> {
+        let (id, id2) = (id.to_string(), id.to_string());
+        let mine = self
+            .shared
+            .run(move |c| {
+                c.sr_get(&id)
+                    .is_some_and(|r| r.may_collect(secret.as_deref()))
+            })
+            .await?;
+        if !mine {
+            return Ok(());
+        }
+        self.wait_while(wait, move |c| {
+            c.sr_get(&id2).is_some_and(|r| r.state == "pending")
+        })
+        .await
+    }
+
     async fn request_session(&self, args: Value) -> R<Value> {
         let daemon = self.daemon();
+        let wait = wait_of(&args);
         if let Some(poll) = args.get("poll_id").filter(|p| crate::util::truthy(p)) {
             let poll = js_string(poll);
             let secret = args
                 .get("poll_secret")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            return self
-                .shared
-                .run(move |core| -> R<Value> {
-                    let Some(record) = core.sr_get(&poll) else {
-                        return Ok(text(json!({"error": format!("no session request {poll}")})));
-                    };
-                    if !record.may_collect(secret.as_deref()) {
-                        return Ok(text(json!({"error": "poll_secret does not match this request; only the agent that asked can poll it"})));
-                    }
-                    if record.state == "pending" {
-                        return Ok(text(json!({"state": "pending", "detail": "a human has not answered yet; poll again or carry on without it"})));
-                    }
-                    if record.state == "denied" {
-                        return Ok(text(json!({"state": "denied", "detail": "a human declined; do not ask again for the same thing"})));
-                    }
-                    if record.result.is_none() {
-                        if record.state == "collected" {
-                            return Ok(text(json!({"state": "approved", "detail": "a human approved this and your session is already active — the bridge found it. Call vault_status to see it, and use the tools normally."})));
-                        }
-                        return Ok(text(json!({"state": record.state, "detail": "the answer is no longer available; ask again"})));
-                    }
-                    let result = core.sr.find_mut(&record.id).and_then(|r| {
-                        r.state = "collected".into();
-                        r.result.take()
-                    });
-                    core.sr_save();
-                    core.audit_opt("session_request.collected", json!({"request_id": record.id, "via": "mcp"}));
-                    let mut out = json!({"state": "approved", "detail": "a human approved this, possibly narrower than you asked. Use what you were given."});
-                    if let Some(Value::Object(m)) = result {
-                        for (k, v) in m {
-                            out[&k] = v;
-                        }
-                    }
-                    Ok(text(out))
-                })
+            self.wait_for_session_request(&poll, secret.clone(), wait)
                 .await?;
+            return Ok(text(self.poll_session_request(poll, secret).await?));
         }
         let Some(daemon) = daemon else {
             return Ok(text(
@@ -644,13 +765,84 @@ impl McpServer {
             }
         }
         match daemon.propose_session_request(Value::Object(asked)).await {
-            Ok((record, secret)) => Ok(text(json!({
-                "state": "pending", "request_id": record["id"], "poll_secret": secret, "asked_for": record["summary"],
-                "detail": "a human must approve this. Poll with vault_request_session { poll_id: request_id, poll_secret }. They may narrow it.",
-            }))),
+            Ok((record, secret)) => {
+                let id = js_string(&record["id"]);
+                let opened = json!({
+                    "state": "pending", "request_id": id, "poll_secret": secret, "asked_for": record["summary"],
+                    "detail": format!("a human must approve this, and may narrow it. {WAIT_AGAIN} vault_request_session {{ poll_id: request_id, poll_secret, wait_seconds: {MAX_WAIT_SECONDS} }}."),
+                });
+                if wait.is_zero() {
+                    return Ok(text(opened));
+                }
+                self.wait_for_session_request(&id, Some(secret.clone()), wait)
+                    .await?;
+                let answered = self.poll_session_request(id, Some(secret)).await?;
+                Ok(text(answered_or(opened, answered)))
+            }
             Err(e) if e.code == C::Internal => Ok(text(json!({"error": e.detail}))),
             Err(e) => Ok(refusal(&e)),
         }
+    }
+
+    /// `vault_propose_credential`: open a proposal, or poll one. Needs no
+    /// session: an agent proposes a credential before it can have one.
+    async fn propose_credential(&self, args: Value) -> R<Value> {
+        let wait = wait_of(&args);
+        if let Some(poll) = args.get("poll_id").filter(|p| crate::util::truthy(p)) {
+            let poll = js_string(poll);
+            let secret = args
+                .get("poll_secret")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            self.wait_for_proposal(&poll, secret.clone(), wait).await?;
+            return self
+                .shared
+                .run(move |core| text(core.cp_poll(&poll, secret.as_deref())))
+                .await;
+        }
+        match self.shared.run(move |core| core.cp_propose(&args)).await? {
+            Ok((record, secret)) => {
+                let opened = json!({
+                    "state": "pending", "request_id": record.id, "poll_secret": secret,
+                    "asked_for": record.summary, "hosts": record.hosts,
+                    "detail": format!("a human must check the hosts and type the key. Do not ask them for it. {WAIT_AGAIN} vault_propose_credential {{ poll_id: request_id, poll_secret, wait_seconds: {MAX_WAIT_SECONDS} }}."),
+                    "human": ["agent-vault approvals", format!("agent-vault approve {}", record.id)],
+                });
+                if wait.is_zero() {
+                    return Ok(text(opened));
+                }
+                self.wait_for_proposal(&record.id, Some(secret.clone()), wait)
+                    .await?;
+                let id = record.id.clone();
+                let answered = self
+                    .shared
+                    .run(move |core| core.cp_poll(&id, Some(&secret)))
+                    .await?;
+                Ok(text(answered_or(opened, answered)))
+            }
+            Err(e) => Ok(refusal(&e)),
+        }
+    }
+
+    /// Wait for the agent's own credential proposal: only with its secret.
+    async fn wait_for_proposal(
+        &self,
+        id: &str,
+        secret: Option<String>,
+        wait: std::time::Duration,
+    ) -> R<()> {
+        let (id, id2) = (id.to_string(), id.to_string());
+        let mine = self
+            .shared
+            .run(move |c| c.cp_get(&id).is_some_and(|r| r.may_poll(secret.as_deref())))
+            .await?;
+        if !mine {
+            return Ok(());
+        }
+        self.wait_while(wait, move |c| {
+            c.cp_get(&id2).is_some_and(|r| r.state == "pending")
+        })
+        .await
     }
 
     async fn vault_http(

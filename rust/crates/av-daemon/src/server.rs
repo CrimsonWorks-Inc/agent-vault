@@ -359,6 +359,9 @@ impl Core {
         for r in self.sr_pending() {
             out.push(json!({"kind": "session", "id": r.id, "headline": r.summary, "created_at": r.created_at}));
         }
+        for r in self.cp_pending() {
+            out.push(json!({"kind": "credential", "id": r.id, "headline": r.summary, "created_at": r.created_at}));
+        }
         out
     }
 
@@ -377,6 +380,7 @@ impl Core {
         }
         if n > 0 {
             self.sr_save();
+            self.decided();
         }
         Ok(n)
     }
@@ -1080,6 +1084,16 @@ impl Daemon {
                     "approval.deny"
                 } else {
                     "approval.approve"
+                },
+                input,
+            ),
+            // The key a human typed is bound by its digest (`value_sha256`),
+            // with the exact hosts they confirmed.
+            "POST /v1/cred-proposals/decide" => of(
+                if input.get("granted") == Some(&Value::Bool(true)) {
+                    "cred_proposal.approve"
+                } else {
+                    "cred_proposal.deny"
                 },
                 input,
             ),
@@ -2169,6 +2183,18 @@ impl Core {
     /// The decision on one session request, after the gate. Ports
     /// `#settleSessionRequest(record, granted, final)`.
     fn dm_settle_session_request(
+        &mut self,
+        record: srq::SrRecord,
+        granted: &Value,
+        final_: Value,
+    ) -> R<Value> {
+        let settled = self.dm_settle_session_request_now(record, granted, final_);
+        // Whatever came of it, an agent waiting on the request should look.
+        self.decided();
+        settled
+    }
+
+    fn dm_settle_session_request_now(
         &mut self,
         mut record: srq::SrRecord,
         granted: &Value,

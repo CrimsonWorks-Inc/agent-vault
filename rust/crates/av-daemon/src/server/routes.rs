@@ -353,6 +353,47 @@ impl Daemon {
                     .await??;
                 Ok((200, v))
             }
+
+            // An agent-proposed credential: a human confirmed the hosts and
+            // typed the key (or denied it). Checked before presence is asked
+            // for, so nobody is asked to confirm something that cannot run.
+            "GET /v1/cred-proposals" => Ok((200, self.shared.run(|core| Value::Array(core.cp_pending().iter().map(|r| r.redact()).collect())).await?)),
+            "POST /v1/cred-proposals/decide" => {
+                if let Some(problem) = crate::cred_proposals::decision_problem(&input) {
+                    return Err(dr(C::PolicyDenied, problem, "proposal_decision"));
+                }
+                let granted = input["granted"] == Value::Bool(true);
+                let i2 = input.clone();
+                let record = self
+                    .shared
+                    .run(move |core| -> R<_> {
+                        let record = core.cp_waiting(&js_string(&i2["id"]))?;
+                        if granted {
+                            core.cp_approval_input(&record, &i2)?;
+                        }
+                        Ok(record)
+                    })
+                    .await??;
+                self.require_human(if granted { "credential proposal approval" } else { "credential proposal denial" }, op?, presence).await?;
+                let v = self
+                    .shared
+                    .run(move |core| -> R<Value> {
+                        // Again under the lock that settles it: it may have
+                        // been answered, or its name taken, meanwhile.
+                        let record = core.cp_waiting(&record.id)?;
+                        if !granted {
+                            core.cp_settle_denied(&record.id, "human");
+                            return Ok(json!({"id": record.id, "state": "denied", "summary": record.summary}));
+                        }
+                        let add = core.cp_approval_input(&record, &input)?;
+                        let cred = add_credential(core, &add)?;
+                        let slug = js_string(&cred["slug"]);
+                        core.cp_settle_approved(&record.id, &slug);
+                        Ok(json!({"id": record.id, "state": "approved", "summary": record.summary, "hosts": record.hosts, "credential": cred}))
+                    })
+                    .await??;
+                Ok((200, v))
+            }
             "POST /v1/pending/decide-many" => {
                 let decisions = if input.is_object() { input.get("decisions").cloned().unwrap_or(Value::Null) } else { Value::Null };
                 if let Some(problem) = av_store::pending::check_decisions(&decisions) {
@@ -1521,6 +1562,12 @@ fn add_credential(core: &mut Core, input: &Value) -> R<Value> {
             .map(|s| s.to_string())
             .collect(),
     };
+    // A site that cannot be used is refused now, not when the key first is.
+    if let Some(problem) = sites.iter().find_map(|s| av_core::sites::site_problem(s)) {
+        return Err(dr(C::PolicyDenied, problem, "site").hinted(
+            "A site is where the key goes in a request, such as header:authorization:Bearer, header:xi-api-key or query:api_key.",
+        ));
+    }
     let value = input.get("value").map(js_string).unwrap_or_default();
     let value_len = value.encode_utf16().count();
     let mut sites_map = std::collections::BTreeMap::new();

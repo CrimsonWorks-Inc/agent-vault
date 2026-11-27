@@ -1,5 +1,5 @@
 {
-  "instructions": "Credentials are placeholders, never real secrets. Never ask the user for a real secret. Prefer vault_http for API calls; use vault_get_placeholder only for tools that must run natively. Put a placeholder only where the usage field says. A placeholder anywhere else is refused. On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry. On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives. Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access.",
+  "instructions": "Credentials are placeholders, never real secrets. Never ask the user for a real secret. To add a credential that does not exist yet, call vault_propose_credential: the user types the key in the vault, not in the chat. After asking a human for something (a session, a credential, a held write), keep working in the same turn: poll with wait_seconds, which returns the moment they answer. Prefer vault_http for API calls; use vault_get_placeholder only for tools that must run natively. Put a placeholder only where the usage field says. A placeholder anywhere else is refused. On AV_PH_EXHAUSTED or AV_PH_STALE, call vault_get_placeholder again and retry. On a denial, call vault_explain_denial with the request_id to learn the rule and the allowed alternatives. Before a write you are unsure of, call vault_preflight; to learn your limits, call vault_describe_access.",
   "tools": [
     {
       "name": "vault_status",
@@ -125,11 +125,75 @@
           "poll_secret": {
             "type": "string",
             "description": "the poll_secret that earlier call returned; only the asker can poll"
+          },
+          "wait_seconds": {
+            "type": "number",
+            "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"
           }
         },
         "required": [
           "reason"
         ]
+      }
+    },
+    {
+      "name": "vault_propose_credential",
+      "description": "Propose a credential that does not exist yet, for a human to finish. Describe it but never the key: the human checks the hosts the key will be sent to, then types the key themselves. Never ask them to paste a key into the chat. Poll the returned id until they answer; then ask for a session on it with vault_request_session.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "the new credential's name: [a-z0-9-], 1-24 characters"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "github",
+              "slack",
+              "anthropic",
+              "openai",
+              "google-genai",
+              "http"
+            ],
+            "description": "a provider the vault knows (its hosts are fixed), or http for any other API"
+          },
+          "host": {
+            "type": "string",
+            "description": "for kind http only: the exact API host, such as api.example.com"
+          },
+          "field": {
+            "type": "string",
+            "description": "optional: the field name (default: the kind's own, or token)"
+          },
+          "sites": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "for kind http only: where the key goes, such as header:authorization:Bearer (the default) or header:x-api-key"
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "optional: when the key stops working, YYYY-MM-DD"
+          },
+          "reason": {
+            "type": "string",
+            "description": "why you need it; shown to the human as an unverified claim"
+          },
+          "poll_id": {
+            "type": "string",
+            "description": "an id from an earlier call: check whether it has been answered"
+          },
+          "poll_secret": {
+            "type": "string",
+            "description": "the poll_secret that earlier call returned; only the proposer can poll"
+          },
+          "wait_seconds": {
+            "type": "number",
+            "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"
+          }
+        }
       }
     },
     {
@@ -141,6 +205,10 @@
           "approval_id": {
             "type": "string",
             "description": "the approval_id from the 202"
+          },
+          "wait_seconds": {
+            "type": "number",
+            "description": "optional: wait up to this many seconds (at most 50) for the human to answer, instead of returning at once; call again if it is still pending"
           }
         },
         "required": [

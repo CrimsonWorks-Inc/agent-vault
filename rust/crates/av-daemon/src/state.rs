@@ -21,6 +21,7 @@ use av_core::errors::{deny, DenyExtra, ErrorCode, VaultError};
 use av_store::vault::Vault;
 use serde_json::{Map, Value};
 
+use crate::cred_proposals::CredProposalStore;
 use crate::notify::Notifier;
 use crate::pipeline::PipelineState;
 use crate::server::DaemonState;
@@ -37,10 +38,15 @@ pub struct Core {
     pub dm: DaemonState,
     /// Agent-proposed sessions waiting for a human.
     pub sr: SessionRequestStore,
+    /// Agent-proposed credentials waiting for a human to bring the key.
+    pub cp: CredProposalStore,
     /// Tripwire counters.
     pub tw: TripwireState,
     /// Who is told when something starts waiting.
     pub notifier: Option<Arc<Notifier>>,
+    /// Bumped whenever a human answers something an agent may be waiting
+    /// on, so a waiting tool call wakes at once instead of polling.
+    pub decisions: tokio::sync::watch::Sender<u64>,
     /// The gateway's bound port, once started.
     pub gateway_port: u16,
     /// How many times the pipeline decrypted every vault secret (tests).
@@ -52,17 +58,25 @@ impl Core {
     /// A new core around an open vault.
     pub fn new(vault: Vault) -> Core {
         let sr = SessionRequestStore::load(&vault);
+        let cp = CredProposalStore::load(&vault);
         Core {
             vault,
             pl: PipelineState::default(),
             dm: DaemonState::default(),
             sr,
+            cp,
             tw: TripwireState::default(),
             notifier: None,
+            decisions: tokio::sync::watch::channel(0).0,
             gateway_port: 0,
             #[cfg(test)]
             secret_reads: std::cell::Cell::new(0),
         }
+    }
+
+    /// A human answered something: wake every tool call waiting on one.
+    pub fn decided(&self) {
+        self.decisions.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// `this.vault.audit?.write(kind, fields)`: recorded when the vault is

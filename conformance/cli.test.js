@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  rustSkipReason, binaries, openWorld, runCli, leaksSecret, SECRET, pinValue, freePort,
+  rustSkipReason, binaries, openWorld, runCli, leaksSecret, SECRET, pinValue, freePort, implName,
 } from './lib/harness.js'
 
 const skip = rustSkipReason()
@@ -100,6 +100,22 @@ if (skip) {
       const shown = assertOk(await runCli(w, ['session', 'show', '--json']), 'session show')
       assert.equal(shown.session.id, box.sid)
       assert.equal(leaksSecret(JSON.stringify(shown)), null)
+    })
+
+    test('cred add --site puts the key in the header the service names, and refuses one that cannot work', async () => {
+      if (implName() === 'js') return // --site is new with the Rust CLI
+      const add = ['cred', 'add', 'eleven', '--kind', 'http', '--host', 'api.elevenlabs.io', '--site', 'header:xi-api-key', '--json']
+      const added = assertOk(await runCli(w, add, { input: `${SECRET}\n` }), 'cred add --site')
+      assert.deepEqual(added.fields[0].sites, ['header:xi-api-key'])
+      // Refused before the value is read: nobody types a key for nothing.
+      for (const site of ['header:xi api key', 'header:host', 'nonsense:x']) {
+        const bad = await runCli(w, ['cred', 'add', 'eleven2', '--kind', 'http', '--host', 'api.elevenlabs.io', '--site', site, '--json'])
+        assert.equal(bad.code, 2, `${site}: ${bad.stdout}${bad.stderr}`)
+        assert.match(bad.json.error.message, /^--site: /)
+      }
+      const list = assertOk(await runCli(w, ['cred', 'list', '--json']), 'cred list')
+      assert.equal(list.some((c) => c.slug === 'eleven2'), false)
+      assertOk(await runCli(w, ['cred', 'rm', 'eleven', '--json']), 'cred rm')
     })
 
     test('templates, credential record commands, notify, tripwire, audit, listeners, and tls', async () => {

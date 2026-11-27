@@ -85,6 +85,7 @@ async fn the_handshake_and_the_ungated_tools_work_without_a_session() {
             "vault_list_creds",
             "vault_get_placeholder",
             "vault_request_session",
+            "vault_propose_credential",
             "vault_approval_status",
             "vault_http",
             "vault_explain_denial",
