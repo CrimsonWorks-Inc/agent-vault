@@ -269,3 +269,22 @@ fn surrogate_pair_secrets_match_javascript() {
     let ordinary = "ordinary \\ud800 text";
     assert_eq!(s.scrub(ordinary).text, ordinary);
 }
+
+#[test]
+fn key_shapes_are_found_only_where_a_token_can_begin() {
+    // Built at run time so no key-shaped literal sits in the source.
+    let anthropic = ["sk", "ant", &"x".repeat(24)].join("-");
+    let github = format!("ghp{}{}", '_', "y".repeat(24));
+    assert_eq!(key_shape_in(&anthropic), Some("anthropic"));
+    assert_eq!(
+        key_shape_in(&format!("use {github} for it")),
+        Some("github")
+    );
+    assert_eq!(key_shape_in("set up the Linear API for the issues"), None);
+    // The scrubber's own ordinary-text corpus holds "task-oriented_…": the
+    // `sk-` in it follows a token character, so it is not a key.
+    for text in SCRUB_PATTERN_CORPUS {
+        assert_eq!(key_shape_in(text), None, "{text}");
+    }
+    assert_eq!(key_shape_in(&format!("x{anthropic}")), None);
+}

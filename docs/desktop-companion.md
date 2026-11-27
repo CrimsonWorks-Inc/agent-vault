@@ -92,6 +92,15 @@ Unlocking needs the vault key itself, which a signature cannot give. So Touch ID
 - **It goes with the key.** Replacing the companion key with another, or removing it, removes the unlock wrap in the same transaction (`presence.factor_removed`, class `companion-prf`). The passphrase cannot be removed while it is on: like the browser's, it never exists without the passphrase to recover with.
 - **The schema.** The `vmk_wraps` table's class check gains `companion-prf` (schema version 3). A vault opened by 0.5.2 cannot then be opened by an older release.
 
+### A key an agent proposed
+
+An agent can propose a credential over MCP (`vault_propose_credential`) with everything but the key. The island shows it as "An agent wants you to add a key" and finishes it in two steps:
+
+1. **The host.** Every host the key could be sent to, as the vault listed them (the credential's host ceiling), one per line. Nothing else can be typed until the user says that is the right host. A host the island would have to clean before showing it is not shown as one to confirm, and such a proposal cannot be finished here.
+2. **The key.** Typed in a secure field and sent to `agent-vault approve <id>` on stdin, after the proof, like a new key's value. The companion signs only when the operation is exactly `cred_proposal.approve` for that proposal, with exactly the hosts it showed and the key bound by digest (`value_sha256`), and nothing else along. Deny signs `cred_proposal.deny` for that proposal.
+
+Without Touch ID in the island, the button opens Terminal, where `agent-vault approve` asks about the host again before it asks for the key. The agent's reason is never shown in the island, as for any request.
+
 ## How it talks to the vault
 
 Through the CLI's `--json` output rather than linking the daemon's crates. The JSON envelope is the public interface the CLI already maintains, the companion stays a thin client that can be reviewed in one sitting, and it never holds control-socket code of its own.

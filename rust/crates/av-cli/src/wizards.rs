@@ -309,6 +309,10 @@ fn repo_ok(v: &str) -> bool {
     part(owner) && part(repo) && !v[owner.len() + 1..].contains('/')
 }
 
+/// The wizard's "another header" choice, which asks for the name next. Not a
+/// site any credential is stored with.
+const OTHER_HEADER: &str = "other-header";
+
 /// Walk someone through storing a credential. Ports
 /// `credentialWizard(control, { slug })` in `src/cli/wizards.js`.
 pub async fn credential_wizard(ctx: &Context, preset: Option<&str>) -> Outcome {
@@ -367,6 +371,11 @@ pub async fn credential_wizard(ctx: &Context, preset: Option<&str>) -> Outcome {
             ),
             ("header:x-api-key", "X-API-Key: <token>", None),
             (
+                OTHER_HEADER,
+                "Another header",
+                Some("you name it, such as xi-api-key"),
+            ),
+            (
                 "header:authorization:token",
                 "Authorization: token <token>",
                 None,
@@ -386,11 +395,21 @@ pub async fn credential_wizard(ctx: &Context, preset: Option<&str>) -> Outcome {
                 hint: h.map(|s| s.to_string()),
             })
             .collect();
-        sites = Some(vec![prompt::select(
-            "Where does the token go in a request?",
-            &site_choices,
-            0,
-        )?]);
+        let mut site = prompt::select("Where does the token go in a request?", &site_choices, 0)?;
+        if site == OTHER_HEADER {
+            let name = prompt::text(
+                "Header name",
+                TextOptions {
+                    placeholder: Some("xi-api-key"),
+                    validate: Some(&|v| {
+                        av_core::sites::chosen_site_problem(&format!("header:{}", v.trim()))
+                    }),
+                    ..TextOptions::default()
+                },
+            )?;
+            site = format!("header:{}", name.trim().to_lowercase());
+        }
+        sites = Some(vec![site]);
     }
     prompt::step(2, 4, "Name it");
     let suggested = suggest_slug(&kind, &existing);

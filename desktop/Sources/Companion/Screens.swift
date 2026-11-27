@@ -199,6 +199,7 @@ func pendingTitle(_ p: Pending) -> String {
     switch p.kind {
     case "session": return "An agent is asking for access"
     case "request": return "An agent wants to make a change"
+    case "credential": return "An agent wants you to add a key"
     default: return "Something needs your decision"
     }
 }
@@ -220,7 +221,9 @@ struct RequestScreen: View {
     let actions: IslandActions
 
     var body: some View {
-        if let p = companion.snapshot.pending.first(where: { $0.id == id }) {
+        if let p = companion.snapshot.pending.first(where: { $0.id == id }), p.kind == "credential" {
+            ProposedKeyScreen(pending: p, companion: companion, actions: actions)
+        } else if let p = companion.snapshot.pending.first(where: { $0.id == id }) {
             Card {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(pendingTitle(p)).font(.system(size: 13, weight: .semibold))
@@ -251,6 +254,74 @@ struct RequestScreen: View {
         } else {
             Card { Note(text: "This request is no longer waiting.", tint: .white) }
         }
+    }
+}
+
+/// A key an agent proposed, finished in two steps: check the hosts the key
+/// would be sent to, then type the key and save it with Touch ID. The key
+/// goes to the CLI on stdin only and is dropped when the screen goes away.
+struct ProposedKeyScreen: View {
+    let pending: Pending
+    @ObservedObject var companion: Companion
+    let actions: IslandActions
+    @State private var confirmed = false
+    @State private var value = ""
+
+    var body: some View {
+        let p = pending
+        Card {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pendingTitle(p)).font(.system(size: 13, weight: .semibold))
+                if let at = p.createdAt {
+                    Text("Asked \(ago(at, companion.now))").font(.system(size: 11)).foregroundStyle(Tint.quiet)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            if !p.facts.isEmpty { Facts(facts: p.facts) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("1. This key will be sent only to:").font(.system(size: 12, weight: .medium))
+                if p.hosts.isEmpty {
+                    Text("The vault did not say where, so it cannot be finished here.").font(.system(size: 11)).foregroundStyle(Tint.waiting)
+                }
+                ForEach(p.hosts, id: \.self) { h in
+                    Text(h).font(.system(size: 13, weight: .semibold, design: .monospaced)).textSelection(.enabled)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+        }
+        if !confirmed {
+            ActionButton(title: "Yes, that's the right host", symbol: "checkmark", tint: Tint.accent, filled: false,
+                         disabled: p.hosts.isEmpty || p.slug == nil) {
+                confirmed = true
+            }
+            Note(text: "Not the service you meant? Deny it. What the agent wrote about its reasons is its own claim; the vault page shows it, marked as such.")
+        } else if let slug = p.slug, companion.touchId == .ready {
+            Card {
+                Text("2. Enter the key for \(slug)").font(.system(size: 12, weight: .medium)).padding(.horizontal, 8).padding(.top, 4)
+                Field(label: "Key") {
+                    SecureField("paste the key", text: $value).textFieldStyle(.roundedBorder)
+                }
+                Note(text: "The key goes straight to the vault. The companion never shows, keeps or logs it, and the agent only ever sees a placeholder.")
+            }
+            HumanButton(companion: companion, title: "Save", signed: .finish(id: p.id, slug: slug, hosts: p.hosts),
+                        fallback: .review(p.id), tint: Tint.good, value: value, disabled: value.isEmpty) { ok in
+                value = ""
+                if ok { actions.home() }
+            }
+        } else {
+            // Without Touch ID here the key is typed in Terminal, which asks
+            // about the host again before it asks for the key.
+            HumanButton(companion: companion, title: "Finish", signed: nil, fallback: .review(p.id), tint: Tint.good)
+        }
+        if companion.touchId == .ready {
+            HumanButton(companion: companion, title: "Deny", signed: .deny(id: p.id), fallback: .review(p.id), tint: Tint.danger) { ok in
+                if ok { actions.home() }
+            }
+        }
+        Row(symbol: "safari", text: "See every detail in the vault", chevron: false) { companion.perform(.review(p.id)) }
+            .onDisappear { value = "" }
     }
 }
 
@@ -530,6 +601,7 @@ struct AddKeyScreen: View {
     @State private var slug = ""
     @State private var kind = "openai"
     @State private var host = ""
+    @State private var header = ""
     @State private var value = ""
 
     var body: some View {
@@ -541,7 +613,10 @@ struct AddKeyScreen: View {
     }
 
     @ViewBuilder private var form: some View {
-        let request = SignedRequest.add(slug: slug, kind: kind, host: kind == "http" ? host : nil)
+        // An empty header means Authorization: Bearer, the common one.
+        let named = header.trimmingCharacters(in: .whitespaces).lowercased()
+        let request = SignedRequest.add(slug: slug, kind: kind, host: kind == "http" ? host : nil,
+                                        header: kind == "http" && !named.isEmpty ? named : nil)
         Card {
             Field(label: "Name") {
                 TextField("openai-work", text: $slug).textFieldStyle(.roundedBorder)
@@ -556,6 +631,10 @@ struct AddKeyScreen: View {
                 Field(label: "Host") {
                     TextField("api.example.com", text: $host).textFieldStyle(.roundedBorder)
                 }
+                Field(label: "Header") {
+                    TextField("authorization (Bearer)", text: $header).textFieldStyle(.roundedBorder)
+                }
+                Note(text: "Leave Header empty for Authorization: Bearer. Otherwise type the header the service's docs name, such as xi-api-key.")
             }
             Field(label: "Value") {
                 SecureField("paste the key", text: $value).textFieldStyle(.roundedBorder)

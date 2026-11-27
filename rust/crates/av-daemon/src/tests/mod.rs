@@ -15,6 +15,7 @@ use crate::upstream::{
 
 mod companion;
 mod control;
+mod cred_proposals;
 mod folders;
 mod gateway;
 mod guards;
@@ -36,6 +37,7 @@ mod notify_slots;
 mod presence;
 mod read_ahead_edges;
 mod ui;
+mod waiting;
 
 /// The fixture secret (obviously fake).
 pub const SECRET: &str = "test-secret-daemon-0123456789abcdef";

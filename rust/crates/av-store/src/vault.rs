@@ -5240,6 +5240,23 @@ impl Vault {
         self.run(|t| rows::session_requests_replace(t.c, rows))
     }
 
+    /// The persisted credential proposals, as the daemon saved them (a JSON
+    /// list; empty when none were ever saved). They hold no secret: an agent
+    /// proposes a credential's shape and the human brings the key. No JS
+    /// method: new with credential proposals.
+    pub fn cred_proposals(&self) -> Result<Value> {
+        Ok(self
+            .read(|c| rows::kv_get(c, "cred_proposals"))?
+            .filter(Value::is_array)
+            .unwrap_or_else(|| Value::Array(Vec::new())))
+    }
+
+    /// Replace the persisted credential proposals. No JS method: new with
+    /// credential proposals.
+    pub fn save_cred_proposals(&mut self, rows: &Value) -> Result<()> {
+        self.run(|t| rows::kv_set(t.c, "cred_proposals", rows))
+    }
+
     /// Extra UI origins. No JS method: replaces reads of
     /// `vault.db.kv.ui_origins` in `src/daemon/server.js`.
     pub fn ui_origins(&self) -> Result<Vec<String>> {

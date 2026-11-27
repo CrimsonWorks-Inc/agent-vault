@@ -8,6 +8,7 @@
 
 pub mod companion;
 pub mod connectors;
+pub mod cred_proposals;
 pub mod decode;
 pub mod err;
 pub mod http;

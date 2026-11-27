@@ -1029,13 +1029,14 @@ to = '''        let cookie = String::new();
 [[mutation]]
 name = 'credential-record writes, tripwire rules and templates go through the UI unsigned'
 file = "src/ui/server.rs"
-from = '''pub const GATED: [&str; 21] = [
+from = '''pub const GATED: [&str; 22] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "DELETE sessions",
     "POST approvals",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST lock",
     "POST touchid/enroll",
@@ -1049,13 +1050,14 @@ from = '''pub const GATED: [&str; 21] = [
     "POST tripwires",
     "POST templates",
     "DELETE templates",'''
-to = '''pub const GATED: [&str; 13] = [
+to = '''pub const GATED: [&str; 14] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "DELETE sessions",
     "POST approvals",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST lock",
     "POST touchid/enroll",
@@ -1145,13 +1147,14 @@ to = '''        UiErr {
 [[mutation]]
 name = 'removing a pin from the UI needs no signature (C22(4))'
 file = "src/ui/server.rs"
-from = '''pub const GATED: [&str; 21] = [
+from = '''pub const GATED: [&str; 22] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "DELETE sessions",
     "POST approvals",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST lock",
     "POST touchid/enroll",
@@ -1169,13 +1172,14 @@ from = '''pub const GATED: [&str; 21] = [
     "POST presence/rotate",
 ];
 '''
-to = '''pub const GATED: [&str; 20] = [
+to = '''pub const GATED: [&str; 21] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "DELETE sessions",
     "POST approvals",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST lock",
     "POST touchid/enroll",
@@ -1196,11 +1200,12 @@ to = '''pub const GATED: [&str; 20] = [
 [[mutation]]
 name = 'the UI treats the daemon-verified pin removal as its own check only'
 file = "src/ui/server.rs"
-from = '''pub const DAEMON_VERIFIED: [&str; 14] = [
+from = '''pub const DAEMON_VERIFIED: [&str; 15] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST credentials/rotate",
     "POST credentials/scrub",
@@ -1213,11 +1218,12 @@ from = '''pub const DAEMON_VERIFIED: [&str; 14] = [
     "POST presence/rotate",
 ];
 '''
-to = '''pub const DAEMON_VERIFIED: [&str; 13] = [
+to = '''pub const DAEMON_VERIFIED: [&str; 14] = [
     "POST credentials",
     "DELETE credentials",
     "POST sessions",
     "POST session-requests/decide",
+    "POST cred-proposals/decide",
     "POST pending/decide-many",
     "POST credentials/rotate",
     "POST credentials/scrub",
@@ -3213,3 +3219,152 @@ from = '''            "POST /v1/presence/companion/unlock" => of("companion.unlo
 '''
 to = ''''''
 test = "tests::companion"
+
+[[mutation]]
+name = 'a proposal adds a host beside a fixed-host profile'
+file = "src/cred_proposals.rs"
+from = '''            Some(h) if profile.hosts.contains(&h.as_str()) => h,'''
+to = '''            Some(h) if !h.is_empty() => h,'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a proposal may name an IP address for its host'
+file = "src/cred_proposals.rs"
+from = '''            .is_some_and(|t| t.bytes().any(|b| b.is_ascii_lowercase()))'''
+to = '''            .is_some()'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a proposal may carry something shaped like a key'
+file = "src/cred_proposals.rs"
+from = '''    refuse_key_shapes(input)?;'''
+to = '''    let _ = refuse_key_shapes;'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a proposal naming the key field is refused only as an unknown field'
+file = "src/cred_proposals.rs"
+from = '''        if KEY_FIELDS.contains(&k.to_lowercase().as_str()) {'''
+to = '''        if KEY_FIELDS.is_empty() {'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'approving a proposal takes hosts other than those shown'
+file = "src/cred_proposals.rs"
+from = '''        if confirmed.as_ref() != Some(&shown) {'''
+to = '''        if confirmed.is_none() {'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'approving a proposal ignores a key shaped for another provider'
+file = "src/cred_proposals.rs"
+from = '''        refuse_misdirected_key(&value, &record.hosts)?;'''
+to = '''        let _ = refuse_misdirected_key;'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a lookalike domain counts as the provider of a key'
+file = "src/cred_proposals.rs"
+from = '''        .any(|d| host == *d || host.ends_with(&format!(".{d}")))'''
+to = '''        .any(|d| host.ends_with(*d))'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a second proposal for a name already waiting is opened'
+file = "src/cred_proposals.rs"
+from = '''        if pending.iter().any(|r| r.proposal["slug"] == slug) {'''
+to = '''        if pending.is_empty() && slug.is_null() {'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'anyone may poll a credential proposal'
+file = "src/cred_proposals.rs"
+from = '''        !self.poll_hash.is_empty()
+            && ct_eq('''
+to = '''        !self.poll_hash.is_empty()
+            || ct_eq('''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'an unanswered credential proposal never expires'
+file = "src/cred_proposals.rs"
+from = '''            if r.state == "pending" && age > PENDING_TTL_MS as i64 {'''
+to = '''            if r.state == "pending" && age < 0 {'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a denial of a credential proposal may carry a key'
+file = "src/cred_proposals.rs"
+from = '''        Some(Value::Bool(false)) => m
+            .get("value")
+            .is_some()
+            .then(|| "a denial carries no key".into()),'''
+to = '''        Some(Value::Bool(false)) => None,'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'a panic leaves credential proposals waiting'
+file = "src/pipeline.rs"
+from = '''        self.cp_deny_all("panic");'''
+to = ''''''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'finishing a credential proposal needs no human'
+file = "src/server/routes.rs"
+from = '''                self.require_human(if granted { "credential proposal approval" } else { "credential proposal denial" }, op?, presence).await?;'''
+to = '''                let _ = (op, presence);'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'a credential proposal decision is signed as a denial'
+file = "src/server.rs"
+from = '''                if input.get("granted") == Some(&Value::Bool(true)) {
+                    "cred_proposal.approve"'''
+to = '''                if input.get("granted") == Some(&Value::Bool(false)) {
+                    "cred_proposal.approve"'''
+test = "tests::companion"
+
+[[mutation]]
+name = 'the page signs a credential decision without its hosts'
+file = "src/ui/server.rs"
+from = '''            ("hosts", b("hosts")),'''
+to = ''''''
+test = "tests::ui"
+
+[[mutation]]
+name = 'a credential is stored with a site that can never be used'
+file = "src/server/routes.rs"
+from = '''    if let Some(problem) = sites.iter().find_map(|s| av_core::sites::site_problem(s)) {'''
+to = '''    if let Some(problem) = sites.iter().find_map(|_| None::<String>) {'''
+test = "tests::cred_proposals"
+
+[[mutation]]
+name = 'an answered held write leaves its waiting agent asleep'
+file = "src/pipeline.rs"
+from = '''        let view = a.view();
+        self.decided();'''
+to = '''        let view = a.view();'''
+test = "tests::waiting"
+
+[[mutation]]
+name = 'a waiting tool call returns before the human answers'
+file = "src/mcp.rs"
+from = '''            if !self.shared.run(move |c| still(c)).await? {'''
+to = '''            if self.shared.run(move |c| still(c)).await? {'''
+test = "tests::waiting"
+
+[[mutation]]
+name = 'anyone may wait on a session request'
+file = "src/mcp.rs"
+from = '''                c.sr_get(&id)
+                    .is_some_and(|r| r.may_collect(secret.as_deref()))'''
+to = '''                c.sr_get(&id).is_some() || secret.is_some()'''
+test = "tests::waiting"
+
+[[mutation]]
+name = 'a tool call waits as long as an agent asks'
+file = "src/mcp.rs"
+from = '''        .map_or(0.0, |n| n.min(MAX_WAIT_SECONDS as f64));'''
+to = '''        .map_or(0.0, |n| n);'''
+test = "tests::waiting"

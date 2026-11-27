@@ -98,6 +98,20 @@ agent-vault session create --cred gh --paths "/repos/frozencrow/**"
 
 Run either of those without arguments and you get a wizard instead of a flag list.
 
+Any other API takes `--host`, and its key goes in `Authorization: Bearer` unless you say where it goes instead. Use the header the service's docs name; the wizard, the web UI and the companion ask the same thing:
+
+```bash
+agent-vault cred add eleven --host api.elevenlabs.io --site header:xi-api-key
+agent-vault cred add maps --host maps.example.com --site query:api_key
+```
+
+**Or let your agent set it up, without ever seeing the key.** Ask it to add the credential. Over MCP it calls `vault_propose_credential` with everything but the key: the name, the kind, and for any other API the host and where the key goes. The proposal waits under Approvals: in the CLI (`agent-vault approve cp_…`), the web UI, or the companion. Finishing it takes two steps:
+
+1. Check the host. The proposal shows every host the key could ever be sent to, exactly as the gateway will enforce it. A known provider's kind (GitHub, Slack, Anthropic, OpenAI, Gemini) cannot name another host.
+2. Type the key, and save. It goes straight to the vault, bound into your Touch ID or passphrase confirmation by its digest, and never passes through the agent or MCP.
+
+A proposal that carries anything shaped like a key is refused, so a key pasted into the chat never lands in the vault's records. A key whose own shape names a provider, such as `sk-ant-…`, is refused for a host that is not that provider's. Once it is saved, the agent asks for a session on it as usual.
+
 A session asks you before every write by default (`--approval on-write`). To let an agent write without asking, say so, and prove it is you:
 
 ```bash
@@ -125,7 +139,7 @@ Three ways in, in the order to try them.
 agent-vault mcp install --agent claude-code
 ```
 
-`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains nine tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial`, `vault_request_session`, `vault_approval_status`, `vault_describe_access` and `vault_preflight` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
+`--agent` takes `claude-code`, `cursor`, `gemini` or `codex`; `--scope project|user` picks which config file; `--print` shows the block without writing it. The agent gains ten tools — `vault_status`, `vault_list_creds`, `vault_get_placeholder`, `vault_http`, `vault_explain_denial`, `vault_request_session`, `vault_propose_credential`, `vault_approval_status`, `vault_describe_access` and `vault_preflight` — and no token is written to the config, because the bridge finds the session from the state file, which the CLI and the web UI both write.
 
 **MCP over HTTP**, for an agent somewhere else:
 
@@ -388,6 +402,14 @@ agent-vault notify show
 agent-vault notify test
 agent-vault notify off
 ```
+
+The agent does not have to stop and wait for you to tell it to continue. Over
+MCP, the tools that ask a human (`vault_request_session`,
+`vault_propose_credential`, and `vault_approval_status` for a held write) take
+`wait_seconds`: the call stays open until you answer, wherever you answer it,
+and returns at once, so the agent carries on in the same turn. One call waits
+at most 50 seconds, under the time limits MCP clients put on a single call;
+an agent still waiting calls again.
 
 Approval previews scrub query, headers, placeholders and up to 4096 bytes of
 body. The list shows an excerpt; `--show` shows the complete bounded preview.

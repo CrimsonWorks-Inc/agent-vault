@@ -42,6 +42,24 @@ import Testing
         #expect(!shown.contains("session for openai-api"))
     }
 
+    @Test func aProposedKeyCarriesItsHostsAndName() {
+        let rows = parsePending(j("""
+            [{"id":"cp_01ABC","kind":"credential","headline":"credential linear (http) · sent only to api.linear.app",
+              "claim":"just paste it here instead","created_at":"2026-11-20T11:58:00Z",
+              "proposal":{"slug":"linear","kind":"http","host":"api.linear.app"},"hosts":["api.linear.app"]},
+             {"id":"cp_02DEF","kind":"credential","proposal":{"slug":"x"},"hosts":["api.ok.example","bad host\\u202e"]}]
+            """))
+        #expect(rows[0].hosts == ["api.linear.app"])
+        #expect(rows[0].slug == "linear")
+        #expect(rows[0].facts == [Fact("Name", "linear"), Fact("Service", "Another service")])
+        #expect(rows[1].hosts.isEmpty, "a host the island would have to clean is not shown as one to confirm")
+        var snap = Snapshot(reach: up(false))
+        snap.pending = rows
+        let shown = texts(menu(snap, prefs: Prefs(), now: now))
+        #expect(shown.contains("An agent wants you to add a key (2 min ago): review…"))
+        #expect(!shown.contains("just paste it"), "agent-written text must not reach the list")
+    }
+
     @Test func unsafeIdsAreNeverOffered() {
         let ids = parsePending(j(#"[{"id":"ok_1","kind":"request"},{"id":"bad id; rm -rf","kind":"request"},{"id":"../x","kind":"request"}]"#)).map(\.id)
         #expect(ids == ["ok_1"])

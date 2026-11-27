@@ -98,6 +98,9 @@ pub mod id {
     pub const REQUEST: &str = "req_";
     /// Ports the `sr_` prefix of `id.sessionRequest` in `src/store/ids.js`.
     pub const SESSION_REQUEST: &str = "sr_";
+    /// The prefix of a credential proposal's id. No JS prefix: new with
+    /// credential proposals.
+    pub const CRED_PROPOSAL: &str = "cp_";
     /// Ports the `cl_` prefix of `id.client` in `src/store/ids.js`.
     pub const CLIENT: &str = "cl_";
     /// Ports the `sp_` prefix of `id.scrubPattern` in `src/store/ids.js`.
@@ -136,6 +139,11 @@ pub mod id {
     /// Ports `id.sessionRequest` in `src/store/ids.js`.
     pub fn session_request() -> String {
         [SESSION_REQUEST, &super::ulid()].concat()
+    }
+    /// A credential proposal's id. No JS function: new with credential
+    /// proposals.
+    pub fn cred_proposal() -> String {
+        [CRED_PROPOSAL, &super::ulid()].concat()
     }
     /// Ports `id.client` in `src/store/ids.js`.
     pub fn client() -> String {

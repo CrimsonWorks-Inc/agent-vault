@@ -456,6 +456,10 @@ pub struct CredAddArgs {
     /// Auth scheme.
     #[arg(long)]
     pub scheme: Option<String>,
+    /// Where the key goes in a request (`header:xi-api-key`); the kind's own
+    /// place when absent.
+    #[arg(long)]
+    pub site: Option<String>,
     /// `YYYY-MM-DD` or `none`.
     #[arg(long)]
     pub expires: Option<String>,

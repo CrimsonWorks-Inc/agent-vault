@@ -106,6 +106,40 @@ describe('Approvals (parity with the old page)', () => {
     expect(await screen.findByText('Approved')).toBeTruthy()
   })
 
+  it('a proposed key: first the host, then the key, then one signature over both; never ticked for bulk', async () => {
+    const PROPOSAL = {
+      id: 'cp_1', kind: 'credential', headline: 'credential linear (http) · sent only to api.linear.app', created_at: NOW,
+      claim: 'to read the issues', caution: 'You type the key yourself. It is only ever sent to the hosts shown.',
+      narrowable: [], owner_settable: [], proposal: { slug: 'linear', kind: 'http' }, hosts: ['api.linear.app'],
+    }
+    const auth = fakeAuthenticator()
+    const server = fakeServer(routes({ 'GET pending': [PROPOSAL], 'POST cred-proposals/decide': { state: 'approved' } }))
+    renderWith(<Approvals />, { server, authenticator: auth })
+    await waitFor(() => expect(within(table()).getAllByText('api.linear.app').length).toBeGreaterThan(0))
+    const card = within(table()).getByRole('article', { name: 'Key requested cp_1' })
+    const c = within(card)
+    expect(c.getByText('key requested')).toBeTruthy()
+    expect(c.getByText('api.linear.app')).toBeTruthy()
+    expect(c.queryByRole('checkbox')).toBeNull()
+    expect(within(table()).queryByRole('checkbox', { name: 'Select cp_1' })).toBeNull()
+    // No key field, and nothing to save, until the host is confirmed.
+    expect(card.querySelector('input[type="password"]')).toBeNull()
+    expect(c.queryByRole('button', { name: /Save key/ })).toBeNull()
+    fireEvent.click(c.getByRole('button', { name: 'Yes, that is the right host' }))
+    const field = card.querySelector('input[type="password"]')
+    expect(field.getAttribute('autocomplete')).toBe('new-password')
+    fireEvent.change(field, { target: { value: 'test-key-fake' } })
+    fireEvent.click(c.getByRole('button', { name: /Save key/ }))
+    await waitFor(() => expect(server.calls.some((c2) => c2.path === 'cred-proposals/decide')).toBe(true))
+    const body = { id: 'cp_1', granted: true, hosts: ['api.linear.app'], value: 'test-key-fake' }
+    expect(challenges(server)[0].body.operation).toEqual(await operationFor('cred_proposal.approve', body))
+    expect(JSON.stringify(challenges(server)[0].body)).not.toContain('test-key-fake')
+    const sent = server.calls.find((c2) => c2.path === 'cred-proposals/decide').body
+    expect(sent).toMatchObject(body)
+    expect(sent.presence.challengeId).toBe('ch1')
+    expect(await screen.findByText('Saved linear')).toBeTruthy()
+  })
+
   it('names the decision on the page before the platform dialog opens', async () => {
     let shown = null
     const auth = fakeAuthenticator({ onGet: () => { shown = document.body.textContent } })

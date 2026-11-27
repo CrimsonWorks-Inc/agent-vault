@@ -121,6 +121,7 @@ const MCP_TOOLS = [
   ['vault_http', 'make the request; the vault injects the credential'],
   ['vault_explain_denial', 'why that was refused, and what is allowed instead'],
   ['vault_request_session', null],
+  ['vault_propose_credential', 'describe a credential that does not exist yet, never its key: you check where the key will be sent, then type the key yourself under Approvals'],
   ['vault_approval_status', 'whether you have answered a write that was held for you'],
   ['vault_describe_access', 'what this session may do right now: hosts, methods, paths, approval mode, budgets and limits, lifetimes, and where each placeholder goes. Read-only: it returns no secret, no token and no placeholder, and changes nothing'],
   ['vault_preflight', 'would this request be allowed, held for you, or refused? Nothing is sent upstream and nothing is spent; it is a prediction, and the real request is checked again'],
@@ -138,7 +139,7 @@ function Connect({ c }) {
       <Cmd code={`${c.cli} mcp install --agent claude-code`} caption="Also: cursor, gemini, codex." />
       <Cmd code={`${c.cli} mcp install --agent codex --print`} caption="Show the block without writing anything." />
       <Prose>
-        <P>Restart the agent afterwards. It gains nine tools:</P>
+        <P>Restart the agent afterwards. It gains ten tools:</P>
         <UL>
           {MCP_TOOLS.map(([name, what]) => (
             <li key={name}>

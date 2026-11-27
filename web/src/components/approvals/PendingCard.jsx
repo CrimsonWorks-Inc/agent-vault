@@ -8,13 +8,21 @@ import { Badge } from '../ui/Badge.jsx'
 import { GatedButton } from '../ui/GatedButton.jsx'
 import { Notice } from '../ui/Notice.jsx'
 import { UntrustedText } from '../ui/UntrustedText.jsx'
-import { decisionCall } from './decide.js'
+import { CredentialSteps } from './CredentialSteps.jsx'
+import { bulkable, decisionCall } from './decide.js'
 import { NarrowingFields } from './NarrowingFields.jsx'
 import { RequestPreview } from './RequestPreview.jsx'
 
+const KIND_WORDS = {
+  session: { label: 'session request', badge: 'session requested', tone: 'accent', article: 'Session requested' },
+  credential: { label: 'credential proposal', badge: 'key requested', tone: 'accent', article: 'Key requested' },
+  request: { label: 'request', badge: 'held request', tone: 'warn', article: 'Held request' },
+}
+const wordsFor = (item) => KIND_WORDS[item.kind] || KIND_WORDS.request
+
 /** "approve session request r_1", the words shown while Touch ID is open. */
 export function decisionLabel(item, granted) {
-  return `${granted ? 'approve' : 'deny'} ${item.kind === 'session' ? 'session request' : 'request'} ${item.id}`
+  return `${granted ? 'approve' : 'deny'} ${wordsFor(item).label} ${item.id}`
 }
 
 /** The tick that puts one item in a bulk decision. */
@@ -40,12 +48,13 @@ export function PickBox({ item, checked, onChange, className }) {
  * the agent said, shown and never believed.
  */
 export function PendingCard({ item, draft, onDraft, selected, onSelect, onDecided }) {
-  const isSession = item.kind === 'session'
+  const words = wordsFor(item)
+  const isCredential = item.kind === 'credential'
   return (
-    <article data-item={item.id} aria-label={`${isSession ? 'Session requested' : 'Held request'} ${item.id}`} className="min-w-0">
+    <article data-item={item.id} aria-label={`${words.article} ${item.id}`} className="min-w-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
-        <PickBox item={item} checked={selected} onChange={onSelect} className="mr-1 md:hidden" />
-        <Badge tone={isSession ? 'accent' : 'warn'}>{isSession ? 'session requested' : 'held request'}</Badge>
+        {bulkable(item) && <PickBox item={item} checked={selected} onChange={onSelect} className="mr-1 md:hidden" />}
+        <Badge tone={words.tone}>{words.badge}</Badge>
         <span className="font-mono text-xs">{cleanLine(item.id)}</span>
         <span aria-hidden="true">·</span>
         <span>asked {item.created_at ? ago(item.created_at) : ''}</span>
@@ -70,12 +79,18 @@ export function PendingCard({ item, draft, onDraft, selected, onSelect, onDecide
 
       {item.caution && <Notice tone="warn" className="mt-3">{cleanLine(item.caution)}</Notice>}
 
-      <NarrowingFields item={item} draft={draft} onChange={onDraft} />
+      {isCredential ? (
+        <CredentialSteps item={item} draft={draft} onDraft={onDraft} onDecided={onDecided} />
+      ) : (
+        <>
+          <NarrowingFields item={item} draft={draft} onChange={onDraft} />
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        <DecideButton item={item} granted draft={draft} onDone={onDecided} />
-        <DecideButton item={item} granted={false} draft={draft} onDone={onDecided} />
-      </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <DecideButton item={item} granted draft={draft} onDone={onDecided} />
+            <DecideButton item={item} granted={false} draft={draft} onDone={onDecided} />
+          </div>
+        </>
+      )}
     </article>
   )
 }

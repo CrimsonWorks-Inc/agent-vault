@@ -12,6 +12,7 @@ const TOOLS = {
   vault_list_creds: [],
   vault_get_placeholder: ['cred', 'reason'],
   vault_request_session: ['reason'],
+  vault_propose_credential: [],
   vault_approval_status: ['approval_id'],
   vault_http: ['cred', 'method', 'path', 'reason'],
   vault_explain_denial: ['request_id'],

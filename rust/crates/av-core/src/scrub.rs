@@ -168,6 +168,20 @@ pub fn untrusted_text(text: Option<&str>, secrets: &[StoredSecret], max: usize) 
     ))
 }
 
+/// The name of the first [`DERIVED_PATTERNS`] shape in `text`, matched where
+/// the scrubber would redact it (at a token boundary), or none. For text
+/// that should never hold a key, such as what an agent proposes. No JS
+/// function: new with credential proposals.
+pub fn key_shape_in(text: &str) -> Option<&'static str> {
+    DERIVED_PATTERNS.iter().find_map(|p| {
+        let re = crate::jsre::compile(p.pattern).expect("derived pattern");
+        let found = re
+            .find_iter(text)
+            .any(|m| p.name == "private-key" || boundary(text, m.start()));
+        found.then_some(p.name)
+    })
+}
+
 /// A human's extra scrub pattern, compiled. Ports the `{ re }` returned by
 /// `compileScrubPattern` (and the `scrubMeta` it records) in
 /// `src/core/scrub.js`.

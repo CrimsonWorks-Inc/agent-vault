@@ -88,12 +88,18 @@ public struct Pending: Equatable {
     /// What the vault recorded about the request, for the island's detail
     /// screen. Never the agent's stated reason.
     public var facts: [Fact] = []
+    /// For a proposed key: every host it would be sent to, which the user
+    /// confirms before typing it, and the name it would be saved under.
+    public var hosts: [String] = []
+    public var slug: String? = nil
 
-    public init(id: String, kind: String, createdAt: Date?, facts: [Fact] = []) {
+    public init(id: String, kind: String, createdAt: Date?, facts: [Fact] = [], hosts: [String] = [], slug: String? = nil) {
         self.id = id
         self.kind = kind
         self.createdAt = createdAt
         self.facts = facts
+        self.hosts = hosts
+        self.slug = slug
     }
 }
 
@@ -635,7 +641,15 @@ public func parsePending(_ data: JSON) -> [Pending] {
     return rows.compactMap { row in
         guard let id = row["id"]?.string, safeId(id) else { return nil }
         let kind = row["kind"]?.string ?? ""
-        return Pending(id: id, kind: kind, createdAt: parseTime(row["created_at"]), facts: pendingFacts(kind, row))
+        var pending = Pending(id: id, kind: kind, createdAt: parseTime(row["created_at"]), facts: pendingFacts(kind, row))
+        if kind == "credential" {
+            // Only hosts the island can show as they are: a host it would
+            // have to clean is not one the user could confirm.
+            let hosts = (row["hosts"]?.array ?? []).compactMap { $0.string }
+            pending.hosts = hosts.allSatisfy(plainHost) ? hosts : []
+            pending.slug = row["proposal"]?["slug"]?.string.flatMap { safeId($0) ? $0 : nil }
+        }
+        return pending
     }
 }
 
@@ -680,6 +694,12 @@ public func pendingFacts(_ kind: String, _ row: JSON) -> [Fact] {
             let shown: Set<String> = ["creds", "cred", "methods", "paths", "infinite", "ttl_hours", "budget", "uses", "approval", "label"]
             let more = o.keys.filter { !shown.contains($0) }.count
             if more > 0 { out.append(Fact("Also", "\(count(more, "more setting")); the vault page shows them")) }
+        }
+    } else if kind == "credential" {
+        let p = row["proposal"] ?? .object([:])
+        if let slug = p["slug"]?.string { out.append(Fact("Name", cleanText(slug, 40))) }
+        if let k = p["kind"]?.string {
+            out.append(Fact("Service", keyKinds.first(where: { $0.kind == k })?.name ?? cleanText(k, 30)))
         }
     } else if kind == "request" {
         if let h = row["headline"]?.string { out.append(Fact("Would send", cleanText(h, 120))) }
@@ -985,6 +1005,7 @@ func upMenu(_ items: inout [Item], _ snap: Snapshot, _ status: Status, _ now: Da
             switch p.kind {
             case "session": what = "An agent is asking for access"
             case "request": what = "An agent wants to make a change"
+            case "credential": what = "An agent wants you to add a key"
             default: what = "Something needs your decision"
             }
             let when = p.createdAt.map { " (\(ago($0, now)))" } ?? ""

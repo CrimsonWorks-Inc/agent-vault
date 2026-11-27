@@ -100,6 +100,32 @@ describe('Credentials: every change is signed over exactly what is sent', () => 
     expect(value.value).toBe('')
   })
 
+  it('a generic key can go in the header the service names, signed with it; a header that cannot work spends no tap', async () => {
+    const authenticator = fakeAuthenticator()
+    const server = fakeServer(pagesRoutes({ 'POST credentials': { slug: 'eleven' } }))
+    renderWith(<Enrolled><Credentials /></Enrolled>, { server, authenticator })
+    await loaded(); await enrolled(server)
+    type(screen.getByPlaceholderText('gh-frozencrow'), 'eleven')
+    const card = within(screen.getByPlaceholderText('gh-frozencrow').closest('section'))
+    await click(card.getByRole('button', { name: 'Kind' }))
+    await click(await screen.findByRole('option', { name: 'http (generic)' }))
+    type(screen.getByPlaceholderText('api.example.com'), 'api.elevenlabs.io')
+    await click(card.getByRole('button', { name: 'Where the key goes' }))
+    await click(await screen.findByRole('option', { name: 'Another header…' }))
+    const header = screen.getByPlaceholderText('xi-api-key')
+    type(header, 'xi api key')
+    type(screen.getByPlaceholderText('paste the token; it is not echoed and never returned'), 'test-eleven-key')
+    await click(screen.getByRole('button', { name: /Store credential/ }))
+    expect(await screen.findByText('A header name is letters, digits and dashes, such as xi-api-key.')).toBeTruthy()
+    expect(authenticator.asked).toHaveLength(0)
+    type(header, 'Xi-Api-Key')
+    await click(screen.getByRole('button', { name: /Store credential/ }))
+    const body = { slug: 'eleven', kind: 'http', value: 'test-eleven-key', host: 'api.elevenlabs.io', sites: ['header:xi-api-key'] }
+    expect(await challengeOf(server)).toEqual(await operationFor('cred.add', body))
+    await waitFor(() => expect(callsTo(server, 'POST', 'credentials')).toHaveLength(1))
+    expect(callsTo(server, 'POST', 'credentials')[0].body).toMatchObject(body)
+  })
+
   it('Store credential without a value asks for one and spends no tap', async () => {
     const authenticator = fakeAuthenticator()
     const server = fakeServer(pagesRoutes())

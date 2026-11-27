@@ -16,7 +16,7 @@ export function setNotifications(storage, on) {
 
 /** The agent's headline, controls out, cut to 120 characters (the CLI's watch). */
 export function notificationText(item) {
-  const lead = item?.kind === 'request' ? 'Held request: ' : 'Session requested: '
+  const lead = { request: 'Held request: ', credential: 'Key requested: ' }[item?.kind] || 'Session requested: '
   return clip(`${lead}${String(item?.headline ?? '')}`, 120)
 }
 

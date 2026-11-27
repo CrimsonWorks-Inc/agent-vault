@@ -77,7 +77,9 @@ test('containment and recovery covers every wave-3 safety feature', () => {
 
 test('the agent tools are documented, read-only ones said to be so', () => {
   const connect = section('connect')
-  assert.match(connect, /It gains nine tools/)
+  // The page counts the Rust daemon's tools, which has gained some since this
+  // implementation was frozen; ported_gateway_core.rs checks that count.
+  assert.match(connect, /It gains \w+ tools/)
   // The tool list is MCP_TOOLS: [name, what it does], rendered "name — what".
   assert.match(connect, /\['vault_describe_access', '[^']*Read-only/)
   assert.match(connect, /\['vault_preflight', '[^']*Nothing is sent upstream and nothing is spent/)

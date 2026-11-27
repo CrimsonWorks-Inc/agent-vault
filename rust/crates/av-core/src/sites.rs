@@ -136,6 +136,61 @@ pub fn parse_site(spec: &str) -> Result<Site, InvalidSite> {
     Ok(site)
 }
 
+/// Headers that frame the request itself, which a key never goes in.
+pub const FRAMING_HEADERS: [&str; 5] = [
+    "host",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+    "connection",
+];
+
+/// Why `spec` is not a site to offer someone choosing where a key goes, or
+/// none: [`site_problem`], and not a header that frames the request. (The
+/// vault still reads a stored one; a redirect hop never resends it.) No JS
+/// function.
+pub fn chosen_site_problem(spec: &str) -> Option<String> {
+    if let Some(p) = site_problem(spec) {
+        return Some(p);
+    }
+    let site = parse_site(spec).ok()?;
+    let name = site.name.as_deref().unwrap_or("");
+    (site.kind == SiteKind::Header && FRAMING_HEADERS.contains(&name))
+        .then(|| format!("a key cannot go in the {name} header"))
+}
+
+/// Why `spec` is not a site a credential can be stored with, or none: it
+/// must parse, and a header site must name a real header (an HTTP token, at
+/// most 64 characters) with an auth scheme of one word, if any. No JS
+/// function: the JS stored any string and failed when the key was first
+/// used.
+pub fn site_problem(spec: &str) -> Option<String> {
+    let site = match parse_site(spec) {
+        Ok(s) => s,
+        Err(e) => return Some(e.0),
+    };
+    if site.kind == SiteKind::Header {
+        let name = site.name.as_deref().unwrap_or("");
+        let token = name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b));
+        if !token {
+            return Some(format!(
+                "{name:?} is not a header name: use letters, digits and dashes, such as xi-api-key"
+            ));
+        }
+        if site.scheme.as_deref().is_some_and(|s| {
+            s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        }) {
+            return Some(format!(
+                "{spec:?} names an auth scheme that is not one word"
+            ));
+        }
+    }
+    None
+}
+
 /// Parse every site string, failing on the first bad one. Ports `parseSites`
 /// in `src/core/sites.js`.
 pub fn parse_sites<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Site>, InvalidSite> {
@@ -225,5 +280,42 @@ mod tests {
         }
         assert!(has_body_site(&parse_sites(&["json:/x"]).unwrap()));
         assert!(!has_body_site(&parse_sites(&["header:x"]).unwrap()));
+    }
+
+    #[test]
+    fn a_site_names_a_real_header_and_a_chosen_one_never_frames_the_request() {
+        for ok in [
+            "header:xi-api-key",
+            "header:X-Goog-Api-Key",
+            "header:authorization:Bearer",
+            "query:api_key",
+            "basic:pass",
+            "json:/auth/token",
+        ] {
+            assert_eq!(site_problem(ok), None, "{ok}");
+            assert_eq!(chosen_site_problem(ok), None, "{ok}");
+        }
+        for bad in [
+            "header:xi api key",
+            "header:x-key\r\nx-evil",
+            "header:",
+            "header:x:two words",
+            "header:x:",
+            "nonsense:x",
+            &format!("header:{}", "a".repeat(65)),
+        ] {
+            assert!(site_problem(bad).is_some(), "{bad}");
+            assert!(chosen_site_problem(bad).is_some(), "{bad}");
+        }
+        // Stored ones are still read (a redirect hop never resends them);
+        // nobody is offered one.
+        for framing in [
+            "header:host",
+            "header:Content-Length",
+            "header:content-type",
+        ] {
+            assert_eq!(site_problem(framing), None, "{framing}");
+            assert!(chosen_site_problem(framing).is_some(), "{framing}");
+        }
     }
 }

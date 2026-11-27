@@ -15,8 +15,13 @@ its tests compare against this code:
 - `AV_IMPL=js npm run conformance` runs the black-box suite against it.
 
 Its own suite still runs in CI (`npm run test:legacy`) so the reference stays
-trustworthy. The one change made when it moved here: the UI server reads the
-built page from the repo's `src/ui/dist`.
+trustworthy. The changes made since it moved here:
+
+- The UI server reads the built page from the repo's `src/ui/dist`.
+- Two docs tests read the live README and docs page, which describe the Rust
+  daemon. Once it gained an MCP tool (0.6.0), they stopped requiring the
+  documents to count exactly this implementation's tools, and only require
+  every one of its tools to be named. The Rust tests check the exact count.
 
 Upgrading a vault this version created: see
 [`rust/README.md`](../../rust/README.md#moving-an-existing-vault).

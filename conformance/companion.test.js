@@ -109,6 +109,51 @@ if (skip) {
       assert.ok(!JSON.stringify(done).includes(value))
     })
 
+    test('another service\'s key added in the island is bound with its host and header', async () => {
+      const value = 'conformance-eleven-value-0123456789'
+      const add = ['cred', 'add', 'eleven', '--kind', 'http', '--host', 'api.elevenlabs.io', '--site', 'header:xi-api-key']
+      const asked = ok(await runCli(w, [...add, '--companion-challenge', '--json'], { input: `${value}\n` }), 'add challenge')
+      // What SignedRequest.add in desktop/Sources/CompanionCore/Signing.swift expects.
+      assert.deepEqual(Object.keys(asked.operation).sort(), ['host', 'kind', 'op', 'sites', 'slug', 'value_sha256'])
+      assert.equal(asked.operation.host, 'api.elevenlabs.io')
+      assert.deepEqual(asked.operation.sites, ['header:xi-api-key'])
+      const proof = JSON.stringify({ challengeId: asked.challengeId, companionSignature: key.sign(asked.challenge) })
+      ok(await runCli(w, [...add, '--presence-stdin', '--json'], { input: `${proof}\n${value}\n` }), 'add')
+      const made = await credential(w, 'eleven')
+      assert.deepEqual(made.fields[0].sites, ['header:xi-api-key'])
+    })
+
+    test('a key an agent proposed is finished as the island finishes it: hosts and key bound', async () => {
+      const res = await fetch(`http://127.0.0.1:${w.port}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'vault_propose_credential', arguments: { slug: 'linear', host: 'api.linear.app' } } }),
+      })
+      const asked = JSON.parse((await res.json()).result.content[0].text)
+      assert.equal(asked.state, 'pending', JSON.stringify(asked))
+      const value = 'conformance-proposed-value-0123456789'
+      const approve = ['approve', asked.request_id]
+      const issued = ok(await runCli(w, [...approve, '--companion-challenge', '--json'], { input: `${value}\n` }), 'challenge')
+      // What the island checks before it asks for a fingerprint
+      // (SignedRequest.finish in desktop/Sources/CompanionCore/Signing.swift).
+      assert.deepEqual(Object.keys(issued.operation).sort(), ['granted', 'hosts', 'id', 'op', 'value_sha256'])
+      assert.equal(issued.operation.op, 'cred_proposal.approve')
+      assert.deepEqual(issued.operation.hosts, ['api.linear.app'])
+      assert.equal(issued.operation.value_sha256, createHash('sha256').update(value).digest('hex'))
+      assert.ok(!JSON.stringify(issued).includes(value))
+      assert.equal(await credential(w, 'linear'), undefined, 'the challenge saved nothing')
+      const proof = JSON.stringify({ challengeId: issued.challengeId, companionSignature: key.sign(issued.challenge) })
+      // Signed for one key, sent with another: refused.
+      refused(await runCli(w, [...approve, '--presence-stdin', '--json'], { input: `${proof}\nanother-value-0123456789\n` }), 'other key')
+      assert.equal(await credential(w, 'linear'), undefined)
+      const again = ok(await runCli(w, [...approve, '--companion-challenge', '--json'], { input: `${value}\n` }), 'challenge')
+      const signed = JSON.stringify({ challengeId: again.challengeId, companionSignature: key.sign(again.challenge) })
+      const done = ok(await runCli(w, [...approve, '--presence-stdin', '--json'], { input: `${signed}\n${value}\n` }), 'finish')
+      assert.equal(done.state, 'approved')
+      assert.ok(!JSON.stringify(done).includes(value))
+      assert.equal((await credential(w, 'linear')).connector.host, 'api.linear.app')
+    })
+
     test('a session made in the island is bound whole', async () => {
       // Two keys, added as the island adds one (demo is stopped by now).
       for (const slug of ['one', 'two']) {

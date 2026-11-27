@@ -39,20 +39,28 @@ const PAGE_TEXT = docsSource()
 const DOCS = readFileSync(new URL('../../../../web/src/components/docs/sections.jsx', import.meta.url), 'utf8')
 const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
 
-test('the README and the docs page say how many MCP tools there are, and it is how many mcp.js has', () => {
+// The README and the docs page describe the Rust daemon, which has gained
+// tools since this implementation was frozen. Its exact count and list are
+// checked in rust/crates/av-daemon/tests/ported_gateway_core.rs; here the
+// documents must count the tools once, no fewer than mcp.js has, and still
+// name every one of them.
+test('the README and the docs page count the MCP tools once and name every tool mcp.js has', () => {
   const tools = new McpServer({}, null, () => null).tools.map((t) => t.name)
-  const word = WORDS[tools.length]
-  assert.ok(word, `${tools.length} tools`)
+  assert.ok(WORDS[tools.length], `${tools.length} tools`)
   // Every sentence that counts the tools, in either document.
   const counts = (text) => [...text.matchAll(/\b(\w+) (?:MCP )?tools\b/gi)].map((m) => m[1].toLowerCase()).filter((w) => WORDS.includes(w))
-  assert.deepEqual(counts(README), [word], 'the README counts the tools differently')
-  assert.deepEqual(counts(PAGE_TEXT), [word], 'the docs page counts the tools differently')
+  for (const [doc, text] of [['README', README], ['docs page', PAGE_TEXT]]) {
+    const said = counts(text)
+    assert.equal(said.length, 1, `the ${doc} counts the tools ${said.length} times`)
+    assert.ok(WORDS.indexOf(said[0]) >= tools.length, `the ${doc} says ${said[0]} tools; mcp.js has ${tools.length}`)
+  }
   // The docs list the tools in MCP_TOOLS, one [name, what it does] row each,
-  // rendered as <C>{name}</C>; the list is exactly the server's tools.
+  // rendered as <C>{name}</C>; every one of the server's tools is listed.
   const listed = [...DOCS.slice(DOCS.indexOf('const MCP_TOOLS = ['), DOCS.indexOf('\n]\n', DOCS.indexOf('const MCP_TOOLS = ['))).matchAll(/^\s*\['(vault_\w+)',/gm)].map((m) => m[1])
-  assert.deepEqual([...listed].sort(), [...tools].sort(), 'the docs page lists different tools from mcp.js')
+  assert.equal(new Set(listed).size, listed.length, 'the docs page lists a tool twice')
   assert.match(DOCS, /MCP_TOOLS\.map\(\(\[name, what\]\) => \(\s*<li key=\{name\}>\s*<C>\{name\}<\/C>/, 'each tool is named as code')
   for (const name of tools) {
+    assert.ok(listed.includes(name), `the docs page does not list ${name}`)
     assert.ok(README.includes(`\`${name}\``), `the README does not name ${name}`)
   }
 })
